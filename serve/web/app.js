@@ -655,7 +655,7 @@ function openDrawer(open) {
   $("drawer").dataset.open = String(open);
   $("drawer").setAttribute("aria-hidden", String(!open));
   $("scrim").hidden = !open;
-  if (open) loadDrawer();
+  if (open) { loadDrawer(); loadShared(); }
 }
 function loadDrawer(s = settings) {
   for (const b of $("s-thinking").children) b.setAttribute("aria-checked", String(b.dataset.v === s.thinking));
@@ -664,7 +664,35 @@ function loadDrawer(s = settings) {
   $("s-show").setAttribute("aria-checked", String(!!s.show));
   $("s-esp").setAttribute("aria-checked", String(s.esp !== false));
   $("esp-row").hidden = !projectionLoaded();
+  $("s-share").setAttribute("aria-checked", String(sharedOn));
   outputs();
+}
+// "Use for other apps too": the server keeps these settings as every client's defaults (GET/POST /settings)
+let sharedOn = false;
+async function loadShared() {
+  try {
+    const r = await fetch("/settings", {headers: headers()});
+    if (r.ok) sharedOn = !!(await r.json()).shared;
+  } catch (e) { /* an older server: the switch just stays off */ }
+  $("s-share").setAttribute("aria-checked", String(sharedOn));
+}
+function sharedDefaults(s) {
+  const d = {reasoning_effort: s.thinking, temperature: +s.temperature};
+  if (+s.temperature > 0) Object.assign(d, {top_p: +s.top_p, top_k: +s.top_k});
+  if (s.seed) d.seed = +s.seed;
+  if (s.max) d.max_tokens = +s.max;
+  if (projectionLoaded()) d.experimental_speed_projection = s.esp !== false;
+  return d;
+}
+async function saveShared(on, s) {
+  const r = await fetch("/settings", {method: "POST", headers: headers(true),
+                                      body: JSON.stringify({defaults: on ? sharedDefaults(s) : null})});
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try { msg = (await r.json()).error.message || msg; } catch (e) { /* not json */ }
+    throw new Error(msg);
+  }
+  sharedOn = !!(await r.json()).shared;
 }
 // the engine was started with the experimental-speed-projection control vector (INFO cvec=...)
 function projectionLoaded() {
@@ -684,15 +712,27 @@ for (const b of $("s-thinking").children) b.onclick = () => { for (const x of $(
 for (const id of ["s-temp", "s-topp", "s-topk"]) $(id).oninput = outputs;
 $("s-show").onclick = () => $("s-show").setAttribute("aria-checked", String($("s-show").getAttribute("aria-checked") !== "true"));
 $("s-esp").onclick = () => $("s-esp").setAttribute("aria-checked", String($("s-esp").getAttribute("aria-checked") !== "true"));
+$("s-share").onclick = () => $("s-share").setAttribute("aria-checked", String($("s-share").getAttribute("aria-checked") !== "true"));
 $("s-reset").onclick = () => loadDrawer(DEFAULTS);
-$("s-apply").onclick = () => {
+$("s-apply").onclick = async () => {
   const sel = [...$("s-thinking").children].find((b) => b.getAttribute("aria-checked") === "true");
   settings = {thinking: sel ? sel.dataset.v : "high", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
               top_k: +$("s-topk").value, max: $("s-max").value.trim(), seed: $("s-seed").value.trim(),
               show: $("s-show").getAttribute("aria-checked") === "true",
               esp: $("s-esp").getAttribute("aria-checked") === "true"};
   store.set("sampling", settings);
+  const share = $("s-share").getAttribute("aria-checked") === "true";
   openDrawer(false);
+  if (share || sharedOn) {
+    try {
+      await saveShared(share, settings);
+      toast("success", "Sampling saved", share ? "Other apps (omp, API clients) use these settings from their next request."
+                                               : "Other apps use their own settings again.");
+    } catch (e) {
+      toast("error", "Saved here, but not for other apps", e.message, 6000);
+    }
+    return;
+  }
   toast("success", "Sampling saved", settings.temperature === 0 ? "Greedy: the same question gives the same answer." : "");
 };
 $("sampling-btn").onclick = () => openDrawer(true);

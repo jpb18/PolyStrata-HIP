@@ -417,6 +417,8 @@ class Service:
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
+        self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
+        self.shared_path = None                       # where they are kept between starts (next to the config)
         self.fifo = threading.Lock()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
@@ -425,6 +427,41 @@ class Service:
         self.status_lock = threading.Lock()
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
+
+    def set_shared(self, defaults) -> dict:
+        """The Chat settings every client gets for what it leaves out; {} / None = clients use their own again."""
+        self.shared = clean_shared_defaults(defaults)
+        if self.shared_path:
+            try:
+                if self.shared:
+                    Path(self.shared_path).write_text(json.dumps(self.shared, indent=1), encoding="utf-8")
+                else:
+                    Path(self.shared_path).unlink(missing_ok=True)
+            except OSError as e:
+                print(f"[strata] could not save the shared settings: {e}", flush=True)
+        return self.shared
+
+    def with_shared(self, req: dict, api: str) -> dict:
+        """The request with the shared thinking level and max tokens filled in where it has none of its own."""
+        s = self.shared
+        if not s:
+            return req
+        req = dict(req)
+        if "max_tokens" in s and not req.get("max_tokens") and not req.get("max_completion_tokens"):
+            req["max_tokens"] = s["max_tokens"]
+        effort = s.get("reasoning_effort")
+        if effort:
+            if api == "openai":
+                ctk = req.get("chat_template_kwargs") if isinstance(req.get("chat_template_kwargs"), dict) else {}
+                if not req.get("reasoning_effort") and not req.get("reasoning") and \
+                        "enable_thinking" not in ctk and "reasoning_effort" not in ctk:
+                    req["reasoning_effort"] = effort
+            elif not req.get("thinking") and not req.get("output_config"):
+                if effort == "none":
+                    req["thinking"] = {"type": "disabled"}
+                else:
+                    req["output_config"] = {"effort": effort}
+        return req
 
     def start_telemetry(self):
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
@@ -548,9 +585,10 @@ class Service:
 
     def run(self, ids, thinking, tools, max_new, sampling, cancel) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..})."""
-        if self.sampling_defaults:     # config defaults; the request's own fields win (explicit 0 stays greedy)
+        defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
+        if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
-            sampling = {**self.sampling_defaults, **req_values}
+            sampling = {**defaults, **req_values}
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
@@ -877,6 +915,10 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, svc.metrics())
                 return
+            if path == "/settings":
+                if self._authorized():
+                    self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
+                return
             if path == "":
                 body = (ROOT / "serve" / "web" / "index.html").read_bytes()
                 self.send_response(200)
@@ -907,6 +949,9 @@ def make_handler(svc: Service):
         def do_POST(self):
             if not self._authorized():
                 return
+            if self.path.rstrip("/") == "/settings":
+                self._settings()
+                return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 if self.path.rstrip("/") == "/v1/chat/completions":
@@ -920,6 +965,28 @@ def make_handler(svc: Service):
             except EngineDied as e:                          # before the answer started (not streamed)
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
 
+        def _settings(self):
+            # They change what every client gets, so only the app's own page may set them: JSON only (a form or a
+            # "simple" cross-site request can't send it without a CORS preflight, which this server never grants),
+            # and no foreign Origin
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                self._json(415, {"error": {"message": "send application/json"}})
+                return
+            origin = self.headers.get("Origin")
+            if origin and origin.split("://", 1)[-1] != self.headers.get("Host", ""):
+                self._json(403, {"error": {"message": "settings can only be changed from Strata's own page"}})
+                return
+            try:
+                req = json.loads(body or b"{}")
+                shared = svc.set_shared(req.get("defaults") if isinstance(req, dict) else None)
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            print("[strata] other apps now use the Chat settings: " + ", ".join(f"{k}={v}" for k, v in shared.items())
+                  if shared else "[strata] other apps use their own settings again", flush=True)
+            self._json(200, {"shared": bool(shared), "defaults": shared})
+
         def _sse(self):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -927,6 +994,7 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _openai(self, req):
+            req = svc.with_shared(req, "openai")
             messages, tools, kw = openai_to_messages(req)
             max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest of the context
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
@@ -952,6 +1020,7 @@ def make_handler(svc: Service):
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _anthropic(self, req):
+            req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
@@ -1030,6 +1099,46 @@ def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     httpd = Server((host, port), make_handler(svc))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
+
+
+SHARED_KEYS = ("reasoning_effort", "temperature", "top_p", "top_k", "seed", "max_tokens", "experimental_speed_projection")
+
+
+def clean_shared_defaults(d) -> dict:
+    """The Chat settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
+    if d is None:
+        return {}
+    if not isinstance(d, dict):
+        raise ValueError("defaults must be an object")
+    out = {}
+    for key, value in d.items():
+        if value is None or value == "":
+            continue
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if key == "reasoning_effort":
+            if value not in ("none", "low", "medium", "high"):
+                raise ValueError("reasoning_effort: none, low, medium or high")
+        elif key == "temperature":
+            if not number or not 0 <= value <= 2:
+                raise ValueError("temperature: 0..2")
+        elif key == "top_p":
+            if not number or not 0 < value <= 1:
+                raise ValueError("top_p: 0 < top_p <= 1")
+        elif key == "top_k":
+            if not number or value != int(value) or not 1 <= value <= 64:
+                raise ValueError("top_k: an integer 1..64")
+            value = int(value)
+        elif key in ("seed", "max_tokens"):
+            if not number or value != int(value) or value <= 0:
+                raise ValueError(f"{key}: a positive integer")
+            value = int(value)
+        elif key == "experimental_speed_projection":
+            if not isinstance(value, bool):
+                raise ValueError("experimental_speed_projection: true or false")
+        else:
+            raise ValueError(f"unknown setting {key!r}")
+        out[key] = float(value) if key in ("temperature", "top_p") else value
+    return out
 
 
 def sampling_defaults_from_config(cfg: dict) -> dict:
@@ -1156,6 +1265,15 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    if a.config:                                        # the Chat settings shared with other apps, from last time
+        svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
+        try:
+            svc.shared = clean_shared_defaults(json.loads(Path(svc.shared_path).read_text(encoding="utf-8")))
+            if svc.shared:
+                print("[strata] other apps use the Chat settings: " +
+                      ", ".join(f"{k}={v}" for k, v in svc.shared.items()), flush=True)
+        except (OSError, ValueError):
+            svc.shared = {}
     httpd = serve(svc, host=a.host, port=a.port)
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
