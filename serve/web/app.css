@@ -107,6 +107,7 @@ main { flex: 1; min-height: 0; display: flex; }
 .facts .st-btn--icon .st-icon { width: 16px; height: 16px; }
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-4); font-size: var(--st-fs-sm);
               font-weight: var(--st-fw-medium); color: var(--st-ink-soft); }
+.toggle-row .st-toggle { flex: none; }   /* a long label must not squeeze the switch */
 
 /* ---------------------------------------------------------------- drawer */
 .st-drawer { z-index: 40; }
