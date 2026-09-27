@@ -464,7 +464,7 @@ class Service:
                     f.write(path.read_bytes())
             self.embeddings.path = combined
         room = self.engine.max_context - CTX_SLACK - len(ids)
-        if max_new is None or max_new <= 0:
+        if max_new is None or max_new <= 0 or (self.fit_max_tokens and room < 1):
             if room < 1:
                 raise ValueError(f"prompt ({len(ids)} tokens) leaves no room to answer in the context "
                                  f"({self.engine.max_context}); requests are never truncated")
@@ -995,7 +995,7 @@ def main() -> int:
     ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
     ap.add_argument("--fit-max-tokens", action="store_true",
                     help="clamp max_tokens to the remaining context instead of rejecting the request "
-                         "(default: reject with 400, like llama.cpp)")
+                         "(default: reject with 400, like llama.cpp; also \"fit_max_tokens\": true in the config)")
     ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY", ""),
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
     a = ap.parse_args()
@@ -1041,7 +1041,8 @@ def main() -> int:
     tpl = tpath / "chat_template.jinja"
     svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
                   model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
-                  sampling_defaults=sampling_defaults, fit_max_tokens=a.fit_max_tokens)
+                  sampling_defaults=sampling_defaults,
+                  fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
     httpd = serve(svc, host=a.host, port=a.port)
     print(f"ready: http://{a.host}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "

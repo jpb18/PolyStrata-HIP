@@ -126,6 +126,45 @@ class MaxTokens(unittest.TestCase):
             del os.environ["STRATA_DEBUG"]
 
 
+class FitMaxTokens(unittest.TestCase):
+    """PR #24: --fit-max-tokens clamps an explicit budget that overshoots the context instead of a 400."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.engine = RecordingEngine(tok, "</think>\n\n" + ANSWER, max_context=CTX)
+        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), fit_max_tokens=True)
+        cls.httpd = serve(cls.svc, port=0)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    post = MaxTokens.post
+    call = MaxTokens.call
+
+    def test_overshoot_is_clamped_to_the_room(self):
+        for api in ("openai", "anthropic"):
+            with self.subTest(api=api):
+                s, b, pt, ct = self.call(api, max_tokens=CTX)
+                self.assertEqual(s, 200, b)
+                self.assertEqual(self.engine.last_max_new, CTX - CTX_SLACK - pt)
+
+    def test_a_budget_that_fits_is_unchanged(self):
+        s, b, _, ct = self.call("openai", max_tokens=50)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(self.engine.last_max_new, 50)
+
+    def test_no_room_is_still_a_400(self):
+        _, _, pt0, _ = self.call("openai", max_tokens=1)
+        overhead = pt0 - len("hi")
+        s, b, _, _ = self.call("openai", text="y" * (CTX - CTX_SLACK - overhead), max_tokens=100)
+        self.assertEqual(s, 400, b)
+        self.assertIn("no room to answer", b["error"]["message"])
+
+
 class WebApp(unittest.TestCase):
     """The web app (PR #22's dashboard idea, rebuilt): its page and files, and GET /metrics."""
 
