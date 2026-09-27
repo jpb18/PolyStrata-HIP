@@ -178,6 +178,7 @@ if(STRATA_ENABLE_CUDA)
                           src/kernels/cuda/ple.cu
                           src/kernels/cuda/kv_q8.cu
                           src/kernels/cuda/kv_stream.cu
+                          src/kernels/cuda/kv_q4.cu
                           src/kernels/cuda/fused_gr.cu
                           src/kernels/cuda/qsa_decode_attn.cu
                           src/kernels/cuda/fused_gdn.cu
@@ -362,6 +363,12 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(kv_stream_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(kv_stream_parity PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME kv_stream_parity COMMAND kv_stream_parity)
+
+  # PR #21: Q4_0 KV with Walsh-Hadamard rotation vs a host reference (GPU, synthetic, no model).
+  add_executable(kv_q4_parity src/kernels/kv_q4_parity.cpp)
+  target_include_directories(kv_q4_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(kv_q4_parity PRIVATE strata_kernels CUDA::cudart)
+  add_test(NAME kv_q4_parity COMMAND kv_q4_parity)
 
   # Plan v0.3 P3: native MMVQ for 1..8 tokens (bitwise selftest + --bench timing); synthetic data, no model.
   if(STRATA_BUILD_TESTS)

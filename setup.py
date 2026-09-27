@@ -647,6 +647,9 @@ def main() -> int:
     ap.add_argument("--family", choices=list(FAMILIES), help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5")
     ap.add_argument("--model", choices=list(MODELS))
     ap.add_argument("--context", type=int)
+    ap.add_argument("--kv", choices=["int8", "q4_0"],
+                    help="KV cache precision above 8K context: int8 (default) or q4_0 (half the memory, a little less "
+                         "precise)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (yes = the encoder on the GPU)")
     ap.add_argument("--port", type=int, default=8080)
@@ -759,6 +762,17 @@ def main() -> int:
              "+ the context): using 128K")
         ctx = 131072
     ok(f"context: {ctx} tokens")
+    # the KV cache (the model's memory of the conversation): 8-bit, or 4-bit after a Hadamard rotation (PR #21)
+    kv = "fp16" if ctx <= 8192 else (a.kv or "int8")
+    if ctx > 8192 and not a.kv and not a.yes:
+        say()
+        say("  KV cache precision (the model's memory of the conversation):")
+        say("  1) 8-bit   (recommended: what every published number was measured with)")
+        say("  2) 4-bit   half the memory (about 4% faster at 128K), but measurably less precise on long")
+        say("             documents; long-context lookups (needle tests) still pass")
+        kv = ["int8", "q4_0"][int(ask("KV cache?", ["1", "2"], "1", a.yes)) - 1]
+    if ctx > 8192:
+        ok(f"KV cache: {'8-bit' if kv == 'int8' else '4-bit (Hadamard-rotated)'}")
     if a.vision:
         vision = {"yes": "gpu", "no": "none"}.get(a.vision, a.vision)
     else:
@@ -869,11 +883,11 @@ def main() -> int:
             "--prefill", "2048", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
             "--max-context", str(ctx)]
     if ctx > 8192:
-        args += ["--kv", "int8"]
+        args += ["--kv", kv]
     # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
     # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
-    # costs ~13.7 KB of RAM per context token (1.7 GB at 128K, 3.4 GB at 262K), so only when that fits.
-    kv_ram_gb = ctx * 13728 / 1e9
+    # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with 4-bit, so only when it fits.
+    kv_ram_gb = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9   # 12 QSA layers + the draft layer
     if ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
         args += ["--kv-resident", "32768"]
         ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
