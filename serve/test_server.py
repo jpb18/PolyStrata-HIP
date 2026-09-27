@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import CTX_SLACK, ByteTokenizer, MockEngine, Service, serve  # noqa: E402
+from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
@@ -163,6 +163,63 @@ class FitMaxTokens(unittest.TestCase):
         s, b, _, _ = self.call("openai", text="y" * (CTX - CTX_SLACK - overhead), max_tokens=100)
         self.assertEqual(s, 400, b)
         self.assertIn("no room to answer", b["error"]["message"])
+
+
+class DyingEngine(MockEngine):
+    """Issue #27: an engine that dies after a few tokens of its first answer, and comes back when restarted."""
+
+    def __init__(self, tok, script, max_context):
+        super().__init__(tok, script, max_context=max_context)
+        self.dead, self.restarts, self.die_after = False, 0, 5
+
+    def alive(self):
+        return not self.dead
+
+    def restart(self):
+        self.dead, self.die_after = False, None
+        self.restarts += 1
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+            if self.die_after is not None and i == self.die_after:
+                self.dead = True
+                raise EngineDied("the engine stopped unexpectedly (exit code -9)")
+            yield t
+
+
+class EngineDeath(unittest.TestCase):
+    """Issue #27: a dead engine is an error (not "length"), and the next request starts it again."""
+
+    def test_error_then_restart(self):
+        tok = ByteTokenizer()
+        eng = DyingEngine(tok, "</think>\n\n" + ANSWER, max_context=CTX)
+        svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            def post(body):
+                req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        return r.status, r.read().decode()
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return e.code, e.read().decode()
+            msgs = [{"role": "user", "content": "hi"}]
+            code, text = post({"model": "m", "messages": msgs, "max_tokens": 50, "stream": True})
+            self.assertEqual(code, 200)
+            self.assertIn('"error"', text)
+            self.assertIn("stopped unexpectedly", text)
+            self.assertTrue(text.rstrip().endswith("data: [DONE]"))
+            self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
+            code, text = post({"model": "m", "messages": msgs, "max_tokens": 50})
+            self.assertEqual(code, 200, text)
+            self.assertEqual(eng.restarts, 1)
+            self.assertEqual(json.loads(text)["usage"]["completion_tokens"], 50)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 class WebApp(unittest.TestCase):

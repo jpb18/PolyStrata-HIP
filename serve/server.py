@@ -72,6 +72,10 @@ class MockEngine:
             yield t
 
 
+class EngineDied(RuntimeError):
+    """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -83,6 +87,8 @@ class StrataEngine:
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None):
+        self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
+        self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
@@ -114,7 +120,28 @@ class StrataEngine:
     def _pump(self):
         for line in self.proc.stdout:
             self.lines.put(line)
+        self.ended = True                               # its output closed: it is gone, even before the OS says so
         self.lines.put(None)
+
+    def alive(self) -> bool:
+        return not getattr(self, "ended", False) and self.proc.poll() is None
+
+    def exit_code(self):
+        try:
+            return self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def restart(self):
+        """Start the engine again (the same command) after it died; the new process has its own line queue."""
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
+        info = dict(self.info)
+        self.ended = False
+        self.__init__(*self.spawn)
+        self.info = {**info, **self.info}
 
     def _parse_done(self, line):
         f = line.split()
@@ -176,8 +203,11 @@ class StrataEngine:
         self.progress = None
         head = f"GENI {int(max_new)}{self.projection_key(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {}) if not embeddings else ''}"
-        self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
+            self.proc.stdin.flush()
+        except OSError:                                  # the pipe is gone: the engine died (not the client)
+            raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         done = False
         try:
             while True:
@@ -190,7 +220,7 @@ class StrataEngine:
                     continue
                 if line is None:
                     done = True
-                    raise RuntimeError("the engine process ended")
+                    raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
                 if line.startswith("T "):
                     if cancel.is_set():
                         return
@@ -531,6 +561,14 @@ class Service:
             with self.fifo:
                 with self.status_lock:
                     self.status["queued"] -= 1
+                if hasattr(self.engine, "alive") and not self.engine.alive():
+                    # issue #27: it died in an earlier request - start it again instead of failing every request
+                    code = self.engine.exit_code() if hasattr(self.engine, "exit_code") else None
+                    print(f"[strata] the engine had stopped (exit code {code}); starting it again "
+                          "(a minute or two) ...", flush=True)
+                    self.engine.restart()
+                    print("[strata] the engine is running again", flush=True)
+                with self.status_lock:
                     self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids), generated=0,
                                        started=time.time(), first_token=None, tool=None, tail="", max_tokens=max_new)
                 last_print = time.time()
@@ -555,6 +593,14 @@ class Service:
                             yield "event", ev
                     if cancel.is_set():
                         finish = "cancel"
+                except EngineDied as e:
+                    finish = "error"
+                    print(f"[strata] {e}. The usual cause is running out of RAM: Linux then ends the biggest program "
+                          "(check: sudo dmesg | grep -i -E 'killed process|out of memory'); Windows slows down instead. "
+                          "Close other programs or use a smaller model (Q2_0 / IQ2_XS). The next request starts the engine "
+                          f"again.{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
+                          flush=True)
+                    raise
                 finally:
                     gen.close()                         # STOP+drain to THIS request's DONE while still holding the
                     #                                     fifo, so a stop-token break can't leave the shared engine
@@ -871,6 +917,8 @@ def make_handler(svc: Service):
                     self._json(404, {"error": {"message": "not found"}})
             except ValueError as e:
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+            except EngineDied as e:                          # before the answer started (not streamed)
+                self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
 
         def _sse(self):
             self.send_response(200)
@@ -899,6 +947,9 @@ def make_handler(svc: Service):
             except OSError:
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
+            except EngineDied as e:                          # mid-stream: say so, then end the stream properly
+                err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _anthropic(self, req):
             messages, tools, kw = anthropic_to_messages(req)
@@ -922,6 +973,9 @@ def make_handler(svc: Service):
             except OSError:
                 cancel.set()
                 events.close()
+            except EngineDied as e:                          # mid-stream: Anthropic's error event
+                err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler
 
@@ -930,6 +984,26 @@ class Server(ThreadingHTTPServer):
     # On Windows SO_REUSEADDR lets a second server bind a port that is already serving, and requests then land on
     # either one (a forgotten second start of run-<model>.bat).  Without it the second start fails loudly instead.
     allow_reuse_address = os.name != "nt"
+
+
+def warn_tight_ram(arena_mib) -> None:
+    """The model's experts live in RAM (INFO arena_mib, engine 0.1.10+).  With less than ~6 GB left beside them for the
+    system, the engine and this server, Linux ends the engine mid-answer when memory runs out (issue #27) and Windows
+    pages to disk; say so at start instead of after a lost answer."""
+    if not isinstance(arena_mib, int) or arena_mib <= 0:
+        return
+    try:
+        import psutil
+        total = psutil.virtual_memory().total
+    except Exception:  # noqa: BLE001 - psutil is optional here
+        return
+    left = total / 2**30 - arena_mib / 1024
+    if left < 6:
+        print(f"[strata] WARNING: RAM is tight - the model's experts take {arena_mib / 1024:.1f} GB of this PC's "
+              f"{total / 2**30:.0f} GB, leaving {left:.1f} GB for everything else. "
+              + ("Linux may stop the engine in the middle of an answer. " if os.name != "nt" else
+                 "Windows will slow down (paging to disk). ")
+              + "Close other programs, or run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS).", flush=True)
 
 
 def lan_addresses() -> list[str]:
@@ -1072,6 +1146,7 @@ def main() -> int:
                             env=env)
         print("loading the model (the first start takes a minute or two) ...", flush=True)
         engine = StrataEngine(cfg["exe"], cfg["args"], cwd=cfg.get("cwd"), log=cfg.get("log"), env=env)
+        warn_tight_ram(engine.info.get("arena_mib"))
     else:
         engine, vision, sampling_defaults = MockEngine(tok, a.script), None, {}
     # the model's own chat template (exported with its tokenizer), else the original model's
