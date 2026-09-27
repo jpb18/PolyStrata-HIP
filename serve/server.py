@@ -922,6 +922,25 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
 
+def lan_addresses() -> list[str]:
+    """This PC's IPv4 addresses on its networks (what another device types in), without loopback/link-local."""
+    import socket
+    first, ips = None, set()
+    try:                                                # the address of the default route; sends nothing (UDP)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            first = s.getsockname()[0]
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    ok = lambda ip: ip and not ip.startswith(("127.", "169.254.", "0."))
+    return ([first] if ok(first) else []) + sorted(ip for ip in ips if ok(ip) and ip != first)
+
+
 def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
@@ -987,7 +1006,9 @@ def main() -> int:
     ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
     ap.add_argument("--config", help="strata engine config (JSON: exe, args, cwd, tokenizer, model_name), "
                                      "written by setup.py")
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default=None,
+                    help="the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices "
+                         "on your network (set an API key); also \"host\" in the config")
     ap.add_argument("--script", default="Thinking about it.</think>\n\nHello from the mock engine.")
     ap.add_argument("--port", type=int, default=8095)
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
@@ -1000,6 +1021,7 @@ def main() -> int:
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
     except OSError:
@@ -1045,10 +1067,26 @@ def main() -> int:
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
     httpd = serve(svc, host=a.host, port=a.port)
-    print(f"ready: http://{a.host}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
+    here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
+    print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
           f"{', API key required' if svc.api_key else ''})", flush=True)
-    print(f"       open http://{a.host}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
+    print(f"       open http://{here}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
+    if a.host not in ("127.0.0.1", "localhost", "::1"):
+        # issue #26: reachable from other devices - say at which address, and what can still block it
+        ips = lan_addresses()
+        for ip in ips:
+            print(f"       from other devices: http://{ip}:{a.port}/   (API: http://{ip}:{a.port}/v1)", flush=True)
+        if not ips:
+            print("       from other devices: http://<this PC's IP address>:" + str(a.port) + "/", flush=True)
+        if not svc.api_key:
+            print("       WARNING: no API key - anyone on your network can use this model. Add \"api_key\": \"...\" "
+                  "to the config (clients send it as their API key; the web page asks for it)", flush=True)
+        if os.name == "nt":
+            print("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for Python, or run "
+                  "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Strata " + str(a.port) + "\" "
+                  "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
+                  "       (and set this network to Private in Windows' network settings)", flush=True)
     if a.open:
         import webbrowser
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
