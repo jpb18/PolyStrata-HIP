@@ -1173,6 +1173,28 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: profile %s: %zu ranked pairs, built for %lld slots\n",
                      o.expert_profile.c_str(), profile.size(), (long long) pslots);
     }
+    // THE HEAD BEFORE THE CACHE.  The expert cache takes what is free minus the reserve, so everything allocated
+    // after it comes out of the reserve.  The native head (~0.5 GB with IQ3_S) was loaded after it and ate most of
+    // the 700 MiB: 128K IQ3_S ended with 30 MiB free, the driver paged, and a request stalled for good at its first
+    // verify window.  Loaded first, the cache is sized around it.
+    const strata::core::WeightRef* wo = wt.find("output.weight");
+    if (wo == nullptr) { std::fprintf(stderr, "strata generate: output.weight is missing\n"); return 1; }
+    const int64_t n_vocab = wo->ne1;
+    strata::core::NativeHead native_head;
+    if (!o.native_head_gguf.empty()) {
+        if (!native_head.load(o.native_head_gguf, g.n_embd, n_vocab, err)) {
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "strata generate: experimental native Q5_K head, %llu bytes\n",
+                     (unsigned long long) native_head.weight_bytes());
+    }
+    std::vector<float> logits((size_t) n_vocab);
+    float* d_logits = nullptr;
+    if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
+        std::fprintf(stderr, "strata generate: the logits buffer failed\n");
+        return 1;
+    }
     const bool auto_cache = o.expert_cache < 0;
     if (o.expert_cache < 0) {
         size_t free_b = 0, total_b = 0;
@@ -1481,25 +1503,7 @@ int main(int argc, char** argv) {
     }
 
     mem_mark("the expert cache and the graphs");
-    std::fprintf(stderr, "strata generate: session is up; locating the head\n");
-    const strata::core::WeightRef* wo = wt.find("output.weight");
-    if (wo == nullptr) { std::fprintf(stderr, "strata generate: output.weight is missing\n"); return 1; }
-    const int64_t n_vocab = wo->ne1;
-    strata::core::NativeHead native_head;
-    if (!o.native_head_gguf.empty()) {
-        if (!native_head.load(o.native_head_gguf, g.n_embd, n_vocab, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
-            return 1;
-        }
-        std::fprintf(stderr, "strata generate: experimental native Q5_K head, %llu bytes\n",
-                     (unsigned long long) native_head.weight_bytes());
-    }
-    std::vector<float> logits((size_t) n_vocab);
-    float* d_logits = nullptr;
-    if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: the logits buffer failed\n");
-        return 1;
-    }
+    std::fprintf(stderr, "strata generate: session is up\n");
     auto run_head = [&](void* stream) -> bool {
         if (!native_head.loaded())
             return strata::core::lm_head(wt, g, ss.block, d_logits, stream, err);
@@ -2174,9 +2178,16 @@ int main(int argc, char** argv) {
             // and a page-in while the verify graph spins on a host flag stalls the request for good
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
-            std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded%s\n",
-                         (long long) (free_b >> 20), free_b < ((size_t) 128 << 20)
-                             ? " - LOW: requests may stall; lower --max-context or raise --vram-reserve-mib" : "");
+            // below ~256 MiB a later allocation (a first-used window's buffers, the desktop, another program) can make
+            // the driver page GPU memory, and a verify graph spinning on a host flag then never finishes
+            const int64_t free_mib = (int64_t) (free_b >> 20);
+            if (free_mib >= 256) {
+                std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded\n", (long long) free_mib);
+            } else {
+                std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
+                                     " add --vram-reserve-mib %lld to the config's args (or lower --max-context)\n",
+                             (long long) free_mib, (long long) (o.vram_reserve_mib + 512 - free_mib));
+            }
         }
         // what the server's Monitor tab shows (servers before 0.1.8 skip unknown lines until READY)
         {
