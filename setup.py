@@ -54,7 +54,7 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 4)                 # IQ3_S: IQ4_XS GPU experts, any-size MTP head rows (v0.1.4)
+MIN_ENGINE = (0, 1, 5)                 # KV streaming (--kv-resident), v0.1.5
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow"]
 
 MODELS = {
@@ -863,6 +863,13 @@ def main() -> int:
             "--max-context", str(ctx)]
     if ctx > 8192:
         args += ["--kv", "int8"]
+    # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
+    # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
+    # costs ~13.7 KB of RAM per context token (1.7 GB at 128K, 3.4 GB at 262K), so only when that fits.
+    kv_ram_gb = ctx * 13728 / 1e9
+    if ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
+        args += ["--kv-resident", "32768"]
+        ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
