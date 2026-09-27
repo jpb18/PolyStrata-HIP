@@ -45,6 +45,7 @@
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/kernels/cvec.hpp"
+#include "strata/core/progress.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX   // gguf_reader.hpp includes windows.h
 #endif
@@ -2200,6 +2201,8 @@ int main(int argc, char** argv) {
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
             std::printf("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) pp_total, ms,
                         ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0);
+            strata::core::progress_at("reading the prompt (batched), done up to token", done);
+            strata::core::progress_beat();
             std::fflush(stdout);
             if (o.prompt_cache_every > 0 && done >= pp_next_check) {
                 if (!checkpoint_at(done)) { e = "saving a conversation checkpoint failed"; return false; }
@@ -2335,6 +2338,31 @@ int main(int argc, char** argv) {
                         o.suffix_draft, (long long) (free_b >> 20), cvec_summary.c_str(),
                         (long long) (strata::kernels::cpu::expert_layout().total >> 20));
         }
+        // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
+        // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
+        // GPU spinning forever.  STRATA_WATCHDOG_S=0 turns it off.
+        {
+            const char* ws = std::getenv("STRATA_WATCHDOG_S");
+            const int limit = ws ? std::atoi(ws) : 120;
+            if (limit > 0)
+                std::thread([limit] {
+                    strata::core::Progress& p = strata::core::progress();
+                    uint64_t last = p.beats.load();
+                    auto since = std::chrono::steady_clock::now();
+                    for (;;) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        const auto now = std::chrono::steady_clock::now();
+                        const uint64_t b = p.beats.load();
+                        if (!p.busy.load() || b != last) { last = b; since = now; continue; }
+                        if (now - since < std::chrono::seconds(limit)) continue;
+                        std::fprintf(stderr, "strata serve: no progress for %d s during a request (%s %lld) - stopping "
+                                             "the engine so the server starts it again (issue #29)\n",
+                                     limit, p.where.load(), (long long) p.detail.load());
+                        std::fflush(stderr);
+                        std::abort();
+                    }
+                }).detach();
+        }
         std::printf("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
         std::fflush(stdout);
         std::string line;
@@ -2354,6 +2382,11 @@ int main(int argc, char** argv) {
         std::vector<const float*> row_ptr;
         while (next_line(line)) {
             if (line == "QUIT") break;
+            // the watchdog watches a request from here until this iteration ends, whichever way it ends
+            struct BusyScope {
+                BusyScope() { strata::core::progress().busy.store(true); strata::core::progress_at("request"); }
+                ~BusyScope() { strata::core::progress().busy.store(false); strata::core::progress_at("idle"); }
+            } busy_scope;
             stop_req.store(false);   // a STOP that arrived between requests is stale
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
@@ -2573,6 +2606,7 @@ int main(int argc, char** argv) {
             pp_t0 = r0;
             pp_next_check = reread_to > 0 ? INT64_MAX : resume + o.prompt_cache_every;
             std::printf("RESUME %lld\n", (long long) resume);   // before reading: this many prompt tokens are reused
+            strata::core::progress_at("reading the prompt, from token", read_from);
             std::fflush(stdout);
             // A SHORT PART OF THE PROMPT - the new message of a chat that continues from a checkpoint, the assistant
             // header - goes through the verify windows, S tokens at a time, as decode reads them.  The batched path
@@ -2612,6 +2646,7 @@ int main(int argc, char** argv) {
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
                 std::printf("PP %lld %lld %.0f %.1f\n", (long long) b, (long long) pp_total, ms,
                             ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0);
+                strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
             };
@@ -2795,6 +2830,7 @@ int main(int argc, char** argv) {
                 bool eos = false;
                 for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {
                     std::printf("T %d\n", (int) outv[(size_t) i]);
+                    strata::core::progress_beat();
                     ++produced_n;
                     if (o.suffix_draft > 0) sfx.append(outv[(size_t) i]);
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();

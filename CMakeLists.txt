@@ -550,6 +550,10 @@ if(STRATA_BUILD_TESTS)
   add_executable(pool_test src/kernels/cpu/pool_test.cpp)
   target_link_libraries(pool_test PRIVATE strata_kernels_cpu)
   add_test(NAME pool_test COMMAND pool_test --selftest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # issue #29: tiny batches with sleeping workers, as on a big-VRAM card; a hang fails it
+  add_executable(pool_stress src/kernels/cpu/pool_stress.cpp)
+  target_link_libraries(pool_stress PRIVATE strata_kernels_cpu)
+  add_test(NAME pool_stress COMMAND pool_stress 20)
 endif()
 
 if(STRATA_BUILD_TESTS)

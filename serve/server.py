@@ -123,6 +123,24 @@ class StrataEngine:
         self.ended = True                               # its output closed: it is gone, even before the OS says so
         self.lines.put(None)
 
+    def death_note(self) -> str:
+        """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
+        tail = ""
+        try:
+            with open(self.log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4096))
+                tail = f.read().decode("utf-8", "replace")
+        except (OSError, TypeError):
+            pass
+        for line in reversed(tail.splitlines()):
+            if "issue #29" in line:
+                return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
+                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+        return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
+                "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
+                "smaller model (Q2_0 / IQ2_XS).")
+
     def alive(self) -> bool:
         return not getattr(self, "ended", False) and self.proc.poll() is None
 
@@ -633,10 +651,9 @@ class Service:
                         finish = "cancel"
                 except EngineDied as e:
                     finish = "error"
-                    print(f"[strata] {e}. The usual cause is running out of RAM: Linux then ends the biggest program "
-                          "(check: sudo dmesg | grep -i -E 'killed process|out of memory'); Windows slows down instead. "
-                          "Close other programs or use a smaller model (Q2_0 / IQ2_XS). The next request starts the engine "
-                          f"again.{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
+                    note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
+                    print(f"[strata] {e}. {note} The next request starts the engine again."
+                          f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
                           flush=True)
                     raise
                 finally:
