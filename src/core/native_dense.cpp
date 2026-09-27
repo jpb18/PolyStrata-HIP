@@ -13,9 +13,12 @@
 
 namespace strata::core {
 namespace {
-bool eligible(const std::string& name, bool include_ple_key) {
+bool eligible(const strata::TensorInfo& tensor, bool include_ple_key) {
+    const auto& name = tensor.name;
     if (name.rfind("blk.", 0) != 0) return false;
-    if (include_ple_key && name == "blk.1.ple_key.weight") return true;
+    // The native PLE kernel accepts Q2_0. Other quantized keys can be converted to BF16 by iq_pack;
+    // keep their packed bytes resident instead of overriding them with an unsupported native key.
+    if (name == "blk.1.ple_key.weight") return include_ple_key && tensor.type == 42;
     static const char* suffixes[] = {".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight",
         ".attn_q.weight", ".attn_k.weight", ".attn_v.weight", ".attn_output.weight",
         ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight", ".ffn_down_shexp.weight"};
@@ -38,7 +41,7 @@ bool NativeDense::served_names(const std::vector<std::string>& shards, bool incl
         for (const auto& path : shards) {
             strata::GgufFile gguf(path);
             for (const auto& tensor : gguf.tensors())
-                if (eligible(tensor.name, include_ple_key) && strata::kernels::native_mmvq_supported(tensor.type) &&
+                if (eligible(tensor, include_ple_key) && strata::kernels::native_mmvq_supported(tensor.type) &&
                     tensor.shape.size() == 2)
                     out.insert(tensor.name);
         }
@@ -124,7 +127,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 }
             }
             for (const auto& tensor : gguf.tensors()) {
-                if (!eligible(tensor.name, include_ple_key)) continue;
+                if (!eligible(tensor, include_ple_key)) continue;
                 if (!seen.insert(tensor.name).second) {
                     err = "native dense: duplicate tensor " + tensor.name; return false;
                 }

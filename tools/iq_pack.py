@@ -21,6 +21,10 @@ Split files: every shard of the model is read (<name>-0000N-of-0000M.gguf beside
 split anyhow (Swift 1.5's GGUFs put layers 13-47 in shard 2 and the PLE table in shard 1).  A layer whose experts
 are not in shard 1 names its shard in native_experts.txt (v3).  Router tensors stored as F32 whose values are
 exactly BF16 (Swift 1.5) are written as BF16, the form the engine's router takes; anything else is refused.
+
+For ordinary quants, --compat-bf16 dequantizes the small projections that the engine reads as BF16, using
+round-to-nearest-even. This introduces BF16 rounding; it does not reconstruct the original full-precision
+weights. Experts, native attention projections, token embeddings and the disk-backed PLE table stay unchanged.
 """
 from __future__ import annotations
 
@@ -42,6 +46,37 @@ FLOAT = {"BF16", "F32", "F16"}
 ROUTERS = ("ffn_gate_inp.weight", "ffn_gate_inp_shexp.weight")
 NOT_IN_PACK = {"per_layer_token_embd.weight"}      # the 28.8 GB PLE table: read from its GGUF by the engine
 
+# These small projections are read as BF16 by the residual, router, GDN, QSA and PLE kernels.
+# GSQ-RCO files already store them that way. Ordinary GGUF quants (including OrcaRouter's IQ3_XXS)
+# quantize them too; --compat-bf16 explicitly dequantizes and rounds ONLY these tensors.
+BF16_PROJECTIONS = (
+    "hc_attn_down.weight", "hc_attn_up.weight", "hc_attn_inject.weight",
+    "hc_ffn_down.weight", "hc_ffn_up.weight", "hc_ffn_inject.weight",
+    "ssm_alpha.weight", "ssm_beta.weight", "indexer.q_proj.weight", "indexer.k_proj.weight",
+    "ple_value.weight", *ROUTERS,
+)
+BF16_OUTPUT = {"output_hc_down.weight", "output_hc_up.weight"}
+
+
+def needs_bf16(name: str, type_name: str) -> bool:
+    if name in BF16_OUTPUT:
+        return True
+    if not name.startswith("blk."):
+        return False
+    # The existing native PLE key supports Q2_0 only. Other key encodings use the BF16 path.
+    return name.endswith(BF16_PROJECTIONS) or (name == "blk.1.ple_key.weight" and type_name != "Q2_0")
+
+
+def bf16_bytes(raw: np.ndarray, type_name: str) -> bytes:
+    from _paths import add_gguf_py
+    add_gguf_py()
+    from gguf import GGMLQuantizationType as Q, quants
+    values = quants.dequantize(raw, Q[type_name])
+    if not np.isfinite(values).all():
+        raise ValueError("cannot convert non-finite weights to BF16")
+    # ggml's round-to-nearest-even conversion, including correct halfway rounding.
+    return quants.quantize(values, Q.BF16).tobytes()
+
 
 class Model:
     """All shards of one model: name -> (GGUFFile, TensorInfo, memmap, shard path)."""
@@ -54,13 +89,20 @@ class Model:
             total = int(m.group(2))
             paths = [first.with_name(first.name[:m.start()] + "-%05d-of-%05d.gguf" % (i, total))
                      for i in range(1, total + 1)]
-            paths = [p for p in paths if p.exists()]
+        missing = [str(p) for p in paths if not p.is_file()]
+        if missing:
+            raise FileNotFoundError("missing model shards (wait for the download): " + ", ".join(missing))
         self.paths = paths
         self.where = {}
         for p in paths:
             g = G.GGUFFile(p)
             mm = np.memmap(p, dtype=np.uint8, mode="r")
             for t in g.tensors:
+                size = t.expected_bytes()
+                if size is None or g.data_start + t.offset + size > mm.size:
+                    raise ValueError(f"{p.name}: unsupported or truncated tensor {t.name}")
+                if t.name in self.where:
+                    raise ValueError(f"{p.name}: duplicate tensor {t.name}")
                 self.where[t.name] = (g, t, mm, p)
 
     def bytes(self, name) -> np.ndarray:
@@ -91,11 +133,18 @@ def is_expert(name: str) -> bool:
     return name.startswith("blk.") and name.endswith(("_exps.weight",))
 
 
-def index_standalone(src, out, model: Model) -> int:
+def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
     """Every non-expert tensor of the model: floats into dense.bin as stored (exact-BF16 F32 routers as BF16),
     quantized ones native-only."""
+    if not compat_bf16:
+        for name, (_, t, _, _) in model.where.items():
+            if needs_bf16(name, t.type_name) and t.type_name != "BF16" and not (
+                    t.type_name == "F32" and name.endswith(ROUTERS)):
+                print(f"{name} is {t.type_name}, but the engine requires BF16; use --compat-bf16")
+                return 1
     rows, at = [], 0
     served = 0
+    converted = []
     with open(out / "dense.bin", "wb") as fo:
         for name, (g, t, mm, _) in model.where.items():
             if is_expert(t.name) or t.name in NOT_IN_PACK:
@@ -105,10 +154,16 @@ def index_standalone(src, out, model: Model) -> int:
                 return 1
             ne0 = int(t.shape[0])
             ne1 = int(t.shape[1]) if len(t.shape) > 1 else 0
-            if t.type_name in FLOAT:
+            convert = compat_bf16 and needs_bf16(t.name, t.type_name) and t.type_name != "BF16"
+            if t.type_name in FLOAT or convert:
                 raw = tensor_bytes(mm, g, t).tobytes()
-                kind = {"BF16": "4", "F16": "5", "F32": "2"}[t.type_name]
-                if t.type_name == "F32" and t.name.endswith(ROUTERS):
+                if convert:
+                    raw = bf16_bytes(np.frombuffer(raw, dtype=np.uint8), t.type_name)
+                    kind = "4"
+                    converted.append({"name": t.name, "source_type": t.type_name, "bytes": len(raw)})
+                else:
+                    kind = {"BF16": "4", "F16": "5", "F32": "2"}[t.type_name]
+                if not convert and t.type_name == "F32" and t.name.endswith(ROUTERS):
                     u = np.frombuffer(raw, dtype=np.uint32)
                     if np.count_nonzero(u & 0xFFFF):
                         print("router %s is F32 with values that are not BF16; the engine's router is BF16" % t.name)
@@ -125,6 +180,12 @@ def index_standalone(src, out, model: Model) -> int:
                 served += 1
                 rows.append([t.name, "0", "0", "0", "0", "0", "0", str(ne0), str(ne1), "8", "0", "32"] + ["0"] * 7)
     write_index(out, rows, src, served, 0)
+    if compat_bf16:
+        (out / "compat-bf16.json").write_text(json.dumps({
+            "source": str(src), "rounding": "nearest-even", "tensors": converted,
+        }, indent=2) + "\n", encoding="utf-8")
+        print("compat-bf16: %d tensors, %.2f GiB; expert and PLE table bytes unchanged"
+              % (len(converted), sum(t["bytes"] for t in converted) / 2**30))
     return 0
 
 
@@ -198,10 +259,16 @@ def main() -> int:
     ap.add_argument("--base", help="optional: a Q2_0 canonical pack whose dense.bin holds the shared float tensors")
     ap.add_argument("--out", required=True)
     ap.add_argument("--skip-experts", action="store_true", help="rewrite the index only")
+    ap.add_argument("--compat-bf16", action="store_true",
+                    help="dequantize small non-native projections to BF16 for ordinary Qwen4Exp GGUFs "
+                         "(rounds weights; leaves experts and the PLE table unchanged)")
     ap.add_argument("--experts-bin", action="store_true",
                     help="also write experts.bin (the engine otherwise reads the experts from the GGUF itself)")
     a = ap.parse_args()
-    src = pathlib.Path(a.gguf).resolve()
+    if a.compat_bf16 and a.base:
+        ap.error("--compat-bf16 cannot reuse --base dense weights")
+    # HF snapshot files are symlinks to hash-named blobs. Keep the shard filename for discovery.
+    src = pathlib.Path(a.gguf).absolute()
     base = pathlib.Path(a.base).resolve() if a.base else None
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -218,7 +285,7 @@ def main() -> int:
             return 1
         rc = index_from_base(a, src, base, out, g, {t.name: t for t in g.tensors}, mm)
     else:
-        rc = index_standalone(src, out, model)
+        rc = index_standalone(src, out, model, a.compat_bf16)
     if rc:
         return rc
     if not (out / "tokenizer" / "vocab.json").exists() or not (out / "tokenizer" / "chat_template.jinja").exists():
