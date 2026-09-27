@@ -44,6 +44,11 @@
 #include "strata/program/logits_selection.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
+#include "strata/kernels/cvec.hpp"
+#ifndef NOMINMAX
+#define NOMINMAX   // gguf_reader.hpp includes windows.h
+#endif
+#include "strata/artifact/gguf_reader.hpp"
 
 #include <cuda_runtime.h>
 
@@ -259,6 +264,13 @@ struct Options {
     int suffix_draft = 3;
     /// The MTP's own window cap (0 = --spec): with --spec 6 --mtp-max-t 4 the long windows come from suffix matches.
     int mtp_max_t = 0;
+    /// A control vector on the residual stream (strata/kernels/cvec.hpp), with llama.cpp's flags: the
+    /// `experimental-speed-projection` profile passes `--control-vector-scaled FILE:1.0 --control-vector-layer-range
+    /// 4 44 --cvec-mode project --cvec-dir per-layer`.  None by default; --serve switches a loaded one per request.
+    std::vector<std::pair<std::string, float>> cvec_files;
+    int cvec_first = -1, cvec_last = -1;   ///< llama.cpp's defaults: 1 .. the last layer
+    int cvec_mode = 1;                     ///< 0 = project, 1 = add (llama.cpp's default)
+    int cvec_single = -1;                  ///< --cvec-dir single:L (project mode): layer L's direction everywhere
 };
 
 void usage() {
@@ -330,6 +342,11 @@ void usage() {
                  "  --suffix-draft N     prompt lookup: draft from an earlier repeat of the last N+ tokens of context\n"
                  "                       when it pays (default 3; 0 = MTP only)\n"
                  "  --mtp-max-t M        cap the MTP's windows at M tokens (0 = --spec; longer ones come from suffixes)\n"
+                 "  --control-vector-scaled FILE:SCALE[,...]  a control vector GGUF on the residual stream (llama.cpp's\n"
+                 "                       format; --control-vector FILE = scale 1).  --serve: requests switch it (cvec=0|1)\n"
+                 "  --control-vector-layer-range A B  the layers it follows (inclusive; default 1 .. the last)\n"
+                 "  --cvec-mode add|project  h += s v (default) or h -= s (h.v) v with v unit\n"
+                 "  --cvec-dir per-layer|single:L  each layer's own direction (default) or layer L's everywhere (project)\n"
                  "  --no-token-graph     A/B: two graphs per layer (the host launches each) instead of one per token\n"
                  "  --no-fused-gr        A/B: the six-kernel hyper-connection read and a separate write (native)\n"
                  "  --prefill CHUNK      batched prompt processing in chunks of CHUNK tokens (needs --native)\n"
@@ -558,6 +575,80 @@ bool checkpoint_restore(const ConvCheckpoint& c, strata::core::SessionState& ss,
     return cudaDeviceSynchronize() == cudaSuccess;
 }
 
+// --control-vector-scaled: llama.cpp's `common_control_vector_load` (every file's `direction.<l>` times its scale,
+// summed; layer 0 has none) and `llama_adapter_cvec::apply` with the projection-mode patch (project: the unit
+// direction and its norm as the scale), into the tables `cvec_upload` takes.  `summary` is what INFO reports.
+bool load_control_vectors(const Options& o, const strata::core::ModelGeometry& g, std::string& summary, std::string& err) {
+    const int64_t L = g.n_layers, N = g.n_embd;
+    std::vector<float> data((size_t) (L * N), 0.0f);
+    std::vector<bool> have((size_t) L, false);
+    for (const auto& [path, scale] : o.cvec_files) {
+        try {
+            strata::GgufFile f(path);
+            const strata::MetaValue* arch = f.get("general.architecture");
+            if (arch == nullptr || arch->s != "controlvector") {
+                err = path + ": not a control vector GGUF (general.architecture is not 'controlvector')";
+                return false;
+            }
+            const strata::MetaValue* hint = f.get("controlvector.model_hint");
+            if (hint != nullptr && hint->s != "qwen4exp")
+                std::fprintf(stderr, "strata generate: %s was made for '%s', not qwen4exp\n", path.c_str(), hint->s.c_str());
+            int found = 0;
+            for (const strata::TensorInfo& t : f.tensors()) {
+                if (t.name.rfind("direction.", 0) != 0) continue;
+                const long l = std::strtol(t.name.c_str() + 10, nullptr, 10);
+                if (l < 1 || l >= L) continue;   // layer 0 has no vector; past the model is ignored, as in llama.cpp
+                if (t.type != 0 || t.elements() != (uint64_t) N) {
+                    err = path + ": " + t.name + " must be " + std::to_string((long long) N) + " f32";
+                    return false;
+                }
+                const float* src = reinterpret_cast<const float*>(f.tensor_data(t));
+                for (int64_t j = 0; j < N; ++j) data[(size_t) (l * N + j)] += scale * src[j];
+                have[(size_t) l] = true;
+                ++found;
+            }
+            if (found == 0) { err = path + ": no direction.<layer> tensors"; return false; }
+        } catch (const std::exception& e) {
+            err = e.what();
+            return false;
+        }
+    }
+    const int first = o.cvec_first <= 0 ? 1 : o.cvec_first;
+    const int last = (o.cvec_last <= 0 || o.cvec_last >= L) ? (int) L - 1 : o.cvec_last;
+    const int single = o.cvec_mode == 0 ? o.cvec_single : -1;
+    if (single >= 0 && (single >= L || !have[(size_t) single])) {
+        err = "--cvec-dir single:" + std::to_string(single) + ": the vector has no direction for that layer";
+        return false;
+    }
+    std::vector<float> dir((size_t) (L * N), 0.0f), s((size_t) L, 0.0f);
+    int steered = 0;
+    for (int64_t l = first; l <= last; ++l) {
+        const int64_t src = single >= 0 ? single : l;
+        if (!have[(size_t) src]) continue;
+        const float* d = data.data() + (size_t) (src * N);
+        if (o.cvec_mode == 0) {
+            double nrm = 0.0;
+            for (int64_t j = 0; j < N; ++j) nrm += (double) d[j] * d[j];
+            nrm = std::sqrt(nrm);
+            if (nrm <= 0.0) continue;
+            s[(size_t) l] = (float) nrm;
+            for (int64_t j = 0; j < N; ++j) dir[(size_t) (l * N + j)] = (float) (d[j] / nrm);
+        } else {
+            s[(size_t) l] = 1.0f;
+            std::copy(d, d + N, dir.begin() + (size_t) (l * N));
+        }
+        ++steered;
+    }
+    if (steered == 0) { err = "the control vector has no direction in layers " + std::to_string(first) + ".." + std::to_string(last); return false; }
+    if (!strata::kernels::cvec_upload(dir, s, o.cvec_mode, first, last, N, g.hc, err)) return false;
+    summary = std::string(o.cvec_mode == 0 ? "project" : "add") + ":" + std::to_string(first) + "-" + std::to_string(last) +
+              (single >= 0 ? ":single" + std::to_string(single) : "");
+    // the line llama.cpp's patched build prints, so a log shows the same thing
+    std::fprintf(stderr, "strata generate: control vector mode = %s, dir = %s, layers %d..%d (%d steered)\n",
+                 o.cvec_mode == 0 ? "project" : "add", single >= 0 ? "single" : "per-layer", first, last, steered);
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -680,6 +771,38 @@ int main(int argc, char** argv) {
         else if (a == "--short-read") o.short_read = std::max(0LL, std::atoll(next("--short-read")));
         else if (a == "--suffix-draft") o.suffix_draft = std::max(0, std::atoi(next("--suffix-draft")));
         else if (a == "--mtp-max-t") o.mtp_max_t = std::max(0, std::atoi(next("--mtp-max-t")));
+        else if (a == "--control-vector") o.cvec_files.push_back({next("--control-vector"), 1.0f});
+        else if (a == "--control-vector-scaled") {
+            // FILE:SCALE, comma-separated; the LAST colon splits, so a Windows path (C:\...) keeps its drive
+            std::stringstream list(next("--control-vector-scaled"));
+            std::string item;
+            while (std::getline(list, item, ',')) {
+                const size_t colon = item.rfind(':');
+                char* end = nullptr;
+                const float sc = colon == std::string::npos ? 0.0f : std::strtof(item.c_str() + colon + 1, &end);
+                if (colon == std::string::npos || colon == 0 || end == item.c_str() + colon + 1 || *end != '\0') {
+                    std::fprintf(stderr, "--control-vector-scaled: expected FILE:SCALE, got '%s'\n", item.c_str());
+                    return 2;
+                }
+                o.cvec_files.push_back({item.substr(0, colon), sc});
+            }
+        }
+        else if (a == "--control-vector-layer-range") {
+            o.cvec_first = std::atoi(next("--control-vector-layer-range"));
+            o.cvec_last = std::atoi(next("--control-vector-layer-range"));
+        }
+        else if (a == "--cvec-mode") {
+            const std::string m = next("--cvec-mode");
+            if (m == "project") o.cvec_mode = 0;
+            else if (m == "add") o.cvec_mode = 1;
+            else { std::fprintf(stderr, "--cvec-mode: add or project, got '%s'\n", m.c_str()); return 2; }
+        }
+        else if (a == "--cvec-dir") {
+            const std::string d = next("--cvec-dir");
+            if (d == "per-layer") o.cvec_single = -1;
+            else if (d.rfind("single:", 0) == 0) o.cvec_single = std::atoi(d.c_str() + 7);
+            else { std::fprintf(stderr, "--cvec-dir: per-layer or single:L, got '%s'\n", d.c_str()); return 2; }
+        }
         else if (a == "--no-spec-split") o.spec_split = false;
         else if (a == "--eos-ids") {
             std::string e;
@@ -948,6 +1071,15 @@ int main(int argc, char** argv) {
     strata::kernels::ple_set_native_postops(o.native_ple_postops);
     const strata::core::ModelGeometry g;
     const int64_t K = 10;
+    // before session_init: every graph captured from here on has the vector's kernels where it applies
+    std::string cvec_summary = "0";
+    if (!o.cvec_files.empty()) {
+        std::string ce;
+        if (!load_control_vectors(o, g, cvec_summary, ce)) {
+            std::fprintf(stderr, "strata generate: control vector: %s\n", ce.c_str());
+            return 2;
+        }
+    }
     if (o.max_context < (int64_t) o.tokens.size() + o.max_new) {
         std::fprintf(stderr, "strata generate: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
                      (long long) o.max_context, o.tokens.size(), (long long) o.max_new);
@@ -2039,6 +2171,7 @@ int main(int argc, char** argv) {
         std::vector<ImgKey> live_imgs, req_imgs;
         bool live_ok = false;
         std::vector<ConvCheckpoint> checks;
+        bool cvec_cached = true;   // the control vector's state the live session and the checkpoints were read with
         int64_t pp_total = 0, pp_from = 0, pp_next_check = 0;
         Clock::time_point pp_t0 = Clock::now();
         auto imgs_below = [&](const std::vector<ImgKey>& all, int64_t L) {
@@ -2194,12 +2327,12 @@ int main(int argc, char** argv) {
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             std::printf("INFO context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld spec=%d "
-                        "mtp_max=%d lookup=%d vram_free_mib=%lld\n",
+                        "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1
                                          ? ss.qsa_states[0].n_slots * 4 : 0),
                         (long long) xcache.slots(), (long long) (xcache.bytes() >> 20), o.spec, o.mtp_max_t,
-                        o.suffix_draft, (long long) (free_b >> 20));
+                        o.suffix_draft, (long long) (free_b >> 20), cvec_summary.c_str());
         }
         std::printf("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
         std::fflush(stdout);
@@ -2236,7 +2369,8 @@ int main(int argc, char** argv) {
             unsigned long long req_seed = 0;
             float req_min_p = 0.0f, req_penalty_repeat = 1.0f, req_penalty_freq = 0.0f, req_penalty_present = 0.0f;
             int req_penalty_last_n = 0;
-            if (!geni && endp != nullptr) {
+            int req_cvec = 1;   // cvec=0|1: a loaded control vector for this request (on when absent)
+            if (endp != nullptr) {   // GENI takes only cvec=; its file path is the first token without an =
                 for (;;) {
                     while (*endp == ' ') ++endp;
                     const char* start = endp;
@@ -2247,7 +2381,9 @@ int main(int argc, char** argv) {
                     if (eq == std::string::npos) { endp = const_cast<char*>(start); break; }
                     const std::string key = tok.substr(0, eq);
                     const float fv = std::strtof(tok.c_str() + eq + 1, nullptr);
-                    if (key == "temperature") req_temperature = fv;
+                    if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
+                    else if (geni) {}   // image requests decode greedily
+                    else if (key == "temperature") req_temperature = fv;
                     else if (key == "top_p") req_top_p = fv;
                     else if (key == "top_k") req_top_k = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "min_p") req_min_p = fv;
@@ -2373,6 +2509,17 @@ int main(int argc, char** argv) {
                     if ((int32_t) ids[(size_t) i] != pre[(size_t) i]) return false;
                 return imgs_below(req_imgs, L) == pre_imgs;
             };
+            // the control vector for this request.  The live session and the checkpoints were read one way, so a
+            // switch reads the prompt again from the start
+            if (strata::kernels::cvec().loaded()) {
+                const bool want = req_cvec != 0;
+                if (want != cvec_cached) {
+                    live_ok = false;
+                    checks.clear();
+                    cvec_cached = want;
+                }
+                strata::kernels::cvec_set_enabled(want);
+            }
             int64_t resume = 0;
             bool from_live = false;
             if (o.prompt_cache > 0) {

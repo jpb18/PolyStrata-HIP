@@ -324,6 +324,45 @@ test images.
 
 ---
 
+## Experimental speed projection (EXPERIMENTAL, off by default)
+
+**This is an experiment, not a finished feature.** It ships with Strata but stays off unless you turn it on.
+
+A 480 KB control vector for Qwen3.8-Flash-Next (`data/experimental-speed-projection/`, see its README). After each
+of layers 4-44 the engine removes one direction from every hyper-connection stream of the residual: `h -= (h . v) v`,
+one unit vector `v` per layer, exactly as llama.cpp does with the package's `--cvec-mode project` patches.
+
+**What it changes.** The vector's own package describes it as a **refusal-direction projection**: with it the model
+declines far fewer requests (it reports 1 of 50 vs 50 of 50 on its test set), and removing refusals removes a safety
+behaviour - you are responsible for what the model writes with it on. It also shifts ordinary answers a little
+(measured below). It is not an optimization in the engine: on the same text it costs 0.2-0.4% per token. What a
+chat's tokens/s does with it on depends on the text the model writes (length, repetition, how well the drafts land),
+so measure it on your own prompts; the Monitor marks every request ESP or stock.
+
+**Turning it on (at setup).** `START-HERE.bat --setup` asks "Turn on the experimental speed projection?" (default:
+no), or pass `--experimental-speed-projection on` (`off`, or a path to another vector GGUF). Only for the original
+Qwen3.8-Flash-Next, not Swift 1.5. It writes these engine flags (llama.cpp's) into `strata-<model>.json`:
+
+```
+--control-vector-scaled <Strata>\data\experimental-speed-projection\Qwen3.8-Flash-Next-experimental-speed-projection.gguf:1.0
+--control-vector-layer-range 4 44 --cvec-mode project --cvec-dir per-layer
+```
+
+The engine log then says `control vector mode = project, dir = per-layer, layers 4..44 (41 steered)`, and the web
+app's About tab lists it. (`--cvec-mode add` is llama.cpp's stock additive mode, for additive vectors.)
+
+**Per request.** A loaded vector is on for every request unless it says otherwise: the web app's Sampling drawer has
+a switch, and the API takes `"experimental_speed_projection": false` in the request body (OpenAI and Anthropic; a
+config default goes in `"sampling": {"experimental_speed_projection": false}`). Switching drops the conversation
+cache once, since the model state was computed the other way. Switched off, the output is token-for-token the stock
+model's.
+
+**Measured here** (Q2_0, fixed experts, 2,557 teacher-forced tokens of code, a document and a chat): the top-1 token
+changes at 10% of positions, mean KL from the stock model 0.063 nats (max 4.1), perplexity +15% on code, +2.3% on
+the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
+
+---
+
 ## Troubleshooting
 
 | Symptom | What to do |

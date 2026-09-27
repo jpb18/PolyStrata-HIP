@@ -11,6 +11,7 @@
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/fused_gr.hpp"
+#include "strata/kernels/cvec.hpp"
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
@@ -331,7 +332,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             wi[h] = need(v, (std::string(pfx[h]) + "inject.weight").c_str(), err);
             if (!wn[h] || !wd[h] || !wu[h] || !wi[h]) return false;
         }
-        bool pending = l > 0;   // the previous layer's FFN write, folded into this layer's first read
+        // the previous layer's FFN write, folded into this layer's first read (a control vector after it has
+        // already applied it)
+        bool pending = l > 0 && !cvec().covers(l - 1);
         if (l == 1 && ple_on) {
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
             for (int t = tb; t < te; ++t) {
@@ -569,8 +572,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             mb.weights = w_ + t * K; mb.shared = shared_ + t * N;
             if (!moe_combine_parts(g, l, K, mb, parts_ + (size_t) t * K * N, bo_ + t * N, cs, err)) return false;
         }
-        if (l == g.n_layers - 1)
+        if (l == g.n_layers - 1) {
             for (int t = tb; t < te; ++t) gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
+            if (cvec().covers(l)) cvec_apply(Rt(tb), l, n, HC * N, nullptr, 0, nullptr, 0, false, cs);
+        } else if (cvec().covers(l)) {
+            cvec_apply(Rt(tb), l, n, HC * N, bo_ + tb * N, N, inj2_ + tb * HC, HC, true, cs);
+        }
         return true;
     };
 

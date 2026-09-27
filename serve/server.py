@@ -160,14 +160,21 @@ class StrataEngine:
         seed = sampling.get("seed")
         if isinstance(seed, int) and seed > 0:
             keys += f" seed={seed}"
-        return keys
+        return keys + StrataEngine.projection_key(sampling)
+
+    @staticmethod
+    def projection_key(sampling: dict) -> str:
+        """`cvec=0|1`: the experimental-speed-projection control vector for this request, when the engine was
+        started with one (--control-vector-scaled; an engine without one ignores the key).  Absent = on."""
+        on = sampling.get("experimental_speed_projection")
+        return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
         the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
         has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
         self.progress = None
-        head = f"GENI {int(max_new)} {embeddings}" if embeddings else \
+        head = f"GENI {int(max_new)}{self.projection_key(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {}) if not embeddings else ''}"
         self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
         self.proc.stdin.flush()
@@ -562,7 +569,10 @@ class Service:
                 if self.status.get("busy"):
                     last = dict(getattr(self.engine, "last", {}) or {})
                     started = self.status.get("started", time.time())
+                    loaded = str((getattr(self.engine, "info", {}) or {}).get("cvec", 0)) not in ("0", "", "None")
                     self.history.append({
+                        "projection": (sampling or {}).get("experimental_speed_projection") is not False
+                        if loaded else None,
                         "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
                         "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
@@ -996,6 +1006,11 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
             if not number or value != int(value) or value <= 0:
                 raise SystemExit(f"[strata] config sampling.seed={value!r}: expected a positive integer")
             out[key] = int(value)
+        elif key == "experimental_speed_projection":
+            if not isinstance(value, bool):
+                raise SystemExit(f"[strata] config sampling.experimental_speed_projection={value!r}: expected true or "
+                                 "false (the default for requests that leave it out, when the engine has the vector)")
+            out[key] = value
         else:
             print(f"[strata] config sampling.{key}={value!r}: unknown key, ignored", flush=True)
     return out

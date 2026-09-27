@@ -21,6 +21,8 @@ What the first run does (each step is skipped when it is already done):
 
 Options: --family qwen|swift, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --vision yes|no|gpu|cpu, --port 8080, --yes (recommended
 answers, no questions), --setup (install another model / change settings instead of starting), --no-start,
+--host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
+(EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile instead of the ready-made
 engine), --check (only check this PC).
 """
@@ -86,6 +88,8 @@ FAMILIES = {
               "license": "Swift Open License 1.0: https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF"},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
+# EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
+ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
 # the image encoder on the GPU (~1.2 GB at 1024 image tokens) warms up before the engine starts, so the engine
 # sizes its expert slots around it and the default reserve (700 MiB) is enough; engines before 0.1.2 need more
 VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
@@ -652,6 +656,9 @@ def main() -> int:
                          "precise)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (yes = the encoder on the GPU)")
+    ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
+                    help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
+                         "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
@@ -784,6 +791,25 @@ def main() -> int:
         say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
         vision = "gpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
+    # EXPERIMENTAL: the experimental-speed-projection control vector (data/experimental-speed-projection), off unless
+    # chosen here; with it loaded, the web app and the API switch it off per request
+    esp = None
+    esp_choice = (a.experimental_speed_projection or "").strip()
+    if family == "qwen":
+        if not esp_choice:
+            say()
+            say("  EXPERIMENTAL - speed projection: a small control vector applied while the model runs (layers 4-44).")
+            say("  It changes how the model answers: its package describes it as a refusal-direction projection (the")
+            say("  model declines far fewer requests). Off unless you choose it; when on, the web app can switch it off")
+            say("  per chat. Details: data/experimental-speed-projection/README.md")
+            esp_choice = "on" if ask("Turn on the experimental speed projection?", ["y", "n"], "n", a.yes) == "y" else "off"
+        if esp_choice.lower() not in ("off", "no", "n", "0"):
+            esp = ESP_VECTOR if esp_choice.lower() in ("on", "yes", "y", "1") else Path(esp_choice).expanduser().resolve()
+            if not esp.is_file():
+                fail(f"the experimental speed projection's vector is missing: {esp}")
+        ok("experimental speed projection: " + ("ON (experimental)" if esp else "off"))
+    elif esp_choice.lower() not in ("", "off", "no", "n", "0"):
+        warn("the experimental speed projection is made for the original Qwen3.8-Flash-Next, not Swift 1.5: left off")
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
     shards = [models_dir / fam["file"].format(q=model, i=i) for i in (1, 2)]
     have_model = all(s.exists() and (done(s) or a.gguf_dir) for s in shards)
@@ -896,6 +922,10 @@ def main() -> int:
         ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
+    if esp is not None:
+        # the package's profile, with llama.cpp's flags (the engine takes the same ones)
+        args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
+                 "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": a.port}

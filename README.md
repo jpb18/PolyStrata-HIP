@@ -99,7 +99,10 @@ Not sure? Take **IQ2_XS**. You can add another one later with `START-HERE.bat --
 - **Thinking:** the model thinks before it answers. Choose **off, low, medium or high** - in the chat page menu, with
   `/think low` in `chat.py`, or with your app's "reasoning effort" setting. Off is fastest; high is best for hard questions.
 - **Pictures:** in the chat page click **Picture**; in `chat.py` type `/image <path>`; in apps just attach them.
-- **From your phone or another PC:** see the [details](docs/DETAILS.md#using-it) (set an API key first).
+- **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`, then open the
+  address the server window prints; see the [details](docs/DETAILS.md#using-it).
+- **Experimental speed projection (off by default):** an experimental control vector that setup can turn on; it
+  changes how the model answers - read [what it does](docs/DETAILS.md#experimental-speed-projection-experimental-off-by-default) first.
 
 **Good to know:** it answers one request at a time. The first message of a chat is read in full (about 1 minute per
 30,000 tokens); after that it keeps the conversation and reads only what is new, so follow-ups start in seconds.
