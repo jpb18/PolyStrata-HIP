@@ -54,7 +54,7 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 6)                 # KV streaming (--kv-resident), v0.1.5; its drafter fallback, v0.1.6
+MIN_ENGINE = (0, 1, 7)                 # per-request sampling on the GEN line (the server sends it), v0.1.7
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow"]
 
 MODELS = {
@@ -696,7 +696,14 @@ def main() -> int:
         warn("less than 12 GB of VRAM: Strata will run, but most experts stay on the CPU and it will be slow")
     ram = ram_gb()
     cpu, avx2, avx512 = cpu_info()
-    ok(f"RAM: {ram:.0f} GB")
+    need = min(d["ram_gb"] for d in MODELS.values())
+    if ram < need - 4 and not a.check:
+        # every model keeps ALL its experts in RAM (34+ GB); VRAM only holds a copy of the most-used ones, so a
+        # bigger GPU does not lower this
+        fail(f"RAM: {ram:.0f} GB - the smallest model (Q2_0 / IQ2_XS) needs about {need} GB",
+             "Strata keeps all of the model's experts in RAM (34-50 GB, whatever the GPU) and the GPU holds a copy "
+             "of the most-used ones: it needs 48 GB of RAM or more")
+    ok(f"RAM: {ram:.0f} GB" if ram >= need - 4 else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)")
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     if not avx2:
         fail("this CPU has no AVX2; Strata needs at least AVX2")

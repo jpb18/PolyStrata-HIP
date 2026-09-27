@@ -424,7 +424,7 @@ endif()
 #     worse opt-out.  `cpu_require_expert_support()` therefore refuses at startup on a CPU without the
 #     features, and the fallback exists for tests, exactly as P2.S3 specifies.
 # Plan v0.3 P6: speculation components that need no GPU.
-add_library(strata_spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp)
+add_library(strata_spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp src/spec/draft_policy.cpp)
 target_include_directories(strata_spec PUBLIC include)
 if(STRATA_BUILD_TESTS)
   add_executable(suffix_drafter_test src/spec/suffix_drafter_test.cpp)
@@ -433,6 +433,9 @@ if(STRATA_BUILD_TESTS)
   add_executable(controller_test src/spec/controller_test.cpp)
   target_link_libraries(controller_test PRIVATE strata_spec)
   add_test(NAME controller_test COMMAND controller_test)
+  add_executable(draft_policy_test src/spec/draft_policy_test.cpp)
+  target_link_libraries(draft_policy_test PRIVATE strata_spec)
+  add_test(NAME draft_policy_test COMMAND draft_policy_test)
 endif()
 
 add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
