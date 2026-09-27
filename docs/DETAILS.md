@@ -216,9 +216,18 @@ print(r.choices[0].message.content)
   15 s, and `GET /status` says what it is doing (`reading the prompt`, `answering`, tokens so far). Closing the
   connection or pressing stop in your app really stops the model, so the next request starts at once.
 - **Chat apps.** Any app with an "OpenAI-compatible" provider works: base URL `http://127.0.0.1:8080/v1`, any API key.
-- **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut.
-- **From other devices / the internet.** The server listens on your PC only (`127.0.0.1`). To reach it from elsewhere,
-  put a tunnel in front of it, for example [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
+- **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
+  `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
+  can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
+  `--fit-max-tokens` to `serve/server.py`). A prompt that leaves no room at all is still refused.
+- **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
+  run setup with `START-HERE.bat --setup --host 0.0.0.0 --api-key some-long-secret` (or add `"host": "0.0.0.0"` and
+  `"api_key": "..."` to `strata-<model>.json`). The server window then prints this PC's addresses
+  (`from other devices: http://192.168.x.x:8080/`); open that on the other device, or use `.../v1` as an API base URL.
+  On Windows the firewall blocks it until you allow it: accept its prompt for Python (private networks), or run
+  `New-NetFirewallRule -DisplayName "Strata 8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private`
+  in an admin PowerShell, and make sure the network is set to Private.
+- **From the internet.** Put a tunnel in front of it, for example [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
   `cloudflared tunnel --url http://127.0.0.1:8080`. **Set a key first**, or anyone with the link can use your PC:
   add `"api_key": "some-long-secret"` to `strata-<model>.json` (or set the `STRATA_API_KEY` environment variable);
   clients then send it as their API key.
@@ -315,6 +324,45 @@ test images.
 
 ---
 
+## Experimental speed projection (EXPERIMENTAL, off by default)
+
+**This is an experiment, not a finished feature.** It ships with Strata but stays off unless you turn it on.
+
+A 480 KB control vector for Qwen3.8-Flash-Next (`data/experimental-speed-projection/`, see its README). After each
+of layers 4-44 the engine removes one direction from every hyper-connection stream of the residual: `h -= (h . v) v`,
+one unit vector `v` per layer, exactly as llama.cpp does with the package's `--cvec-mode project` patches.
+
+**What it changes.** The vector's own package describes it as a **refusal-direction projection**: with it the model
+declines far fewer requests (it reports 1 of 50 vs 50 of 50 on its test set), and removing refusals removes a safety
+behaviour - you are responsible for what the model writes with it on. It also shifts ordinary answers a little
+(measured below). It is not an optimization in the engine: on the same text it costs 0.2-0.4% per token. What a
+chat's tokens/s does with it on depends on the text the model writes (length, repetition, how well the drafts land),
+so measure it on your own prompts; the Monitor marks every request ESP or stock.
+
+**Turning it on (at setup).** `START-HERE.bat --setup` asks "Turn on the experimental speed projection?" (default:
+no), or pass `--experimental-speed-projection on` (`off`, or a path to another vector GGUF). Only for the original
+Qwen3.8-Flash-Next, not Swift 1.5. It writes these engine flags (llama.cpp's) into `strata-<model>.json`:
+
+```
+--control-vector-scaled <Strata>\data\experimental-speed-projection\Qwen3.8-Flash-Next-experimental-speed-projection.gguf:1.0
+--control-vector-layer-range 4 44 --cvec-mode project --cvec-dir per-layer
+```
+
+The engine log then says `control vector mode = project, dir = per-layer, layers 4..44 (41 steered)`, and the web
+app's About tab lists it. (`--cvec-mode add` is llama.cpp's stock additive mode, for additive vectors.)
+
+**Per request.** A loaded vector is on for every request unless it says otherwise: the web app's Sampling drawer has
+a switch, and the API takes `"experimental_speed_projection": false` in the request body (OpenAI and Anthropic; a
+config default goes in `"sampling": {"experimental_speed_projection": false}`). Switching drops the conversation
+cache once, since the model state was computed the other way. Switched off, the output is token-for-token the stock
+model's.
+
+**Measured here** (Q2_0, fixed experts, 2,557 teacher-forced tokens of code, a document and a chat): the top-1 token
+changes at 10% of positions, mean KL from the stock model 0.063 nats (max 4.1), perplexity +15% on code, +2.3% on
+the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
+
+---
+
 ## Troubleshooting
 
 | Symptom | What to do |
@@ -323,14 +371,16 @@ test images.
 | Python or the build tools could not be installed | Install what it names (links are printed), then run it again. Everything already done is kept. |
 | `port 8080 is already in use` | Strata is already running (look for its window), or another program uses the port: `START-HERE.bat --port 8081`. |
 | `cudaHostRegister ... out of memory` in the log | Normal on Windows: the engine pins the experts in per-layer slices instead. Only a problem if the load then fails. |
-| The first start takes minutes | It is reading 34-43 GB into RAM; the second start is faster while the files are in the OS cache. |
+| The first start takes minutes | It is reading 34-55 GB into RAM; the second start is faster while the files are in the OS cache. |
+| The PC freezes for a few minutes at the first start | Normal the first time: the engine loads the experts into RAM, pins part of it for the GPU and sizes the expert cache. Wait; don't close the window. Still frozen after 10 minutes: restart the PC, close other programs, try again, or pick a smaller size. |
+| `the engine stopped unexpectedly (exit code ...)` | The engine process ended mid-answer - usually out of RAM (Linux ends the biggest program: `sudo dmesg \| grep -i -E 'killed process\|out of memory'`). The next request starts it again by itself. If it repeats: close other programs or pick a smaller size. The server also warns at start when the model's experts leave less than ~6 GB of RAM for everything else. |
 | Slow output, disk light busy | Not enough free RAM: close other programs, or choose Q2_0 / IQ2_XS. |
 | `prompt ... exceeds the context` | The request is longer than the context you chose: run setup again with a bigger `--context`. |
 | Slower than the tables | The monitor plugged into the GPU and other GPU programs take VRAM from the expert cache; RAM running below its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half. |
 | `this server was started without the vision encoder` | The model was set up for text only: run setup again with `--vision gpu`. |
 | A picture is refused or `cannot read the image` | The file is not a picture Pillow can open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF work). |
 | Pictures are slow (10-30 s) | The encoder runs on the CPU: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM). |
-| A request never finishes (older engines, mostly with pictures) | Run `START-HERE.bat` once to get engine 0.1.2 or newer. It keeps a real margin of VRAM free: the log says `... MiB of VRAM free with everything loaded` and warns when it is close to 0. |
+| A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
 | Anything else | The engine log is `strata-<model>.log` in this folder. |
 
 ---

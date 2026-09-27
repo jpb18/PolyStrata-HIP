@@ -10,6 +10,7 @@
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/kv_stream.hpp"
+#include "strata/kernels/cvec.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
@@ -651,6 +652,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 }
                 // ---- the hyper-connection write of this half
                 gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
+                if (half == 1 && strata::kernels::cvec().covers(l))   // --control-vector-scaled
+                    strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
         }
         stats_.tokens += T;

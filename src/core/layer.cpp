@@ -25,6 +25,7 @@
 #include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/native_flash_attn.hpp"
 #include "strata/kernels/fused_gr.hpp"
+#include "strata/kernels/cvec.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/fused_gdn.hpp"
 #include "strata/kernels/qsa_select.hpp"
@@ -1107,7 +1108,8 @@ bool block_layer_pre(const WeightTable& tables, const ModelGeometry& g, int64_t 
     // the device half: `ple_block` reading `emb_dev`, and the history shift.
     const bool fused = g_fused_gr && stage_prefix == 0 && half == 0 &&
                        strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr);
-    bool pending_ffn = fused && layer > 0;   // layer-1's FFN write has not been applied to R yet
+    // layer-1's FFN write has not been applied to R yet - unless a control vector follows it, which needs R
+    bool pending_ffn = fused && layer > 0 && !strata::kernels::cvec().covers(layer - 1);
     if (ple != nullptr && ple->ready() && layer == 1 && (half == 0 || half == 1)) {
         if (pending_ffn) {
             const strata::kernels::GrShapes gs0{g.n_embd, g.hc, g.hc_lr};
@@ -1242,10 +1244,23 @@ st_begin(layer, 5, stream);
     if (g_shared_early ? !moe_combine_parts(g, layer, k, mb, parts, bb.block_out, stream, err)
                        : !moe_finish(tables, g, layer, k, mb, bb.mixed, parts, bb.block_out, stream, err)) return false;
     st_end(layer, 5, stream);    dump_half(bb, g, layer, bb.block_out, (uint64_t) g.n_embd, g.n_embd, stream);    dump_half(bb, g, layer, bb.inject, (uint64_t) 2 * g.n_embd + g.hc, g.hc, stream);    st_begin(layer, 6, stream);
-    if (!(g_fused_gr && strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr)))
-        gr_write(bb.R, bb.block_out, bb.inject, gs, bb.R, stream);
-    else if (layer == g.n_layers - 1)
-        gr_write(bb.R, bb.block_out, bb.inject2, gs, bb.R, stream);   // materialise R for the head
+    const bool steer = strata::kernels::cvec().covers(layer);   // --control-vector-scaled: after this write
+    try {
+        if (!(g_fused_gr && strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr))) {
+            gr_write(bb.R, bb.block_out, bb.inject, gs, bb.R, stream);
+            if (steer) strata::kernels::cvec_apply(bb.R, layer, 1, g.hc * g.n_embd, nullptr, 0, nullptr, 0, false, stream);
+        } else if (layer == g.n_layers - 1) {
+            gr_write(bb.R, bb.block_out, bb.inject2, gs, bb.R, stream);   // materialise R for the head
+            if (steer) strata::kernels::cvec_apply(bb.R, layer, 1, g.hc * g.n_embd, nullptr, 0, nullptr, 0, false, stream);
+        } else if (steer) {
+            // the write the next layer's fused read would have folded, then the vector
+            strata::kernels::cvec_apply(bb.R, layer, 1, g.hc * g.n_embd, bb.block_out, g.n_embd, bb.inject2, g.hc,
+                                        true, stream);
+        }
+    } catch (const std::exception& e) {
+        err = std::string("block_layer_post: ") + e.what();
+        return false;
+    }
     st_end(layer, 6, stream);    return true;}
 bool block_layer(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t pos, int32_t pos_base,                 const GdnBuffers& gb, const QsaState& qst, const QsaBuffers& qb, const MoEBuffers& mb,                 int64_t k, const BlockBuffers& bb, const float* parts, void* stream, std::string& err,                 const Doorbell* db, const PleRun* ple) {
 // The two halves back to back.  `parts` must be THIS layer's experts and must be ready before the call -
