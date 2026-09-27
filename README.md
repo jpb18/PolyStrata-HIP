@@ -41,7 +41,7 @@ A card with more VRAM is faster, because more of the model fits on the GPU: an R
 
 **The size** (the same model, compressed more or less):
 
-| Size | Shard 1 (loaded into RAM + VRAM) | Speed | Quality |
+| Model | RAM+VRAM Requirements | Speed | Quality |
 | --- | ---: | --- | --- |
 | **Q2_0** | 37.6 GB | fastest | good |
 | **IQ2_XS** | 39.2 GB | fast | better (**recommended**) |
