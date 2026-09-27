@@ -55,7 +55,7 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
 MIN_ENGINE = (0, 1, 7)                 # per-request sampling on the GEN line (the server sends it), v0.1.7
-PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow"]
+PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
 
 MODELS = {
     "Q2_0": {"about": "2-bit, the fastest", "download_gb": 66.4, "ram_gb": 48, "arena_gb": 34.0},
@@ -791,7 +791,7 @@ def main() -> int:
 
     # ---- 3. python packages
     step(3, "Python packages")
-    pip_install(PY_PACKAGES, "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow")
+    pip_install(PY_PACKAGES, "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
     # ---- 4. the engine
     step(4, "the Strata engine")
