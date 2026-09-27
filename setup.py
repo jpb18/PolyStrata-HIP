@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import platform
@@ -475,7 +476,13 @@ def update_installed_engine(url_base) -> None:
     meta_text = info.read_text()
     meta = json.loads(meta_text)
     ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
-    if meta.get("source") == "local" or ver >= MIN_ENGINE:
+    local = meta.get("source") == "local"
+    vision = meta.get("vision") or "none"
+    if local:                                          # compiled here: is it older than the source (a git pull)?
+        if meta.get("src") == source_hash(ENGINE_SOURCES) and \
+                (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES)):
+            return
+    elif ver >= MIN_ENGINE:
         return
     try:                                               # a running engine cannot be replaced (Windows keeps it locked)
         for x in (EXE, VEXE):
@@ -483,9 +490,17 @@ def update_installed_engine(url_base) -> None:
                 with open(eng / x, "r+b"):
                     pass
     except OSError:
-        warn(f"engine {meta.get('version')} is in use: close the model window and run this again to update it")
+        warn(f"engine {meta.get('version') or ''} is in use: close the model window and run this again to update it")
         return
     gpu = gpu_info()
+    if local:
+        try:                                           # a failed compile must not stop the model from starting
+            if gpu is None:
+                raise RuntimeError("no NVIDIA GPU found")
+            build_engine(gpu, vision, False, get_llama_cpp())
+        except (Exception, SystemExit) as e:
+            warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the installed one")
+        return
     new = None
     if gpu is not None:
         try:
@@ -578,24 +593,45 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
         run(build)
 
 
+ENGINE_SOURCES = ("CMakeLists.txt", "src", "include", "third_party/ggml")
+VISION_SOURCES = ("tools/vision",)
+
+
+def source_hash(parts) -> str:
+    """A fingerprint of the files a compiled engine is built from, kept in engine/BUILD.json: when a `git pull`
+    changes them, the engine is compiled again (issue #31)."""
+    h = hashlib.sha256(LLAMA_CPP_COMMIT.encode())
+    for part in parts:
+        base = ROOT / part
+        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file()):
+            h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n"))
+    return h.hexdigest()[:16]
+
+
 def build_engine(gpu, vision, yes, llama) -> Path:
-    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/."""
+    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
+    engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes."""
     eng = ROOT / "engine"
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
     want_vision = vision != "none"
-    if meta.get("source") == "local" and (eng / EXE).exists() and (not want_vision or (eng / VEXE).exists()):
+    local = meta.get("source") == "local"
+    src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
+    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src
+    vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
+    if engine_ok and vision_ok:
         ok("engine already built for this PC")
         return eng
     nvcc, vcvars = install_build_tools(gpu, yes)
-    if not (eng / EXE).exists() or meta.get("source") != "local":
-        say("  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
+    if not engine_ok:
+        say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
+            if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, ROOT / "build", "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata.bat")
         shutil.copy2(ROOT / "build" / EXE, eng / EXE)
-    if want_vision and not (eng / VEXE).exists():
+    if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
         defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}"]
         if vision == "gpu":
@@ -605,7 +641,7 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "archs": [int(gpu["arch"])], "vision": vision,
-                                 "cuda_dirs": dirs}, indent=1))
+                                 "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
 
