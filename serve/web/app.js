@@ -98,7 +98,8 @@ let health = {model: "strata", images: false, max_context: 0};
 async function loadHealth() {
   try {
     health = await (await fetch("/health")).json();
-    $("attach-btn").hidden = !health.images;
+    $("attach-btn").title = health.images ? "Attach a text file or a picture (or drop it here)"
+                                          : "Attach a text file (or drop it here)";
     $("chat-empty-sub").textContent = `${health.model} runs on this PC. Nothing leaves it.`;
   } catch (e) {
     setTimeout(loadHealth, 2000);
@@ -394,7 +395,8 @@ let attachments = [];                 // {name, url}
 let busy = null;                      // {controller, msg}
 
 function saveChat() {
-  store.set("chat", messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name}))})));
+  store.set("chat", messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name})),
+                                           files: (m.files || []).map((f) => ({name: f.name}))})));
 }
 function timeStr(t) { return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
 
@@ -403,6 +405,18 @@ function msgEl(m, i) {
   el.className = `st-msg st-msg--${m.role}`;
   el.dataset.i = i;
   if (m.role === "user") {
+    if (m.files && m.files.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg-images";
+      for (const f of m.files) {
+        const c = document.createElement("span");
+        c.className = "chip";
+        c.innerHTML = icon("attach", "st-icon st-icon--sm");
+        c.append(f.name);
+        wrap.appendChild(c);
+      }
+      el.appendChild(wrap);
+    }
     if (m.images && m.images.length) {
       const wrap = document.createElement("div");
       wrap.className = "msg-images";
@@ -486,8 +500,9 @@ function apiMessages() {
   for (const m of messages) {
     if (m.role === "user") {
       const imgs = (m.images || []).filter((i) => i.url);
-      out.push({role: "user", content: imgs.length ? [{type: "text", text: m.text},
-        ...imgs.map((i) => ({type: "image_url", image_url: {url: i.url}}))] : m.text});
+      const text = userText(m);
+      out.push({role: "user", content: imgs.length ? [{type: "text", text},
+        ...imgs.map((i) => ({type: "image_url", image_url: {url: i.url}}))] : text});
     } else if (m.text && !m.error) {
       out.push({role: "assistant", content: m.text});
     }
@@ -504,7 +519,8 @@ function setBusy(on) {
 async function send() {
   const text = $("input").value.trim();
   if ((!text && !attachments.length) || busy) return;
-  messages.push({role: "user", text, images: attachments, time: Date.now()});
+  messages.push({role: "user", text, images: attachments.filter((a) => a.kind !== "file"),
+                 files: attachments.filter((a) => a.kind === "file"), time: Date.now()});
   attachments = [];
   renderAttachments();
   $("input").value = "";
@@ -615,15 +631,44 @@ $("export-btn").onclick = () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 };
 
-// pictures: the attach button, or paste into the message box
+// pictures and text files: the attach button, dropping them on the chat, or pasting a picture (issue #30)
+const TEXT_EXT = /\.(txt|md|markdown|rst|tex|py|pyi|ipynb|js|mjs|cjs|ts|tsx|jsx|vue|svelte|json|jsonl|csv|tsv|log|ya?ml|toml|ini|cfg|conf|env|xml|html?|css|scss|less|c|cc|cpp|cxx|h|hh|hpp|cu|cuh|rs|go|java|kt|kts|swift|rb|php|pl|lua|r|jl|scala|sql|sh|bash|zsh|fish|ps1|psm1|bat|cmd|diff|patch|gradle|cmake|mk|dockerfile|gitignore|proto|graphql)$/i;
+const MAX_TEXT_FILE = 512 * 1024;
+function isTextFile(f) {
+  return f.type.startsWith("text/") || /json|xml|javascript|yaml|toml|x-sh|x-python/.test(f.type) ||
+         TEXT_EXT.test(f.name) || /(^|[\\/])(makefile|dockerfile|readme|license)$/i.test(f.name);
+}
 function addFiles(files) {
   for (const f of files) {
-    if (!f.type.startsWith("image/")) continue;
-    if (f.size > 20e6) { toast("warn", "Picture too large", `${f.name} is over 20 MB.`); continue; }
+    if (f.type.startsWith("image/")) {
+      if (!health.images) { toast("warn", "Pictures are off", "This model was set up for text only."); continue; }
+      if (f.size > 20e6) { toast("warn", "Picture too large", `${f.name} is over 20 MB.`); continue; }
+      const r = new FileReader();
+      r.onload = () => { attachments.push({kind: "image", name: f.name || "pasted image", url: r.result}); renderAttachments(); };
+      r.readAsDataURL(f);
+      continue;
+    }
+    if (!isTextFile(f)) { toast("warn", "Not a text file", `${f.name}: attach text files (code, notes, logs, data)${health.images ? " or pictures" : ""}.`); continue; }
+    if (f.size > MAX_TEXT_FILE) { toast("warn", "File too large", `${f.name} is over 512 KB.`); continue; }
     const r = new FileReader();
-    r.onload = () => { attachments.push({name: f.name || "pasted image", url: r.result}); renderAttachments(); };
-    r.readAsDataURL(f);
+    r.onload = () => {
+      const text = String(r.result);
+      if (text.includes("\u0000")) { toast("warn", "Not a text file", `${f.name} looks like a binary file.`); return; }
+      attachments.push({kind: "file", name: f.name, text});
+      renderAttachments();
+    };
+    r.readAsText(f);
   }
+}
+// a file's text in the message, fenced with more backticks than it contains itself
+function fileBlock(f) {
+  const longest = Math.max(2, ...(f.text.match(/`+/g) || []).map((s) => s.length));
+  const fence = "`".repeat(longest + 1);
+  return `File: ${f.name}\n${fence}\n${f.text}\n${fence}`;
+}
+function userText(m) {
+  const files = (m.files || []).filter((f) => f.text != null);
+  return [m.text, ...files.map(fileBlock)].filter((s) => s).join("\n\n");
 }
 function renderAttachments() {
   const box = $("attachments");
@@ -632,7 +677,7 @@ function renderAttachments() {
   attachments.forEach((a, i) => {
     const c = document.createElement("span");
     c.className = "chip";
-    c.innerHTML = icon("image", "st-icon st-icon--sm");
+    c.innerHTML = icon(a.kind === "file" ? "attach" : "image", "st-icon st-icon--sm");
     c.append(a.name);
     const x = document.createElement("button");
     x.type = "button"; x.className = "st-btn st-btn--icon"; x.setAttribute("aria-label", "Remove");
@@ -643,6 +688,23 @@ function renderAttachments() {
   });
 }
 $("attach-btn").onclick = () => $("file").click();
+// drop files on the chat or the message box
+for (const id of ["chat", "composer"]) {
+  const el = $(id);
+  el.addEventListener("dragover", (e) => {
+    if (![...(e.dataTransfer || {}).types || []].includes("Files")) return;
+    e.preventDefault();
+    $("composer").classList.add("dragging");
+  });
+  el.addEventListener("dragleave", () => $("composer").classList.remove("dragging"));
+  el.addEventListener("drop", (e) => {
+    $("composer").classList.remove("dragging");
+    if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    addFiles(e.dataTransfer.files);
+    $("input").focus();
+  });
+}
 $("file").onchange = () => { addFiles($("file").files); $("file").value = ""; };
 $("input").addEventListener("paste", (e) => {
   if (!health.images) return;
