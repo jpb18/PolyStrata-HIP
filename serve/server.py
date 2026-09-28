@@ -600,7 +600,9 @@ class Service:
             s = dict(self.status)
         el = now - s.get("started", now)
         if s.get("first_token") is None:
-            print(f"[strata] reading the prompt: {s.get('prompt_tokens', 0)} tokens, {el:.0f} s so far", flush=True)
+            pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
+            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
+            print(f"[strata] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
             print(f"[strata] {s['phase']}: {s['generated']} of max {s.get('max_tokens')} tokens, {rate:.1f} tok/s, "
