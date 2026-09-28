@@ -419,7 +419,9 @@ def get_llama_cpp():
         f.extractall(tmp)
     top = next(tmp.iterdir())
     shutil.rmtree(llama, ignore_errors=True)
-    top.replace(llama)
+    # pathlib.Path.replace() can fail on Windows with PermissionError
+    # when file handles or AV locks persist; use shutil.move instead.
+    shutil.move(str(top), str(llama.parent))
     shutil.rmtree(tmp, ignore_errors=True)
     z.unlink(missing_ok=True)
     z.with_name(z.name + ".done").unlink(missing_ok=True)
