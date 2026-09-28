@@ -444,8 +444,9 @@ def driver_major(gpu):
         return 0
 
 
-def get_prebuilt(url_base, gpu, vision) -> Path | None:
-    """The ready-made engine in engine/ (kept between runs), or None when there is none for this PC."""
+def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
+    """The ready-made engine in engine/ (kept between runs), or None when there is none for this PC.
+    updating: called to replace an installed engine, which starts instead when this fails (no compile)."""
     eng = ROOT / "engine"
     info = eng / "BUILD.json"
     if info.exists() and (eng / EXE).exists():
@@ -465,7 +466,7 @@ def get_prebuilt(url_base, gpu, vision) -> Path | None:
             req = urllib.request.Request(base + PREBUILT_ASSET, method="HEAD", headers={"User-Agent": "strata-setup"})
             urllib.request.urlopen(req, timeout=60).close()
         except OSError as e:
-            warn(f"no ready-made engine at {base} ({e}): compiling instead")
+            warn(f"no ready-made engine at {base} ({e})" + ("" if updating else ": compiling instead"))
             return None
     say("  Downloading the ready-made Strata engine ...")
     download(base + PREBUILT_ASSET, z, "Strata engine")
@@ -475,14 +476,19 @@ def get_prebuilt(url_base, gpu, vision) -> Path | None:
         f.extractall(tmp)
     meta = json.loads((tmp / "BUILD.json").read_text())
     if tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit()) < MIN_ENGINE:
-        warn(f"the ready-made engine at {base} is version {meta.get('version')}; this setup needs "
-             f"{'.'.join(map(str, MIN_ENGINE))}: compiling instead")
+        need = ".".join(map(str, MIN_ENGINE))
+        if updating:                                   # these files are newer than the published release (#58)
+            warn(f"engine {need} is not published yet (the release may still be uploading): run this again "
+                 f"in a few minutes to update it")
+        else:
+            warn(f"the ready-made engine at {base} is version {meta.get('version')}; this setup needs "
+                 f"{need}: compiling instead")
         shutil.rmtree(tmp, ignore_errors=True)
         return None
     archs = [int(a) for a in meta.get("archs", [])]
     arch = int(gpu["arch"])
     if arch not in archs and not (meta.get("ptx") and arch > max(archs)):
-        warn(f"the ready-made engine is built for {', '.join(str(a) for a in archs)}; your GPU is {arch}: compiling instead")
+        warn(f"the ready-made engine is built for {', '.join(str(a) for a in archs)}; your GPU is {arch}" + ("" if updating else ": compiling instead"))
         shutil.rmtree(tmp, ignore_errors=True)
         return None
     for p in tmp.iterdir():
@@ -543,7 +549,7 @@ def update_installed_engine(url_base) -> None:
     new = None
     if gpu is not None:
         try:
-            new = get_prebuilt(url_base, gpu, "gpu")
+            new = get_prebuilt(url_base, gpu, "gpu", updating=True)
         except Exception as e:                         # a failed download must not stop the model from starting
             warn(f"updating the engine failed ({e})")
     if new is None:

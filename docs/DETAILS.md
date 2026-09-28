@@ -193,6 +193,7 @@ downloaded again. Closing the window stops the model.
 
 ```
 START-HERE.bat --setup                          install another model, or change context / images
+SETUP.bat                                       the same (double-click it)
 START-HERE.bat --model IQ2_XS --context 32768 --vision yes --yes     no questions
 START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
 START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
