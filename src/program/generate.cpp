@@ -513,6 +513,19 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, int64_t 
     strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
     t->cpu_ms += std::chrono::duration<double, std::milli>(Clock::now() - a).count();
     ++t->calls;
+    // the routing trace for the serve path: the same record format drive_pool writes (layer, k, ids, weights),
+    // one record per token.  The multi dispatch fuses the router weights into the kernel and does not surface
+    // them, so records carry unit weights: tools/make_profile.py ranks pairs by routed frequency, which is the
+    // signal that matters; a one-shot --dump-routing run records true weights if a weighted ranking is wanted.
+    if (t->routing != nullptr && layer >= 0 && layer < 48) {
+        for (int64_t tok = 0; tok < n_tok; ++tok) {
+            const int32_t rec[2] = {(int32_t) layer, (int32_t) k};
+            std::fwrite(rec, sizeof rec, 1, t->routing);
+            std::fwrite(ids + tok * k, sizeof(int32_t), (size_t) k, t->routing);
+            static const float one[64] = {};   // k <= 64 in a verify window; zeros read as unit weights
+            std::fwrite(one, sizeof(float), (size_t) k, t->routing);
+        }
+    }
 }
 
 /// Layer split: every verify stage shares one Drive (its counters, usage and failure flags); the GPU plan, the expert
@@ -4000,6 +4013,7 @@ int main(int argc, char** argv) {
                         decode_ms, finish, (long long) draft_accepted, (long long) draft_offered, (long long) resume,
                         (long long) req_hits, (long long) req_look);
             std::fflush(stdout);
+            if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             const int64_t fresh = n - resume;
             std::fprintf(stderr, "strata serve: prompt %lld tokens = %lld reused + %lld read in %.0f ms (%.1f tok/s), "
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
