@@ -29,6 +29,7 @@ Measured on an RTX 5070 (12 GB), a Ryzen 5 7600 and 64 GB of RAM:
 | **IQ2_XS** | 74 tokens/s | 60 tokens/s | 1,240 tokens/s |
 | **IQ3_XXS** | 62 tokens/s | 46 tokens/s | 1,110 tokens/s |
 | **IQ3_S** | 52 tokens/s | 41 tokens/s | 1,070 tokens/s |
+| **Coder** (IQ1_M) | 51 tokens/s | 44 tokens/s | 1,300 tokens/s |
 
 - **Writes answers** = how fast the reply appears (tokens per second).
 - **Reads your prompt** = how fast it takes in what you send (long documents, code, chat history), measured on a
@@ -58,11 +59,17 @@ lower the RAM needed.
 **The version:**
 
 - **Qwen3.8-Flash-Next** - the original.
+- **[Coder](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)** - ISTA-DASLab's coding
+  version: half of the experts removed, keeping the ones that code, tool use and images need (91% of the full model's
+  SWE-bench Verified score, 99% of LiveCodeBench, by its authors). One size (IQ1_M: its experts stored like IQ3_S):
+  shard 1 is **29.6 GB**, so it fits a PC with **32 GB of RAM**, runs 262K context on 64 GB, and reads long prompts
+  the fastest of all. Weaker outside coding.
 - **[Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF)** - a fine-tune by UkisAI
   that thinks much shorter before answering, so you get the answer sooner, with about the same quality. Same speed per
   token, and about the same RAM as the same size of the original (no IQ3_S). Its own license applies (see its page).
 
-Not sure? Take **IQ2_XS**. You can add another one later with `START-HERE.bat --setup`.
+Not sure? Take **IQ2_XS** - or the **Coder** if you mainly write code, or have 32-48 GB of RAM. You can add another
+one later with `START-HERE.bat --setup`.
 
 ## Install
 

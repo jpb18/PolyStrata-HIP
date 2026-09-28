@@ -24,6 +24,7 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 | **IQ2_XS** | 461 | 811 | 1,238 | 1,136 | 1,071 | 886 |
 | **IQ3_XXS** | 415 | 770 | 1,108 | 1,065 | 1,015 | - |
 | **IQ3_S** | 396 | 737 | 1,070 | 1,070 | 931 | - |
+| **Coder** | 599 | 1,152 | 1,298 | 1,350 | 1,266 | 1,034 |
 
 ### Output (tokens/s)
 
@@ -33,6 +34,7 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 | **IQ2_XS** | 74.4 | 73.8 | 71.5 | 64.3 | 59.8 | 52.8 |
 | **IQ3_XXS** | 60.3 | 62.1 | 51.4 | 50.0 | 45.8 | - |
 | **IQ3_S** | 51.5 | 51.6 | 48.2 | 48.8 | 40.5 | - |
+| **Coder** | 53.3 | 50.6 | 53.3 | 50.8 | 44.0 | 42.8 |
 
 Output speed depends on the text as well: speculative decoding runs faster when more of the drafted tokens are
 accepted, so a different answer to the same prompt moves it by several percent. Run back to back on the 4K prompt,
@@ -103,6 +105,23 @@ of [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next).
 | **IQ3_XXS** | 76 GB | ~43 GB experts + ~6 GB | slower (more CPU work) | best |
 
 With 64 GB of RAM all three fit (close the browser for IQ3_XXS, and keep its context at 128K or less). With 48 GB only Q2_0 / IQ2_XS may fit. 32 GB is not enough.
+
+### Or: the Coder (half the experts, for code)
+
+**[Qwen3.8-Flash-Next GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)** is
+ISTA-DASLab's expert-pruned release: 256 of each layer's 512 experts are kept (still 10 active per token), chosen with
+RCO on code, agentic and vision calibration data; its authors report 91.3% of the full model's SWE-bench Verified and
+98.7% of LiveCodeBench v6. One size, named IQ1_M for its 1.89 bits per *original* parameter; the kept experts are
+stored like IQ3_S (IQ2_S-IQ4_XS gate/up, IQ4_NL/Q2_0 down). Shard 1 is 29.6 GB (experts: 23 GB of RAM), so it runs
+on **32 GB of RAM**, and at 262K on 64 GB. Its shard 2 and its vision encoder are the original's files: with the
+original installed, setup downloads only shard 1. Strata ships its expert profile (`data/expert-profile-coder.bin`,
+the shipped ranking mapped onto the kept experts through the release's `rco-allocation.txt`: 72% of the expert
+reads hit the GPU on a 12 GB card). Images work; the experimental speed projection loads and runs on it (it was made
+for the full model).
+
+```
+START-HERE.bat --setup --family coder
+```
 
 ### Or: Swift 1.5 (a fine-tune that thinks shorter)
 
