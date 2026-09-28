@@ -555,7 +555,8 @@ bool Prefill::carve(size_t T, void* alloc) {
         m.bounds_dev = o.take<int32_t>((size_t) (2 * (NE + NE / MMQ_GROUP + 2)), ok);
         m.grp_gu = o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
         m.grp_d = o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
-        if (ok) mmq::iota(m.ids_identity, (int64_t) (T * K), m.cs);
+        // (written at every run's start, not here: when serving, these are live expert-cache slots until a request
+        // lends them - a write now would corrupt a resident expert)
         if (!m.mmq_ctx) m.mmq_ctx = std::make_unique<mmq::Context>();
     }
     m.ring = ring_slots(T);
@@ -1363,6 +1364,24 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     }
     ss.ple_prev[0] = prev[0];
     ss.ple_prev[1] = prev[1];
+    if (std::getenv("STRATA_DBG_NAN") != nullptr) {   // debug: the state the prompt leaves for the token path
+        cudaStreamSynchronize(m.cs);
+        auto bad = [&](const float* d, int64_t n) {
+            std::vector<float> h((size_t) n);
+            cudaMemcpy(h.data(), d, (size_t) n * 4, cudaMemcpyDeviceToHost);
+            int64_t c = 0;
+            double mx = 0;
+            for (float v : h) { c += !std::isfinite(v); if (std::isfinite(v)) mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, " %lld non-finite (max |x| %.3g)", (long long) c, mx);
+        };
+        const int64_t last = (n - 1) % m.T;
+        std::fprintf(stderr, "strata dbg: prompt end: last residual row");
+        bad(m.R + last * D, D);
+        if (ss.ple.ready()) { std::fprintf(stderr, "; PLE history"); bad(ss.ple.hist, (int64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM); }
+        std::fprintf(stderr, "; GDN state 0");
+        bad(ss.gdn_state, 64 * 1024);
+        std::fprintf(stderr, "\n");
+    }
     if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
         err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
         return false;

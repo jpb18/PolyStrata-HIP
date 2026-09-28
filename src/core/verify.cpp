@@ -854,6 +854,22 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         }
     }
     for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
+    if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {   // debug: the first non-finite head
+        static bool reported = false;
+        if (!reported) {
+            std::vector<float> h((size_t) T * (size_t) n_vocab_);
+            cudaMemcpy(h.data(), head_logits_, h.size() * 4, cudaMemcpyDeviceToHost);
+            for (int t = 0; t < T && !reported; ++t) {
+                int64_t bad = 0;
+                for (int64_t v = 0; v < n_vocab_; ++v) bad += !std::isfinite(h[(size_t) t * n_vocab_ + v]);
+                if (bad) {
+                    reported = true;
+                    std::fprintf(stderr, "strata dbg: verify window at position %lld, row %d: %lld of %lld logits non-finite "
+                                         "(token out %d)\n", (long long) pos0, t, (long long) bad, (long long) n_vocab_, out[t]);
+                }
+            }
+        }
+    }
     VDBG("window done\n");
     ++windows;
     progress_at("decode");
