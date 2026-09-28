@@ -76,6 +76,57 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+def narrate_start(log_path: str, offset: int, args: list, done: threading.Event, heartbeat=20.0) -> None:
+    """While the engine starts, say in the server window what it is doing, from its log: the start reads tens of GB
+    into RAM and locks part of it for the GPU, and on many PCs everything is slow or frozen for a minute or more -
+    people closed the window thinking it had hung.  The warning comes at that step, not after it."""
+    gb = 0.0
+    if "--native" in args:                              # about the size of the experts it will read
+        try:
+            gb = os.path.getsize(args[args.index("--native") + 1]) / 1e9
+        except (OSError, IndexError):
+            pass
+    size = f"about {gb:.0f} GB" if gb >= 1 else "tens of GB"
+    t0 = last = time.time()
+    said = set()
+
+    def say(key, text):
+        nonlocal last
+        if key not in said:
+            said.add(key)
+            last = time.time()
+            print(text, flush=True)
+
+    say("weights", "[strata] starting the engine: reading the model's weights ...")
+    pos = offset
+    while not done.wait(0.5):
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        if chunk.count(b"\n"):
+            cut = chunk.rfind(b"\n") + 1
+            pos += cut
+            for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                if "PLE on" in line or "expert arena:" in line:
+                    say("arena", f"[strata] loading the experts into RAM ({size}) and locking part of them for the GPU.\n"
+                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
+                                 "         Please wait and don't close this window; the browser opens when it is ready.")
+                elif " loaded " in line and "GiB at" in line:
+                    say("loaded", "[strata] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
+                        f" ({time.time() - t0:.0f} s so far)")
+                elif "expert cache " in line and " slots, " in line and "auto" not in line:
+                    n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
+                    say("cache", f"[strata] filling the GPU's expert cache ({n}) ...")
+                elif "session is up" in line:
+                    say("up", "[strata] almost ready ...")
+        if time.time() - last > heartbeat:
+            last = time.time()
+            print(f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -90,6 +141,10 @@ class StrataEngine:
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
         self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
+        loading = threading.Event()                     # set once READY: the narrator below stops
+        if log:
+            threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
+                             daemon=True).start()
         self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         self.max_context = 0
@@ -111,6 +166,7 @@ class StrataEngine:
                 self.max_context = int(f[1])
                 self.can_stop = "stop" in f[2:]
                 break
+        loading.set()
         if self.max_context <= 0:
             raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
@@ -380,6 +436,9 @@ def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
     env = dict(os.environ)
+    if cfg.get("gpu") is not None:                   # issue #51: the GPU to run on, numbered as nvidia-smi does; CUDA's
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
+        env["CUDA_VISIBLE_DEVICES"] = str(cfg["gpu"])
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -441,7 +500,10 @@ class Service:
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
-        self.history = collections.deque(maxlen=30)     # the last finished requests, newest last (GET /metrics)
+        self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
+        # since the server started (the Monitor's totals, issue #35)
+        self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
+                       "prompt_ms": 0.0, "decode_ms": 0.0}
         self.status_lock = threading.Lock()
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
@@ -485,7 +547,8 @@ class Service:
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
-            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()})
+            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()},
+                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0))
 
     def _tok_s(self):
         with self.status_lock:
@@ -494,12 +557,13 @@ class Service:
             return 0.0
         return s["generated"] / max(1e-6, time.time() - s["first_token"])
 
-    def metrics(self) -> dict:
+    def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
         the hardware (with a minute of history per series)."""
         with self.status_lock:
             s = dict(self.status)
             hist = list(self.history)
+            totals = dict(self.totals)
         now = time.time()
         progress = getattr(self.engine, "progress", None)
         if s.get("busy") and s.get("first_token") is None:
@@ -519,7 +583,9 @@ class Service:
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
-        return {"engine": engine, "live": live, "requests": hist[::-1], "hardware": tel["now"], "hardware_static":
+        return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
+                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
 
     def prepare(self, messages, tools, kwargs, max_new=None):
@@ -594,7 +660,9 @@ class Service:
             s = dict(self.status)
         el = now - s.get("started", now)
         if s.get("first_token") is None:
-            print(f"[strata] reading the prompt: {s.get('prompt_tokens', 0)} tokens, {el:.0f} s so far", flush=True)
+            pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
+            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
+            print(f"[strata] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
             print(f"[strata] {s['phase']}: {s['generated']} of max {s.get('max_tokens')} tokens, {rate:.1f} tok/s, "
@@ -656,6 +724,10 @@ class Service:
                           f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
                           flush=True)
                     raise
+                except ValueError as e:                 # the engine's ERR line (it may have ended after it)
+                    finish = "error"
+                    print(f"[strata] the engine reported an error: {e}", flush=True)
+                    raise
                 finally:
                     gen.close()                         # STOP+drain to THIS request's DONE while still holding the
                     #                                     fifo, so a stop-token break can't leave the shared engine
@@ -679,6 +751,13 @@ class Service:
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                         "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                         if n and last.get("generated") and last.get("decode_ms") else None})
+                    t = self.totals
+                    t["requests"] += 1
+                    t["prompt_tokens"] += len(ids)
+                    t["reused"] += last.get("reused") or 0
+                    t["output_tokens"] += n
+                    t["prompt_ms"] += last.get("prompt_ms") or 0.0
+                    t["decode_ms"] += last.get("decode_ms") or 0.0
                     now = time.time()
                     el = now - self.status.get("started", now)
                     ft = self.status.get("first_token")
@@ -930,7 +1009,8 @@ def make_handler(svc: Service):
                 return
             if path == "/metrics":
                 if self._authorized():
-                    self._json(200, svc.metrics())
+                    # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
+                    self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
             if path == "/settings":
                 if self._authorized():
@@ -966,14 +1046,15 @@ def make_handler(svc: Service):
         def do_POST(self):
             if not self._authorized():
                 return
-            if self.path.rstrip("/") == "/settings":
+            path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
+            if path == "/settings":
                 self._settings()
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-                if self.path.rstrip("/") == "/v1/chat/completions":
+                if path == "/v1/chat/completions":
                     self._openai(req)
-                elif self.path.rstrip("/") == "/v1/messages":
+                elif path == "/v1/messages":
                     self._anthropic(req)
                 else:
                     self._json(404, {"error": {"message": "not found"}})
@@ -1035,6 +1116,9 @@ def make_handler(svc: Service):
             except EngineDied as e:                          # mid-stream: say so, then end the stream properly
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+            except ValueError as e:                          # the engine's ERR after the stream started: the
+                err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _anthropic(self, req):
             req = svc.with_shared(req, "anthropic")
@@ -1061,6 +1145,9 @@ def make_handler(svc: Service):
                 events.close()
             except EngineDied as e:                          # mid-stream: Anthropic's error event
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
+            except ValueError as e:                          # the engine's ERR after the stream started
+                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler
@@ -1226,6 +1313,7 @@ def main() -> int:
                          "on your network (set an API key); also \"host\" in the config")
     ap.add_argument("--script", default="Thinking about it.</think>\n\nHello from the mock engine.")
     ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--gpu", type=int, help="the GPU to run on, as nvidia-smi numbers them (also \"gpu\" in the config)")
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
                     help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
     ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
@@ -1236,6 +1324,8 @@ def main() -> int:
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    if a.gpu is not None:
+        cfg["gpu"] = a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
@@ -1282,6 +1372,7 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    svc.gpu_index = cfg.get("gpu") or 0                 # the Monitor reads the card the engine runs on (issue #51)
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:

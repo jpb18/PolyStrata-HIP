@@ -25,13 +25,15 @@ Measured on an RTX 5070 (12 GB), a Ryzen 5 7600 and 64 GB of RAM:
 
 | Size | Writes answers (short chat) | Writes answers (128K context) | Reads your prompt |
 | --- | ---: | ---: | ---: |
-| **Q2_0** | 95 tokens/s | 65 tokens/s | 539 tokens/s |
-| **IQ2_XS** | 78 tokens/s | 52 tokens/s | 463 tokens/s |
-| **IQ3_XXS** | 66 tokens/s | 45 tokens/s | 410 tokens/s |
-| **IQ3_S** | 54 tokens/s | 42 tokens/s | 374 tokens/s |
+| **Q2_0** | 90 tokens/s | 67 tokens/s | 1,310 tokens/s |
+| **IQ2_XS** | 74 tokens/s | 60 tokens/s | 1,240 tokens/s |
+| **IQ3_XXS** | 62 tokens/s | 46 tokens/s | 1,110 tokens/s |
+| **IQ3_S** | 52 tokens/s | 41 tokens/s | 1,070 tokens/s |
+| **Coder** (IQ1_M) | 51 tokens/s | 44 tokens/s | 1,300 tokens/s |
 
 - **Writes answers** = how fast the reply appears (tokens per second).
-- **Reads your prompt** = how fast it takes in what you send (long documents, code, chat history).
+- **Reads your prompt** = how fast it takes in what you send (long documents, code, chat history), measured on a
+  32K-token prompt; a 4K prompt reads at 740-1,000 tokens/s. A 32K prompt takes about 25 seconds with Q2_0.
 
 A card with more VRAM is faster, because more of the model fits on the GPU: an RTX 3090 (24 GB) should do roughly
 100-140 tokens per second. All measurements, long-context numbers and estimates for other cards are in the
@@ -57,11 +59,17 @@ lower the RAM needed.
 **The version:**
 
 - **Qwen3.8-Flash-Next** - the original.
+- **[Coder](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)** - ISTA-DASLab's coding
+  version: half of the experts removed, keeping the ones that code, tool use and images need (91% of the full model's
+  SWE-bench Verified score, 99% of LiveCodeBench, by its authors). One size (IQ1_M: its experts stored like IQ3_S):
+  shard 1 is **29.6 GB**, so it fits a PC with **32 GB of RAM**, runs 262K context on 64 GB, and reads long prompts
+  the fastest of all. Weaker outside coding.
 - **[Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF)** - a fine-tune by UkisAI
   that thinks much shorter before answering, so you get the answer sooner, with about the same quality. Same speed per
   token, and about the same RAM as the same size of the original (no IQ3_S). Its own license applies (see its page).
 
-Not sure? Take **IQ2_XS**. You can add another one later with `START-HERE.bat --setup`.
+Not sure? Take **IQ2_XS** - or the **Coder** if you mainly write code, or have 32-48 GB of RAM. You can add another
+one later with `SETUP.bat` (the same as `START-HERE.bat --setup`; on Linux `./setup.sh --setup`).
 
 For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](docs/ORCA.md).
 It needs an explicit packing conversion and is not an installer menu option.
@@ -86,8 +94,16 @@ App). Everything else - Python, the engine, the model - is set up for you.
 Then it downloads everything (the model is ~70 GB, so the first time takes a while - you can stop and it picks up
 where it left off) and **starts the model**. Your browser opens the Strata app at `http://127.0.0.1:8080`.
 
+> **While the model starts, your PC can be slow or stop responding for 1-3 minutes** (longest the first time): Strata
+> loads 35-55 GB into your RAM and locks part of it for the graphics card. That's normal - wait, and don't close the
+> window. The window tells you what it is doing.
+
 **Next time**, just double-click `START-HERE.bat` again: it starts right away, nothing is downloaded twice. Close its
 window to stop the model.
+
+**Updating:** download the new version and unzip it anywhere (or `git pull`), then run `START-HERE.bat` in it. The
+model files are kept in a `Strata-data` folder next to your Strata folder, so a new copy finds them and sets itself up
+the same way - nothing big is downloaded again.
 
 **Linux:** run `./setup.sh` - same questions, same result.
 
@@ -115,8 +131,8 @@ window to stop the model.
 ## Something went wrong?
 
 **My PC froze, or got very slow, the first time Strata started.**
-That's normal the first time. Strata loads 35-55 GB into your RAM, locks part of it for the graphics card, and works
-out how much of the model fits on your GPU. The mouse can freeze for a few minutes. **Wait, and don't close the
+That's normal while it starts, most of all the first time. Strata loads 35-55 GB into your RAM, locks part of it for
+the graphics card, and works out how much of the model fits on your GPU. The mouse can freeze for a few minutes. **Wait, and don't close the
 window.** The next starts are much faster. Still frozen after 10 minutes? Restart the PC, close other programs
 (browsers use a lot of RAM) and try again. If it keeps happening, pick a smaller size (Q2_0 or IQ2_XS).
 
@@ -138,7 +154,7 @@ Usually not enough RAM (on Linux the system then stops the engine). Just send yo
 engine by itself. If it keeps happening, close other programs or pick a smaller size.
 
 **It says the prompt exceeds the context.**
-The conversation is longer than the context you chose. Start a new chat, or run `START-HERE.bat --setup` and pick more
+The conversation is longer than the context you chose. Start a new chat, or run `SETUP.bat` and pick more
 context.
 
 **Still stuck?** Look in the [full troubleshooting table](docs/DETAILS.md#troubleshooting), or open an issue and
@@ -146,17 +162,31 @@ attach `strata-<model>.log` from the Strata folder.
 
 ## How does it work?
 
-A model this big doesn't fit on a gaming graphics card. Strata splits the work between the parts of your PC:
+Models like this one normally run on servers with hundreds of gigabytes of graphics memory. Your graphics card has
+12-24 GB. Strata makes it fit by **sharing the work across your whole PC** - the same idea as a kitchen, where the
+things you use all the time stay on the counter and the rest waits in the pantry.
 
-<p align="center"><img src="docs/paper/tiers.svg" width="700" alt="how Strata splits the model between GPU, RAM and SSD"></p>
+<p align="center"><img src="docs/media/how-it-works.svg" width="860" alt="The model's 24,576 experts: the busiest on the graphics card, all of them in RAM, a lookup table on the SSD"></p>
 
-- **The GPU** runs the part of the model that is used for every word, plus the "experts" it needs most often.
-- **The RAM** holds all 24,576 experts, and **the CPU** computes the few the GPU doesn't have - at the same time as the GPU.
-- **The SSD** holds a big lookup table; the model reads a few rows of it per word.
-- **A small helper inside the model guesses the next words**, and Strata checks several guesses at once. That makes
-  it 1.6-1.8x faster than going word by word - and the answer is exactly the same.
+- **The model is a team of 24,576 small specialists ("experts"),** and each word it writes needs only 10 of them.
+  So it doesn't have to have all of them on the graphics card at once.
+- **Your graphics card** does the part of the work needed for every word, and keeps the few thousand experts that
+  are asked most often. It keeps learning which ones those are while you use it.
+- **Your RAM** holds every expert. When a word needs one the card doesn't have, **your processor** works on it -
+  at the same time as the graphics card, so neither waits for the other.
+- **Your SSD** holds a big lookup table; the model only reads a few small rows of it per word.
 
-The full story is in the [paper](docs/paper/Strata-Paper.pdf) and the [details](docs/DETAILS.md).
+<p align="center"><img src="docs/media/guess-and-check.svg" width="860" alt="A small helper guesses the next words; the big model checks them all at once and keeps the right ones"></p>
+
+- **Guess, then check.** A small, fast helper built into the model guesses the next few words, and the big model
+  checks all the guesses in one go. It keeps the ones it agrees with and writes the next word itself - so one step
+  often produces several words. The helper only guesses - the big model decides every word - so you get the same
+  quality answer, 1.6-1.8x sooner.
+- **Long texts are read in big pieces** (up to 8,192 tokens - pieces of words - at a time), which is why a long
+  document or code base is read at over 1,000 tokens per second.
+
+Want the full picture? The [details](docs/DETAILS.md#how-it-works) explain every part and its numbers, and the
+[paper](docs/paper/Strata-Paper.pdf) tells the whole story, with the measurements behind it.
 
 ## Credits
 
@@ -167,3 +197,10 @@ The full story is in the [paper](docs/paper/Strata-Paper.pdf) and the [details](
 - Built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT). Ideas from
   [Splash](https://github.com/incoai/splash), [ninfer](https://github.com/Neroued/ninfer) and
   [HyperQwen](https://github.com/syv-ai/HyperQwen). More in the [details](docs/DETAILS.md#credits-and-licenses).
+
+## License
+
+Strata is open source under the [MIT License](LICENSE). A few parts carry their own licenses: `third_party/ggml`
+(MIT, llama.cpp / ggml), the web app's font (SIL Open Font License 1.1) and the experimental speed projection's
+vector in `data/experimental-speed-projection` (Qwen Community License 1.0, from the model's activations). The
+models are not part of this repository; each model's own license applies to its files.

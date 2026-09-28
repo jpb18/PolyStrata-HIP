@@ -116,7 +116,10 @@ class CompatibilityTests(unittest.TestCase):
             snap.mkdir()
             first = snap / "model-00001-of-00002.gguf"
             second = snap / "model-00002-of-00002.gguf"
-            write_gguf(root / "blob1", [("blk.0.hc_attn_down.weight", np.ones((2, 32), np.float32), Q.Q8_0)])
+            write_gguf(root / "blob1", [
+                ("blk.0.hc_attn_down.weight", np.ones((2, 32), np.float32), Q.Q8_0),
+                ("blk.0.ffn_gate_inp.weight", np.ones((512, 32), np.float32), Q.BF16),
+            ])
             write_gguf(root / "blob2", [(f"blk.0.ffn_{r}_exps.weight", np.ones((512, 2, 32), np.float32), Q.Q8_0)
                                        for r in ("gate", "up", "down")])
             first.symlink_to(root / "blob1")
@@ -130,7 +133,9 @@ class CompatibilityTests(unittest.TestCase):
             with patch.object(sys, "argv", ["iq_pack.py", "--gguf", str(first), "--out", str(out), "--compat-bf16"]):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(iq_pack.main(), 0)
-            self.assertIn(second.name, (out / "native_experts.txt").read_text())
+            expert_index = (out / "native_experts.txt").read_text()
+            self.assertIn(second.name, expert_index)
+            self.assertIn("n_expert 512,", expert_index)
             (root / "blob2").write_bytes((root / "blob2").read_bytes()[:-64])
             with self.assertRaisesRegex(ValueError, "truncated tensor"):
                 iq_pack.Model(first)

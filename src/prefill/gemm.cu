@@ -44,6 +44,13 @@ bool Gemm::init_external(void* stream, uint16_t* scratch, int64_t scratch_elems,
     return true;
 }
 
+void Gemm::rebind(uint16_t* scratch, int64_t scratch_elems, void* workspace, size_t ws_bytes) {
+    scratch_ = scratch;
+    scratch_elems_ = scratch_elems;
+    workspace_ = workspace;
+    cublasSetWorkspace((cublasHandle_t) handle_, workspace_, ws_bytes);
+}
+
 bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
     cublasHandle_t h = nullptr;
     if (cublasCreate(&h) != CUBLAS_STATUS_SUCCESS) { err = "prefill gemm: cublasCreate failed"; return false; }

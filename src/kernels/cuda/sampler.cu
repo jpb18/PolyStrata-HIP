@@ -1,13 +1,14 @@
-// src/kernels/cuda/sampler.cu - P2.S2: the sampler chain, in the order docs/sampling.md settles.
+// src/kernels/cuda/sampler.cu - P2.S2: the sampler chain, in llama.cpp's order.
 //
-//     penalties -> top_k -> min_p -> top_p -> temperature -> penalties -> pick
+//     penalties -> top_k -> top_p -> min_p -> temperature -> pick
 //
-// THE ORDER IS THE WHOLE CONTENT OF THIS FILE.  `docs/sampling.md` transcribes it from llama.cpp's own chain
-// (`common/sampling.cpp` L357/360/375/381/399) and the two facts that are easy to get backwards are that
-// TEMPERATURE COMES AFTER THE TRUNCATION FILTERS and PENALTIES COME AFTER TEMPERATURE.  The intuitive order -
-// scale first, then truncate, with penalties as pre-processing - is a different distribution.  Both produce a
-// valid token, so only a comparison at the distribution level can tell them apart; the parity test does that
-// explicitly by running the wrong order and requiring it to differ.
+// THE ORDER IS THE WHOLE CONTENT OF THIS FILE.  llama.cpp builds its chain by walking `params.samplers`, whose
+// default is { PENALTIES, DRY, TOP_N_SIGMA, TOP_K, TYPICAL_P, TOP_P, MIN_P, XTC, TEMPERATURE } (`common/common.h`
+// at 3cf03257) - ONE penalties stage, first, and TEMPERATURE AFTER THE TRUNCATION FILTERS.  (Issue #53: this file
+// used to apply the penalties a second time after the temperature, and min_p before top_p - both taken from the
+// order of the `case` labels in `common/sampling.cpp`, which is not the order the chain runs.)  Every order
+// produces a valid token, so only a comparison at the distribution level can tell them apart; the parity test
+// does that against an independently computed distribution.
 //
 // Both kernels put ONE BLOCK per token over the vocabulary: `sampler_greedy_kernel` is the plain argmax,
 // `sampler_kernel` runs the sampled chain as `top_k` block-argmax rounds followed by the top_p / temperature /
@@ -108,7 +109,9 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
     // the counts - and therefore every sampled value - are exactly what the per-candidate scan produced.
     extern __shared__ unsigned int penal_bits[];
     const int bits_words = (int) ((n_vocab + 31) / 32);
-    const bool use_bits = hrow != nullptr && bits_words > 0;
+    // The gate needs a NON-EMPTY WINDOW (`hlen > 0`): the launch sizes the shared bitmap only when penalties
+    // are on, so a caller handing over a history buffer with `penalty_last_n == 0` must not touch it.
+    const bool use_bits = hrow != nullptr && hlen > 0 && bits_words > 0;
     if (use_bits) {
         for (int w = threadIdx.x; w < bits_words; w += blockDim.x) penal_bits[w] = 0u;
         __syncthreads();
@@ -187,10 +190,12 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
         hrow += history_len - hlen;          // the window is the TAIL
     }
 
-    // the membership bitmap, as in `sampler_greedy_kernel` - see the cost note there
+    // the membership bitmap, as in `sampler_greedy_kernel` - see the cost note there.  The gate needs an
+    // NON-EMPTY WINDOW too: the launch sizes the bitmap only when penalties are on, so a caller that hands over
+    // a stale history buffer with `penalty_last_n == 0` must not touch it.
     extern __shared__ unsigned int penal_bits[];
     const int bits_words = (int) ((n_vocab + 31) / 32);
-    const bool use_bits = hrow != nullptr && bits_words > 0;
+    const bool use_bits = hrow != nullptr && hlen > 0 && bits_words > 0;
     if (use_bits) {
         for (int w = threadIdx.x; w < bits_words; w += blockDim.x) penal_bits[w] = 0u;
         __syncthreads();
@@ -253,39 +258,37 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
         __syncthreads();
     }
 
-    // ---- min_p: keep the descending prefix whose probability is at least `min_p` of the top token's.  The
-    // kept list is in selection order (descending), so the survivors are a PREFIX and the cut composes with
-    // top_p's below.  In logit space the threshold is `sel_logit[0] + logf(min_p)` - equivalent to
-    // `p >= min_p * p_max` without the overflow an exp of raw logits risks.  0 disables, and the head itself
-    // always survives (`expf(0) == 1 >= min_p` for min_p in 0..1), so the count never reaches zero.
-    int n_minp = k;
-    if (p.min_p > 0.0f) {
-        const float thresh = sel_logit[0] + logf(p.min_p);
-        for (int i = 0; i < k; ++i)
-            if (sel_logit[i] < thresh) { n_minp = i; break; }
-    }
-
-    // ---- top_p over the survivors, in descending order (which the selection produced), then temperature and
-    // one Philox draw.  Every thread computes the same chain redundantly over `sel_*` - the arithmetic is the
-    // serial kernel's, instruction for instruction - so they agree on `pick` and thread 0 writes it.
-    int n_keep = n_minp;
+    // ---- top_p over the top_k list (penalised logits, descending as the selection produced them), then min_p,
+    // then temperature and one Philox draw - llama.cpp's order (issue #53).  Every thread computes the same chain
+    // redundantly over `sel_*` - the arithmetic is the serial kernel's, instruction for instruction - so they
+    // agree on `pick` and thread 0 writes it.
+    int n_keep = k;
     float mx = sel_logit[0];
-    for (int i = 1; i < n_minp; ++i) mx = fmaxf(mx, sel_logit[i]);
+    for (int i = 1; i < k; ++i) mx = fmaxf(mx, sel_logit[i]);
     if (p.top_p < 1.0f) {
         double sum = 0.0;
-        for (int i = 0; i < n_minp; ++i) sum += exp((double) sel_logit[i] - (double) mx);
+        for (int i = 0; i < k; ++i) sum += exp((double) sel_logit[i] - (double) mx);
         double cum = 0.0;
-        int cut = n_minp;
-        for (int i = 0; i < n_minp; ++i) {
+        int cut = k;
+        for (int i = 0; i < k; ++i) {
             cum += exp((double) sel_logit[i] - (double) mx) / sum;
             if (cum >= (double) p.top_p) { cut = i + 1; break; }
         }
-        if (cut < p.min_keep) cut = p.min_keep < n_minp ? p.min_keep : n_minp;
+        if (cut < p.min_keep) cut = p.min_keep < k ? p.min_keep : k;
         n_keep = cut;
     }
-    auto scaled = [&](int i) {
-        return apply_penalties(sel_logit[i] * inv_t, hit_count(sel_ids[i]), p);
-    };
+    // ---- min_p on top_p's survivors: the descending prefix whose probability is at least `min_p` of the top
+    // token's.  In logit space the threshold is `sel_logit[0] + logf(min_p)` - equivalent to `p >= min_p * p_max`
+    // without the overflow an exp of raw logits risks.  0 disables, and the head itself always survives
+    // (`expf(0) == 1 >= min_p` for min_p in 0..1), so the count never reaches zero.
+    if (p.min_p > 0.0f) {
+        const float thresh = sel_logit[0] + logf(p.min_p);
+        for (int i = 0; i < n_keep; ++i)
+            if (sel_logit[i] < thresh) { n_keep = i; break; }
+    }
+    // temperature only: the penalties were applied once, before the selection (issue #53: they were applied a
+    // second time here, after the temperature scaling - llama.cpp's chain has one penalties stage)
+    auto scaled = [&](int i) { return sel_logit[i] * inv_t; };
     float smx = scaled(0);
     for (int i = 1; i < n_keep; ++i) smx = fmaxf(smx, scaled(i));
     double sum = 0.0;

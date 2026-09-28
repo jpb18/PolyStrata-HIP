@@ -11,26 +11,36 @@ New here? Start with the [README](../README.md) - it has everything you need to 
 
 ## Speed (measured)
 
-RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows. One code-agent prompt per length, 256 generated
-tokens, MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt).
+RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.14 with the settings setup writes
+(`--prefill auto`, 8-bit KV above 4K, KV streaming from 64K). One code-agent prompt per length, 256 generated tokens,
+MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt). The IQ2_XS row was
+measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 
 ### Prompt processing (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 389 | 539 | 571 | 561 | 543 | 496 |
-| **IQ2_XS** | 332 | 463 | 495 | 486 | 472 | 437 |
-| **IQ3_XXS** | 285 | 410 | 435 | 427 | 414 | - |
-| **IQ3_S** | 260 | 374 | 397 | - | 378 | - |
+| **Q2_0** | 494 | 1,007 | 1,308 | 1,294 | 1,208 | 967 |
+| **IQ2_XS** | 461 | 811 | 1,238 | 1,136 | 1,071 | 886 |
+| **IQ3_XXS** | 415 | 770 | 1,108 | 1,065 | 1,015 | - |
+| **IQ3_S** | 396 | 737 | 1,070 | 1,070 | 931 | - |
+| **Coder** | 599 | 1,152 | 1,298 | 1,350 | 1,266 | 1,034 |
 
 ### Output (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 88.7 | 94.6 | 87.5 | 76.4 | 65.1 | 56.3 |
-| **IQ2_XS** | 82.0 | 78.0 | 65.3 | 63.7 | 52.0 | 48.0 |
-| **IQ3_XXS** | 64.6 | 65.6 | 57.3 | 54.4 | 44.8 | - |
-| **IQ3_S** | 51.2 | 54.4 | 51.1 | - | 42.2 | - |
+| **Q2_0** | 84.3 | 90.3 | 73.6 | 69.0 | 67.2 | 60.3 |
+| **IQ2_XS** | 74.4 | 73.8 | 71.5 | 64.3 | 59.8 | 52.8 |
+| **IQ3_XXS** | 60.3 | 62.1 | 51.4 | 50.0 | 45.8 | - |
+| **IQ3_S** | 51.5 | 51.6 | 48.2 | 48.8 | 40.5 | - |
+| **Coder** | 53.3 | 50.6 | 53.3 | 50.8 | 44.0 | 42.8 |
+
+Output speed depends on the text as well: speculative decoding runs faster when more of the drafted tokens are
+accepted, so a different answer to the same prompt moves it by several percent. Run back to back on the 4K prompt,
+0.1.14 writes 88.5 tokens/s and 0.1.12 85.7. The numbers before 0.1.13 (prompts about half as fast):
+[`bench/results/2026-09-24-final`](../bench/results/2026-09-24-final/matrix.md); these:
+[`bench/results/2026-09-28-speed-0114`](../bench/results/2026-09-28-speed-0114/README.md).
 
 IQ3_XXS and IQ3_S at 262K are not measured: with their 43 / 50 GB of experts, a 260K-token context brings a 64 GB PC
 to its memory limit. Use up to 128K with them on 64 GB (setup caps it). IQ3_S (engine 0.1.4 or newer) is only published
@@ -47,13 +57,27 @@ halves the KV cache's memory with a Hadamard rotation before 4-bit rounding (PR 
 is measurably less precise on long documents (perplexity +8-12%; needle tests still pass). 8-bit stays the default.
 Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/README.md).
 
-Time to first token is prompt length / prompt speed: about 7 s at 4K, 55 s at 32K, 4 minutes at 128K and 9 minutes at
-262K. The raw numbers: [`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
+Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
+and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
+
+**Faster prompts (engine 0.1.13):** the prompt is read in chunks of up to 8,192 tokens instead of 2,048 (`--prefill
+auto`: the largest chunk whose buffers fit in the expert-cache slots it borrows, and a request borrows only what its
+prompt needs); the experts are multiplied by llama.cpp's quantized MMQ kernels instead of being expanded to FP16
+first; the next layer's experts stream over PCIe while the current layer's attention runs; the PLE block runs for the
+whole chunk at once; unpinned experts are copied by helper threads. Measured on the RTX 5070 12 GB, 64 GB RAM,
+32K-token prompt: Q2_0 572 -> 1,290 tokens/s, IQ3_S 383 -> 1,208. Through the server (Q2_0, 128K context): 999 tokens
+353 -> 438 tokens/s, 6,927 tokens 529 -> 1,077, 28,584 tokens 584 -> 1,249. Output speed is unchanged. Needles 5/5
+(1K-262K). Details and the quality check:
+[`bench/results/2026-09-28-prefill-speed`](../bench/results/2026-09-28-prefill-speed/README.md). Existing installs
+switch to `--prefill auto` the next time START-HERE / setup.sh starts them. The raw numbers:
+[`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
 
 ## Other GPUs (estimated)
 
 Not measured - estimated from the runs above (same CPU and 64 GB RAM): the GPU part scaled by memory bandwidth, the CPU
 part by how many more experts the card's VRAM holds. Treat as **±20%**. Numbers are *prompt / output* tokens/s.
+The prompt figures predate engine 0.1.13, which about doubled prompt speed on the measured card; how much of that a
+card gains depends on its PCIe link (the experts stream over it), so they are still the older estimates.
 
 | GPU | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -65,7 +89,9 @@ part by how many more experts the card's VRAM holds. Treat as **±20%**. Numbers
 |  | IQ3_XXS | ~260 / ~106 | ~374 / ~103 | ~396 / ~89 | ~390 / ~85 | ~378 / ~71 | - |
 
 More VRAM matters more than a faster GPU: every extra GB holds ~700 more experts, and every expert on the GPU is one the
-CPU does not have to compute. A 3090's 24 GB takes most of the CPU work away.
+CPU does not have to compute. A 3090's 24 GB takes most of the CPU work away. (Since 0.1.14 the expert profile ranks
+all 24,576 experts; before, the cache stopped at 8,000, about 10-14 GB. `tools/make_profile.py` builds a profile from
+your own prompts: run the engine once with `--dump-routing trace.bin`, see the tool's help.)
 
 ## Which model?
 
@@ -78,7 +104,24 @@ of [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next).
 | **IQ2_XS** | 68 GB | ~36 GB experts + ~6 GB | close to Q2_0 | a bit better |
 | **IQ3_XXS** | 76 GB | ~43 GB experts + ~6 GB | slower (more CPU work) | best |
 
-With 64 GB of RAM all three fit (close the browser for IQ3_XXS, and keep its context at 128K or less). With 48 GB only Q2_0 / IQ2_XS may fit. 32 GB is not enough.
+With 64 GB of RAM all three fit (close the browser for IQ3_XXS, and keep its context at 128K or less). With 48 GB only Q2_0 / IQ2_XS may fit. With 32 GB: the Coder (below).
+
+### Or: the Coder (half the experts, for code)
+
+**[Qwen3.8-Flash-Next GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)** is
+ISTA-DASLab's expert-pruned release: 256 of each layer's 512 experts are kept (still 10 active per token), chosen with
+RCO on code, agentic and vision calibration data; its authors report 91.3% of the full model's SWE-bench Verified and
+98.7% of LiveCodeBench v6. One size, named IQ1_M for its 1.89 bits per *original* parameter; the kept experts are
+stored like IQ3_S (IQ2_S-IQ4_XS gate/up, IQ4_NL/Q2_0 down). Shard 1 is 29.6 GB (experts: 23 GB of RAM), so it runs
+on **32 GB of RAM**, and at 262K on 64 GB. Its shard 2 and its vision encoder are the original's files: with the
+original installed, setup downloads only shard 1. Strata ships its expert profile (`data/expert-profile-coder.bin`,
+the shipped ranking mapped onto the kept experts through the release's `rco-allocation.txt`: 72% of the expert
+reads hit the GPU on a 12 GB card). Images work; the experimental speed projection loads and runs on it (it was made
+for the full model).
+
+```
+START-HERE.bat --setup --family coder
+```
 
 ### Or: Swift 1.5 (a fine-tune that thinks shorter)
 
@@ -110,7 +153,11 @@ You need **only an NVIDIA driver** (version 580 or newer; update it with the NVI
 | Disk | ~70-80 GB free for the model, ~6 GB for the MTP layer (+1 GB with images). **Q2_0 on an AVX-512 CPU** also writes a one-time ~40 GB copy of its experts for the fast CPU kernel. An NVMe SSD is strongly recommended. |
 | OS | Windows 10/11, or Linux (Ubuntu 22.04/24.04 get everything installed automatically). |
 
-What the first start installs, all inside this folder (`.venv/`, `engine/`, `third_party/`, `models/`, `packs/`, `mtp/`):
+What the first start installs: in this folder `.venv/`, `engine/` and `third_party/`; the model files (`models/`,
+`packs/`, `mtp/`, 70-120 GB) in **`Strata-data` next to this folder**, so a new copy of Strata (an update unzipped
+elsewhere) finds them and sets itself up the same way. The place is remembered per user (`%APPDATA%\Strata\settings.json`,
+`~/.config/strata/settings.json`); `--data-dir` chooses another. Installs from before 0.1.16 are moved there by the next
+start (a rename on the same drive; files on another drive are used where they are).
 Python 3.12 if you have none (for your user account, no admin), a private Python environment, NVIDIA's CUDA libraries
 (from pip, ~0.4 GB), the ready-made Strata engine for RTX 30/40/50, the model and the MTP draft layer. If no
 ready-made engine fits your PC, it offers to install the build tools (Visual Studio Build Tools + CUDA Toolkit on
@@ -146,9 +193,12 @@ downloaded again. Closing the window stops the model.
 
 ```
 START-HERE.bat --setup                          install another model, or change context / images
+SETUP.bat                                       the same (double-click it)
 START-HERE.bat --model IQ2_XS --context 32768 --vision yes --yes     no questions
 START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
+START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port
+START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-smi; setup picks the one with the most VRAM)
 ```
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
@@ -171,6 +221,15 @@ The same questions, the same automatic install (it uses `sudo apt` for Python an
 for the build tools), and the same start: `http://127.0.0.1:8080`. Later runs of `./setup.sh` (or `./run-<model>.sh`)
 start the model directly. Options as on Windows (`./setup.sh --setup`, `--model Q2_0 --yes`, `--gguf-dir /data/Q2_0`).
 Terminal chat: `.venv/bin/python chat.py`.
+
+- **Updating:** `git pull`, then `./setup.sh`: it compiles the engine again when its source changed (a minute or
+  two for the changed files). If that compile fails, it says so and starts the engine you had.
+- **Other distributions** (Arch, Fedora, ...): install the C++ compiler and the CUDA Toolkit 13 with your package
+  manager first (Arch: `sudo pacman -S base-devel cuda`); setup finds `nvcc` on PATH, in `/usr/local/cuda*` and in
+  `/opt/cuda*`, and does the rest.
+- **WSL** works (Ubuntu 24.04 tested), with one limit: the NVIDIA driver pins only about 1 GB of RAM there, so KV
+  streaming (`--kv-resident`) is off and the KV cache stays in VRAM, and the experts are copied to the GPU from
+  unpinned RAM (slower prompts than native Linux).
 
 ---
 
@@ -216,6 +275,9 @@ print(r.choices[0].message.content)
   15 s, and `GET /status` says what it is doing (`reading the prompt`, `answering`, tokens so far). Closing the
   connection or pressing stop in your app really stops the model, so the next request starts at once.
 - **Chat apps.** Any app with an "OpenAI-compatible" provider works: base URL `http://127.0.0.1:8080/v1`, any API key.
+- **Claude Code** (Strata 0.1.17 or newer): set `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and
+  `ANTHROPIC_MODEL` to a Claude model name it knows (it refuses names it doesn't; Strata ignores the name), plus any
+  `ANTHROPIC_AUTH_TOKEN` (or your `api_key`, if you set one).
 - **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
   `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
   can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
@@ -372,7 +434,7 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | `port 8080 is already in use` | Strata is already running (look for its window), or another program uses the port: `START-HERE.bat --port 8081`. |
 | `cudaHostRegister ... out of memory` in the log | Normal on Windows: the engine pins the experts in per-layer slices instead. Only a problem if the load then fails. |
 | The first start takes minutes | It is reading 34-55 GB into RAM; the second start is faster while the files are in the OS cache. |
-| The PC freezes for a few minutes at the first start | Normal the first time: the engine loads the experts into RAM, pins part of it for the GPU and sizes the expert cache. Wait; don't close the window. Still frozen after 10 minutes: restart the PC, close other programs, try again, or pick a smaller size. |
+| The PC freezes for a few minutes at the start | Normal, most of all the first time (the server window says when it happens): the engine loads the experts into RAM, pins part of it for the GPU and sizes the expert cache. Wait; don't close the window. Still frozen after 10 minutes: restart the PC, close other programs, try again, or pick a smaller size. |
 | `the engine stopped unexpectedly (exit code ...)` | The engine process ended mid-answer - usually out of RAM (Linux ends the biggest program: `sudo dmesg \| grep -i -E 'killed process\|out of memory'`). The next request starts it again by itself. If it repeats: close other programs or pick a smaller size. The server also warns at start when the model's experts leave less than ~6 GB of RAM for everything else. |
 | Slow output, disk light busy | Not enough free RAM: close other programs, or choose Q2_0 / IQ2_XS. |
 | `prompt ... exceeds the context` | The request is longer than the context you chose: run setup again with a bigger `--context`. |
@@ -381,7 +443,8 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | A picture is refused or `cannot read the image` | The file is not a picture Pillow can open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF work). |
 | Pictures are slow (10-30 s) | The encoder runs on the CPU: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM). |
 | A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
-| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving for 2 minutes ends with an error instead of hanging: the log says `no progress for 120 s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. (`STRATA_WATCHDOG_S` sets the 120 s; 0 turns it off.) |
+| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving ends with an error instead of hanging (after 2 minutes; 1 minute from 0.1.13): the log says `no progress for ... s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. Engine 0.1.13 adds a stall report under it (what every expert-pool thread and the GPU handshake were doing, memory and page faults) and, on Windows, a `strata-stall-<pid>.dmp` file with every thread's stack: attach both. (`STRATA_WATCHDOG_S` sets the time in seconds; 0 turns it off.) Engine 0.1.14 fixes the stall those reports found (issue #31: with the IQ packs the host could wait forever inside the NVIDIA driver while copying experts in a verify window; the experts are now copied by a GPU kernel, `--pcie-mode dma` restores the old way). |
+| `out of memory: cudaFuncSetAttribute` in the log (IQ3_XXS, long prompt) | Fixed in engine 0.1.15: CUDA loaded a kernel's code when it was first needed, and mid-prompt there was no VRAM left for it. Run `START-HERE.bat` (Windows) or `./setup.sh` (Linux) once to update. |
 | Anything else | The engine log is `strata-<model>.log` in this folder. |
 
 ---
@@ -408,8 +471,12 @@ The full story, with measurements, bottlenecks and what comes next: **[docs/pape
 
 ## Credits and licenses
 
+Strata itself: [MIT](../LICENSE). The model files are not part of it; their licenses apply to them (below).
+
 - Model: [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team; quantizations:
   [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF).
+  The Coder: [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
+  (Apache-2.0 per its card); its support in Strata came from @pjgmobile's PR #54.
   Swift 1.5: [ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
   by UkisAI. Their licenses apply to the weights.
 - [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT): the i-quant formats, the GPU dot products and
@@ -420,3 +487,5 @@ The full story, with measurements, bottlenecks and what comes next: **[docs/pape
   [HyperQwen](https://github.com/syv-ai/HyperQwen); references in the paper.
 - The web app's font: [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL Open Font License 1.1, see
   `serve/web/fonts/OFL.txt`). Its Monitor tab started from @code-martin's dashboard idea (PR #22).
+- The experimental speed projection's vector (`data/experimental-speed-projection/`): Qwen Community License 1.0,
+  made from the model's activations (see its README).

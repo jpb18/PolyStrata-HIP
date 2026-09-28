@@ -31,6 +31,8 @@
 #include "strata/kernels/cpu/native_expert.hpp"
 
 #include <atomic>
+#include <cstdio>
+#include <memory>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -100,6 +102,8 @@ public:
     /// threads on six cores. `false` is the A/B arm and exists so the change is measurable rather than
     /// asserted - the counter it moves is `pool phases ... drain`, which is host-side and needs no profiler.
     explicit ExpertPool(int n_workers = 0, bool pin = true, bool host_works = true);
+    /// The watchdog's view of the pool (issue #31): the batch, the counters, every thread's state.
+    void diag(std::FILE* f) const;
     ~ExpertPool();
     ExpertPool(const ExpertPool&) = delete;
     ExpertPool& operator=(const ExpertPool&) = delete;
@@ -196,6 +200,13 @@ private:
     //
     // The counter was diagnostic only - `pauses()` was read in one place, to print a number nothing branched on
     // - so it is deleted rather than amortised.  `alignas(64)` then stops the remaining four sharing.
+    // issue #31 diagnostics: each worker's state (kParked, kSleeping, kBetween, or the job it runs) and the host's
+    // (kIdle, kWaitParked, kWaitDone, or its job), printed by the serve watchdog through `diag`
+    static constexpr int32_t kParked = -1, kSleeping = -2, kBetween = -3, kIdle = -10, kWaitParked = -11,
+                             kWaitDone = -12;
+    std::unique_ptr<std::atomic<int32_t>[]> wstate_;
+    std::atomic<int32_t> hstate_{kIdle};
+    std::atomic<int64_t> hstate_ms_{0};
     alignas(64) std::atomic<uint64_t> head_{0};   // epoch << 32 | njobs << 16 | next index (issue #29)
     alignas(64) std::atomic<uint32_t> done_{0};
     alignas(64) std::atomic<uint32_t> parked_{0};

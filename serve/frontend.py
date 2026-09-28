@@ -129,6 +129,14 @@ def images_of(messages: list[dict]) -> list[str]:
             for item in m["content"] if item.get("type") == "image"]
 
 
+def _late_system_to_user(messages: list[dict]) -> list[dict]:
+    """The chat template takes a system message only at the start ("System message must be at the beginning").
+    Clients also send them mid-conversation - Claude Code's hook context as {"role": "system"} after the first user
+    turn, some OpenAI clients a late "developer" message (issue #56) - so those become user messages, in place:
+    merging them into the first one would change the prompt's start and cost the conversation cache every turn."""
+    return [dict(m, role="user") if m.get("role") == "system" and i > 0 else m for i, m in enumerate(messages)]
+
+
 def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     """OpenAI Chat Completions -> (template messages, template tools, template kwargs)."""
     messages = []
@@ -161,7 +169,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
-    return messages, tools, kwargs
+    return _late_system_to_user(messages), tools, kwargs
 
 
 def anthropic_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
@@ -210,7 +218,7 @@ def anthropic_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dic
         kwargs.update(effort_kwargs(effort))
     elif isinstance(thinking, dict) and thinking.get("budget_tokens"):
         kwargs.update(budget_effort(thinking["budget_tokens"]))
-    return messages, tools, kwargs
+    return _late_system_to_user(messages), tools, kwargs
 
 
 # ------------------------------------------------------------------------------------------------ output parser
