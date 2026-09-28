@@ -199,9 +199,21 @@ START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
 START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-smi; setup picks the one with the most VRAM)
+START-HERE.bat --calibrate                      tune the engine for this PC (about 5-10 minutes), then start
 ```
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
+
+**Tuning for your PC (`--calibrate`, engine 0.1.19).** Three engine settings depend on the PC more than on the model:
+- the share of the experts missing from VRAM that are copied to the GPU instead of computed by the CPU
+  (`--pcie-frac`: a fast PCIe link and a slower CPU want more, a laptop's narrower link less);
+- how sure the draft layer must be to add another guess to a check (`--spec-min-p`);
+- how many CPU threads compute experts (`--pool-workers`: on CPUs with efficiency cores, fewer can be faster).
+
+The defaults were measured on a Ryzen 5 7600 with an RTX 5070. Setup offers to measure them on your PC after an
+install; `START-HERE.bat --calibrate` (Linux: `./setup.sh --calibrate`) does it any time. It measures the output
+speed with each setting and keeps one only when it is more than 3% faster. The result is remembered per PC and model
+(in the settings file next to the data folder's record), so updates keep it.
 
 ### Chat in the terminal (optional)
 
