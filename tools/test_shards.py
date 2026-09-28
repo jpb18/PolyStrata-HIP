@@ -1,10 +1,14 @@
-"""A missing or short model shard is named with its numbers - over a minimal GGUF written here (no download,
-no model, no GPU).
+"""A missing or short model shard is named with its numbers, and a pack's verify reads back the source hash
+its manifest recorded - over a minimal GGUF written here (no download, no model, no GPU).
 
     python -m unittest tools.test_shards
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
+import json
 import struct
 import sys
 import tempfile
@@ -15,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
 import setup as S  # noqa: E402
+import strata_pack  # noqa: E402
 
 
 class Stop(Exception):
@@ -73,6 +78,41 @@ class ShardCheck(unittest.TestCase):
         with self.assertRaises(Stop) as cm:
             S.check_shards([s])
         self.assertIn("m-00001-of-00002.gguf is not a whole GGUF shard", str(cm.exception))
+
+
+class PackVerifyHash(unittest.TestCase):
+    """verify over a manifest with no tensor entries: the only check left is the source hash."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.gguf = self.dir / "m-00001-of-00002.gguf"
+        write_gguf(self.gguf)
+        self.digest = hashlib.sha256(self.gguf.read_bytes()).hexdigest()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_verify(self, source, limit=None):
+        (self.dir / "manifest.json").write_text(json.dumps({"tensors": {}, "source": source}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = strata_pack.verify(self.gguf, self.dir, limit, 0)
+        return rc, out.getvalue()
+
+    def test_matching_hash_passes(self):
+        rc, _ = self.run_verify({"shard1_sha256": self.digest})
+        self.assertEqual(rc, 0)
+
+    def test_wrong_hash_fails_naming_both(self):
+        rc, out = self.run_verify({"shard1_sha256": "0" * 64})
+        self.assertEqual(rc, 1)
+        self.assertIn("m-00001-of-00002.gguf: sha256 " + self.digest, out)
+        self.assertIn("built from " + "0" * 64, out)
+
+    def test_no_hash_or_limit_skips(self):
+        self.assertEqual(self.run_verify({})[0], 0)                                  # setup builds --skip-hash
+        self.assertEqual(self.run_verify({"shard1_sha256": "0" * 64}, limit=1)[0], 0)  # --limit stays quick
 
 
 if __name__ == "__main__":
