@@ -116,7 +116,8 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
         for (int w = threadIdx.x; w < bits_words; w += blockDim.x) penal_bits[w] = 0u;
         __syncthreads();
         for (int i = threadIdx.x; i < hlen; i += blockDim.x)
-            if (hrow[i] >= 0) atomicOr(&penal_bits[hrow[i] >> 5], 1u << (hrow[i] & 31));
+            if (hrow[i] >= 0 && hrow[i] < n_vocab)   // an id outside the vocabulary is never a candidate
+                atomicOr(&penal_bits[hrow[i] >> 5], 1u << (hrow[i] & 31));
         __syncthreads();
     }
     auto hit_count = [&](int v) -> int {
@@ -200,7 +201,8 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
         for (int w = threadIdx.x; w < bits_words; w += blockDim.x) penal_bits[w] = 0u;
         __syncthreads();
         for (int i = threadIdx.x; i < hlen; i += blockDim.x)
-            if (hrow[i] >= 0) atomicOr(&penal_bits[hrow[i] >> 5], 1u << (hrow[i] & 31));
+            if (hrow[i] >= 0 && hrow[i] < n_vocab)   // an id outside the vocabulary is never a candidate
+                atomicOr(&penal_bits[hrow[i] >> 5], 1u << (hrow[i] & 31));
         __syncthreads();
     }
     auto hit_count = [&](int v) -> int {
@@ -208,14 +210,11 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
         return history_count(hrow, hlen, v);
     };
 
+    // top_k in 1..64 is taken as given; 0 ("off") and anything wider mean the widest shortlist the kernel
+    // keeps, 64.  Every row writes out[t]: a verify window reads all of them.
     const int KMAX = 64;
-    int k = p.top_k > 0 ? (p.top_k < KMAX ? p.top_k : KMAX) : 0;
-    if (k <= 0) {
-        if (threadIdx.x == 0)
-            std::printf("sampler: the sampled path needs top_k in 1..%d (got %d); greedy needs no filters\n",
-                        KMAX, p.top_k);
-        return;   // leave out[t] unwritten rather than returning an uninitialised token
-    }
+    int k = (p.top_k > 0 && p.top_k < KMAX) ? p.top_k : KMAX;
+    if (k > n_vocab) k = n_vocab;
 
     // ---- top_k: k rounds of a block argmax over the not-yet-taken.  `sel_*` holds the kept ids and their
     // raw logits in selection order: descending by value, ties to the lower index, which is the order the

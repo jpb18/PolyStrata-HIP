@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, serve  # noqa: E402
+from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, StrataEngine, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
@@ -234,6 +234,27 @@ class ClientShapes(unittest.TestCase):
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
+
+
+class SamplingKeys(unittest.TestCase):
+    """The GEN line's sampling keys: top_k 0 ("off") or wider than the engine's 64 get the widest list, 64 (they used
+    to fall back to the engine default 20); a penalty always carries its window."""
+
+    def keys(self, **sampling):
+        return StrataEngine.sampling_keys(sampling).split()
+
+    def test_top_k(self):
+        self.assertIn("top_k=10", self.keys(temperature=0.7, top_k=10))
+        self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=64))
+        self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=0))
+        self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=100))
+        for bad in (-1, True, 2.5, "20"):
+            self.assertFalse([k for k in self.keys(temperature=0.7, top_k=bad) if k.startswith("top_k=")], bad)
+
+    def test_penalty_window(self):
+        self.assertIn("penalty_last_n=64", self.keys(presence_penalty=1.5))
+        self.assertIn("penalty_last_n=4096", self.keys(repetition_penalty=1.1, penalty_last_n=4096))
+        self.assertFalse([k for k in self.keys(temperature=0.7) if k.startswith("penalty")])
 
 
 class GpuChoice(unittest.TestCase):

@@ -308,7 +308,9 @@ engine arguments. The run config's optional `sampling` block sets the defaults f
 block at all a request without sampling keys decodes greedy. The penalties (`presence_penalty`, `frequency_penalty`,
 `repetition_penalty`, with `penalty_last_n` capping how many recent tokens they count over, default 64 when any
 penalty is set) ride the same path; they count the tokens the request has consumed, so a repetition penalty
-suppresses what the model itself just said, not the prompt alone.
+suppresses what the model itself just said, not the prompt alone. Since engine 0.1.19 they apply to every token
+the speculative decoding checks at once, exactly as if it decoded one token at a time (before, only the first of
+each batch got them). `top_k` keeps at most 64 candidates: `0` ("off") or anything above 64 uses all 64.
 
 ---
 

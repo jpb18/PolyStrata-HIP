@@ -107,6 +107,9 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
     check(cudaMalloc(&d_l, logits.size() * sizeof(float)), "malloc logits");
     check(cudaMalloc(&d_o, (size_t) n_tokens * sizeof(int)), "malloc out");
     check(cudaMemcpy(d_l, logits.data(), logits.size() * sizeof(float), cudaMemcpyHostToDevice), "copy");
+    // -1 in every output slot first: a row the kernel leaves unwritten can never match (a verify window reads
+    // every row, so "no output" is a wrong answer, not a skipped one)
+    check(cudaMemset(d_o, 0xFF, (size_t) n_tokens * sizeof(int)), "fill out");
     int* d_h = nullptr;
     if (hist_len > 0) {
         check(cudaMalloc(&d_h, hist.size() * sizeof(int)), "malloc hist");
@@ -167,8 +170,8 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
     };
     auto count = [&](int v) { int c = 0; for (int h : hist) if (h == v) ++c; return c; };
     const int nv = (int) l.size();
-    const int KMAX = 64;
-    const int k = p.top_k > 0 ? (p.top_k < KMAX ? p.top_k : KMAX) : 0;
+    const int KMAX = 64;                       // 1..64 as given; 0 (off) and wider keep the widest list, 64
+    const int k = std::min(nv, (p.top_k > 0 && p.top_k < KMAX) ? p.top_k : KMAX);
     std::vector<int> sel_ids;
     std::vector<float> sel_logit;
     std::vector<char> taken((size_t) nv, 0);
@@ -230,7 +233,7 @@ int sampled_cut(const std::vector<float>& l, const std::vector<int>& hist, const
     auto count = [&](int v) { int c = 0; for (int h : hist) if (h == v) ++c; return c; };
     const int nv = (int) l.size();
     const int KMAX = 64;
-    const int k = p.top_k > 0 ? (p.top_k < KMAX ? p.top_k : KMAX) : 0;
+    const int k = std::min(nv, (p.top_k > 0 && p.top_k < KMAX) ? p.top_k : KMAX);
     std::vector<float> sel;
     std::vector<char> taken((size_t) nv, 0);
     for (int i = 0; i < k; ++i) {
@@ -645,6 +648,173 @@ int main(int argc, char** argv) {
             gwant[(size_t) t] = reference_pick({l.begin() + (size_t) t * NV,
                                                 l.begin() + (size_t) (t + 1) * NV}, gp, false);
         bad += run("stale history, last_n=0 (greedy)", l, NT, gp, gwant, hist, 8);
+    }
+
+    // ---- fixture 12: ONE HISTORY PER ROW (engine 0.1.19).  A verify window samples T rows, and row t's pick
+    // follows the drafts 1..t: its penalties must count them.  The engine used to stage row 0 alone, so rows
+    // 1..T-1 read slots nobody wrote.  Here every row gets `penalty_rows`' history and is pinned against a
+    // per-row scalar reference; the fixture first asserts it can SEE the difference - with row 0's history
+    // copied to every row (the nearest well-defined stand-in for the old staging) some row must pick differently.
+    // Row t's own newest token (window[t]) is its favourite by a margin the presence penalty overturns.
+    {
+        auto greedy_pen = [](const std::vector<float>& l, const std::vector<int>& hist,
+                             const strata::kernels::SamplerParams& p) {
+            int best = 0; float bv = 0; bool first = true;
+            for (int v = 0; v < (int) l.size(); ++v) {
+                int c = 0; for (int h : hist) if (h == v) ++c;
+                float s = l[(size_t) v];
+                if (c > 0) {
+                    if (s <= 0.0f) s *= p.penalty_repeat; else s /= p.penalty_repeat;
+                    s -= (float) c * p.penalty_freq + p.penalty_present;
+                }
+                if (first || s > bv) { bv = s; best = v; first = false; }
+            }
+            return best;
+        };
+        std::mt19937 rng(12); std::normal_distribution<float> g(0.0f, 1.0f);
+        const int TAIL = 5000;                           // longer than the widest window below
+        std::vector<int32_t> tail((size_t) TAIL);
+        for (auto& v : tail) v = (int32_t) (rng() % NV);
+        int observable = 0, rows_checked = 0;
+        for (int T : {1, 2, 4, 8}) {
+            for (int H : {1, 64, 1024, 4096}) {
+                std::vector<int32_t> window((size_t) T);
+                for (int t = 0; t < T; ++t) window[(size_t) t] = (int32_t) (100 + 37 * t);   // distinct, in range
+                std::vector<int32_t> rows((size_t) T * H);
+                strata::kernels::penalty_rows(tail.data(), TAIL, window.data(), T, H, rows.data());
+                std::vector<float> l((size_t) T * NV);
+                for (auto& v : l) v = g(rng);
+                for (int t = 0; t < T; ++t) l[(size_t) t * NV + window[(size_t) t]] = 5.0f;
+                strata::kernels::SamplerParams gp;
+                gp.greedy = true; gp.temperature = 0.0f; gp.top_k = 0; gp.top_p = 1.0f;
+                gp.penalty_last_n = H; gp.penalty_present = 4.0f;
+                strata::kernels::SamplerParams sp2;
+                sp2.top_k = 20; sp2.top_p = 0.9f; sp2.temperature = 0.7f; sp2.seed = 1000 + (uint64_t) H;
+                sp2.counter = 77; sp2.penalty_last_n = H; sp2.penalty_present = 4.0f; sp2.penalty_repeat = 1.1f;
+                std::vector<int> gwant((size_t) T), swant((size_t) T), rows_int(rows.begin(), rows.end());
+                for (int t = 0; t < T; ++t) {
+                    const std::vector<float> lr(l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV);
+                    const std::vector<int> own(rows.begin() + (size_t) t * H, rows.begin() + (size_t) (t + 1) * H);
+                    const std::vector<int> row0(rows.begin(), rows.begin() + H);
+                    gwant[(size_t) t] = greedy_pen(lr, own, gp);
+                    swant[(size_t) t] = sampled_reference(lr, own, sp2, t);
+                    if (t > 0 && greedy_pen(lr, row0, gp) != gwant[(size_t) t]) ++observable;
+                    ++rows_checked;
+                }
+                char name[64];
+                std::snprintf(name, sizeof name, "per-row history T=%d H=%d greedy", T, H);
+                bad += run(name, l, T, gp, gwant, rows_int, H);
+                std::snprintf(name, sizeof name, "per-row history T=%d H=%d sampled", T, H);
+                bad += run(name, l, T, sp2, swant, rows_int, H);
+            }
+        }
+        std::printf("  %-34s %s (%d drafted rows pick differently with row 0's history, of %d rows)\n",
+                    "per-row histories are observable", observable > 0 ? "yes" : "*** NO ***", observable,
+                    rows_checked);
+        if (observable == 0) ++bad;
+    }
+
+    // ---- fixture 13: HISTORY IDS OUTSIDE THE VOCABULARY ARE IGNORED.  The bitmap is sized for n_vocab bits;
+    // an id >= n_vocab used to set a bit past its end (a shared-memory write out of bounds - compute-sanitizer
+    // memcheck reports it).  They can never be a candidate, so the result equals the reference without them.
+    {
+        std::mt19937 rng(13); std::normal_distribution<float> g(0.0f, 1.0f);
+        const int H = 16;
+        std::vector<float> l((size_t) NV * NT);
+        for (auto& v : l) v = g(rng);
+        std::vector<int> hist((size_t) NT * H, -1), valid_only((size_t) NT * H, -1);
+        const int junk[] = {NV, NV + 1000, 0x7fffffff, -5, 1 << 20};
+        for (int t = 0; t < NT; ++t) {
+            for (int j = 0; j < H; ++j) {
+                const bool bogus = j % 3 == 0;
+                const int v = bogus ? junk[(size_t) (j / 3) % 5] : (int) (rng() % NV);
+                hist[(size_t) t * H + j] = v;
+                if (!bogus) valid_only[(size_t) t * H + j] = v;
+            }
+            l[(size_t) t * NV + hist[(size_t) t * H + 1]] = 4.0f;     // a penalised favourite, so penalties matter
+        }
+        strata::kernels::SamplerParams gp;
+        gp.greedy = true; gp.temperature = 0.0f; gp.top_k = 0; gp.top_p = 1.0f;
+        gp.penalty_last_n = H; gp.penalty_present = 3.0f;
+        strata::kernels::SamplerParams sp2 = gp;
+        sp2.greedy = false; sp2.temperature = 0.8f; sp2.top_k = 20; sp2.top_p = 0.95f; sp2.seed = 13;
+        std::vector<int> gwant((size_t) NT), swant((size_t) NT);
+        for (int t = 0; t < NT; ++t) {
+            const std::vector<float> lr(l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV);
+            const std::vector<int> ok(valid_only.begin() + (size_t) t * H, valid_only.begin() + (size_t) (t + 1) * H);
+            {   // the greedy reference with the penalty (reference_pick has none)
+                int best = 0; float bv = 0; bool first = true;
+                for (int v = 0; v < NV; ++v) {
+                    int c = 0; for (int h : ok) if (h == v) ++c;
+                    float s = lr[(size_t) v];
+                    if (c > 0) { if (s <= 0.0f) s *= gp.penalty_repeat; else s /= gp.penalty_repeat; s -= gp.penalty_present; }
+                    if (first || s > bv) { bv = s; best = v; first = false; }
+                }
+                gwant[(size_t) t] = best;
+            }
+            swant[(size_t) t] = sampled_reference(lr, ok, sp2, t);
+        }
+        bad += run("out-of-vocab history ids (greedy)", l, NT, gp, gwant, hist, H);
+        bad += run("out-of-vocab history ids (sampled)", l, NT, sp2, swant, hist, H);
+    }
+
+    // ---- fixture 14: THE top_k CONTRACT.  1..64 as given; 0 ("off") and anything wider use the widest list the
+    // kernel keeps, 64 - and every row is written (the sampled kernel used to print an error for 0 and leave the
+    // row unwritten, which a verify window then read as a token; `run` pre-fills -1 so that fails here).
+    {
+        std::mt19937 rng(14); std::normal_distribution<float> g(0.0f, 1.0f);
+        std::vector<float> l((size_t) NV * NT);
+        for (auto& v : l) v = g(rng) * 0.3f;             // flat: the 64-wide list matters to the draw
+        strata::kernels::SamplerParams p64;
+        p64.top_k = 64; p64.top_p = 1.0f; p64.temperature = 1.5f; p64.seed = 14;
+        std::vector<int> want((size_t) NT);
+        for (int t = 0; t < NT; ++t)
+            want[(size_t) t] = sampled_reference({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV},
+                                                 {}, p64, t);
+        bad += run("sampled top_k=64", l, NT, p64, want);
+        strata::kernels::SamplerParams p0 = p64; p0.top_k = 0;
+        bad += run("sampled top_k=0 means 64", l, NT, p0, want);
+        strata::kernels::SamplerParams p100 = p64; p100.top_k = 100;
+        bad += run("sampled top_k=100 means 64", l, NT, p100, want);
+        strata::kernels::SamplerParams pneg = p64; pneg.top_k = -3;
+        bad += run("sampled top_k=-3 means 64", l, NT, pneg, want);
+    }
+
+    // ---- fixture 15: `penalty_rows`, host only, against the plain definition: row t = the last h tokens of
+    // tail + window[0..t], -1 padded in front.  Covers a tail shorter than, equal to and longer than h, and row 0
+    // equal to the single row the engine staged before 0.1.19.
+    {
+        int wrong = 0, cases = 0;
+        for (int n_tail : {0, 1, 5, 63, 64, 65, 300}) {
+            for (int T : {1, 3, 8}) {
+                for (int h : {1, 4, 64, 100}) {
+                    std::vector<int32_t> tail((size_t) n_tail), window((size_t) T);
+                    for (int i = 0; i < n_tail; ++i) tail[(size_t) i] = 1000 + i;
+                    for (int i = 0; i < T; ++i) window[(size_t) i] = 5000 + i;
+                    std::vector<int32_t> rows((size_t) T * h, 12345);
+                    strata::kernels::penalty_rows(tail.data(), n_tail, window.data(), T, h, rows.data());
+                    for (int t = 0; t < T; ++t) {
+                        std::vector<int32_t> seq(tail);
+                        seq.insert(seq.end(), window.begin(), window.begin() + t + 1);
+                        std::vector<int32_t> expect((size_t) h, -1);
+                        const int take = (int) std::min<size_t>((size_t) h, seq.size());
+                        for (int j = 0; j < take; ++j) expect[(size_t) (h - take + j)] = seq[seq.size() - take + j];
+                        if (!std::equal(expect.begin(), expect.end(), rows.begin() + (size_t) t * h)) ++wrong;
+                        ++cases;
+                    }
+                    // row 0 = the old single-row staging: consumed tail, then the fed-back head last
+                    std::vector<int32_t> old((size_t) h, -1);
+                    const int take0 = (int) std::min<int64_t>(h, (int64_t) n_tail + 1);
+                    for (int j = 0; j < take0 - 1; ++j) old[(size_t) (h - take0 + j)] = tail[(size_t) (n_tail - (take0 - 1) + j)];
+                    old[(size_t) (h - 1)] = window[0];
+                    if (!std::equal(old.begin(), old.end(), rows.begin())) ++wrong;
+                    ++cases;
+                }
+            }
+        }
+        std::printf("  %-34s %s (%d of %d rows differ)\n", "penalty_rows layout", wrong ? "*** WRONG ***" : "matches",
+                    wrong, cases);
+        bad += wrong;
     }
 
     // A continuous stream and individual decode calls consume the same draw counters.

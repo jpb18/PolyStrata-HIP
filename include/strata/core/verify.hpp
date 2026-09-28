@@ -71,14 +71,20 @@ public:
         sampling_ = sp;   // row t of a window at pos0 draws Philox(seed, pos0 + t): see run()
     }
 
-    /// The penalty-history row for `sampling_.penalty_last_n`: ONE row of `history_len` int32 slots, most
-    /// recent token LAST, unused front slots -1 (the kernel reads only the tail window).  Null disables the
-    /// penalties entirely - the neutral run's sampling call is byte-for-byte what it was.  The engine
-    /// re-uploads the request's tail before every window; the pointer must stay alive across the request.
+    /// The penalty histories for `sampling_.penalty_last_n`: ONE ROW PER WINDOW ROW, T rows of `history_len`
+    /// int32 slots at that stride (`strata::kernels::penalty_rows` builds them), most recent token LAST, unused
+    /// front slots -1 (the kernel reads only the tail window).  Row t follows the window's drafts 1..t - staging
+    /// row 0 alone (before 0.1.19) left the drafted rows with unwritten histories.  Null disables the penalties
+    /// entirely - the neutral run's sampling call is byte-for-byte what it was.  The engine re-uploads the rows
+    /// before every window; the buffer must hold kVerifyMaxT rows and stay alive across the request.
     void set_history(const int32_t* history, int history_len) {
         hist_d_ = history;
         hist_len_ = history_len;
     }
+    /// Off: `run` skips the request's head sampling and `out` is the recorded greedy pick.  For windows whose
+    /// picks are discarded - a prompt read through windows commits every token - so they cost no sampler launch
+    /// or sync and never read a history staged for another position.
+    void set_head_sampling(bool on) { head_sampling_ = on; }
 
     /// Keep the first `n_keep` (1..T) tokens of the last window; advances `ss.ple_prev` by them.
     bool commit(int n_keep, std::string& err);
@@ -112,6 +118,7 @@ private:
     }();   ///< greedy by default; per-request via set_sampling
     const int32_t* hist_d_ = nullptr;   ///< penalty-history row (set_history); null = no penalties apply
     int hist_len_ = 0;
+    bool head_sampling_ = true;          ///< set_head_sampling
     bool capture_commit(std::string& err);
     bool record_window(int T, cudaStream_t cs, std::string& err);
 
