@@ -748,6 +748,40 @@ bool load_control_vectors(const Options& o, const strata::core::ModelGeometry& g
     return true;
 }
 
+// The effective host->device bandwidth of the PCIe link, measured the way the engine actually uses it: DMA
+// reads from pinned host memory (the expert arena's fetches).  The pcie_frac defaults (0.55 native / 0.2
+// canonical) were measured on a PCIe 4.0 x16 link (~26 GB/s); a x8 card in a x8 slot carries about half of
+// that and the copy engine's share must shrink with it, or the GPU waits for DMA that arrived late.
+// Returns < 0 when the probe cannot run (then the caller keeps the default).
+double probe_pcie_h2d_gbps() {
+    constexpr size_t kBytes = 256ull << 20;
+    constexpr int kIters = 4;
+    void* h = nullptr;
+    void* d = nullptr;
+    cudaEvent_t ev0, ev1;
+    if (cudaMallocHost(&h, kBytes) != cudaSuccess) return -1.0;
+    if (cudaMalloc(&d, kBytes) != cudaSuccess || cudaEventCreate(&ev0) != cudaSuccess ||
+        cudaEventCreate(&ev1) != cudaSuccess) {
+        if (d != nullptr) cudaFree(d);
+        cudaFreeHost(h);
+        return -1.0;
+    }
+    std::memset(h, 0, kBytes);   // fault the pages in before timing
+    cudaMemcpyAsync(d, h, kBytes, cudaMemcpyHostToDevice);   // warmup: context up, copy engine primed
+    cudaEventRecord(ev0);
+    for (int i = 0; i < kIters; ++i) cudaMemcpyAsync(d, h, kBytes, cudaMemcpyHostToDevice);
+    cudaEventRecord(ev1);
+    const bool ok = cudaEventSynchronize(ev1) == cudaSuccess;
+    float ms = 0.f;
+    const bool timed = ok && cudaEventElapsedTime(&ms, ev0, ev1) == cudaSuccess && ms > 0.01f;
+    const double bw = timed ? ((double) kIters * (double) kBytes / (ms * 1e-3)) / 1e9 : -1.0;
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
+    cudaFree(d);
+    cudaFreeHost(h);
+    return bw;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1069,8 +1103,21 @@ int main(int argc, char** argv) {
         }
     }
     const bool native_pack = strata::kernels::cpu::expert_layout().native;
-    // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe)
-    if (o.pcie_frac < 0.0) o.pcie_frac = native_pack ? 0.55 : 0.2;
+    // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
+    // A x8 link carries half of what the defaults assume: probe the real H2D bandwidth once and scale the
+    // default by it, so the copy engine's share matches the link this machine actually has.
+    if (o.pcie_frac < 0.0) {
+        const double base = native_pack ? 0.55 : 0.2;
+        const double bw = probe_pcie_h2d_gbps();
+        if (bw > 0.0) {
+            o.pcie_frac = std::min(base, std::max(0.05, base * (bw / 26.0)));
+            std::fprintf(stderr, "strata generate: PCIe probe: %.1f GB/s host->device -> pcie_frac %.2f (default %.2f)\n",
+                         bw, o.pcie_frac, base);
+        } else {
+            o.pcie_frac = base;
+            std::fprintf(stderr, "strata generate: PCIe probe failed -> pcie_frac default %.2f\n", base);
+        }
+    }
     // the canonical Q2_0 pack's CPU kernels are AVX-512 only; a native pack runs on AVX2 CPUs as well
     if (!native_pack) strata::kernels::cpu::cpu_require_expert_support();
     else if (!strata::kernels::cpu::cpu_avx512_ok())
