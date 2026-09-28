@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # runnable from the repo root too
+
 from _paths import add_gguf_py
 add_gguf_py()
 from gguf import GGUFWriter, GGMLQuantizationType as Q, quants
@@ -37,7 +39,7 @@ class CompatibilityTests(unittest.TestCase):
             iq_pack.bf16_bytes(np.array([np.nan], dtype=np.float32).view(np.uint8), "F32")
 
     def test_projection_conversion_and_native_bytes(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             source = root / "model.gguf"
             values = np.linspace(-1, 1, 256, dtype=np.float32).reshape(2, 128)
@@ -76,7 +78,7 @@ class CompatibilityTests(unittest.TestCase):
             self.assertEqual(len(json.loads((root / "compat-bf16.json").read_text())["tensors"]), 7)
 
     def test_default_still_refuses_inexact_f32_router(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             source = root / "model.gguf"
             write_gguf(source, [("blk.0.ffn_gate_inp.weight", np.full((2, 32), 0.10001, np.float32), Q.F32)])
@@ -84,7 +86,7 @@ class CompatibilityTests(unittest.TestCase):
                 self.assertEqual(iq_pack.index_standalone(source, root, iq_pack.Model(source)), 1)
 
     def test_existing_bf16_pack_remains_byte_identical(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             source = root / "model.gguf"
             values = np.linspace(-2, 2, 256, dtype=np.float32).reshape(2, 128)
@@ -94,7 +96,7 @@ class CompatibilityTests(unittest.TestCase):
             self.assertEqual((root / "dense.bin").read_bytes(), quants.quantize(values, Q.BF16).tobytes())
 
     def test_quantized_control_weights_need_explicit_conversion(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             source = root / "model.gguf"
             write_gguf(source, [("blk.0.hc_attn_down.weight", np.ones((2, 32), np.float32), Q.Q8_0)])
@@ -110,7 +112,7 @@ class CompatibilityTests(unittest.TestCase):
             self.assertFalse(iq_pack.needs_bf16(name, "IQ3_XXS"))
 
     def test_snapshot_symlinks_keep_split_discovery(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             snap = root / "snapshot"
             snap.mkdir()
@@ -122,7 +124,10 @@ class CompatibilityTests(unittest.TestCase):
             ])
             write_gguf(root / "blob2", [(f"blk.0.ffn_{r}_exps.weight", np.ones((512, 2, 32), np.float32), Q.Q8_0)
                                        for r in ("gate", "up", "down")])
-            first.symlink_to(root / "blob1")
+            try:
+                first.symlink_to(root / "blob1")
+            except OSError:                              # Windows without Developer Mode or admin rights
+                self.skipTest("symlinks are not available here")
             with self.assertRaisesRegex(FileNotFoundError, "missing model shards"):
                 iq_pack.Model(first)
             second.symlink_to(root / "blob2")

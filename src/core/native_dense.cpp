@@ -18,7 +18,7 @@ bool eligible(const strata::TensorInfo& tensor, bool include_ple_key) {
     if (name.rfind("blk.", 0) != 0) return false;
     // The native PLE kernel accepts Q2_0. Other quantized keys can be converted to BF16 by iq_pack;
     // keep their packed bytes resident instead of overriding them with an unsupported native key.
-    if (name == "blk.1.ple_key.weight") return include_ple_key && tensor.type == 42;
+    if (name == "blk.1.ple_key.weight") return include_ple_key && tensor.type == 42;   // 42 = Q2_0
     static const char* suffixes[] = {".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight",
         ".attn_q.weight", ".attn_k.weight", ".attn_v.weight", ".attn_output.weight",
         ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight", ".ffn_down_shexp.weight"};
