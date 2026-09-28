@@ -124,6 +124,13 @@
           <p class="muted req-totals" id="req-totals"></p>
         </div>
       </div>
+
+      <div class="st-card mcp-card" id="mcp-card" hidden>
+        <div class="req-head"><span class="card-title">MCP servers</span><span class="muted small" id="mcp-sum"></span></div>
+        <div class="mcp-list" id="mcp-list"></div>
+        <p class="muted small mcp-note">Their tools run on this PC with your rights, when the model decides to call them
+          (in this page's chat only; switch it off in Sampling).</p>
+      </div>
     </div>
   </section>
 
@@ -194,6 +201,9 @@
     </div>
     <div class="toggle-row"><span>Show thinking<br><span class="muted small">expanded while it streams</span></span>
       <button class="st-toggle" id="s-show" role="switch" aria-checked="true" aria-label="Show thinking"></button></div>
+    <div class="toggle-row" id="mcp-row" hidden><span>Use tools from MCP servers<br><span class="muted small"
+      id="mcp-row-sub">the model may call them while it answers</span></span>
+      <button class="st-toggle" id="s-mcp" role="switch" aria-checked="true" aria-label="Use tools from MCP servers"></button></div>
     <div class="toggle-row" id="esp-row" hidden><span>Experimental speed projection<br><span class="muted small">the
       engine's control vector; off = the stock model. Switching reads the chat again once</span></span>
       <button class="st-toggle" id="s-esp" role="switch" aria-checked="true" aria-label="Experimental speed projection"></button></div>

@@ -4,7 +4,9 @@
     python -m serve.server --engine strata --config strata.json --port 8080   (the real engine, resident)
 
 Endpoints: POST /v1/chat/completions (OpenAI, stream and non-stream), POST /v1/messages (Anthropic, stream and
-non-stream), GET /v1/models, GET /health. One sequence at a time behind a FIFO (plan: one resident sequence).
+non-stream), GET /v1/models, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
+Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
+ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
 data, http(s) URLs or local file paths) go through `strata-vision` (the model's mmproj file) and reach the engine as
 embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
@@ -41,6 +43,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             images_of, openai_to_messages)
+from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -54,16 +57,23 @@ class Engine(Protocol):
 
 
 class MockEngine:
-    """Replays a scripted completion (text) as token ids, one per step, then the end-of-turn token."""
+    """Replays a scripted completion (text) as token ids, one per step, then the end-of-turn token.  Given a list of
+    scripts, each request gets the next one and the last one repeats (a tool call, then the answer after it)."""
 
-    def __init__(self, tokenizer, script: str, max_context: int = 32768, delay_s: float = 0.0):
+    def __init__(self, tokenizer, script: str | list[str], max_context: int = 32768, delay_s: float = 0.0):
         self.tok, self.max_context, self.delay = tokenizer, max_context, delay_s
-        self.script = tokenizer.encode(script, parse_special=True) + tokenizer.encode(IM_END, parse_special=True)
+        end = tokenizer.encode(IM_END, parse_special=True)
+        self.scripts = [tokenizer.encode(x, parse_special=True) + end for x in ([script] if isinstance(script, str)
+                                                                                 else script)]
+        self.script, self.turns = self.scripts[0], 0
         self.last_prompt: list[int] = []
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_prompt = list(ids)
         self.last_embeddings = embeddings
+        if len(self.scripts) > 1:
+            self.script = self.scripts[min(self.turns, len(self.scripts) - 1)]
+            self.turns += 1
         for t in self.script[:max_new]:
             if cancel.is_set():
                 return
@@ -513,6 +523,7 @@ class Service:
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0}
         self.status_lock = threading.Lock()
+        self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
 
@@ -795,8 +806,98 @@ def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
           f"prompt_tokens={prompt_tokens} last={last.get('role')!r}:{preview!r}", flush=True)
 
 
+# ------------------------------------------------------------------------------------------------ MCP tool loop
+def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new, max_req, sampling, cancel,
+                 mcp_names):
+    """Service.run with the MCP tools executed here: the model writes a call to an MCP tool, the server runs it, adds
+    the call and its result to the conversation and lets the model continue - up to `max_rounds` times.  Yields what
+    Service.run yields (text, thinking, the request's own tool calls) plus ("mcp", {...}) for the tool activity, and
+    one ("done", ...) at the very end with the output tokens of every round.
+
+    `mcp_names`: the MCP tools this request offered; any other call is one of the request's own tools and ends the
+    turn as always (the client answers it).  MCP calls written in the same answer are then not run (their results
+    could not reach the model before the client's)."""
+    max_rounds = int(hub.settings["max_rounds"])
+    total, rounds, done = 0, 0, None
+    messages = list(messages)
+    while True:
+        text, reasoning, calls, own_calls = [], [], [], 0
+        for kind, x in svc.run(ids, thinking, tools, max_new, sampling, cancel):
+            if kind == "done":
+                done = x
+                continue
+            if kind == "event":
+                ev: Event = x
+                if ev.call is not None and ev.call.name in mcp_names:
+                    if ev.kind == "tool_start":          # the model has started writing a call: say so at once
+                        yield "mcp", {"event": "start", "id": ev.call.id, "name": ev.call.name}
+                    elif ev.kind == "tool_call":
+                        calls.append(ev.call)
+                    continue                             # its argument pieces are not streamed to the client
+                if ev.kind == "tool_call":
+                    own_calls += 1
+                elif ev.kind == "content":
+                    text.append(ev.text)
+                elif ev.kind == "reasoning":
+                    reasoning.append(ev.text)
+            yield kind, x
+        total += done["completion_tokens"]
+        run_them = calls and not own_calls and done["finish"] == "stop" and not cancel.is_set()
+        if run_them and rounds >= max_rounds:
+            yield "mcp", {"event": "limit", "max_rounds": max_rounds}
+            run_them = False
+        if not run_them:
+            for c in calls:                              # announced, never run: close them in the client's view
+                yield "mcp", {"event": "result", "id": c.id, "ok": False, "skipped": True, "text": "not run",
+                              "chars": 0, "truncated": False, "ms": 0}
+            break
+        rounds += 1
+        results = []
+        for c in calls:
+            s, tool = hub.routes().get(c.name, (None, c.name))
+            yield "mcp", {"event": "call", "id": c.id, "name": c.name, "server": s.name if s else None,
+                          "tool": tool, "arguments": c.arguments, "round": rounds}
+            # The call runs on a thread while this generator keeps yielding heartbeats: they reach the client as
+            # keep-alives, which is how a client that went away (the web app's Stop) is noticed during a slow tool.
+            box = {}
+
+            def work(c=c, box=box):
+                try:
+                    box["r"] = hub.call(c.name, c.arguments, cancel)
+                except McpCancelled:
+                    box["cancelled"] = True
+            worker = threading.Thread(target=work, daemon=True)
+            worker.start()
+            try:
+                while worker.is_alive():
+                    worker.join(1.0)
+                    if worker.is_alive():
+                        yield "ping", None
+            except GeneratorExit:
+                cancel.set()                             # the client is gone: stop the tool too
+                raise
+            if "r" not in box:
+                break
+            r = box["r"]
+            print(f"[strata] tool {c.name}: {'ok' if r['ok'] else 'error'}, {r['chars']:,} characters in "
+                  f"{r['ms'] / 1000:.1f} s{' (truncated for the model)' if r['truncated'] else ''}", flush=True)
+            results.append(r["text"])
+            yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")}}
+        if cancel.is_set() or len(results) < len(calls):
+            done = {**done, "finish": "cancel"}
+            break
+        messages.append({"role": "assistant", "content": "".join(text).strip(),
+                         **({"reasoning_content": "".join(reasoning).strip()} if reasoning else {}),
+                         "tool_calls": [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]})
+        messages += [{"role": "tool", "content": r} for r in results]
+        ids, thinking, max_new = svc.prepare(messages, tools, kw, max_req)
+    yield "done", {**done, "completion_tokens": total, "prompt_tokens": len(ids)}
+
+
 # ------------------------------------------------------------------------------------------------ OpenAI
-def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel):
+def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None):
+    """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
+    an empty delta and a `strata_mcp` field, which only the web app reads."""
     cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
 
     def chunk(delta, finish=None):
@@ -806,9 +907,13 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
     yield chunk({"role": "assistant", "content": ""})
     calls = 0
     streamed = {}                                  # tool call id -> index, for calls sent piece by piece
-    for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
+    for kind, x in run if run is not None else svc.run(ids, thinking, tools, max_new, req, cancel):
         if kind == "ping":
             yield None
+        elif kind == "mcp":
+            c = chunk({})
+            c["strata_mcp"] = x
+            yield c
         elif kind == "event":
             ev: Event = x
             if ev.kind == "reasoning" and ev.text:
@@ -832,16 +937,19 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
         else:
             finish = "tool_calls" if calls and x["finish"] == "stop" else {"cancel": "stop"}.get(x["finish"], x["finish"])
             last = chunk({}, finish)
-            last["usage"] = {"prompt_tokens": len(ids), "completion_tokens": x["completion_tokens"],
-                             "total_tokens": len(ids) + x["completion_tokens"]}
+            pt = x.get("prompt_tokens", len(ids))     # after MCP rounds: the last round's prompt
+            last["usage"] = {"prompt_tokens": pt, "completion_tokens": x["completion_tokens"],
+                             "total_tokens": pt + x["completion_tokens"]}
             yield last
 
 
 def openai_collect(chunks) -> dict:
-    content, reasoning, by_index, last = [], [], {}, None
+    content, reasoning, by_index, last, mcp = [], [], {}, None, []
     for c in chunks:
         if c is None:                              # a heartbeat
             continue
+        if c.get("strata_mcp"):
+            mcp.append(c["strata_mcp"])
         d = c["choices"][0]["delta"]
         content.append(d.get("content") or "")
         reasoning.append(d.get("reasoning_content") or "")
@@ -859,6 +967,8 @@ def openai_collect(chunks) -> dict:
         msg["reasoning_content"] = "".join(reasoning)
     if calls:
         msg["tool_calls"] = calls
+    if mcp:
+        msg["strata_mcp"] = mcp
     return {"id": last["id"], "object": "chat.completion", "created": last["created"], "model": last["model"],
             "choices": [{"index": 0, "message": msg, "finish_reason": last["choices"][0]["finish_reason"]}],
             "usage": last["usage"]}
@@ -1024,6 +1134,11 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
                 return
+            if path == "/mcp":
+                # the MCP servers, their state and tools (the web app's switch and Monitor card)
+                if self._authorized():
+                    self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
+                return
             if path == "":
                 body = (ROOT / "serve" / "web" / "index.html").read_bytes()
                 self.send_response(200)
@@ -1071,17 +1186,22 @@ def make_handler(svc: Service):
             except EngineDied as e:                          # before the answer started (not streamed)
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
 
-        def _settings(self):
-            # They change what every client gets, so only the app's own page may set them: JSON only (a form or a
-            # "simple" cross-site request can't send it without a CORS preflight, which this server never grants),
-            # and no foreign Origin
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        def _own_page(self, what) -> bool:
+            """Only JSON (a form or a "simple" cross-site request can't send it without a CORS preflight, which this
+            server never grants) and no foreign Origin: a web page elsewhere must not change settings or run tools."""
             if not self.headers.get("Content-Type", "").startswith("application/json"):
                 self._json(415, {"error": {"message": "send application/json"}})
-                return
+                return False
             origin = self.headers.get("Origin")
             if origin and origin.split("://", 1)[-1] != self.headers.get("Host", ""):
-                self._json(403, {"error": {"message": "settings can only be changed from Strata's own page"}})
+                self._json(403, {"error": {"message": f"{what} only from Strata's own page"}})
+                return False
+            return True
+
+        def _settings(self):
+            # They change what every client gets, so only the app's own page may set them
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not self._own_page("settings can be changed"):
                 return
             try:
                 req = json.loads(body or b"{}")
@@ -1102,11 +1222,22 @@ def make_handler(svc: Service):
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
             messages, tools, kw = openai_to_messages(req)
-            max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest of the context
+            max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
+            use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
+            own = {t.get("name") for t in tools or []}
+            if use_mcp:
+                if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
+                    return
+                svc.mcp.wait(10)                                  # servers still starting (only right after start)
+                extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
+                use_mcp = bool(extra)
+                tools = (tools or []) + extra or None
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
-            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel)
+            run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
+                               {t["name"] for t in extra}) if use_mcp else None
+            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
             if not req.get("stream"):
                 return self._json(200, openai_collect(chunks))
             self._sse()
@@ -1319,7 +1450,9 @@ def main() -> int:
     ap.add_argument("--host", default=None,
                     help="the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices "
                          "on your network (set an API key); also \"host\" in the config")
-    ap.add_argument("--script", default="Thinking about it.</think>\n\nHello from the mock engine.")
+    ap.add_argument("--script", action="append",
+                    help="the mock engine's answer (default: a short greeting); given more than once, requests get "
+                         "them in turn and the last one repeats")
     ap.add_argument("--port", type=int, default=8095)
     ap.add_argument("--gpu", type=int, help="the GPU to run on, as nvidia-smi numbers them (also \"gpu\" in the config)")
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
@@ -1330,6 +1463,9 @@ def main() -> int:
                          "(default: reject with 400, like llama.cpp; also \"fit_max_tokens\": true in the config)")
     ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY", ""),
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
+    ap.add_argument("--mcp-config", help="a JSON file with MCP servers in Claude Desktop's format ({\"mcpServers\": "
+                                         "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
+                                         "the config)")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
     if a.gpu is not None:
@@ -1355,6 +1491,7 @@ def main() -> int:
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
         tok = ST.Tokenizer(tokens, merges, types)
+    hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not cfg:
             ap.error("--engine strata needs --config")
@@ -1372,7 +1509,8 @@ def main() -> int:
         engine = StrataEngine(cfg["exe"], cfg["args"], cwd=cfg.get("cwd"), log=cfg.get("log"), env=env)
         warn_tight_ram(engine.info.get("arena_mib"))
     else:
-        engine, vision, sampling_defaults = MockEngine(tok, a.script), None, {}
+        engine, vision, sampling_defaults = MockEngine(tok, a.script or [
+            "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}
     # the model's own chat template (exported with its tokenizer), else the original model's
     tpl = tpath / "chat_template.jinja"
     svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
@@ -1390,6 +1528,13 @@ def main() -> int:
                       ", ".join(f"{k}={v}" for k, v in svc.shared.items()), flush=True)
         except (OSError, ValueError):
             svc.shared = {}
+    if hub is not None:
+        import atexit
+        svc.mcp = hub
+        print(f"[strata] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
+              f"chat: {', '.join(hub.servers)}", flush=True)
+        hub.start()
+        atexit.register(hub.close)                      # the servers Strata started end with it
     httpd = serve(svc, host=a.host, port=a.port)
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
@@ -1422,6 +1567,8 @@ def main() -> int:
             engine.close()
         if vision:
             vision.close()
+        if hub is not None:
+            hub.close()
     return 0
 
 
