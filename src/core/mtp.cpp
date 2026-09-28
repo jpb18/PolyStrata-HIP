@@ -68,13 +68,31 @@ strata::kernels::QsaShapes shapes_of(const ModelGeometry& g) {
     return s;
 }
 
+// 64-bit seek/tell on a `FILE*`: `fseek`/`ftell` take a 32-bit `long` on Windows and would wrap past 2 GiB.
+#if defined(_WIN32)
+#define STRATA_FILE_SEEK64(f, o, w) _fseeki64((f), (long long) (o), (w))
+#define STRATA_FILE_TELL64(f) _ftelli64(f)
+#else
+#define STRATA_FILE_SEEK64(f, o, w) fseeko((f), (off_t) (o), (w))
+#define STRATA_FILE_TELL64(f) ftello(f)
+#endif
+
 bool read_file(const std::string& path, std::vector<uint8_t>& out) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    const std::streamsize n = f.tellg();
-    f.seekg(0);
+    // Loader fix (0.1.15+loaderfix.2): `ifstream::read` reaches the disk as 4095-byte reads on MSVC - the same
+    // split `load_experts_ranges` had - so the drafter's 111 MiB dense blob paid 4 KiB per operation on a cold
+    // start.  `fread` passes a request bigger than the stream buffer straight to `ReadFile()`.
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) return false;
+    // A `FILE*` has no destructor and the short-read path below returns early: the guard closes on every path.
+    struct Closer {
+        FILE* f;
+        ~Closer() { if (f != nullptr) std::fclose(f); }
+    } closer{f};
+    if (STRATA_FILE_SEEK64(f, 0, SEEK_END) != 0) return false;
+    const long long n = (long long) STRATA_FILE_TELL64(f);
+    if (n < 0 || STRATA_FILE_SEEK64(f, 0, SEEK_SET) != 0) return false;
     out.resize((size_t) n);
-    return (bool) f.read((char*) out.data(), n);
+    return n == 0 || std::fread(out.data(), 1, (size_t) n, f) == (size_t) n;
 }
 
 }  // namespace
@@ -116,6 +134,9 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     max_t_ = max_t;
     rt_dir_ = rt_dir;
     if (max_t < 1 || max_t > strata::kernels::kVerifyMaxT) { err = "mtp: max_t out of range"; return false; }
+    // Loader fix (0.1.15+loaderfix.2): the two reads below are the whole “drafter files” cost; reporting
+    // them apart from the rest of the stage is what makes the next regression visible.
+    const auto t_files = std::chrono::steady_clock::now();
     // ---- the index and the dense weights
     {
         std::ifstream idx(rt_dir + "/dense.txt");
@@ -138,13 +159,19 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     // ---- the 512 routed experts, one blob each
     {
         const uint64_t bytes = (uint64_t) g.n_expert * strata::kernels::cpu::BLOB;
-        std::ifstream f(rt_dir + "/experts.bin", std::ios::binary);
-        if (!f) { err = "mtp: cannot open experts.bin"; return false; }
+        // Loader fix (0.1.15+loaderfix.2): each 64 MiB read below reached the disk as ~16k 4095-byte reads under
+        // MSVC's `basic_filebuf::xsgetn`, which is what made 675 MiB of drafter experts take minutes.
+        FILE* f = std::fopen((rt_dir + "/experts.bin").c_str(), "rb");
+        if (f == nullptr) { err = "mtp: cannot open experts.bin"; return false; }
+        struct Closer {
+            FILE* f;
+            ~Closer() { if (f != nullptr) std::fclose(f); }
+        } closer{f};
         if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
         std::vector<uint8_t> chunk(64u << 20);
         for (uint64_t off = 0; off < bytes;) {
             const uint64_t n = std::min<uint64_t>(chunk.size(), bytes - off);
-            if (!f.read((char*) chunk.data(), (std::streamsize) n)) { err = "mtp: experts.bin is truncated"; return false; }
+            if (std::fread(chunk.data(), 1, (size_t) n, f) != (size_t) n) { err = "mtp: experts.bin is truncated"; return false; }
             cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice);
             off += n;
         }
@@ -236,9 +263,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         cudaMemcpy(ident_, id.data(), id.size() * 4, cudaMemcpyHostToDevice);
     }
     if (cudaStreamCreateWithFlags(&cs_, cudaStreamNonBlocking) != cudaSuccess) { err = "mtp: stream"; return false; }
-    std::fprintf(stderr, "strata mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f, dense %.0f)\n",
+    const double files_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_files).count();
+    std::fprintf(stderr, "strata mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f, dense %.0f), files read in %.2f s (%.0f MiB/s)\n",
                  (double) vram_ / 1048576.0, (double) g.n_expert * strata::kernels::cpu::BLOB / 1048576.0,
-                 (double) tensors_.back().off / 1048576.0);
+                 (double) tensors_.back().off / 1048576.0, files_s,
+                 files_s > 0 ? ((double) g.n_expert * strata::kernels::cpu::BLOB + (double) tensors_.back().off) /
+                                   1048576.0 / files_s : 0.0);
     return true;
 }
 
