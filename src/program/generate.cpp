@@ -264,6 +264,9 @@ struct Options {
     int prompt_cache = 6;
     /// --serve: also keep a checkpoint every N freshly read prompt tokens (0 = only at the last turn boundary)
     int64_t prompt_cache_every = 16384;
+    /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
+    /// prompt, which every chat of the same client shares - when that is at least N tokens (0 = never)
+    int64_t prompt_cache_root = 2048;
     /// --serve: the token that opens a chat turn (<|im_start|>).  The last one in a prompt is where the chat's
     /// history ends and the new assistant turn begins, which is the checkpoint the next request can reuse.
     int64_t turn_token = 248045;
@@ -919,6 +922,7 @@ int main(int argc, char** argv) {
         else if (a == "--vision") o.vision = true;
         else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
+        else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
         else if (a == "--short-read") o.short_read = std::max(0LL, std::atoll(next("--short-read")));
         else if (a == "--suffix-draft") o.suffix_draft = std::max(0, std::atoi(next("--suffix-draft")));
@@ -3088,8 +3092,20 @@ int main(int argc, char** argv) {
             if (o.prompt_cache > 0 && o.turn_token >= 0)
                 for (int64_t i = n - 1; i > resume; --i)
                     if (ids[(size_t) i] == o.turn_token) { turn_at = i; break; }
+            // A prompt read from token 0 also stops at its FIRST turn boundary: the end of the system prompt (with
+            // the tools), which every new chat of the same client shares.  That checkpoint becomes the chain's root,
+            // which the retention policy pins (conv_cache.hpp), so the next new chat reads only what comes after it.
+            // (PR #65, code-martin.)  Only for a system prompt of --prompt-cache-root tokens or more: a small one
+            // is cheaper to read again than the extra part costs (~0.3 s).
+            int64_t root_at = -1;
+            if (o.prompt_cache > 0 && o.turn_token >= 0 && o.prompt_cache_root > 0 && read_from == 0)
+                for (int64_t i = 1; i < turn_at; ++i)
+                    if (ids[(size_t) i] == o.turn_token) {
+                        if (i >= o.prompt_cache_root) root_at = i;
+                        break;
+                    }
             int64_t at = read_from;
-            for (const int64_t to : {reread_to, turn_at, n - 1}) {
+            for (const int64_t to : {reread_to, root_at, turn_at, n - 1}) {
                 if (to <= at) continue;
                 const bool win = windows_ok(at, to);
                 if (win && !refill(err)) {
@@ -3118,7 +3134,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 at = to;
-                if (to == turn_at && !checkpoint_at(to)) {
+                if ((to == turn_at || to == root_at) && !checkpoint_at(to)) {
                     std::printf("ERR saving a conversation checkpoint failed\n");
                     return 1;
                 }

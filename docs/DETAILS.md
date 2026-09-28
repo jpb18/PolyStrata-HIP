@@ -313,8 +313,10 @@ live session, or one of the checkpoints it keeps in RAM (up to 6, ~118 MB each, 
 assistant turn and every 16K prompt tokens). A checkpoint is used only when the prompt starts with exactly its tokens
 and pictures. The oldest checkpoint - in practice the end of the system prompt, which every chat of the same client
 shares - is kept for good while the rest rotates by least recent use, so a NEW chat that shares that prefix starts
-reading after it instead of from token 0. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`,
-`--turn-token ID`.
+reading after it instead of from token 0. A prompt read from the start is also checkpointed at the end of its system
+prompt when that is 2,048 tokens or more (engine 0.1.20; PR #62 + #65), so that root exists for agent clients with long
+system prompts and tool lists. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`,
+`--prompt-cache-root N` (0 = no system-prompt checkpoint), `--turn-token ID`.
 
 **Current limits (v1):** one request at a time, and one conversation's history in the KV cache at a time (switching
 between two chats re-reads the part where they diverge; the shared prefix, such as the system prompt, is reused); images
