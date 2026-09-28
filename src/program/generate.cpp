@@ -257,6 +257,8 @@ struct Options {
     bool stop_eos = false;
     std::vector<int64_t> eos_ids = {248044, 248046};
     bool spec_split = false;   ///< opt-in split verify window (the overlap study: exact, ~7% slower)
+    /// --serve: run layers [0, K) and [K, n_layers) as two verify stages (multi-GPU layer split; 0 = off)
+    int64_t layer_split = 0;
     /// Plan v0.3 P8: stay resident and take requests on stdin (see the --serve block in main).
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
@@ -506,6 +508,20 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, int64_t 
     strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
     t->cpu_ms += std::chrono::duration<double, std::milli>(Clock::now() - a).count();
     ++t->calls;
+}
+
+/// Layer split: both verify stages share one Drive (its counters, PCIe share, failure flags); the GPU plan the
+/// pool publishes goes to the verifier that runs the layer.
+struct SplitDrive {
+    Drive* base = nullptr;
+    strata::core::GpuPlanSink* plan[2] = {};
+    int64_t split = 0;
+};
+void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k, float* out,
+                      int64_t layer) {
+    SplitDrive* s = (SplitDrive*) user;
+    s->base->d.plan = s->plan[layer < s->split ? 0 : 1];
+    drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
 }
 
 // ---- issue #31: what the watchdog prints before it stops a stalled engine
@@ -931,6 +947,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
         else if (a == "--stop-eos") o.stop_eos = true;
         else if (a == "--spec-split") o.spec_split = true;
+        else if (a == "--layer-split") o.layer_split = std::atoll(next("--layer-split"));
         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
         else if (a == "--serve") o.serve = true;
         else if (a == "--vision") o.vision = true;
@@ -2593,11 +2610,52 @@ int main(int argc, char** argv) {
         vh.d_res = thits.d_res;
         vh.cache_base = thits.cache_base;
         vh.blob = thits.blob;
+        // Layer split (multi-GPU, v1: both stages on this device, sharing its weights, session and expert cache):
+        // `ver` runs layers [0, K) and hands its residual to `ver_b`, which runs the rest and the head.  The
+        // hand-off is mapped pinned memory, portable so a stage on another device can read it.
+        strata::core::Verifier ver_b;
+        SplitDrive split_drive;
+        float* handoff_d = nullptr;
+        if (o.layer_split != 0) {
+            if (o.layer_split < 2 || o.layer_split >= g.n_layers) {
+                std::fprintf(stderr, "strata serve: --layer-split must be 2..%lld\n", (long long) (g.n_layers - 1));
+                return 1;
+            }
+            float* handoff_h = nullptr;
+            const size_t hb = (size_t) strata::kernels::kVerifyMaxT *
+                              (size_t) strata::core::Verifier::handoff_floats(g) * sizeof(float);
+            if (cudaHostAlloc((void**) &handoff_h, hb, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+                cudaHostGetDevicePointer((void**) &handoff_d, handoff_h, 0) != cudaSuccess) {
+                std::fprintf(stderr, "strata serve: the layer-split hand-off allocation failed\n");
+                return 1;
+            }
+            std::memset(handoff_h, 0, hb);
+            ver.set_stage(0, o.layer_split, nullptr, handoff_d);
+            ver_b.set_stage(o.layer_split, -1, handoff_d, nullptr);
+            if (!ver_b.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
+                std::fprintf(stderr, "strata serve: layer split, stage 2: %s\n", err.c_str());
+                return 1;
+            }
+            split_drive.base = &drive;
+            split_drive.split = o.layer_split;
+            ver.set_next(&ver_b, &split_drive);
+            std::fprintf(stderr, "strata serve: layer split: layers 0-%lld, then %lld-%lld (one hand-off per window)\n",
+                         (long long) (o.layer_split - 1), (long long) o.layer_split, (long long) (g.n_layers - 1));
+        }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err) ||
             !mtp.bind(wt, &native_head, ver.final_R_all(), err)) {
             std::fprintf(stderr, "strata serve: %s\n", err.c_str());
             return 1;
         }
+        if (o.layer_split != 0) {
+            split_drive.plan[0] = ver.plan_sink();
+            split_drive.plan[1] = ver_b.plan_sink();
+            ver_b.set_split(o.spec_split);
+            ver_b.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : 2);
+        }
+        // the pool the verify windows call: with a layer split, the wrapper that routes each layer's GPU plan
+        const strata::core::PoolMultiFn win_pool_fn = o.layer_split != 0 ? &drive_pool_split : &drive_pool_multi;
+        void* const win_pool_user = o.layer_split != 0 ? (void*) &split_drive : (void*) &drive;
         mem_mark("the verifier and the drafter's binding");
         ver.set_split(o.spec_split);
         // auto: the copy kernel for every pack.  DMA (the native packs' default until 0.1.13) has the host call
@@ -3144,7 +3202,7 @@ int main(int argc, char** argv) {
                     drive.d.layers = 0;
                     drive.d.experts = 0;
                     drive.d.failed = false;
-                    if (!ver.run(T, win.data(), q, &drive_pool_multi, &drive, outw.data(), e) || drive.d.failed) {
+                    if (!ver.run(T, win.data(), q, win_pool_fn, win_pool_user, outw.data(), e) || drive.d.failed) {
                         if (drive.d.failed && drive.d.fail) e = drive.d.fail;
                         return false;
                     }
@@ -3345,7 +3403,7 @@ int main(int argc, char** argv) {
                                cudaMemcpyHostToDevice);
                 }
                 tr("window", p, T);
-                if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err) || drive.d.failed) {
+                if (!ver.run(T, window.data(), p, win_pool_fn, win_pool_user, outv.data(), err) || drive.d.failed) {
                     std::printf("ERR %s\n", drive.d.failed && drive.d.fail ? drive.d.fail : err.c_str());
                     return 1;
                 }
