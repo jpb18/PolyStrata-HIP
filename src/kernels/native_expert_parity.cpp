@@ -132,8 +132,14 @@ int main(int argc, char** argv) {
                     float* gp[NT];
                     for (int k = 0; k < NT; ++k) gp[k] = g.data() + k * FF;
                     (is512 ? cpu::iq512_rows : cpu::iq256_rows)(f.gu_type, blob.data(), f.gu_row, (int) H, a, NT, gp, 0, (int) FF);
+                    const double rg = rel(g, gref);
                     std::printf("          %s %s gate rows vs ggml vec_dot: rel %.2e\n",
-                                ggml_type_name((ggml_type) f.gu_type), tag, rel(g, gref));
+                                ggml_type_name((ggml_type) f.gu_type), tag, rg);
+                    if (rg > 1e-5) {   // ggml's own vec_dot is the reference: above 1e-5 it is a real mismatch,
+                        std::printf("          %s %s gate rows MISMATCH (rel %.2e > 1e-5)\n",
+                                    ggml_type_name((ggml_type) f.gu_type), tag, rg);   // not rounding (measured 3e-8)
+                        ++failures;
+                    }
                     float* f1[1] = {ffp[0]};
                     const int it = 50;
                     const auto gu = is512 ? cpu::iq512_gu_rows : cpu::iq256_gu_rows;
@@ -177,16 +183,21 @@ int main(int argc, char** argv) {
             if (f.d_type == 20) {
                 // (b3) the IQ4_NL multi-token AVX-2 kernel the pool now uses for IQ4_NL down projections,
                 // against ggml-cpu's single-token vec_dot on the SAME Q8_0 activations (h), plus timing.
-                std::vector<float> alt((size_t) NT * H), ref((size_t) NT * H);
+                std::vector<float> alt((size_t) NT * H), refd((size_t) NT * H);
                 float* altp[NT];
                 for (int k = 0; k < NT; ++k) altp[k] = alt.data() + k * H;
                 cpu::iq4nl256_down_rows(blob.data() + f.down_off, f.d_row, (int) FF, hp, NT, altp, 0, (int) H);
                 const auto* tdc = ggml_get_type_traits_cpu((ggml_type) f.d_type);
                 for (int k = 0; k < NT; ++k)
                     for (int64_t r = 0; r < H; ++r)
-                        tdc->vec_dot((int) FF, ref.data() + k * H + r, 0,
+                        tdc->vec_dot((int) FF, refd.data() + k * H + r, 0,
                                      blob.data() + f.down_off + (size_t) r * f.d_row, 0, hp[k], 0, 1);
-                std::printf("          iq4_nl AVX-2 multi-token down vs ggml down: rel %.2e\n", rel(alt, ref));
+                const double rdn = rel(alt, refd);
+                std::printf("          iq4_nl AVX-2 multi-token down vs ggml down: rel %.2e\n", rdn);
+                if (rdn > 1e-5) {   // measured 1e-7; same reasoning as the gate/up rows above
+                    std::printf("          iq4_nl down MISMATCH (rel %.2e > 1e-5)\n", rdn);
+                    ++failures;
+                }
                 const int it = 50;
                 const auto t0 = std::chrono::steady_clock::now();
                 for (int i = 0; i < it; ++i)
@@ -195,7 +206,7 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < it; ++i)
                     for (int k = 0; k < NT; ++k)
                         for (int64_t r = 0; r < H; ++r)
-                            tdc->vec_dot((int) FF, ref.data() + k * H + r, 0,
+                            tdc->vec_dot((int) FF, refd.data() + k * H + r, 0,
                                         blob.data() + f.down_off + (size_t) r * f.d_row, 0, hp[k], 0, 1);
                 const auto t2 = std::chrono::steady_clock::now();
                 const double usn = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
