@@ -1166,7 +1166,9 @@ int main(int argc, char** argv) {
         if (!native_pack) {
             o.pcie_frac = base;
         } else if (bw > 0.0) {
-            o.pcie_frac = bw >= 20.0 ? base : std::min(base, std::max(0.05, base * (bw / 26.0)));
+            // below ~4 GB/s (an x1 link: ~0.9 GB/s) a missed expert's 1.4 MB takes longer to cross than the CPU
+            // pool takes to compute it, so none of them go over the link
+            o.pcie_frac = bw >= 20.0 ? base : bw < 4.0 ? 0.0 : std::min(base, std::max(0.05, base * (bw / 26.0)));
             std::fprintf(stderr, "strata generate: PCIe probe: %.1f GB/s host->device -> pcie_frac %.2f (default %.2f)\n",
                          bw, o.pcie_frac, base);
         } else {
