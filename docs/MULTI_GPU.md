@@ -64,4 +64,22 @@ into the card that owns the layer.
 
 ## Measured
 
-See `bench/results/2026-09-29-layer-split/` for the full runs.
+The Coder on an RTX 5080 + RTX 3090 (Ryzen 9 9950X3D), 32K context; details in
+`bench/results/2026-09-29-layer-split/`:
+
+| | Prompt 16K / 28K tok/s | Decode story / code tok/s |
+|---|---|---|
+| 5080 alone | 1,726-2,017 / 1,970 | 83-87 / 88-105 |
+| 5080 + 3090, best split (K=26) | 2,039 / 2,357 | 84 / 110 |
+| 5080 + 3090, auto (K=22) | 2,037 / 2,073 | 80 / 109 |
+
+- **Prompts gain the most** (+18-20%): each card reads its own layers of the chunk while the other reads the next.
+- **Decode is on par with the faster card alone**, and ahead on code. Once both caches hold nearly every routed
+  expert, the per-layer GPU time decides.
+- **Correctness:** one GPU is byte-identical to 0.1.20, and the hand-off itself is bit-exact.
+
+**Which cards and in what order:**
+- Put the fastest card first; auto gives it as many layers as its cache allows.
+- Leave out a much slower card when two already hold the model. An RTX 2080 Ti as a third card made the 5080 +
+  3090 pair slower (68 / 90 tok/s decode): every extra card costs its own round per window.
+- More cards pay off when the model's routed experts do not fit the faster ones.
