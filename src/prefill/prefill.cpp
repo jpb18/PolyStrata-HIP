@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <atomic>
 #include <condition_variable>
@@ -376,6 +377,10 @@ uint64_t qsa_set_bytes(size_t T, int64_t cap, int64_t max_blocks, int64_t sel_ba
 // is converted to GGUF Q2_0 blocks on the gather), whether any layer keeps the FP16 path (IQ1_M), and the largest
 // gate/up and down matrices a group buffer slot holds.  STRATA_PREFILL_MMQ=0: the FP16 path everywhere (the A/B).
 constexpr int MMQ_GROUP = 16;                  // experts per MMQ launch (the gather is per expert, as blobs arrive)
+// MMQ reads up to one 256-value tile past a matrix's last row when the row length is not a multiple of it (the down
+// product: 640 values).  Those bytes meet zero activations, which is harmless only if they decode to finite numbers -
+// llama.cpp zero-pads after every tensor, and so does a group buffer: this many zeroed bytes follow its last expert.
+constexpr size_t MMQ_TAIL = 4096;
 struct MmqPlan {
     bool any = false, fallback = true;
     std::vector<char> layer;                   // per layer: MMQ
@@ -548,8 +553,8 @@ bool Prefill::carve(size_t T, void* alloc) {
         const MmqPlan& mp = mmq_plan();
         m.ids_identity = o.take<int32_t>(T * K, ok);
         m.bounds_dev = o.take<int32_t>((size_t) (2 * (NE + NE / MMQ_GROUP + 2)), ok);
-        m.grp_gu = o.take<uint8_t>(MMQ_GROUP * mp.gu_max, ok);
-        m.grp_d = o.take<uint8_t>(MMQ_GROUP * mp.d_max, ok);
+        m.grp_gu = o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
+        m.grp_d = o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
         if (ok) mmq::iota(m.ids_identity, (int64_t) (T * K), m.cs);
         if (!m.mmq_ctx) m.mmq_ctx = std::make_unique<mmq::Context>();
     }
@@ -618,8 +623,8 @@ uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::Session
         const MmqPlan& mp = mmq_plan();
         o.take<int32_t>(T * K, ok);
         o.take<int32_t>((size_t) (2 * (NE + NE / MMQ_GROUP + 2)), ok);
-        o.take<uint8_t>(MMQ_GROUP * mp.gu_max, ok);
-        o.take<uint8_t>(MMQ_GROUP * mp.d_max, ok);
+        o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
+        o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
     }
     for (int i = 0; i < ring_slots(T); ++i) o.take<uint8_t>((size_t) MAXBLOB(), ok);
     f(T * N);
@@ -1218,6 +1223,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             int64_t maxr = 0;
                             for (size_t i = j0; i <= j; ++i) maxr = std::max<int64_t>(maxr, m.cnt[(size_t) order[i]]);
                             pt.mark(kPfGemmGU, cs);
+                            // the zeroed tail after the group's last expert (see MMQ_TAIL)
+                            cudaMemsetAsync(m.grp_gu + (size_t) ngx * mmq_gub, 0, MMQ_TAIL, m.cs);
+                            cudaMemsetAsync(m.grp_d + (size_t) ngx * mmq_db, 0, MMQ_TAIL, m.cs);
                             mmq::Product gu;
                             gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
                             gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
@@ -1302,6 +1310,27 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     }
                     pt.mark(kPfCombine, cs);
                     moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs);
+                    // debug: STRATA_DBG_NAN=1 reports the first layer of a chunk whose MoE produced non-finite values
+                    if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {
+                        cudaStreamSynchronize(m.cs);
+                        auto bad = [&](const float* d, int64_t n) {
+                            std::vector<float> h((size_t) n);
+                            cudaMemcpy(h.data(), d, (size_t) n * 4, cudaMemcpyDeviceToHost);
+                            int64_t c = 0;
+                            for (float v : h) c += !std::isfinite(v);
+                            return c;
+                        };
+                        const int64_t bgu = bad(m.GU, T * K * 1280), bdm = bad(m.Dm, T * K * N), bbo = bad(m.bo, T * N);
+                        const int64_t bh = m.H ? bad(m.H, T * K * 640) : -1;
+                        static int64_t reported = -1;
+                        if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
+                            reported = stats_.chunks;
+                            std::fprintf(stderr, "strata dbg: layer %lld (mmq %d, types %d/%d, %zu experts): non-finite GU %lld "
+                                         "H %lld Dm %lld bo %lld of T %lld\n", (long long) l, (int) use_mmq, mmq_gt, mmq_dt,
+                                         order.size(), (long long) bgu, (long long) bh, (long long) bdm, (long long) bbo,
+                                         (long long) T);
+                        }
+                    }
                 }
                 // ---- the hyper-connection write of this half
                 gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
