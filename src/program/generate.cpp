@@ -42,6 +42,7 @@
 #include "strata/prefill/prefill.hpp"
 #include "strata/core/native_dense.hpp"
 #include "strata/program/logits_selection.hpp"
+#include "strata/program/conv_cache.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/kernels/cvec.hpp"
@@ -622,6 +623,7 @@ struct ConvCheckpoint {
     std::vector<int32_t> ids;     ///< the tokens this state has consumed
     std::vector<ImgKey> imgs;     ///< the images among them
     std::vector<uint8_t> gdn, ple, tails;
+    uint64_t used = 0;            ///< last-use stamp for the retention policy (conv_cache.hpp)
 };
 
 uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ull) {
@@ -2367,11 +2369,16 @@ int main(int argc, char** argv) {
         std::vector<int64_t> cur;
         // ---- the conversation cache (see ConvCheckpoint).  `live` is what the session holds right now: the tokens
         // it has consumed, so a request that starts with exactly them continues without any copy.  `checks` are the
-        // saved points; every one of them is a prefix of `live` (the loop drops the rest).
+        // saved points; every one of them is a prefix of `live` (the loop drops the rest), so they form a chain -
+        // the radix cache's tree collapsed onto the one branch of history whose cells the session holds.  The
+        // chain's root is the deepest point every request so far shared (the end of the system prompt, in
+        // practice); the retention policy pins it and rotates the rest LRU (conv_cache.hpp), so a NEW chat that
+        // shares that prefix mounts through it instead of reading it again.
         std::vector<int32_t> live;
         std::vector<ImgKey> live_imgs, req_imgs;
         bool live_ok = false;
         std::vector<ConvCheckpoint> checks;
+        uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
         bool cvec_cached = true;   // the control vector's state the live session and the checkpoints were read with
         int64_t pp_total = 0, pp_from = 0, pp_next_check = 0;
         Clock::time_point pp_t0 = Clock::now();
@@ -2383,13 +2390,22 @@ int main(int argc, char** argv) {
         // a checkpoint of the state after `cur[0, L)`; false only when the copy itself failed
         auto checkpoint_at = [&](int64_t L) -> bool {
             if (o.prompt_cache <= 0 || L < 1) return true;
-            for (const ConvCheckpoint& c : checks) if ((int64_t) c.ids.size() == L) return true;
+            for (ConvCheckpoint& c : checks)
+                if ((int64_t) c.ids.size() == L) { c.used = ++check_clock; return true; }
             ConvCheckpoint c;
             c.ids.assign(cur.begin(), cur.begin() + L);
             c.imgs = imgs_below(req_imgs, L);
             if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(c, ss, g)) return false;
+            c.used = ++check_clock;
             checks.push_back(std::move(c));
-            while ((int) checks.size() > o.prompt_cache) checks.erase(checks.begin());   // the oldest goes first
+            while ((int) checks.size() > o.prompt_cache) {
+                std::vector<uint64_t> stamps;
+                stamps.reserve(checks.size());
+                for (const ConvCheckpoint& k : checks) stamps.push_back(k.used);
+                const size_t victim = strata::program::conv_cache::eviction_victim(stamps.data(), stamps.size(),
+                                                                                   o.prompt_cache);
+                checks.erase(checks.begin() + (std::ptrdiff_t) victim);
+            }
             return true;
         };
         sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
@@ -2805,8 +2821,9 @@ int main(int argc, char** argv) {
                 cudaStreamSynchronize(main_stream);
                 checks.clear();
             } else if (!from_live) {
-                const ConvCheckpoint* c = nullptr;
-                for (const ConvCheckpoint& k : checks) if ((int64_t) k.ids.size() == resume) c = &k;
+                ConvCheckpoint* c = nullptr;
+                for (ConvCheckpoint& k : checks) if ((int64_t) k.ids.size() == resume) c = &k;
+                if (c != nullptr) c->used = ++check_clock;   // mounting through it is the use LRU counts
                 static const bool reread = std::getenv("STRATA_CKPT_REREAD") != nullptr;
                 if (reread && c != nullptr) {
                     // THE CHECK OF THE CHECKPOINT: instead of restoring it, read its tokens again from position 0 in
