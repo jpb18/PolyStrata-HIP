@@ -191,7 +191,7 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
     }
 
     // the membership bitmap, as in `sampler_greedy_kernel` - see the cost note there.  The gate needs an
-    // EMPTY WINDOW too: the launch sizes the bitmap only when penalties are on, so a caller that hands over
+    // NON-EMPTY WINDOW too: the launch sizes the bitmap only when penalties are on, so a caller that hands over
     // a stale history buffer with `penalty_last_n == 0` must not touch it.
     extern __shared__ unsigned int penal_bits[];
     const int bits_words = (int) ((n_vocab + 31) / 32);

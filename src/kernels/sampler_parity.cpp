@@ -621,7 +621,7 @@ int main(int argc, char** argv) {
         bad += run("sampled chain: top_p then min_p", l, NT10, p, want);
     }
 
-    // ---- fixture 10: A STALE HISTORY WITH last_n = 0 IS INERT.  A caller can hand over a history buffer
+    // ---- fixture 11: A STALE HISTORY WITH last_n = 0 IS INERT (PR #59).  A caller can hand over a history buffer
     // from a previous penalised request while this request disables the penalties - the run must equal the
     // no-history run in both kernels, and the bitmap the launch did not size must stay untouched.
     {
