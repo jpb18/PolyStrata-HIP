@@ -12,6 +12,14 @@
 #include <mutex>
 #include <thread>
 
+// Loader fix: `fseek`/`ftell` are 32-bit on Windows by default (and the pack is 42.9 GB), and the 64-bit
+// spelling is not the same on the two platforms the engine builds for.
+#ifdef _WIN32
+#define STRATA_FSEEK64(f, o) _fseeki64((f), (long long) (o), SEEK_SET)
+#else
+#define STRATA_FSEEK64(f, o) fseeko((f), (off_t) (o), SEEK_SET)
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -228,11 +236,33 @@ LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<uint64_t> layer_hash((size_t) layers, 1469598103934665603ull);
     std::atomic<uint64_t> next_layer{0};
+    std::atomic<uint64_t> read_ns_sum{0};   // summed over the threads: see LoadStats::read_seconds
+    std::atomic<uint64_t> copy_ns_sum{0};
     std::mutex err_mu;
     std::string err;
 
     auto worker = [&]() {
         std::vector<uint8_t> buf((size_t) chunk);
+        // One handle per thread, seeked once per layer: a shared handle would need a lock around the seek and
+        // would serialise the very thing the threads are here to parallelise.  `fread` on a `FILE*` rather than
+        // `std::ifstream`: see the header - MSVC's `basic_filebuf::xsgetn` splits any request larger than
+        // `_INTERNAL_BUFSIZ - 1` into 4095-byte freads, which turned one 8 MiB chunk into ~2048 4 KiB reads.
+        // `fread` sees a request bigger than the stream buffer and passes it to `_read()`/
+        // `ReadFile()` unchanged, so the chunk size reaches the disk.  Buffered, not `FILE_FLAG_NO_BUFFERING`:
+        // the cache should still hold what it can.
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (f == nullptr) {
+            std::lock_guard<std::mutex> g(err_mu);
+            err = "cannot open " + path;
+            return;
+        }
+        // A `FILE*` has no destructor that closes it, and this function has early returns below (open, seek and
+        // short-read failures), so the guard is what keeps the closing correct on every path.
+        struct Closer {
+            FILE* f;
+            ~Closer() { if (f != nullptr) std::fclose(f); }
+        } closer{f};
+        uint64_t read_ns = 0, copy_ns = 0;
         for (;;) {
             const uint64_t L = next_layer.fetch_add(1);
             if (L >= layers) break;
@@ -240,30 +270,39 @@ LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::
             uint64_t remaining = layer_bytes[(size_t) L];
             uint64_t pos = 0;
             uint64_t h = 1469598103934665603ull;
-            // one handle per thread, seeked once per layer: a shared handle would need a lock around the seek
-            // and would serialise the very thing the threads are here to parallelise
-            std::ifstream f(path, std::ios::binary);
-            if (!f) {
+            // 64-bit seek: the pack is 42.9 GB, so the 32-bit `fseek` would wrap past 4 GiB
+            if (STRATA_FSEEK64(f, off) != 0) {
                 std::lock_guard<std::mutex> g(err_mu);
-                err = "cannot open " + path;
+                err = "seek to " + std::to_string(off) + " B failed in layer " + std::to_string(L);
                 return;
             }
-            f.seekg((std::streamoff) off);
             while (remaining > 0) {
                 const uint64_t n = remaining < chunk ? remaining : chunk;
-                f.read((char*) buf.data(), (std::streamsize) n);
-                if ((uint64_t) f.gcount() != n) {
+                const auto t_read = std::chrono::steady_clock::now();
+                const size_t got = std::fread(buf.data(), 1, (size_t) n, f);
+                read_ns += (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - t_read).count();
+                // A short read is EOF or an I/O error, never a silent zero fill: say WHERE and HOW SHORT, and
+                // keep going no further - the caller turns this into a refused load, not a wrong answer.
+                if (got != (size_t) n) {
                     std::lock_guard<std::mutex> g(err_mu);
-                    err = "short read in layer " + std::to_string(L);
+                    err = "short read in layer " + std::to_string(L) + ": got " + std::to_string(got) + " of "
+                          + std::to_string(n) + " B at offset " + std::to_string(off + pos)
+                          + (std::ferror(f) != 0 ? " (ferror set)" : "");
                     return;
                 }
+                const auto t_copy = std::chrono::steady_clock::now();
                 std::memcpy(dst + off + pos, buf.data(), (size_t) n);
                 h = fnv1a64(buf.data(), n, h);
+                copy_ns += (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - t_copy).count();
                 pos += n;
                 remaining -= n;
             }
             layer_hash[(size_t) L] = h;
         }
+        read_ns_sum.fetch_add(read_ns);
+        copy_ns_sum.fetch_add(copy_ns);
     };
 
     std::vector<std::thread> pool;
@@ -274,8 +313,12 @@ LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::
     if (!err.empty()) {
         std::fprintf(stderr, "load_experts: %s\n", err.c_str());
         st.seconds = -1.0;
+        st.ok = false;
+        st.error = err;
         return st;
     }
+    st.read_seconds = (double) read_ns_sum.load() / 1e9;
+    st.copy_seconds = (double) copy_ns_sum.load() / 1e9;
     st.layer_checksums = std::move(layer_hash);
     st.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return st;

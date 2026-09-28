@@ -606,6 +606,8 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
     for (auto& t : pool) t.join();
     if (bad) {
         st.seconds = -1.0;
+        st.ok = false;
+        st.error = "short read or unreadable shard while reading the experts from the GGUF";
         return st;
     }
     st.bytes = lay.total;
@@ -665,6 +667,11 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     }
     const LoadStats st = from_gguf ? load_experts_gguf(gguf_, a->data(), lay, threads)
                                    : load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
+    if (!st.ok) {
+        delete a;
+        err = "ArenaExpertSource: the expert load was refused: " + (st.error.empty() ? std::string("unknown") : st.error);
+        return false;
+    }
     if (st.bytes != want) {
         delete a;
         err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
@@ -693,6 +700,9 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     reads_ = 0;
     note_ = a->note;
     gib_per_s_ = st.gib_per_second();
+    load_seconds_ = st.seconds;
+    load_read_s_ = st.read_seconds;
+    load_copy_s_ = st.copy_seconds;
     return true;
 }
 
