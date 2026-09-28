@@ -3276,8 +3276,10 @@ int main(int argc, char** argv) {
                          prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0, (long long) produced_n, decode_ms,
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+            // the VRAM share of the experts the pool looked up while decoding; experts it sent over PCIe for the GPU
+            // to read (--pcie-frac) are in neither count
             if (req_look > 0) {
-                std::fprintf(stderr, "strata serve: decode expert cache hit rate: %.1f%% (%lld / %lld hits)\n",
+                std::fprintf(stderr, "strata serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)\n",
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look);
             }
