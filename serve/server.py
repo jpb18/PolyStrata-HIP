@@ -662,6 +662,10 @@ class Service:
                           f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
                           flush=True)
                     raise
+                except ValueError as e:                 # the engine's ERR line (it may have ended after it)
+                    finish = "error"
+                    print(f"[strata] the engine reported an error: {e}", flush=True)
+                    raise
                 finally:
                     gen.close()                         # STOP+drain to THIS request's DONE while still holding the
                     #                                     fifo, so a stop-token break can't leave the shared engine
@@ -1049,6 +1053,9 @@ def make_handler(svc: Service):
             except EngineDied as e:                          # mid-stream: say so, then end the stream properly
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+            except ValueError as e:                          # the engine's ERR after the stream started: the
+                err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _anthropic(self, req):
             req = svc.with_shared(req, "anthropic")
@@ -1075,6 +1082,9 @@ def make_handler(svc: Service):
                 events.close()
             except EngineDied as e:                          # mid-stream: Anthropic's error event
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
+            except ValueError as e:                          # the engine's ERR after the stream started
+                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler

@@ -662,14 +662,27 @@ def engine_version(exe: Path) -> tuple:
     return tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
 
 
+def is_wsl() -> bool:
+    return sys.platform.startswith("linux") and "microsoft" in platform.uname().release.lower()
+
+
 def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     """Configs written before v0.1.13 read prompts in fixed 2048-token chunks; the engine now picks the chunk
-    itself (`--prefill auto`: up to 8192, as the free VRAM allows - about 2x faster on long prompts)."""
+    itself (`--prefill auto`: up to 8192, as the free VRAM allows - about 2x faster on long prompts).  Under WSL,
+    KV streaming is dropped: its RAM copy must be pinned, and the driver pins only about 1 GB there."""
     a = cfg.get("args", [])
+    changed = False
     if "--prefill" in a and a[a.index("--prefill") + 1] == "2048" and engine_version(cfg["exe"]) >= (0, 1, 13):
         a[a.index("--prefill") + 1] = "auto"
-        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+        changed = True
         ok("prompt reading: the engine now picks its chunk size (--prefill auto)")
+    if is_wsl() and "--kv-resident" in a:
+        i = a.index("--kv-resident")
+        del a[i:i + 2]
+        changed = True
+        ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
+    if changed:
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     return cfg
 
 
@@ -976,7 +989,10 @@ def main() -> int:
     # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
     # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with 4-bit, so only when it fits.
     kv_ram_gb = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9   # 12 QSA layers + the draft layer
-    if ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
+    # the RAM copy must be pinned, and under WSL the NVIDIA driver pins only about 1 GB in all
+    if is_wsl() and ctx >= 65536:
+        ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
+    elif ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
         args += ["--kv-resident", "32768"]
         ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
     if vision != "none":
