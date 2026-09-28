@@ -181,7 +181,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     Impl& m = *impl_;
     m.wt = &wt; m.g = &g; m.ss = &ss; m.src = src; m.cache = cache; m.host_res = host_res;
     m.T = chunk; m.cs = (cudaStream_t) stream; m.stats = &stats_;
-    if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert != NE || ss.k != K) {
+    if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert < 1 || ss.k != K) {
         err = "prefill: geometry differs from the artifact's"; return false;
     }
     if (cudaStreamCreateWithFlags(&m.copy, cudaStreamNonBlocking) != cudaSuccess) { err = "prefill: copy stream"; return false; }
@@ -218,7 +218,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     m.max_blocks = ss.qsa_states[0].max_cells / s.idx_block + 2;
     m.sel_scores = o.take<float>((size_t) m.sel_batch * (size_t) m.max_blocks, ok);
     m.attn_scratch = o.take<float>((size_t) m.attn_batch * strata::kernels::qsa_decode_attn_scratch_floats(m.cap, s), ok);
-    m.logits = o.take<float>(T * NE, ok); m.w = o.take<float>(T * K, ok); m.ids = o.take<int32_t>(T * K, ok);
+    m.logits = o.take<float>(T * m.g->n_expert, ok); m.w = o.take<float>(T * K, ok); m.ids = o.take<int32_t>(T * K, ok);
     m.slot_dev = o.take<int32_t>(T * K, ok); m.src_dev = o.take<int32_t>(T * K, ok);
     m.Xs = o.take<uint16_t>(T * K * N, ok); m.GU = o.take<float>(T * K * 1280, ok);
     m.Hh = o.take<uint16_t>(T * K * 640, ok); m.Dm = o.take<float>(T * K * N, ok);
@@ -244,7 +244,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         else
             m.owned.push_back(m.ident_table);
     }
-    m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(NE); m.off.resize(NE + 1);
+    m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(m.g->n_expert); m.off.resize(m.g->n_expert + 1);
     m.ple_emb_host.resize(T * N); m.ple_rows.resize(T * strata::kernels::PLE_N_HEADS);
     if (!ok) { err = "prefill: device buffers for a chunk of " + std::to_string(chunk) + " tokens do not fit"; return false; }
     return true;
@@ -252,7 +252,6 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
 
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk) {
     // the same allocation sequence as `init`, counted
-    (void) g;
     const size_t T = (size_t) chunk;
     bool ok = true;
     Alloc o;
@@ -271,7 +270,7 @@ uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::Session
     const int64_t max_blocks = ss.qsa_states[0].max_cells / s.idx_block + 2;
     f(256 * (size_t) max_blocks);
     f(32 * strata::kernels::qsa_decode_attn_scratch_floats(cap, s));
-    f(T * NE); f(T * K); o.take<int32_t>(T * K, ok); o.take<int32_t>(T * K, ok); o.take<int32_t>(T * K, ok);
+    f(T * g.n_expert); f(T * K); o.take<int32_t>(T * K, ok); o.take<int32_t>(T * K, ok); o.take<int32_t>(T * K, ok);
     o.take<uint16_t>(T * K * N, ok); f(T * K * 1280); o.take<uint16_t>(T * K * 640, ok); f(T * K * N);
     f(T * 640); f(T * 640); o.take<uint16_t>(T * 640, ok); f(T * N); f(T);
     for (int i = 0; i < DQ; ++i) { o.take<uint16_t>(1280 * 2560, ok); o.take<uint16_t>(2560 * 640, ok); }
@@ -554,7 +553,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                           *wsd = need(v, "ffn_down_shexp.weight", err);
                     if (!wr || !wgi || !wsg || !wsu || !wsd) return false;
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err)) return false;
-                    route(m.logits, m.ids, m.w, T, m.cs);
+                    route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
                     // the shared expert and its scalar gate
                     if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                     if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
@@ -568,11 +567,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     std::fill(m.cnt.begin(), m.cnt.end(), 0);
                     for (int64_t i = 0; i < T * K; ++i) {
                         const int32_t e = m.ids_host[(size_t) i];
-                        if (e < 0 || e >= NE) { err = "prefill: routed id out of range"; return false; }
+                        if (e < 0 || e >= m.g->n_expert) { err = "prefill: routed id out of range"; return false; }
                         ++m.cnt[(size_t) e];
                     }
                     m.off[0] = 0;
-                    for (int64_t e = 0; e < NE; ++e) m.off[(size_t) e + 1] = m.off[(size_t) e] + m.cnt[(size_t) e];
+                    for (int64_t e = 0; e < m.g->n_expert; ++e) m.off[(size_t) e + 1] = m.off[(size_t) e] + m.cnt[(size_t) e];
                     std::vector<int32_t> fill(m.off.begin(), m.off.end() - 1);
                     for (int64_t i = 0; i < T * K; ++i) {
                         const int32_t e = m.ids_host[(size_t) i];
@@ -585,14 +584,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
                     // the experts, in id order: resident ones from VRAM, the others through the staging ring
                     std::vector<int32_t> order;
-                    for (int32_t e = 0; e < NE; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
+                    for (int32_t e = 0; e < m.g->n_expert; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
                     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
                     // Stage ahead: the copy stream moves blobs host -> device while the compute stream works.
                     int stage_next = 0;
                     std::vector<int> stage_of(order.size(), -1);
                     auto stage_one = [&](size_t j) -> bool {
                         const int32_t e = order[j];
-                        const bool resident = m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0;
+                        const bool resident = m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0;
                         if (resident) return true;
                         const int sl = stage_next;
                         stage_next = (stage_next + 1) % STAGE;
@@ -626,7 +625,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         const int32_t e = order[j];
                         const uint8_t* blob_dev = nullptr;
                         if (stage_of[j] < 0) {
-                            blob_dev = m.cache->device_slot(m.host_res[(size_t) l * NE + e]);
+                            blob_dev = m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]);
                             ++stats_.experts_resident;
                         } else {
                             cudaStreamWaitEvent(m.cs, m.copied[stage_of[j]], 0);
