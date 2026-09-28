@@ -159,17 +159,31 @@ attach `strata-<model>.log` from the Strata folder.
 
 ## How does it work?
 
-A model this big doesn't fit on a gaming graphics card. Strata splits the work between the parts of your PC:
+Models like this one normally run on servers with hundreds of gigabytes of graphics memory. Your graphics card has
+12-24 GB. Strata makes it fit by **sharing the work across your whole PC** - the same idea as a kitchen, where the
+things you use all the time stay on the counter and the rest waits in the pantry.
 
-<p align="center"><img src="docs/paper/tiers.svg" width="700" alt="how Strata splits the model between GPU, RAM and SSD"></p>
+<p align="center"><img src="docs/media/how-it-works.svg" width="860" alt="The model's 24,576 experts: the busiest on the graphics card, all of them in RAM, a lookup table on the SSD"></p>
 
-- **The GPU** runs the part of the model that is used for every word, plus the "experts" it needs most often.
-- **The RAM** holds all 24,576 experts, and **the CPU** computes the few the GPU doesn't have - at the same time as the GPU.
-- **The SSD** holds a big lookup table; the model reads a few rows of it per word.
-- **A small helper inside the model guesses the next words**, and Strata checks several guesses at once. That makes
-  it 1.6-1.8x faster than going word by word - and the answer is exactly the same.
+- **The model is a team of 24,576 small specialists ("experts"),** and each word it writes needs only 10 of them.
+  So it doesn't have to have all of them on the graphics card at once.
+- **Your graphics card** does the part of the work needed for every word, and keeps the few thousand experts that
+  are asked most often. It keeps learning which ones those are while you use it.
+- **Your RAM** holds every expert. When a word needs one the card doesn't have, **your processor** works on it -
+  at the same time as the graphics card, so neither waits for the other.
+- **Your SSD** holds a big lookup table; the model only reads a few small rows of it per word.
 
-The full story is in the [paper](docs/paper/Strata-Paper.pdf) and the [details](docs/DETAILS.md).
+<p align="center"><img src="docs/media/guess-and-check.svg" width="860" alt="A small helper guesses the next words; the big model checks them all at once and keeps the right ones"></p>
+
+- **Guess, then check.** A small, fast helper built into the model guesses the next few words, and the big model
+  checks all the guesses in one go. It keeps the ones it agrees with and writes the next word itself - so one step
+  often produces several words. The helper only guesses - the big model decides every word - so you get the same
+  quality answer, 1.6-1.8x sooner.
+- **Long texts are read in big pieces** (up to 8,192 tokens - pieces of words - at a time), which is why a long
+  document or code base is read at over 1,000 tokens per second.
+
+Want the full picture? The [details](docs/DETAILS.md#how-it-works) explain every part and its numbers, and the
+[paper](docs/paper/Strata-Paper.pdf) tells the whole story, with the measurements behind it.
 
 ## Credits
 
