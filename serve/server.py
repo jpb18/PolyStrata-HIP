@@ -441,7 +441,10 @@ class Service:
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
-        self.history = collections.deque(maxlen=30)     # the last finished requests, newest last (GET /metrics)
+        self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
+        # since the server started (the Monitor's totals, issue #35)
+        self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
+                       "prompt_ms": 0.0, "decode_ms": 0.0}
         self.status_lock = threading.Lock()
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
@@ -494,12 +497,13 @@ class Service:
             return 0.0
         return s["generated"] / max(1e-6, time.time() - s["first_token"])
 
-    def metrics(self) -> dict:
+    def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
         the hardware (with a minute of history per series)."""
         with self.status_lock:
             s = dict(self.status)
             hist = list(self.history)
+            totals = dict(self.totals)
         now = time.time()
         progress = getattr(self.engine, "progress", None)
         if s.get("busy") and s.get("first_token") is None:
@@ -519,7 +523,9 @@ class Service:
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
-        return {"engine": engine, "live": live, "requests": hist[::-1], "hardware": tel["now"], "hardware_static":
+        return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
+                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
 
     def prepare(self, messages, tools, kwargs, max_new=None):
@@ -679,6 +685,13 @@ class Service:
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                         "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                         if n and last.get("generated") and last.get("decode_ms") else None})
+                    t = self.totals
+                    t["requests"] += 1
+                    t["prompt_tokens"] += len(ids)
+                    t["reused"] += last.get("reused") or 0
+                    t["output_tokens"] += n
+                    t["prompt_ms"] += last.get("prompt_ms") or 0.0
+                    t["decode_ms"] += last.get("decode_ms") or 0.0
                     now = time.time()
                     el = now - self.status.get("started", now)
                     ft = self.status.get("first_token")
@@ -930,7 +943,8 @@ def make_handler(svc: Service):
                 return
             if path == "/metrics":
                 if self._authorized():
-                    self._json(200, svc.metrics())
+                    # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
+                    self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
             if path == "/settings":
                 if self._authorized():

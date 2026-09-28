@@ -143,9 +143,10 @@ function setMetric(key, value, unit, sub) {
 }
 
 let lastMetrics = null, metricsFailures = 0, keyWarned = false;
+let reqShowAll = false;   // the Monitor's request table: the last 12, or every one the server keeps (issue #35)
 async function poll() {
   try {
-    const r = await fetch("/metrics", {headers: headers()});
+    const r = await fetch(reqShowAll ? "/metrics?requests=all" : "/metrics", {headers: headers()});
     if (r.status === 401) {
       setPill("error", "API key needed");
       if (!keyWarned) { keyWarned = true; toast("warn", "API key needed", "This server needs a key: add it under About > Settings.", 6000); }
@@ -180,11 +181,20 @@ function render(m) {
     setPill("idle", "Idle");
   }
   if (live.queued > 0) setPill("queued", `${live.queued} queued`);
-  if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || []);
+  if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (tab === "about") renderAbout(eng, hw, st);
 }
 
-function renderMonitor(live, hw, st, eng, h, last, requests) {
+function renderTotals(t) {
+  if (!t || !t.requests) return "";
+  const since = new Date(t.since * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"});
+  const read = t.prompt_tokens - t.reused;
+  const pSpeed = t.prompt_ms > 0 && read > 0 ? ` at ${fmt(read / (t.prompt_ms / 1000))} tok/s` : "";
+  const oSpeed = t.decode_ms > 0 && t.output_tokens > 0 ? ` at ${fmt(t.output_tokens / (t.decode_ms / 1000), 1)} tok/s` : "";
+  return `Since ${since}: ${fmt(t.requests)} requests · ${fmt(read)} prompt tokens read${pSpeed} (${fmt(t.reused)} reused) · ` +
+         `${fmt(t.output_tokens)} written${oSpeed}`;
+}
+function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   // model state
   const on = live.queued > 0 ? "queued" : live.state;
   for (const b of document.querySelectorAll("#state-badges .st-badge")) b.classList.toggle("on", b.dataset.s === on || b.dataset.s === live.state);
@@ -268,7 +278,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests) {
   } else {
     const badge = {stop: ["", "Done"], length: ["", "Max tokens"], cancel: ["st-badge--queued", "Stopped"],
                    disconnect: ["st-badge--queued", "Closed"], error: ["st-badge--error", "Error"]};
-    body.innerHTML = requests.slice(0, 12).map((r) => {
+    body.innerHTML = requests.slice(0, reqShowAll ? requests.length : 12).map((r) => {
       const [cls, text] = badge[r.finish] || ["", r.finish || "–"];
       const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
       const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="experimental speed projection ${r.projection ? "on" : "off"}">${r.projection ? "ESP" : "stock"}</span>`;
@@ -277,6 +287,12 @@ function renderMonitor(live, hw, st, eng, h, last, requests) {
         <td class="num">${fmt(r.duration_s, 1)} s</td></tr>`;
     }).join("");
   }
+  const all = $("req-all");
+  kept = kept == null ? requests.length : kept;
+  all.hidden = kept <= 12;
+  all.textContent = reqShowAll ? "Show fewer" : `Show all (${kept})`;
+  $("req-wrap").classList.toggle("all", reqShowAll);
+  $("req-totals").textContent = renderTotals(totals);
 }
 
 function facts(el, rows) {
@@ -320,6 +336,7 @@ document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-copy]");
   if (b) copyText(b.dataset.copy, b);
 });
+$("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (lastMetrics) render(lastMetrics); });
 
 // ------------------------------------------------------------------ Markdown (escaped first, then formatted)
 function inline(s) {

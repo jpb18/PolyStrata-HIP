@@ -55,13 +55,38 @@ std::vector<int> physical_cores(bool skip_first) {
         }
     }
 #else
+    // The logical CPUs this process may run on, ONE PER PHYSICAL CORE (issue #40): SMT siblings share a core's
+    // load/store bandwidth, so a worker on each would put two workers on one core, as the Windows branch above
+    // explains.  sysfs names each CPU's (package, core); the first allowed CPU of each pair is kept, so a taskset
+    // that leaves out the first sibling still gets its core.  Without sysfs every allowed CPU counts, as before.
+    auto topo = [](int cpu, const char* what) -> long {
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/%s", cpu, what);
+        long v = -1;
+        if (std::FILE* f = std::fopen(path, "r")) {
+            if (std::fscanf(f, "%ld", &v) != 1) v = -1;
+            std::fclose(f);
+        }
+        return v;
+    };
+    std::vector<int> allowed;
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof set, &set) == 0) {
         for (int i = 0; i < CPU_SETSIZE; ++i)
-            if (CPU_ISSET(i, &set)) cores.push_back(i);
+            if (CPU_ISSET(i, &set)) allowed.push_back(i);
     } else {
-        for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) cores.push_back((int) i);
+        for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) allowed.push_back((int) i);
+    }
+    std::vector<std::pair<long, long>> seen;
+    for (int cpu : allowed) {
+        const long pkg = topo(cpu, "physical_package_id"), core = topo(cpu, "core_id");
+        if (pkg >= 0 && core >= 0) {
+            const std::pair<long, long> key{pkg, core};
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;   // an SMT sibling
+            seen.push_back(key);
+        }
+        cores.push_back(cpu);
     }
 #endif
     if (skip_first && !cores.empty()) cores.erase(cores.begin());

@@ -112,14 +112,16 @@
           <div class="st-progress" data-tone="warn"><div class="st-progress__bar" id="temp-bar" style="width:0%"></div></div>
         </div>
         <div class="st-card req-card">
-          <span class="card-title">Recent requests</span>
-          <div class="table-wrap">
+          <div class="req-head"><span class="card-title">Recent requests</span>
+            <button class="st-btn st-btn--secondary" id="req-all" hidden>Show all</button></div>
+          <div class="table-wrap" id="req-wrap">
             <table class="st-table">
               <thead><tr><th>Time</th><th>Status</th><th class="num">Prompt</th><th class="num">Reused</th><th class="num">Output</th>
                 <th class="num">Tok/s</th><th class="num">Duration</th></tr></thead>
               <tbody id="req-body"><tr><td colspan="7" class="muted">No requests yet</td></tr></tbody>
             </table>
           </div>
+          <p class="muted req-totals" id="req-totals"></p>
         </div>
       </div>
     </div>
