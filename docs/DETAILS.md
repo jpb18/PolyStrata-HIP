@@ -324,7 +324,8 @@ block at all a request without sampling keys decodes greedy. The penalties (`pre
 penalty is set) ride the same path; they count the tokens the request has consumed, so a repetition penalty
 suppresses what the model itself just said, not the prompt alone. Since engine 0.1.19 they apply to every token
 the speculative decoding checks at once, exactly as if it decoded one token at a time (before, only the first of
-each batch got them). `top_k` keeps at most 64 candidates: `0` ("off") or anything above 64 uses all 64.
+each batch got them). That makes requests with penalties 1-11% slower than in 0.1.18: the draft layer guesses
+without penalties, so more of its guesses are now rejected. Requests without penalties are unchanged. `top_k` keeps at most 64 candidates: `0` ("off") or anything above 64 uses all 64.
 
 ---
 

@@ -39,6 +39,9 @@ A card with more VRAM is faster, because more of the model fits on the GPU: an R
 100-140 tokens per second. All measurements, long-context numbers and estimates for other cards are in the
 [details](docs/DETAILS.md#speed-measured).
 
+Every PC is different: `START-HERE.bat --calibrate` measures a few engine settings on yours and keeps the fastest
+(about 5-10 minutes; on the PC above it made the Coder 7% faster).
+
 ## Which model should I pick?
 
 **The size** (the same model, compressed more or less):
