@@ -62,6 +62,9 @@ private:
     float* h_out_ = nullptr;
     void* h_meta_ = nullptr;
     float* d_x_ = nullptr;
+    float* z_x_ = nullptr;     ///< h_x_ as the helper GPU sees it (zero-copy: no input copy per layer)
+    float* z_out_ = nullptr;   ///< h_out_ as the helper GPU sees it (zero-copy: no result copy)
+    bool zero_copy_ = false;
     float* d_out_ = nullptr;
     uint8_t* d_q8_ = nullptr;
     float* d_scales_ = nullptr;

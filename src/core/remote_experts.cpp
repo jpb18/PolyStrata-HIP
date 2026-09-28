@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 namespace strata::core {
@@ -69,6 +70,12 @@ bool RemoteExperts::preflight(int device, double& free_gib, std::string& err) {
         err = "CUDA" + std::to_string(device) + " experts: CUDA device is not visible";
         return false;
     }
+    // The layer waits for this GPU on the CPU pool's critical path: spin instead of sleeping, whose wake-up
+    // costs more than a small expert batch takes (measured: ~0.3 ms per round trip on Windows).  Only possible
+    // before the device's context exists, so first thing; STRATA_REMOTE_SPIN=0 keeps the driver's default.
+    const char* spin = std::getenv("STRATA_REMOTE_SPIN");
+    if (!(spin && spin[0] == '0')) cudaInitDevice(device, cudaDeviceScheduleSpin | cudaDeviceMapHost, 0);
+    cudaGetLastError();
     DeviceScope scope(device);
     if (!scope.ok) { err = scope.error(device); return false; }
     size_t free_bytes = 0, total_bytes = 0;
@@ -177,8 +184,8 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         strata::kernels::native_expert_scratch_bytes(CAP, FF));
     const bool allocated =
         check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "stream", err, device) &&
-        check(cudaHostAlloc((void**) &h_x_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable), "input staging", err, device) &&
-        check(cudaHostAlloc((void**) &h_out_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable), "result staging", err, device) &&
+        check(cudaHostAlloc((void**) &h_x_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable | cudaHostAllocMapped), "input staging", err, device) &&
+        check(cudaHostAlloc((void**) &h_out_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable | cudaHostAllocMapped), "result staging", err, device) &&
         check(cudaHostAlloc(&h_meta_, sizeof(RemoteMeta), cudaHostAllocPortable), "metadata staging", err, device) &&
         check(cudaMalloc((void**) &d_x_, (size_t) CAP * H * sizeof(float)), "input", err, device) &&
         check(cudaMalloc((void**) &d_out_, (size_t) CAP * H * sizeof(float)), "result", err, device) &&
@@ -187,6 +194,13 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         check(cudaMalloc(&d_scratch_, scratch), "scratch", err, device) &&
         check(cudaMalloc(&d_meta_, sizeof(RemoteMeta)), "group metadata", err, device);
     if (!allocated) { close(); return false; }
+    // Zero-copy: the helper reads its input from, and writes its compact rows into, the pinned host buffers
+    // directly - two copies fewer per layer, each of which is a PCIe round trip.  STRATA_REMOTE_ZEROCOPY=0 copies.
+    const char* zc = std::getenv("STRATA_REMOTE_ZEROCOPY");
+    zero_copy_ = !(zc && zc[0] == '0') &&
+                 cudaHostGetDevicePointer((void**) &z_x_, h_x_, 0) == cudaSuccess &&
+                 cudaHostGetDevicePointer((void**) &z_out_, h_out_, 0) == cudaSuccess;
+    cudaGetLastError();
     auto* meta = (RemoteMeta*) d_meta_;
     d_ptr_ = meta->ptr;
     d_start_ = meta->start;
@@ -272,23 +286,23 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     groups_ = (int32_t) group_id_.size();
     const cudaStream_t s = stream_;
     const bool staged =
-        check(cudaMemcpyAsync(d_x_, h_x_, (size_t) n_tok * H * sizeof(float), cudaMemcpyHostToDevice, s), "copy input", err, device_) &&
+        (zero_copy_ || check(cudaMemcpyAsync(d_x_, h_x_, (size_t) n_tok * H * sizeof(float), cudaMemcpyHostToDevice, s), "copy input", err, device_)) &&
         check(cudaMemcpyAsync(d_meta_, h_meta_, sizeof(RemoteMeta), cudaMemcpyHostToDevice, s), "copy group metadata", err, device_);
     if (!staged) return false;
     const auto& lay = strata::kernels::cpu::expert_layout();
     if (lay.native) {
-        strata::kernels::quantize_q8_1_rows(d_x_, n_tok, H, d_q8_, s);
+        strata::kernels::quantize_q8_1_rows(zero_copy_ ? z_x_ : d_x_, n_tok, H, d_q8_, s);
         const auto& fmt = lay.fmt[(size_t) layer];
         auto L = strata::kernels::native_expert_layout(fmt.gu_type, fmt.d_type, fmt.n_embd, fmt.n_ff);
         strata::kernels::native_expert_grouped(L, d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
-                                               groups_, (int64_t) dst_.size(), d_q8_, d_scratch_, d_out_, s);
+                                               groups_, (int64_t) dst_.size(), d_q8_, d_scratch_, zero_copy_ ? z_out_ : d_out_, s);
     } else {
-        strata::kernels::quantize_q8_0_scaled(d_x_, d_q8_, d_scales_, n_tok * H, s);
+        strata::kernels::quantize_q8_0_scaled(zero_copy_ ? z_x_ : d_x_, d_q8_, d_scales_, n_tok * H, s);
         strata::kernels::moe_grouped_s2(d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
-                                        groups_, (int64_t) dst_.size(), d_q8_, d_scales_, d_scratch_, d_out_, s);
+                                        groups_, (int64_t) dst_.size(), d_q8_, d_scales_, d_scratch_, zero_copy_ ? z_out_ : d_out_, s);
     }
     const uint64_t compact_bytes = (uint64_t) dst_.size() * H * sizeof(float);
-    if (!check(cudaMemcpyAsync(h_out_, d_out_, (size_t) compact_bytes, cudaMemcpyDeviceToHost, s),
+    if (!zero_copy_ && !check(cudaMemcpyAsync(h_out_, d_out_, (size_t) compact_bytes, cudaMemcpyDeviceToHost, s),
                "copy results", err, device_)) return false;
     ++launched_layers_;
     returned_bytes_ += compact_bytes;
