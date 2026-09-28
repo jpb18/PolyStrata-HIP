@@ -11,26 +11,34 @@ New here? Start with the [README](../README.md) - it has everything you need to 
 
 ## Speed (measured)
 
-RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows. One code-agent prompt per length, 256 generated
-tokens, MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt).
+RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.14 with the settings setup writes
+(`--prefill auto`, 8-bit KV above 4K, KV streaming from 64K). One code-agent prompt per length, 256 generated tokens,
+MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt). The IQ2_XS row was
+measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 
 ### Prompt processing (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 389 | 539 | 571 | 561 | 543 | 496 |
-| **IQ2_XS** | 332 | 463 | 495 | 486 | 472 | 437 |
-| **IQ3_XXS** | 285 | 410 | 435 | 427 | 414 | - |
-| **IQ3_S** | 260 | 374 | 397 | - | 378 | - |
+| **Q2_0** | 494 | 1,007 | 1,308 | 1,294 | 1,208 | 967 |
+| **IQ2_XS** | 461 | 811 | 1,238 | 1,136 | 1,071 | 886 |
+| **IQ3_XXS** | 415 | 770 | 1,108 | 1,065 | 1,015 | - |
+| **IQ3_S** | 396 | 737 | 1,070 | 1,070 | 931 | - |
 
 ### Output (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 88.7 | 94.6 | 87.5 | 76.4 | 65.1 | 56.3 |
-| **IQ2_XS** | 82.0 | 78.0 | 65.3 | 63.7 | 52.0 | 48.0 |
-| **IQ3_XXS** | 64.6 | 65.6 | 57.3 | 54.4 | 44.8 | - |
-| **IQ3_S** | 51.2 | 54.4 | 51.1 | - | 42.2 | - |
+| **Q2_0** | 84.3 | 90.3 | 73.6 | 69.0 | 67.2 | 60.3 |
+| **IQ2_XS** | 74.4 | 73.8 | 71.5 | 64.3 | 59.8 | 52.8 |
+| **IQ3_XXS** | 60.3 | 62.1 | 51.4 | 50.0 | 45.8 | - |
+| **IQ3_S** | 51.5 | 51.6 | 48.2 | 48.8 | 40.5 | - |
+
+Output speed depends on the text as well: speculative decoding runs faster when more of the drafted tokens are
+accepted, so a different answer to the same prompt moves it by several percent. Run back to back on the 4K prompt,
+0.1.14 writes 88.5 tokens/s and 0.1.12 85.7. The numbers before 0.1.13 (prompts about half as fast):
+[`bench/results/2026-09-24-final`](../bench/results/2026-09-24-final/matrix.md); these:
+[`bench/results/2026-09-28-speed-0114`](../bench/results/2026-09-28-speed-0114/README.md).
 
 IQ3_XXS and IQ3_S at 262K are not measured: with their 43 / 50 GB of experts, a 260K-token context brings a 64 GB PC
 to its memory limit. Use up to 128K with them on 64 GB (setup caps it). IQ3_S (engine 0.1.4 or newer) is only published
@@ -47,8 +55,8 @@ halves the KV cache's memory with a Hadamard rotation before 4-bit rounding (PR 
 is measurably less precise on long documents (perplexity +8-12%; needle tests still pass). 8-bit stays the default.
 Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/README.md).
 
-Time to first token is prompt length / prompt speed: about 7 s at 4K, 55 s at 32K, 4 minutes at 128K and 9 minutes at
-262K (engine 0.1.12; long prompts are about twice as fast since 0.1.13, below).
+Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
+and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
 
 **Faster prompts (engine 0.1.13):** the prompt is read in chunks of up to 8,192 tokens instead of 2,048 (`--prefill
 auto`: the largest chunk whose buffers fit in the expert-cache slots it borrows, and a request borrows only what its
@@ -66,6 +74,8 @@ switch to `--prefill auto` the next time START-HERE / setup.sh starts them. The 
 
 Not measured - estimated from the runs above (same CPU and 64 GB RAM): the GPU part scaled by memory bandwidth, the CPU
 part by how many more experts the card's VRAM holds. Treat as **±20%**. Numbers are *prompt / output* tokens/s.
+The prompt figures predate engine 0.1.13, which about doubled prompt speed on the measured card; how much of that a
+card gains depends on its PCIe link (the experts stream over it), so they are still the older estimates.
 
 | GPU | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

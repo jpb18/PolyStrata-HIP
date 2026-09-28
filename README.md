@@ -25,13 +25,14 @@ Measured on an RTX 5070 (12 GB), a Ryzen 5 7600 and 64 GB of RAM:
 
 | Size | Writes answers (short chat) | Writes answers (128K context) | Reads your prompt |
 | --- | ---: | ---: | ---: |
-| **Q2_0** | 95 tokens/s | 65 tokens/s | 539 tokens/s |
-| **IQ2_XS** | 78 tokens/s | 52 tokens/s | 463 tokens/s |
-| **IQ3_XXS** | 66 tokens/s | 45 tokens/s | 410 tokens/s |
-| **IQ3_S** | 54 tokens/s | 42 tokens/s | 374 tokens/s |
+| **Q2_0** | 90 tokens/s | 67 tokens/s | 1,310 tokens/s |
+| **IQ2_XS** | 74 tokens/s | 60 tokens/s | 1,240 tokens/s |
+| **IQ3_XXS** | 62 tokens/s | 46 tokens/s | 1,110 tokens/s |
+| **IQ3_S** | 52 tokens/s | 41 tokens/s | 1,070 tokens/s |
 
 - **Writes answers** = how fast the reply appears (tokens per second).
-- **Reads your prompt** = how fast it takes in what you send (long documents, code, chat history).
+- **Reads your prompt** = how fast it takes in what you send (long documents, code, chat history), measured on a
+  32K-token prompt; a 4K prompt reads at 740-1,000 tokens/s. A 32K prompt takes about 25 seconds with Q2_0.
 
 A card with more VRAM is faster, because more of the model fits on the GPU: an RTX 3090 (24 GB) should do roughly
 100-140 tokens per second. All measurements, long-context numbers and estimates for other cards are in the
