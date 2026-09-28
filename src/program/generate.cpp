@@ -1700,7 +1700,9 @@ int main(int argc, char** argv) {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
         // On the multi-GPU Windows experiment, start with at most 8 GiB of mapped host pages.
         // Unregistered layers remain in the resident arena and use the CPU expert path.
-        const uint64_t pin_limit = o.expert_cache_remote[0] > 0 ? (8ull << 30) : 0;
+        // (a layer split across GPUs too: pinning all of it into two contexts leaves WDDM refusing every later
+        // allocation - measured on the 5080 + 3090 rig: cudaMemGetInfo and the next cudaMalloc fail)
+        const uint64_t pin_limit = (o.expert_cache_remote[0] > 0 || multi_gpu) ? (8ull << 30) : 0;
         if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, pin_limit)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -1741,7 +1743,9 @@ int main(int argc, char** argv) {
     auto stage_room = [&](int dev, bool later) -> int64_t {
         const strata::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
-        cudaMemGetInfo(&fb, &tb);
+        if (const cudaError_t e = cudaMemGetInfo(&fb, &tb); e != cudaSuccess)
+            std::fprintf(stderr, "strata generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
+                         cudaGetErrorString(e));
         const int64_t reserve = ((int64_t) o.vram_reserve_mib + split_pf_mib + (later ? 1024 : 0)) << 20;
         return std::max<int64_t>((int64_t) fb - reserve, 0);
     };
