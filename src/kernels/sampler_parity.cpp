@@ -153,10 +153,10 @@ float host_philox_uniform(uint64_t seed, uint64_t counter) {
     return (float) (c0 >> 8) * (1.0f / 16777216.0f);
 }
 
-// The full SAMPLED chain, host side - the kernel's `sampler_kernel` in serial form: penalties on the raw
-// logits during the top_k selection (ties to the lowest index), the min_p prefix cut, top_p's cut in double,
-// then penalties AGAIN on the temperature-scaled survivors (docs/sampling.md's after-temperature pass), and
-// one Philox draw at (seed, counter + row).
+// The full SAMPLED chain, host side - the kernel's `sampler_kernel` in serial form, in llama.cpp's order:
+// penalties on the raw logits during the top_k selection (ties to the lowest index), top_p's cut in double over
+// the top_k list, the min_p prefix cut on its survivors, the temperature, and one Philox draw at
+// (seed, counter + row).  One penalties stage (issue #53: this reference used to repeat the kernel's second one).
 int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
                       const strata::kernels::SamplerParams& p, int row) {
     auto penal = [&](float logit, int count) {
@@ -182,27 +182,28 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
         taken[(size_t) best] = 1;
         sel_ids.push_back(best); sel_logit.push_back(bv);
     }
-    int n_minp = (int) sel_ids.size();
-    if (p.min_p > 0.0f) {
-        const float thresh = sel_logit[0] + std::log(p.min_p);
-        for (int i = 0; i < (int) sel_ids.size(); ++i)
-            if (sel_logit[(size_t) i] < thresh) { n_minp = i; break; }
-    }
-    int n_keep = n_minp;
+    // llama.cpp's order (issue #53): top_p over the whole top_k list, then min_p on its survivors
+    const int n_sel = (int) sel_ids.size();
+    int n_keep = n_sel;
     if (p.top_p < 1.0f) {
         double sum = 0.0;
-        for (int i = 0; i < n_minp; ++i) sum += std::exp((double) sel_logit[(size_t) i] - (double) sel_logit[0]);
+        for (int i = 0; i < n_sel; ++i) sum += std::exp((double) sel_logit[(size_t) i] - (double) sel_logit[0]);
         double cum = 0.0;
-        int cut = n_minp;
-        for (int i = 0; i < n_minp; ++i) {
+        int cut = n_sel;
+        for (int i = 0; i < n_sel; ++i) {
             cum += std::exp((double) sel_logit[(size_t) i] - (double) sel_logit[0]) / sum;
             if (cum >= (double) p.top_p) { cut = i + 1; break; }
         }
-        if (cut < p.min_keep) cut = p.min_keep < n_minp ? p.min_keep : n_minp;
+        if (cut < p.min_keep) cut = p.min_keep < n_sel ? p.min_keep : n_sel;
         n_keep = cut;
     }
+    if (p.min_p > 0.0f) {
+        const float thresh = sel_logit[0] + std::log(p.min_p);
+        for (int i = 0; i < n_keep; ++i)
+            if (sel_logit[(size_t) i] < thresh) { n_keep = i; break; }
+    }
     const float inv_t = p.temperature > 0.0f ? 1.0f / p.temperature : 0.0f;
-    auto scaled = [&](int i) { return penal(sel_logit[(size_t) i] * inv_t, count(sel_ids[(size_t) i])); };
+    auto scaled = [&](int i) { return sel_logit[(size_t) i] * inv_t; };   // one penalties stage, before (#53)
     float smx = scaled(0);
     for (int i = 1; i < n_keep; ++i) smx = std::fmax(smx, scaled(i));
     double sum = 0.0;
@@ -461,9 +462,8 @@ int main(int argc, char** argv) {
     }
 
     // ---- fixture 6: PENALTIES IN THE SAMPLED CHAIN.  Fixture 4 pins the greedy (argmax) path; the sampled
-    // chain applies penalties a SECOND time - after the temperature scaling, on the survivors - so it gets its
-    // own reference (the full chain with the host Philox) and its own observability check: with the penalties
-    // on, the history row's favourite must LOSE a pick it would win penalty-free.
+    // chain gets its own reference (the full chain with the host Philox) and its own observability check: with
+    // the penalties on, the history row's favourite must LOSE a pick it would win penalty-free.
     {
         const int NV2 = 8, NT2 = 2;
         strata::kernels::SamplerParams p;
@@ -568,6 +568,57 @@ int main(int argc, char** argv) {
                     "penalty window clamp is observable", visible ? "yes" : "*** NO ***", want, unclamped);
         if (!visible) ++bad;
         else bad += run("penalty window: tail only", {l.begin(), l.end()}, 1, p, {want}, hist, 8);
+    }
+
+    // ---- fixture 9: ONE PENALTIES STAGE (issue #53), against an independently computed distribution, not the
+    // reference above (which had copied the kernel's mistake).  Two tokens with equal logits, token 0 in the
+    // history, presence penalty 1.5, temperature 0.7: llama.cpp's chain gives token 0 the logit (0 - 1.5) / 0.7,
+    // P = 1 / (1 + exp(1.5 / 0.7)) = 0.1050; a second penalty after the temperature made it 0.0255.  Over 8,000
+    // draws the kernel's share of token 0 must be near 0.105 (4 sigma = 0.014), and its picks must equal the
+    // reference's draw for draw.
+    {
+        const int NT9 = 8000;
+        strata::kernels::SamplerParams p;
+        p.top_k = 2; p.top_p = 1.0f; p.min_p = 0.0f; p.temperature = 0.7f; p.seed = 53; p.counter = 0;
+        p.penalty_last_n = 1; p.penalty_repeat = 1.0f; p.penalty_freq = 0.0f; p.penalty_present = 1.5f;
+        std::vector<float> l((size_t) 2 * NT9, 0.0f);
+        std::vector<int> hist((size_t) NT9, 0);
+        std::vector<int> want((size_t) NT9);
+        int zeros = 0;
+        for (int t = 0; t < NT9; ++t) {
+            want[(size_t) t] = sampled_reference({0.0f, 0.0f}, {0}, p, t);
+            zeros += want[(size_t) t] == 0;
+        }
+        const double expect = 1.0 / (1.0 + std::exp(1.5 / 0.7)), share = (double) zeros / NT9;
+        const bool near = std::fabs(share - expect) < 0.014;
+        std::printf("  %-34s %s (token 0 drawn %.4f of %d, expected %.4f; twice-penalised would be 0.0255)\n",
+                    "one penalties stage (#53)", near ? "yes" : "*** NO ***", share, NT9, expect);
+        if (!near) ++bad;
+        bad += run("sampled chain: #53's example", l, NT9, p, want, hist, 1);
+    }
+
+    // ---- fixture 10: TOP_P BEFORE MIN_P (llama.cpp's order).  Probabilities 0.4 / 0.3 / 0.2 / 0.1, top_p 0.75,
+    // min_p 0.3 (keeps p >= 0.12): top_p over all four keeps three (0.4 + 0.3 < 0.75 <= 0.9) and min_p keeps them;
+    // min_p first would drop 0.1, renormalise, and top_p would then stop at two (0.444 + 0.333 >= 0.75).  So token
+    // 2 must be drawn sometimes - never in the old order - and every pick must equal the reference's.
+    {
+        const int NT10 = 256;
+        strata::kernels::SamplerParams p;
+        p.top_k = 4; p.top_p = 0.75f; p.min_p = 0.3f; p.temperature = 1.0f; p.seed = 10; p.counter = 0;
+        const float lp[4] = {std::log(0.4f), std::log(0.3f), std::log(0.2f), std::log(0.1f)};
+        std::vector<float> row = {lp[0], lp[1], lp[2], lp[3], -30.0f, -30.0f, -30.0f, -30.0f};
+        std::vector<float> l;
+        for (int t = 0; t < NT10; ++t) l.insert(l.end(), row.begin(), row.end());
+        std::vector<int> want((size_t) NT10);
+        int twos = 0;
+        for (int t = 0; t < NT10; ++t) {
+            want[(size_t) t] = sampled_reference(row, {}, p, t);
+            twos += want[(size_t) t] == 2;
+        }
+        std::printf("  %-34s %s (token 2 drawn %d of %d times)\n", "top_p before min_p is observable",
+                    twos > 0 ? "yes" : "*** NO ***", twos, NT10);
+        if (twos == 0) ++bad;
+        bad += run("sampled chain: top_p then min_p", l, NT10, p, want);
     }
 
     // A continuous stream and individual decode calls consume the same draw counters.
