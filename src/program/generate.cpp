@@ -3011,6 +3011,8 @@ int main(int argc, char** argv) {
             for (int64_t i = 0; i < n - 1; ++i) consumed.push_back((int32_t) ids[(size_t) i]);
             const char* finish = "length";
             const Clock::time_point d0 = Clock::now();
+            const int64_t decode_hits0 = drive.d.cache_hits;
+            const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             if (cancelled) finish = "cancel";
             while (!cancelled && produced_n < max_new) {
                 int T = S_mtp;
@@ -3190,9 +3192,12 @@ int main(int argc, char** argv) {
                              (unsigned long long) h_pool, (unsigned long long) h_kv, (unsigned long long) h_mtp,
                              (unsigned long long) h_stale, ss.ple_prev[0], ss.ple_prev[1]);
             }
-            // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused>
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld\n", (long long) produced_n, (long long) n, prompt_ms,
-                        decode_ms, finish, (long long) draft_accepted, (long long) draft_offered, (long long) resume);
+            const int64_t req_hits = drive.d.cache_hits - decode_hits0;
+            const int64_t req_look = (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused) - decode_look0;
+            // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
+            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld\n", (long long) produced_n, (long long) n, prompt_ms,
+                        decode_ms, finish, (long long) draft_accepted, (long long) draft_offered, (long long) resume,
+                        (long long) req_hits, (long long) req_look);
             std::fflush(stdout);
             const int64_t fresh = n - resume;
             std::fprintf(stderr, "strata serve: prompt %lld tokens = %lld reused + %lld read in %.0f ms (%.1f tok/s), "
@@ -3201,6 +3206,11 @@ int main(int argc, char** argv) {
                          prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0, (long long) produced_n, decode_ms,
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+            if (req_look > 0) {
+                std::fprintf(stderr, "strata serve: decode expert cache hit rate: %.1f%% (%lld / %lld hits)\n",
+                             100.0 * (double) req_hits / (double) req_look,
+                             (long long) req_hits, (long long) req_look);
+            }
             if (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1) {
                 // KV streaming, cumulative over the process: blocks the selections named vs blocks read from RAM
                 uint64_t miss = 0, look = 0;
