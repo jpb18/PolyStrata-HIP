@@ -62,9 +62,11 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
             note = "large pages (" + std::to_string((unsigned long long) large) + " B)";
             return p;
         }
-        note = "large pages refused (GetLargePageMinimum=" + std::to_string((unsigned long long) large) +
-               ", VirtualAlloc error " + std::to_string((unsigned long long) GetLastError()) +
-               " - needs SeLockMemoryPrivilege); using 4 KB pages";
+        // 1450 (ERROR_NO_SYSTEM_RESOURCES) is the large-page pool saying no, 87 is a size that is not a
+        // multiple of the minimum, 1314 is the privilege: without the byte count the three read as one bug.
+        note = "large pages refused for " + std::to_string((unsigned long long) lbytes) + " B (GetLargePageMinimum=" +
+               std::to_string((unsigned long long) large) + ", VirtualAlloc error " +
+               std::to_string((unsigned long long) GetLastError()) + "); using 4 KB pages";
     } else if (std::getenv("STRATA_NO_LARGEPAGES") != nullptr) {
         note = "large pages skipped (STRATA_NO_LARGEPAGES); using 4 KB pages";
     } else {
