@@ -180,3 +180,10 @@ The full story is in the [paper](docs/paper/Strata-Paper.pdf) and the [details](
 - Built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT). Ideas from
   [Splash](https://github.com/incoai/splash), [ninfer](https://github.com/Neroued/ninfer) and
   [HyperQwen](https://github.com/syv-ai/HyperQwen). More in the [details](docs/DETAILS.md#credits-and-licenses).
+
+## License
+
+Strata is open source under the [MIT License](LICENSE). A few parts carry their own licenses: `third_party/ggml`
+(MIT, llama.cpp / ggml), the web app's font (SIL Open Font License 1.1) and the experimental speed projection's
+vector in `data/experimental-speed-projection` (Qwen Community License 1.0, from the model's activations). The
+models are not part of this repository; each model's own license applies to its files.
