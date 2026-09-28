@@ -8,7 +8,14 @@
 # written against sm_120 (RTX 5000 / Blackwell) and silently building for an older arch would produce a
 # binary that runs and is wrong about its own performance, which is the worst of both outcomes.
 cmake_minimum_required(VERSION 3.24)
-project(strata VERSION 0.1.0 LANGUAGES CXX)
+project(strata VERSION 0.1.13 LANGUAGES CXX)
+add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
+# issue #31: release builds keep a PDB beside the exe (not shipped in it), so a minidump from a stalled engine can
+# be read back to the exact source line
+if(MSVC AND CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zi>)
+  add_link_options(/DEBUG /OPT:REF /OPT:ICF)
+endif()
 
 # The prebuilt release (setup.py downloads it, so users need no compiler): ggml's CPU backend for any AVX2 CPU
 # instead of this machine's (Strata's own AVX-512 kernels are per-file and chosen at run time either way), and
@@ -517,6 +524,30 @@ if(STRATA_NATIVE_EXPERTS)
   endif()
   target_link_libraries(strata_kernels_cpu PUBLIC ggml-cpu ggml-base)
   target_compile_definitions(strata_kernels_cpu PUBLIC STRATA_NATIVE_EXPERTS=1)
+  if(STRATA_ENABLE_CUDA)
+    # prompt-speed plan step 2b: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the prompt path's experts, compiled
+    # from the same checkout as ggml above - only mmq.cuh's instances for the packs' types and the quantizer, with
+    # the few host symbols of ggml-cuda.cu they use in src/prefill/ggml_cuda_host.cu
+    if(STRATA_GGML_DIR)
+      set(_strata_gg ${STRATA_GGML_DIR}/ggml)
+    else()
+      set(_strata_gg ${strata_llamacpp_SOURCE_DIR}/ggml)
+    endif()
+    set(_strata_mmq ${_strata_gg}/src/ggml-cuda)
+    add_library(strata_mmq STATIC src/prefill/moe_mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu)
+    foreach(_t q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs)
+      target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
+    endforeach()
+    target_include_directories(strata_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+                               PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+    if(MSVC)
+      target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+    endif()
+    target_link_libraries(strata_mmq PUBLIC ggml-base CUDA::cudart)
+    target_link_libraries(strata_prefill PUBLIC strata_mmq)
+    target_compile_definitions(strata_prefill PUBLIC STRATA_PREFILL_MMQ=1)
+  endif()
   if(STRATA_ENABLE_CUDA)
     add_executable(native_expert_parity src/kernels/native_expert_parity.cpp)
     target_include_directories(native_expert_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})

@@ -48,7 +48,19 @@ is measurably less precise on long documents (perplexity +8-12%; needle tests st
 Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/README.md).
 
 Time to first token is prompt length / prompt speed: about 7 s at 4K, 55 s at 32K, 4 minutes at 128K and 9 minutes at
-262K. The raw numbers: [`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
+262K (engine 0.1.12; long prompts are about twice as fast since 0.1.13, below).
+
+**Faster prompts (engine 0.1.13):** the prompt is read in chunks of up to 8,192 tokens instead of 2,048 (`--prefill
+auto`: the largest chunk whose buffers fit in the expert-cache slots it borrows, and a request borrows only what its
+prompt needs); the experts are multiplied by llama.cpp's quantized MMQ kernels instead of being expanded to FP16
+first; the next layer's experts stream over PCIe while the current layer's attention runs; the PLE block runs for the
+whole chunk at once; unpinned experts are copied by helper threads. Measured on the RTX 5070 12 GB, 64 GB RAM,
+32K-token prompt: Q2_0 572 -> 1,290 tokens/s, IQ3_S 383 -> 1,208. Through the server (Q2_0, 128K context): 999 tokens
+353 -> 438 tokens/s, 6,927 tokens 529 -> 1,077, 28,584 tokens 584 -> 1,249. Output speed is unchanged. Needles 5/5
+(1K-262K). Details and the quality check:
+[`bench/results/2026-09-28-prefill-speed`](../bench/results/2026-09-28-prefill-speed/README.md). Existing installs
+switch to `--prefill auto` the next time START-HERE / setup.sh starts them. The raw numbers:
+[`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
 
 ## Other GPUs (estimated)
 
@@ -381,7 +393,7 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | A picture is refused or `cannot read the image` | The file is not a picture Pillow can open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF work). |
 | Pictures are slow (10-30 s) | The encoder runs on the CPU: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM). |
 | A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
-| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving for 2 minutes ends with an error instead of hanging: the log says `no progress for 120 s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. (`STRATA_WATCHDOG_S` sets the 120 s; 0 turns it off.) |
+| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving ends with an error instead of hanging (after 2 minutes; 1 minute from 0.1.13): the log says `no progress for ... s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. Engine 0.1.13 adds a stall report under it (what every expert-pool thread and the GPU handshake were doing, memory and page faults) and, on Windows, a `strata-stall-<pid>.dmp` file with every thread's stack: attach both. (`STRATA_WATCHDOG_S` sets the time in seconds; 0 turns it off.) |
 | Anything else | The engine log is `strata-<model>.log` in this folder. |
 
 ---

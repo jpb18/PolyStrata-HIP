@@ -57,7 +57,7 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 12)                # the expert-pool race and the serve watchdog (issue #29), v0.1.12
+MIN_ENGINE = (0, 1, 13)                # the faster prompt path and `--prefill auto`, v0.1.13
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
 
 MODELS = {
@@ -651,8 +651,30 @@ def installed_configs():
     return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def engine_version(exe: Path) -> tuple:
+    """The version in the engine folder's BUILD.json; a locally compiled engine is the current source's."""
+    try:
+        meta = json.loads((Path(exe).parent / "BUILD.json").read_text())
+    except (OSError, ValueError):
+        return (0, 0, 0)
+    if meta.get("source") == "local":
+        return MIN_ENGINE
+    return tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+
+
+def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
+    """Configs written before v0.1.13 read prompts in fixed 2048-token chunks; the engine now picks the chunk
+    itself (`--prefill auto`: up to 8192, as the free VRAM allows - about 2x faster on long prompts)."""
+    a = cfg.get("args", [])
+    if "--prefill" in a and a[a.index("--prefill") + 1] == "2048" and engine_version(cfg["exe"]) >= (0, 1, 13):
+        a[a.index("--prefill") + 1] = "auto"
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+        ok("prompt reading: the engine now picks its chunk size (--prefill auto)")
+    return cfg
+
+
 def start(cfg_path: Path, port: int | None, open_browser=True) -> int:
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
@@ -945,7 +967,7 @@ def main() -> int:
         fail("the model has no per_layer_token_embd tensor (is this a Qwen3.8-Flash-Next GGUF?)")
     args = ["--pack", str(pack), "--native", str(shards[0]), "--ple-gguf", str(ple),
             "--expert-profile", str(ROOT / "data" / "expert-profile.bin"), "--expert-cache", "auto",
-            "--prefill", "2048", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
+            "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
             "--max-context", str(ctx)]
     if ctx > 8192:
         args += ["--kv", kv]

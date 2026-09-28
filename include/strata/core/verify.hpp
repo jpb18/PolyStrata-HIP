@@ -21,6 +21,8 @@
 // selection, native indexer) and a profile-filled VRAM expert tier with its residency table on the device.
 #pragma once
 
+#include <cstdio>
+
 #include "strata/core/expert_source.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
@@ -51,6 +53,9 @@ public:
     ~Verifier();
     Verifier(const Verifier&) = delete;
     Verifier& operator=(const Verifier&) = delete;
+
+    /// The watchdog's view of the window in flight (issue #31): the layer, the GPU's sequence, the flags.
+    void diag(std::FILE* f) const;
 
     /// `max_t` <= kVerifyMaxT.  `head` may be null (the canonical head is then run per token).
     bool init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
