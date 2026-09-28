@@ -596,5 +596,8 @@ endif()
 
 if(STRATA_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests)
+  # the unit tests above build from src/; the tests/ tree (model-level checks) is not part of the published repo
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt)
+    add_subdirectory(tests)
+  endif()
 endif()
