@@ -9,6 +9,8 @@
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/iq_avx512.hpp"
+#include "strata/kernels/cpu/iq_avx2.hpp"
+#include "strata/kernels/cpu/expert_layout.hpp"
 #include "ggml-cpu.h"
 #include "strata/kernels/iq_kernels.hpp"
 
@@ -33,6 +35,7 @@ static double rel(const std::vector<float>& a, const std::vector<float>& b) {
 }
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);   // keep the trail on a crash
     if (argc < 2) { std::fprintf(stderr, "usage: native_expert_parity <shard1.gguf> [layer ...]\n"); return 2; }
     strata::GgufFile gguf(argv[1]);
     std::vector<int> layers;
@@ -103,40 +106,50 @@ int main(int argc, char** argv) {
             }
             cpu::native_gu_rows(f, blob.data(), a, NT, ffp, 0, (int) FF);
             if (cpu::iq512_supported(f.gu_type)) {
-                // the AVX-512 rows against ggml's own vec_dot, same Q8_K activations: float-order differences only
-                std::vector<float> g512((size_t) NT * FF), gref((size_t) NT * FF);
-                float* gp[NT];
-                for (int k = 0; k < NT; ++k) gp[k] = g512.data() + k * FF;
-                cpu::iq512_rows(f.gu_type, blob.data(), f.gu_row, (int) H, a, NT, gp, 0, (int) FF);
+                // ggml's own vec_dot, same Q8_K activations: the reference for both multi-token kernels
+                // (float-order differences only)
                 const auto* tc = ggml_get_type_traits_cpu((ggml_type) f.gu_type);
+                std::vector<float> gref((size_t) NT * FF);
                 for (int k = 0; k < NT; ++k)
                     for (int64_t r = 0; r < FF; ++r)
                         tc->vec_dot((int) H, &gref[k * FF + r], 0, blob.data() + r * f.gu_row, 0, a[k], 0, 1);
-                {   // single-thread throughput, the weights cache-resident (compute bound)
-                    float* f1[1] = {ffp[0]};
+                double usg = 0.0;
+                {   // ggml single-token throughput, the weights cache-resident (compute bound)
                     const int it = 50;
                     auto t0 = std::chrono::steady_clock::now();
-                    for (int i = 0; i < it; ++i) cpu::iq512_gu_rows(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, 1, f1, 0, (int) FF);
-                    auto t1 = std::chrono::steady_clock::now();
                     for (int i = 0; i < it; ++i)
                         for (int64_t r = 0; r < FF; ++r) {
                             float gg, uu;
                             tc->vec_dot((int) H, &gg, 0, blob.data() + r * f.gu_row, 0, a[0], 0, 1);
                             tc->vec_dot((int) H, &uu, 0, blob.data() + f.up_off + r * f.gu_row, 0, a[0], 0, 1);
                         }
-                    auto t2 = std::chrono::steady_clock::now();
-                    const double us512 = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
-                    const double usg = std::chrono::duration<double, std::micro>(t2 - t1).count() / it;
-                    std::printf("          gate+up one token one thread: avx512 %.0f us (%.2f GB/s), ggml %.0f us (%.2f GB/s)\n",
-                                us512, 2.0 * f.up_off / us512 / 1e3, usg, 2.0 * f.up_off / usg / 1e3);
-                    auto t3 = std::chrono::steady_clock::now();
-                    for (int i = 0; i < it; ++i) cpu::iq512_gu_rows(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, NT, ffp, 0, (int) FF);
-                    auto t4 = std::chrono::steady_clock::now();
-                    std::printf("          gate+up %d tokens one thread: avx512 %.0f us vs ggml %d x %.0f us\n", NT,
-                                std::chrono::duration<double, std::micro>(t4 - t3).count() / it, NT, usg);
+                    auto t1 = std::chrono::steady_clock::now();
+                    usg = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
                 }
-                std::printf("          %s AVX-512 gate rows vs ggml vec_dot: rel %.2e\n",
-                            ggml_type_name((ggml_type) f.gu_type), rel(g512, gref));
+                // one multi-token kernel: parity against ggml's vec_dot, then one-token and NT-token throughput
+                auto check = [&](const char* tag, bool is512) {
+                    std::vector<float> g((size_t) NT * FF);
+                    float* gp[NT];
+                    for (int k = 0; k < NT; ++k) gp[k] = g.data() + k * FF;
+                    (is512 ? cpu::iq512_rows : cpu::iq256_rows)(f.gu_type, blob.data(), f.gu_row, (int) H, a, NT, gp, 0, (int) FF);
+                    std::printf("          %s %s gate rows vs ggml vec_dot: rel %.2e\n",
+                                ggml_type_name((ggml_type) f.gu_type), tag, rel(g, gref));
+                    float* f1[1] = {ffp[0]};
+                    const int it = 50;
+                    const auto gu = is512 ? cpu::iq512_gu_rows : cpu::iq256_gu_rows;
+                    auto t0 = std::chrono::steady_clock::now();
+                    for (int i = 0; i < it; ++i) gu(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, 1, f1, 0, (int) FF);
+                    auto t1 = std::chrono::steady_clock::now();
+                    for (int i = 0; i < it; ++i) gu(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, NT, ffp, 0, (int) FF);
+                    auto t2 = std::chrono::steady_clock::now();
+                    const double us1 = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
+                    const double usn = std::chrono::duration<double, std::micro>(t2 - t1).count() / it;
+                    std::printf("          gate+up one token one thread: %s %.0f us (%.2f GB/s), ggml %.0f us (%.2f GB/s)\n",
+                                tag, us1, 2.0 * f.up_off / us1 / 1e3, usg, 2.0 * f.up_off / usg / 1e3);
+                    std::printf("          gate+up %d tokens one thread: %s %.0f us vs ggml %d x %.0f us\n", NT, tag, usn, NT, usg);
+                };
+                if (cpu::cpu_avx512_ok()) check("avx512", true);   // guarded: the binary runs on AVX-2 CPUs too
+                check("avx2", false);
             }
             for (int k = 0; k < NT; ++k) {
                 cpu::native_quant_h(f, ff[k].data(), hq[k].data());
@@ -145,18 +158,51 @@ int main(int argc, char** argv) {
             }
             cpu::native_down_rows(f, blob.data(), hp, NT, op, 0, (int) H);
             if (f.d_type == 42) {
-                // (b2) the AVX-512 GGUF-layout Q2_0 kernel the pool uses for Q2_0 down projections
+                // (b2) the GGUF-layout Q2_0 kernel the pool uses for Q2_0 down projections - the AVX-512 one
+                // where the CPU has it, the AVX-2 one (q2_avx2.cpp) where it does not.  Calling the AVX-512
+                // kernel unconditionally faults on a Zen 2/3 CPU.
                 std::vector<cpu::ActQ> a2(NT);
                 const cpu::ActQ* ap[NT];
                 std::vector<float> alt((size_t) NT * H);
                 float* altp[NT];
                 for (int k = 0; k < NT; ++k) {
-                    cpu::act_quant_q8_1(ff[k].data(), (int) FF, a2[k]);
+                    cpu::act_quant_any(ff[k].data(), (int) FF, a2[k]);   // gated: AVX-512 or AVX-2 per CPU
                     ap[k] = &a2[k];
                     altp[k] = alt.data() + k * H;
                 }
-                cpu::q2_0_gguf_rows_multi(blob.data() + f.down_off, f.d_row, (int) (FF / 64), ap, NT, altp, 0, (int) H);
-                std::printf("          q2_0 AVX-512 down vs ggml down: rel %.2e\n", rel(alt, got_c));
+                cpu::q2_rows_any(blob.data() + f.down_off, f.d_row, (int) (FF / 64), ap, NT, altp, 0, (int) H);
+                std::printf("          q2_0 %s down vs ggml down: rel %.2e\n",
+                            cpu::cpu_avx512_ok() ? "AVX-512" : "AVX-2", rel(alt, got_c));
+            }
+            if (f.d_type == 20) {
+                // (b3) the IQ4_NL multi-token AVX-2 kernel the pool now uses for IQ4_NL down projections,
+                // against ggml-cpu's single-token vec_dot on the SAME Q8_0 activations (h), plus timing.
+                std::vector<float> alt((size_t) NT * H), ref((size_t) NT * H);
+                float* altp[NT];
+                for (int k = 0; k < NT; ++k) altp[k] = alt.data() + k * H;
+                cpu::iq4nl256_down_rows(blob.data() + f.down_off, f.d_row, (int) FF, hp, NT, altp, 0, (int) H);
+                const auto* tdc = ggml_get_type_traits_cpu((ggml_type) f.d_type);
+                for (int k = 0; k < NT; ++k)
+                    for (int64_t r = 0; r < H; ++r)
+                        tdc->vec_dot((int) FF, ref.data() + k * H + r, 0,
+                                     blob.data() + f.down_off + (size_t) r * f.d_row, 0, hp[k], 0, 1);
+                std::printf("          iq4_nl AVX-2 multi-token down vs ggml down: rel %.2e\n", rel(alt, ref));
+                const int it = 50;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < it; ++i)
+                    cpu::iq4nl256_down_rows(blob.data() + f.down_off, f.d_row, (int) FF, hp, NT, altp, 0, (int) H);
+                const auto t1 = std::chrono::steady_clock::now();
+                for (int i = 0; i < it; ++i)
+                    for (int k = 0; k < NT; ++k)
+                        for (int64_t r = 0; r < H; ++r)
+                            tdc->vec_dot((int) FF, ref.data() + k * H + r, 0,
+                                        blob.data() + f.down_off + (size_t) r * f.d_row, 0, hp[k], 0, 1);
+                const auto t2 = std::chrono::steady_clock::now();
+                const double usn = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
+                const double usg = std::chrono::duration<double, std::micro>(t2 - t1).count() / it;
+                std::printf("          down %d tokens one thread: avx2 %.0f us (%.2f GB/s) vs ggml %.0f us (%.2f GB/s)\n",
+                            NT, usn, (double) (f.bytes - f.down_off) / usn / 1e3, usg,
+                            (double) (f.bytes - f.down_off) / usg / 1e3);
             }
         }
         // (c) the GPU: one group holding the NT entries
