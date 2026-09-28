@@ -3979,6 +3979,16 @@ int main(int argc, char** argv) {
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look);
             }
+            // STRATA_SPLIT_TIMING: where each verify stage's host time went, cumulative per window since the start
+            // (waiting for its GPU to ring a layer, the CPU pool and plan per layer, staging the window)
+            if (static const bool st_timing = std::getenv("STRATA_SPLIT_TIMING") != nullptr; st_timing)
+                for (int st = 0; st < n_stages; ++st) {
+                    const strata::core::Verifier& v = stage_ver(st);
+                    const double w = v.windows > 0 ? (double) v.windows : 1.0;
+                    std::fprintf(stderr, "strata serve: stage %d: %lld windows; per window: wait for the GPU %.3f ms, "
+                                         "pool + plan %.3f ms, host staging %.3f ms, commit %.3f ms\n", st,
+                                 (long long) v.windows, v.ms_wait / w, v.ms_pool / w, v.ms_host / w, v.ms_commit / w);
+                }
             if (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1) {
                 // KV streaming, cumulative over the process: blocks the selections named vs blocks read from RAM
                 uint64_t miss = 0, look = 0;
