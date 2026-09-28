@@ -753,11 +753,9 @@ bool load_control_vectors(const Options& o, const strata::core::ModelGeometry& g
     return true;
 }
 
-// The effective host->device bandwidth of the PCIe link, measured the way the engine actually uses it: DMA
-// reads from pinned host memory (the expert arena's fetches).  The pcie_frac defaults (0.55 native / 0.2
-// canonical) were measured on a PCIe 4.0 x16 link (~26 GB/s); a x8 card in a x8 slot carries about half of
-// that and the copy engine's share must shrink with it, or the GPU waits for DMA that arrived late.
-// Returns < 0 when the probe cannot run (then the caller keeps the default).
+// The effective host->device bandwidth of the PCIe link: copies from pinned host memory, as the expert arena's
+// reads are.  The native default share (0.55) was measured on x16 links (~26-28 GB/s); a x8 card in a x8 slot
+// carries about half of that.  Returns < 0 when the probe cannot run (then the caller keeps the default).
 double probe_pcie_h2d_gbps() {
     constexpr size_t kBytes = 256ull << 20;
     constexpr int kIters = 4;
@@ -1119,13 +1117,17 @@ int main(int argc, char** argv) {
     }
     const bool native_pack = strata::kernels::cpu::expert_layout().native;
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
-    // A x8 link carries half of what the defaults assume: probe the real H2D bandwidth once and scale the
-    // default by it, so the copy engine's share matches the link this machine actually has.
+    // PR #44: a x8 link carries half of what the native default assumes - the GPU's SMs read that share over the
+    // link (the copy kernel, since 0.1.14), so on a slower link it must shrink or the window waits for it.  The
+    // real H2D bandwidth is probed once; from 20 GB/s up (x16 PCIe 4/5) the measured default stays.  The canonical
+    // pack's 0.2 was never measured against the link, so it is left alone.  `--calibrate` measures it outright.
     if (o.pcie_frac < 0.0) {
         const double base = native_pack ? 0.55 : 0.2;
-        const double bw = probe_pcie_h2d_gbps();
-        if (bw > 0.0) {
-            o.pcie_frac = std::min(base, std::max(0.05, base * (bw / 26.0)));
+        const double bw = native_pack ? probe_pcie_h2d_gbps() : -1.0;
+        if (!native_pack) {
+            o.pcie_frac = base;
+        } else if (bw > 0.0) {
+            o.pcie_frac = bw >= 20.0 ? base : std::min(base, std::max(0.05, base * (bw / 26.0)));
             std::fprintf(stderr, "strata generate: PCIe probe: %.1f GB/s host->device -> pcie_frac %.2f (default %.2f)\n",
                          bw, o.pcie_frac, base);
         } else {
