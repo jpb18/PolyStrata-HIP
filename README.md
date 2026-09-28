@@ -84,8 +84,16 @@ App). Everything else - Python, the engine, the model - is set up for you.
 Then it downloads everything (the model is ~70 GB, so the first time takes a while - you can stop and it picks up
 where it left off) and **starts the model**. Your browser opens the Strata app at `http://127.0.0.1:8080`.
 
+> **While the model starts, your PC can be slow or stop responding for 1-3 minutes** (longest the first time): Strata
+> loads 35-55 GB into your RAM and locks part of it for the graphics card. That's normal - wait, and don't close the
+> window. The window tells you what it is doing.
+
 **Next time**, just double-click `START-HERE.bat` again: it starts right away, nothing is downloaded twice. Close its
 window to stop the model.
+
+**Updating:** download the new version and unzip it anywhere (or `git pull`), then run `START-HERE.bat` in it. The
+model files are kept in a `Strata-data` folder next to your Strata folder, so a new copy finds them and sets itself up
+the same way - nothing big is downloaded again.
 
 **Linux:** run `./setup.sh` - same questions, same result.
 
@@ -113,8 +121,8 @@ window to stop the model.
 ## Something went wrong?
 
 **My PC froze, or got very slow, the first time Strata started.**
-That's normal the first time. Strata loads 35-55 GB into your RAM, locks part of it for the graphics card, and works
-out how much of the model fits on your GPU. The mouse can freeze for a few minutes. **Wait, and don't close the
+That's normal while it starts, most of all the first time. Strata loads 35-55 GB into your RAM, locks part of it for
+the graphics card, and works out how much of the model fits on your GPU. The mouse can freeze for a few minutes. **Wait, and don't close the
 window.** The next starts are much faster. Still frozen after 10 minutes? Restart the PC, close other programs
 (browsers use a lot of RAM) and try again. If it keeps happening, pick a smaller size (Q2_0 or IQ2_XS).
 

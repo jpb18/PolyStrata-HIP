@@ -654,6 +654,203 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     return eng
 
 
+# ------------------------------------------------------------------------------------------------ the data folder
+# The model files - the GGUFs, the prepared packs and the MTP layer, 70-120 GB - live in a data folder NEXT TO the
+# Strata folder (`Strata-data`), not inside it: updating Strata by unzipping a new copy used to give a new, empty
+# folder and a full download again.  Where it is, and which Strata folders this user ran, is kept in a small
+# per-user file, so every Strata folder on the PC finds the same files.
+DATA_ITEMS = ("models", "packs", "mtp")
+
+
+def settings_path() -> Path:
+    if WIN:
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(s: dict) -> None:
+    try:
+        settings_path().parent.mkdir(parents=True, exist_ok=True)
+        settings_path().write_text(json.dumps(s, indent=1), encoding="utf-8")
+    except OSError as e:
+        warn(f"could not save {settings_path()} ({e})")
+
+
+def has_data(folder: Path) -> bool:
+    for d in DATA_ITEMS:
+        try:
+            if (folder / d).is_dir() and any((folder / d).iterdir()):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def other_installs(settings: dict) -> list:
+    """Strata folders besides this one that may hold model files: the ones this user ran before, and Strata* folders
+    next to this one (a zip unpacked again lands in e.g. `Strata-main (1)\\Strata-main`)."""
+    cands = [Path(p) for p in settings.get("installs", [])]
+    for base in dict.fromkeys((ROOT.parent, ROOT.parent.parent)):
+        try:
+            for d in base.iterdir():
+                if d.is_dir() and d.name.lower().startswith("strata"):
+                    cands.append(d)
+                    cands += [c for c in d.iterdir() if c.is_dir() and c.name.lower().startswith("strata")]
+        except OSError:
+            pass
+    found = []
+    for d in cands:
+        try:
+            d = d.resolve()
+            if d != ROOT and d not in found and (d / "setup.py").is_file():
+                found.append(d)
+        except OSError:
+            pass
+    return found
+
+
+def same_drive(a: Path, b: Path) -> bool:
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
+def move_into(src: Path, dst: Path) -> None:
+    """A rename into the data folder (same drive: instant); a folder merges into one already there, keeping what the
+    destination has.  Whatever cannot be moved (a file in use) stays where it is."""
+    if not dst.exists():
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst)
+            return
+        except OSError:
+            if not src.is_dir():
+                return
+            dst.mkdir(parents=True, exist_ok=True)
+    if src.is_dir() and dst.is_dir():
+        for c in list(src.iterdir()):
+            move_into(c, dst / c.name)
+        try:
+            src.rmdir()
+        except OSError:
+            pass
+
+
+def repoint_config(cfg_file: Path, old: Path, new: Path) -> None:
+    """A config whose model files moved from `old` to `new` points at them there (each path only if its file is
+    now there and no longer at the old place)."""
+    try:
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return
+
+    def fix(v):
+        if isinstance(v, list):
+            return [fix(x) for x in v]
+        if isinstance(v, dict):
+            return {k: fix(x) for k, x in v.items()}
+        if isinstance(v, str):
+            for d in DATA_ITEMS:
+                o = str(old / d)
+                nv, no = os.path.normcase(v), os.path.normcase(o)   # Windows: C:\ and c:\ are the same place
+                if nv == no or nv.startswith(no + os.sep):
+                    n = str(new / d) + v[len(o):]
+                    if Path(n).exists() and not Path(v).exists():
+                        return n
+        return v
+
+    new_cfg = fix(cfg)
+    if new_cfg != cfg:
+        cfg_file.write_text(json.dumps(new_cfg, indent=1), encoding="utf-8")
+
+
+def data_folder(requested: str | None) -> tuple:
+    """(the data folder, folders on other drives that still hold model files).  Moves the model files of this folder
+    and of earlier Strata folders on the same drive into the data folder, and points their configs there."""
+    settings = load_settings()
+    dest = Path(requested).expanduser().resolve() if requested else \
+        Path(settings["data_dir"]) if settings.get("data_dir") else ROOT.parent / "Strata-data"
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as e:                                # e.g. no write access next to the Strata folder
+        warn(f"cannot use {dest} for the model files ({e}): keeping them in {ROOT}")
+        dest = ROOT
+    elsewhere = []
+    for folder in [ROOT, *other_installs(settings)]:
+        if folder == dest or not has_data(folder):
+            continue
+        if not same_drive(folder, dest):
+            elsewhere.append(folder)                    # another drive: used where it is (no 70 GB copy)
+            continue
+        # the downloads merge file by file (the same file wherever it came from); a prepared pack or MTP layer moves
+        # whole or not at all, so two copies are never mixed
+        if (folder / "models").is_dir():
+            move_into(folder / "models", dest / "models")
+        for item in [*((folder / "packs").glob("*") if (folder / "packs").is_dir() else []), folder / "mtp"]:
+            rel = item.relative_to(folder)
+            if item.exists() and not (dest / rel).exists():
+                move_into(item, dest / rel)
+        for d in ("packs",):
+            try:
+                (folder / d).rmdir()                    # empty now
+            except OSError:
+                pass
+        for c in folder.glob("strata-*.json"):
+            repoint_config(c, folder, dest)
+        if has_data(folder):
+            elsewhere.append(folder)                    # in use, or a copy the data folder already has
+            warn(f"some model files are still in {folder} (in use, or already in {dest})")
+        else:
+            ok(f"model files from {folder} moved to {dest} (a new copy of Strata finds them there)")
+    installs = [str(ROOT)] + [p for p in settings.get("installs", []) if p != str(ROOT) and Path(p).is_dir()]
+    save_settings({**settings, "data_dir": str(dest), "installs": installs[:20]})
+    return dest, elsewhere
+
+
+def previous_config(elsewhere_first: list, settings: dict):
+    """The most recently used model config of another Strata folder on this PC, for a folder that has none yet."""
+    cands = []
+    for folder in [*elsewhere_first, *other_installs(settings)]:
+        cands += list(folder.glob("strata-*.json"))
+    cands = [c for c in dict.fromkeys(cands) if c.is_file()]
+    return max(cands, key=lambda p: p.stat().st_mtime) if cands else None
+
+
+def choices_from_config(cfg_path: Path) -> dict:
+    """The setup answers a config was written with (family, size, context, KV, images, projection, network)."""
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    tag = cfg_path.stem[len("strata-"):]
+    family = "swift" if tag.startswith("swift-") else "qwen"
+    model = tag.split("-")[-1].upper()
+    a = cfg.get("args", [])
+    val = lambda k: a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else None   # noqa: E731
+    vis = cfg.get("vision")
+    esp = val("--control-vector-scaled")
+    esp_path = esp.rsplit(":", 1)[0] if esp else None
+    return {"family": family, "model": model if model in MODELS else None,
+            "context": int(val("--max-context")) if val("--max-context") else None,
+            "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
+            "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
+            "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
+            "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port")}
+
+
+def find_in(roots: list, rel: str):
+    """The first of roots/rel that exists."""
+    for r in roots:
+        if (r / rel).exists():
+            return r / rel
+    return None
+
+
 # ------------------------------------------------------------------------------------------------ start
 def installed_configs():
     return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -722,8 +919,20 @@ def start(cfg_path: Path, port: int | None, open_browser=True) -> int:
            "--port", str(port or cfg.get("port", 8080))]
     if open_browser:
         cmd.append("--open")
+    gb = 0.0
+    if "--native" in cfg["args"]:
+        try:
+            gb = Path(cfg["args"][cfg["args"].index("--native") + 1]).stat().st_size / 1e9
+        except (OSError, IndexError):
+            pass
     say()
-    say(f"Starting {cfg.get('model_name', 'the model')} (loads 34-43 GB into RAM: 30-90 s). Close this window to stop it.")
+    say("  " + "-" * 100)
+    say(f"  Starting {cfg.get('model_name', 'the model')}: it loads {f'about {gb:.0f} GB' if gb >= 1 else '34-55 GB'} "
+        "into RAM and locks part of it for the GPU.")
+    say("  While it does, YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES (longer the first time after a")
+    say("  restart). That is normal: please wait and don't close this window - the browser opens when it is ready.")
+    say("  Later, closing this window stops the model.")
+    say("  " + "-" * 100)
     return subprocess.call(cmd)
 
 
@@ -760,7 +969,9 @@ def main() -> int:
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
     ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0)")
-    ap.add_argument("--models-dir", default=str(ROOT / "models"), help="where the GGUF files go (~70 GB)")
+    ap.add_argument("--data-dir", help="where the model files go (~70-120 GB): default Strata-data next to this folder, "
+                                       "remembered for every Strata folder on this PC")
+    ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with the two shards)")
     ap.add_argument("--yes", action="store_true", help="accept the recommended answers")
     ap.add_argument("--setup", action="store_true", help="install another model or change settings")
@@ -771,12 +982,30 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
-
     say("Strata - Qwen3.8-Flash-Next on a normal PC (NVIDIA GPU + system RAM + CPU)")
+    data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
+    roots = [data, *elsewhere]
+    if a.models_dir is None:
+        a.models_dir = str(data / "models")
 
     # ---- 0. already installed: just start it
     have = installed_configs()
+    explicit = a.setup or a.model or a.family or a.check or a.no_start
+    if not have and not explicit:                      # a new copy of Strata (an update unzipped elsewhere): set it
+        prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already here
+        if prev is not None:
+            ch = choices_from_config(prev)
+            if ch["model"]:
+                say(f"  Found your earlier install in {prev.parent} ({prev.stem[len('strata-'):]}): setting up this "
+                    "copy the same way - the model files are reused, nothing big is downloaded.")
+                a.family, a.model, a.context = ch["family"], ch["model"], a.context or ch["context"]
+                a.kv = a.kv or ch["kv"]
+                a.vision = a.vision or ch["vision"]
+                a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
+                a.host, a.api_key = a.host or ch["host"], a.api_key or ch["api_key"]
+                a.port = a.port or ch["port"]
+                a.yes = True
+    port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         if not a.build:
             update_installed_engine(a.prebuilt)
@@ -910,6 +1139,13 @@ def main() -> int:
         warn("the experimental speed projection is made for the original Qwen3.8-Flash-Next, not Swift 1.5: left off")
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
     shards = [models_dir / fam["file"].format(q=model, i=i) for i in (1, 2)]
+    if not a.gguf_dir and not all(sh.exists() and done(sh) for sh in shards):
+        for r in elsewhere:                            # already downloaded in a Strata folder on another drive
+            cand = [r / "models" / tag / sh.name for sh in shards]
+            if all(c.exists() and done(c) for c in cand):
+                models_dir, shards = cand[0].parent, cand
+                ok(f"model files found in {models_dir}")
+                break
     have_model = all(s.exists() and (done(s) or a.gguf_dir) for s in shards)
     need = (0 if a.gguf_dir or have_model else MODELS[model]["download_gb"]) + 8 + \
         (40 if model == "Q2_0" and avx512 and family == "qwen" else 0) + (1 if vision != "none" else 0)
@@ -959,6 +1195,8 @@ def main() -> int:
             fail(f"missing {s}")
     ok("model files present")
     mmproj = Path(a.models_dir) / fam["mmproj"]
+    if not mmproj.exists():
+        mmproj = find_in(roots, f"models/{fam['mmproj']}") or mmproj
     if vision != "none":
         if not mmproj.exists() and a.gguf_dir and (Path(a.gguf_dir) / fam["mmproj"]).exists():
             mmproj = Path(a.gguf_dir) / fam["mmproj"]
@@ -968,7 +1206,7 @@ def main() -> int:
 
     # ---- 6. the pack and the MTP draft layer
     step(6, "preparing the model for Strata")
-    pack = ROOT / "packs" / tag.lower()
+    pack = find_in(roots, f"packs/{tag.lower()}") or data / "packs" / tag.lower()
     env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
     if model == "Q2_0" and avx512 and family == "qwen":
         # the Q2_0 experts repacked for the AVX-512 kernel (the measured speed): a one-time ~40 GB conversion
@@ -984,7 +1222,7 @@ def main() -> int:
         # every tensor as the GGUF stores it; the experts are read from the GGUF at start (seconds to build)
         run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack)], env=env)
     ok(f"model prepared: {pack}")
-    mtp = ROOT / "mtp"
+    mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
     rt = mtp / "rt"
     if not (rt / "experts.bin").exists():
         say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")

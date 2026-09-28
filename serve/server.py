@@ -76,6 +76,57 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+def narrate_start(log_path: str, offset: int, args: list, done: threading.Event, heartbeat=20.0) -> None:
+    """While the engine starts, say in the server window what it is doing, from its log: the start reads tens of GB
+    into RAM and locks part of it for the GPU, and on many PCs everything is slow or frozen for a minute or more -
+    people closed the window thinking it had hung.  The warning comes at that step, not after it."""
+    gb = 0.0
+    if "--native" in args:                              # about the size of the experts it will read
+        try:
+            gb = os.path.getsize(args[args.index("--native") + 1]) / 1e9
+        except (OSError, IndexError):
+            pass
+    size = f"about {gb:.0f} GB" if gb >= 1 else "tens of GB"
+    t0 = last = time.time()
+    said = set()
+
+    def say(key, text):
+        nonlocal last
+        if key not in said:
+            said.add(key)
+            last = time.time()
+            print(text, flush=True)
+
+    say("weights", "[strata] starting the engine: reading the model's weights ...")
+    pos = offset
+    while not done.wait(0.5):
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        if chunk.count(b"\n"):
+            cut = chunk.rfind(b"\n") + 1
+            pos += cut
+            for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                if "PLE on" in line or "expert arena:" in line:
+                    say("arena", f"[strata] loading the experts into RAM ({size}) and locking part of them for the GPU.\n"
+                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
+                                 "         Please wait and don't close this window; the browser opens when it is ready.")
+                elif " loaded " in line and "GiB at" in line:
+                    say("loaded", "[strata] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
+                        f" ({time.time() - t0:.0f} s so far)")
+                elif "expert cache " in line and " slots, " in line and "auto" not in line:
+                    n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
+                    say("cache", f"[strata] filling the GPU's expert cache ({n}) ...")
+                elif "session is up" in line:
+                    say("up", "[strata] almost ready ...")
+        if time.time() - last > heartbeat:
+            last = time.time()
+            print(f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -90,6 +141,10 @@ class StrataEngine:
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
         self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
+        loading = threading.Event()                     # set once READY: the narrator below stops
+        if log:
+            threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
+                             daemon=True).start()
         self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         self.max_context = 0
@@ -111,6 +166,7 @@ class StrataEngine:
                 self.max_context = int(f[1])
                 self.can_stop = "stop" in f[2:]
                 break
+        loading.set()
         if self.max_context <= 0:
             raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
