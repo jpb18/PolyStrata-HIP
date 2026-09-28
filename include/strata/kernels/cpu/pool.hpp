@@ -14,15 +14,25 @@
 // THE COMPLETION PROTOCOL, because this is where a pool usually goes wrong.  `run()` waits for `done == n`
 // AND for every worker to PARK.  Waiting only for `done` is not enough: a worker can still be inside the
 // drain loop after its last `done` increment, and the host resetting `head` underneath it would let that
-// worker claim a job from the NEXT batch before the next batch has been published.  The
-// `done`-then-`parked` pair makes the handover unambiguous, and the second wait costs a few hundred cycles
-// against a layer that takes milliseconds.
+// worker claim a job from the NEXT batch before the next batch has been published.
+//
+// **AND `parked` IS NOT ENOUGH EITHER (issue #29).**  A worker that went to sleep (after `kSpinBeforeSleep`) is
+// still counted as parked when it wakes, so for a moment after it has seen a new epoch the host believes it is
+// idle.  On a card with most experts in VRAM the workers sleep in the middle of a request, tiny batches finish
+// before a sleeper is awake, and that moment comes round constantly: a late worker could claim from the NEXT
+// batch while the host was still writing it, run a job twice, or add to `done` after the host had reset it -
+// and `done != n` then never ended, with the GPU waiting on the pool forever.  So every claim carries its
+// batch: `head` is one 64-bit word `epoch | njobs | index`, a claim is a CAS that only succeeds for the epoch
+// the worker woke for, and a late worker's claim simply fails.  A claim that succeeds belongs to the current
+// batch, whose description the host cannot change until that job's `done` has landed.
 #pragma once
 
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 
 #include <atomic>
+#include <cstdio>
+#include <memory>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -92,6 +102,8 @@ public:
     /// threads on six cores. `false` is the A/B arm and exists so the change is measurable rather than
     /// asserted - the counter it moves is `pool phases ... drain`, which is host-side and needs no profiler.
     explicit ExpertPool(int n_workers = 0, bool pin = true, bool host_works = true);
+    /// The watchdog's view of the pool (issue #31): the batch, the counters, every thread's state.
+    void diag(std::FILE* f) const;
     ~ExpertPool();
     ExpertPool(const ExpertPool&) = delete;
     ExpertPool& operator=(const ExpertPool&) = delete;
@@ -142,14 +154,26 @@ public:
     /// **A PARKED WORKER SPINS FOR THIS LONG, THEN SLEEPS.**  The park is a `_mm_pause` spin because a layer's
     /// batches are microseconds apart and a wake-up from the OS costs more than that.  But a spin that never ends
     /// keeps every worker's core at 100% while the engine waits for a request - issue #4, "CPU 50% even when
-    /// doing nothing" (7 of the 5700X's 16 threads).  Inside a request the gaps between batches are far below
-    /// this, so the token path still never sleeps; between requests the workers block on `sleep_cv_`.
+    /// doing nothing" (7 of the 5700X's 16 threads).  Between requests the workers block on `sleep_cv_`.  NOT only
+    /// between requests: with most experts in VRAM (a 24 GB card) many layers have no CPU work, so the workers
+    /// also sleep mid-request - which the claim protocol above must survive (issue #29).
+    /// `STRATA_POOL_SPIN_US` overrides it (a test knob: a short spin makes the workers sleep constantly).
     static constexpr std::chrono::milliseconds kSpinBeforeSleep{20};
+    /// A pool wait that sees no completion for this long is a bug; the engine stops with a message instead of
+    /// spinning forever, and the server starts it again (issue #29).
+    static constexpr std::chrono::seconds kStall{60};
 
 private:
     void worker(int id);
-    void drain(int id, ExpertScratch& scratch);
+    void drain(int id, ExpertScratch& scratch, uint32_t epoch);
     void run_phase(int mode, int n_tasks);
+    /// Claim the next job of batch `epoch`, or -1 (that batch is exhausted, or it is not the current one).
+    int claim(uint32_t epoch);
+    /// Publish the batch whose description the caller has just written: reset `done`, then `head`, then the epoch.
+    uint32_t begin_batch(int n);
+    /// The host's waits, bounded by `kStall`.
+    void wait_parked(const char* what);
+    void wait_done(int n);
     /// Bump `epoch_`, and wake the workers that went to sleep.  Every publish goes through here.
     void publish();
 
@@ -176,7 +200,14 @@ private:
     //
     // The counter was diagnostic only - `pauses()` was read in one place, to print a number nothing branched on
     // - so it is deleted rather than amortised.  `alignas(64)` then stops the remaining four sharing.
-    alignas(64) std::atomic<uint32_t> head_{0};
+    // issue #31 diagnostics: each worker's state (kParked, kSleeping, kBetween, or the job it runs) and the host's
+    // (kIdle, kWaitParked, kWaitDone, or its job), printed by the serve watchdog through `diag`
+    static constexpr int32_t kParked = -1, kSleeping = -2, kBetween = -3, kIdle = -10, kWaitParked = -11,
+                             kWaitDone = -12;
+    std::unique_ptr<std::atomic<int32_t>[]> wstate_;
+    std::atomic<int32_t> hstate_{kIdle};
+    std::atomic<int64_t> hstate_ms_{0};
+    alignas(64) std::atomic<uint64_t> head_{0};   // epoch << 32 | njobs << 16 | next index (issue #29)
     alignas(64) std::atomic<uint32_t> done_{0};
     alignas(64) std::atomic<uint32_t> parked_{0};
     alignas(64) std::atomic<uint32_t> epoch_{0};
@@ -186,6 +217,7 @@ private:
     alignas(64) std::atomic<uint32_t> sleepers_{0};
     std::mutex sleep_mu_;
     std::condition_variable sleep_cv_;
+    std::chrono::microseconds spin_before_sleep_{kSpinBeforeSleep};
     std::vector<std::thread> threads_;
     std::vector<ExpertScratch> scratch_;   // one per worker: no allocation, no false sharing of the hot data
     // run_split state: mode 0 = whole experts, 1 = gate/up row parts, 2 = down row parts

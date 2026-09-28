@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import platform
@@ -56,7 +57,7 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 10)                # INFO arena_mib: the start-up RAM warning (issue #27), v0.1.10
+MIN_ENGINE = (0, 1, 14)                # v0.1.14: no host CUDA call inside a verify window (#31); v0.1.13: --prefill auto
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
 
 MODELS = {
@@ -248,6 +249,7 @@ def find_nvcc():
             cands += [str(p / "bin" / "nvcc.exe") for p in sorted(base.iterdir(), reverse=True)]
     else:
         cands += [str(p / "bin" / "nvcc") for p in sorted(Path("/usr/local").glob("cuda*"), reverse=True)]
+        cands += [str(p / "bin" / "nvcc") for p in sorted(Path("/opt").glob("cuda*"), reverse=True)]   # Arch (#46)
     best = (None, None)
     for c in dict.fromkeys(cands):                     # every toolkit found; the newest wins
         if c and Path(c).exists():
@@ -475,7 +477,13 @@ def update_installed_engine(url_base) -> None:
     meta_text = info.read_text()
     meta = json.loads(meta_text)
     ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
-    if meta.get("source") == "local" or ver >= MIN_ENGINE:
+    local = meta.get("source") == "local"
+    vision = meta.get("vision") or "none"
+    if local:                                          # compiled here: is it older than the source (a git pull)?
+        if meta.get("src") == source_hash(ENGINE_SOURCES) and \
+                (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES)):
+            return
+    elif ver >= MIN_ENGINE:
         return
     try:                                               # a running engine cannot be replaced (Windows keeps it locked)
         for x in (EXE, VEXE):
@@ -483,9 +491,17 @@ def update_installed_engine(url_base) -> None:
                 with open(eng / x, "r+b"):
                     pass
     except OSError:
-        warn(f"engine {meta.get('version')} is in use: close the model window and run this again to update it")
+        warn(f"engine {meta.get('version') or ''} is in use: close the model window and run this again to update it")
         return
     gpu = gpu_info()
+    if local:
+        try:                                           # a failed compile must not stop the model from starting
+            if gpu is None:
+                raise RuntimeError("no NVIDIA GPU found")
+            build_engine(gpu, vision, False, get_llama_cpp())
+        except (Exception, SystemExit) as e:
+            warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the installed one")
+        return
     new = None
     if gpu is not None:
         try:
@@ -535,8 +551,9 @@ def install_build_tools(gpu, yes):
     else:
         apt = shutil.which("apt-get")
         if apt is None:
-            fail("automatic install is only done on Ubuntu/Debian",
-                 "install g++ and the CUDA Toolkit 13 (https://developer.nvidia.com/cuda-downloads), then run it again")
+            fail("missing: " + " and ".join(missing) + " (the automatic install is only done on Ubuntu/Debian)",
+                 "install them with your distribution's packages (Arch: pacman -S base-devel cuda; nvcc is found on "
+                 "PATH, in /usr/local/cuda* and in /opt/cuda*), then run it again")
         if not have_cc:
             run(["sudo", "apt-get", "install", "-y", "build-essential"])
         if nvcc is None or cuda_v < need_cuda:
@@ -567,35 +584,61 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     conf = [cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-S", str(src), "-B", str(bdir),
             "-DCMAKE_BUILD_TYPE=Release", *defs]
     build = [cmake, "--build", str(bdir), "--target", target, "-j", str(max(2, (os.cpu_count() or 4) // 2))]
+    # A failed build is tried once more: CUDA 13.0's ptxas now and then fails to parse a PTX file it just wrote, and
+    # the same command then gets past it (issue #45); a second attempt only compiles what is still missing.
     if WIN:
         bat = ROOT / bat_name
         q = lambda c: " ".join(f'"{x}"' if " " in str(x) else str(x) for x in c)  # noqa: E731
-        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} || exit /b 1\r\n',
+        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
+                       f'echo   (the build stopped - trying it once more)\r\n{q(build)} || exit /b 1\r\n',
                        encoding="utf-8")
         run(["cmd", "/c", str(bat)])
     else:
         run(conf)
-        run(build)
+        if run(build, check=False).returncode != 0:
+            say("  (the build stopped - trying it once more)")
+            run(build)
+
+
+ENGINE_SOURCES = ("CMakeLists.txt", "src", "include", "third_party/ggml")
+VISION_SOURCES = ("tools/vision",)
+
+
+def source_hash(parts) -> str:
+    """A fingerprint of the files a compiled engine is built from, kept in engine/BUILD.json: when a `git pull`
+    changes them, the engine is compiled again (issue #31)."""
+    h = hashlib.sha256(LLAMA_CPP_COMMIT.encode())
+    for part in parts:
+        base = ROOT / part
+        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file()):
+            h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n"))
+    return h.hexdigest()[:16]
 
 
 def build_engine(gpu, vision, yes, llama) -> Path:
-    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/."""
+    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
+    engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes."""
     eng = ROOT / "engine"
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
     want_vision = vision != "none"
-    if meta.get("source") == "local" and (eng / EXE).exists() and (not want_vision or (eng / VEXE).exists()):
+    local = meta.get("source") == "local"
+    src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
+    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src
+    vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
+    if engine_ok and vision_ok:
         ok("engine already built for this PC")
         return eng
     nvcc, vcvars = install_build_tools(gpu, yes)
-    if not (eng / EXE).exists() or meta.get("source") != "local":
-        say("  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
+    if not engine_ok:
+        say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
+            if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, ROOT / "build", "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata.bat")
         shutil.copy2(ROOT / "build" / EXE, eng / EXE)
-    if want_vision and not (eng / VEXE).exists():
+    if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
         defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}"]
         if vision == "gpu":
@@ -604,8 +647,9 @@ def build_engine(gpu, vision, yes, llama) -> Path:
         shutil.copy2(ROOT / "build-vision" / "bin" / VEXE, eng / VEXE)
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
-    stamp.write_text(json.dumps({"source": "local", "archs": [int(gpu["arch"])], "vision": vision,
-                                 "cuda_dirs": dirs}, indent=1))
+    stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": [int(gpu["arch"])],
+                                 "vision": vision,
+                                 "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
 
@@ -615,8 +659,61 @@ def installed_configs():
     return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def source_version() -> str:
+    """The engine version the source tree builds (CMakeLists.txt's project version)."""
+    m = re.search(r"project\(strata VERSION ([\d.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
+    return m.group(1) if m else "0"
+
+
+def engine_version(exe: Path) -> tuple:
+    """The version in the engine folder's BUILD.json, or else the one compiled into the binary.  A locally compiled
+    engine is not necessarily the source's version: when compiling a `git pull` fails, the previous engine is kept
+    (issue #49)."""
+    try:
+        meta = json.loads((Path(exe).parent / "BUILD.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    v = str(meta.get("version") or "")
+    if not v:                                          # the version compiled into the binary: 0.1.13 and newer
+        try:                                           # carry it, so a binary without it is older
+            m = re.search(rb"engine=(\d+\.\d+\.\d+)\n", Path(exe).read_bytes())
+            v = m.group(1).decode() if m else "0.1.12"
+        except OSError:
+            v = "0"
+    return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
+
+
+def is_wsl() -> bool:
+    return sys.platform.startswith("linux") and "microsoft" in platform.uname().release.lower()
+
+
+def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
+    """Configs written before v0.1.13 read prompts in fixed 2048-token chunks; the engine now picks the chunk
+    itself (`--prefill auto`: up to 8192, as the free VRAM allows - about 2x faster on long prompts).  Under WSL,
+    KV streaming is dropped: its RAM copy must be pinned, and the driver pins only about 1 GB there."""
+    a = cfg.get("args", [])
+    changed = False
+    ver = engine_version(cfg["exe"]) if "--prefill" in a else (0, 0, 0)
+    if "--prefill" in a and a[a.index("--prefill") + 1] == "2048" and ver >= (0, 1, 13):
+        a[a.index("--prefill") + 1] = "auto"
+        changed = True
+        ok("prompt reading: the engine now picks its chunk size (--prefill auto)")
+    elif "--prefill" in a and a[a.index("--prefill") + 1] == "auto" and (0, 0, 0) < ver < (0, 1, 13):
+        a[a.index("--prefill") + 1] = "2048"           # an older engine kept after a failed update (issue #49)
+        changed = True
+        warn(f"the installed engine is {'.'.join(map(str, ver))}: prompts are read in 2048-token chunks until it is updated")
+    if is_wsl() and "--kv-resident" in a:
+        i = a.index("--kv-resident")
+        del a[i:i + 2]
+        changed = True
+        ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
+    if changed:
+        cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    return cfg
+
+
 def start(cfg_path: Path, port: int | None, open_browser=True) -> int:
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
@@ -659,7 +756,7 @@ def main() -> int:
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--port", type=int, help="the server's port (default: the one the install was set up with, 8080 for a new one)")
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
     ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0)")
@@ -674,6 +771,7 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
 
     say("Strata - Qwen3.8-Flash-Next on a normal PC (NVIDIA GPU + system RAM + CPU)")
 
@@ -683,14 +781,14 @@ def main() -> int:
         if not a.build:
             update_installed_engine(a.prebuilt)
         if len(have) == 1:
-            return start(have[0], None)
+            return start(have[0], a.port)
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
         say(f"  {len(have) + 1}) install another model / change settings")
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
-            return start(have[pick - 1], None)
+            return start(have[pick - 1], a.port)
 
     # ---- 1. the PC
     step(1, "checking your PC")
@@ -909,7 +1007,7 @@ def main() -> int:
         fail("the model has no per_layer_token_embd tensor (is this a Qwen3.8-Flash-Next GGUF?)")
     args = ["--pack", str(pack), "--native", str(shards[0]), "--ple-gguf", str(ple),
             "--expert-profile", str(ROOT / "data" / "expert-profile.bin"), "--expert-cache", "auto",
-            "--prefill", "2048", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
+            "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
             "--max-context", str(ctx)]
     if ctx > 8192:
         args += ["--kv", kv]
@@ -917,7 +1015,10 @@ def main() -> int:
     # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
     # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with 4-bit, so only when it fits.
     kv_ram_gb = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9   # 12 QSA layers + the draft layer
-    if ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
+    # the RAM copy must be pinned, and under WSL the NVIDIA driver pins only about 1 GB in all
+    if is_wsl() and ctx >= 65536:
+        ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
+    elif ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
         args += ["--kv-resident", "32768"]
         ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
     if vision != "none":
@@ -928,7 +1029,7 @@ def main() -> int:
                  "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
-           "lib_dirs": lib_dirs, "port": a.port}
+           "lib_dirs": lib_dirs, "port": port}
     if a.host:
         cfg["host"] = a.host
     if a.api_key:
@@ -940,22 +1041,22 @@ def main() -> int:
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-    script = write_run_script(tag, cfg_path, a.port)
+    script = write_run_script(tag, cfg_path, port)
     ok(f"start script: {script.name}")
 
     say()
     say("All set.")
-    say(f"  API (OpenAI):     http://127.0.0.1:{a.port}/v1   (any API key; model name: anything)")
-    say(f"  API (Anthropic):  http://127.0.0.1:{a.port}/v1/messages")
+    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1   (any API key; model name: anything)")
+    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
     if a.host and a.host not in ("127.0.0.1", "localhost"):
-        say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{a.port}/)"
+        say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{port}/)"
             + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
     if a.no_start:
         return 0
-    return start(cfg_path, a.port)
+    return start(cfg_path, port)
 
 
 if __name__ == "__main__":

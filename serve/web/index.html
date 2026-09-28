@@ -50,9 +50,9 @@
         <div class="attachments" id="attachments" hidden></div>
         <textarea id="input" rows="2" placeholder="Ask anything&hellip;" aria-label="Message"></textarea>
         <div class="st-composer__bar">
-          <button type="button" class="st-btn st-btn--icon" id="attach-btn" title="Attach a picture" aria-label="Attach a picture" hidden>
+          <button type="button" class="st-btn st-btn--icon" id="attach-btn" title="Attach a text file (or drop it here)" aria-label="Attach a file">
             <svg class="st-icon"><use href="/web/sprite.svg#i-attach"/></svg></button>
-          <input type="file" id="file" accept="image/*" multiple hidden>
+          <input type="file" id="file" multiple hidden>
           <button type="button" class="st-btn st-btn--icon" id="new-btn" title="New chat" aria-label="New chat">
             <svg class="st-icon"><use href="/web/sprite.svg#i-new-chat"/></svg></button>
           <button type="button" class="st-btn st-btn--icon" id="export-btn" title="Save this chat as Markdown" aria-label="Save this chat">
@@ -112,14 +112,16 @@
           <div class="st-progress" data-tone="warn"><div class="st-progress__bar" id="temp-bar" style="width:0%"></div></div>
         </div>
         <div class="st-card req-card">
-          <span class="card-title">Recent requests</span>
-          <div class="table-wrap">
+          <div class="req-head"><span class="card-title">Recent requests</span>
+            <button class="st-btn st-btn--secondary" id="req-all" hidden>Show all</button></div>
+          <div class="table-wrap" id="req-wrap">
             <table class="st-table">
               <thead><tr><th>Time</th><th>Status</th><th class="num">Prompt</th><th class="num">Reused</th><th class="num">Output</th>
                 <th class="num">Tok/s</th><th class="num">Duration</th></tr></thead>
               <tbody id="req-body"><tr><td colspan="7" class="muted">No requests yet</td></tr></tbody>
             </table>
           </div>
+          <p class="muted req-totals" id="req-totals"></p>
         </div>
       </div>
     </div>

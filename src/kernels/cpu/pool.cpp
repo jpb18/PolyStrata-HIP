@@ -1,5 +1,6 @@
 // src/kernels/cpu/pool.cpp - P2.S3: the CPU expert pool.  Read pool.hpp first; it explains the protocol.
 #include "strata/kernels/cpu/pool.hpp"
+#include "strata/core/progress.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <immintrin.h>
 
 #include <cstdio>
+#include <cstdlib>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -18,6 +20,12 @@
 #endif
 
 namespace strata::kernels::cpu {
+
+namespace {
+constexpr uint64_t pack_head(uint32_t epoch, uint32_t n, uint32_t i) {
+    return ((uint64_t) epoch << 32) | ((uint64_t) n << 16) | (uint64_t) i;
+}
+}  // namespace
 
 std::vector<int> physical_cores(bool skip_first) {
     std::vector<int> cores;
@@ -47,13 +55,38 @@ std::vector<int> physical_cores(bool skip_first) {
         }
     }
 #else
+    // The logical CPUs this process may run on, ONE PER PHYSICAL CORE (issue #40): SMT siblings share a core's
+    // load/store bandwidth, so a worker on each would put two workers on one core, as the Windows branch above
+    // explains.  sysfs names each CPU's (package, core); the first allowed CPU of each pair is kept, so a taskset
+    // that leaves out the first sibling still gets its core.  Without sysfs every allowed CPU counts, as before.
+    auto topo = [](int cpu, const char* what) -> long {
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/%s", cpu, what);
+        long v = -1;
+        if (std::FILE* f = std::fopen(path, "r")) {
+            if (std::fscanf(f, "%ld", &v) != 1) v = -1;
+            std::fclose(f);
+        }
+        return v;
+    };
+    std::vector<int> allowed;
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof set, &set) == 0) {
         for (int i = 0; i < CPU_SETSIZE; ++i)
-            if (CPU_ISSET(i, &set)) cores.push_back(i);
+            if (CPU_ISSET(i, &set)) allowed.push_back(i);
     } else {
-        for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) cores.push_back((int) i);
+        for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) allowed.push_back((int) i);
+    }
+    std::vector<std::pair<long, long>> seen;
+    for (int cpu : allowed) {
+        const long pkg = topo(cpu, "physical_package_id"), core = topo(cpu, "core_id");
+        if (pkg >= 0 && core >= 0) {
+            const std::pair<long, long> key{pkg, core};
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;   // an SMT sibling
+            seen.push_back(key);
+        }
+        cores.push_back(cpu);
     }
 #endif
     if (skip_first && !cores.empty()) cores.erase(cores.begin());
@@ -108,11 +141,50 @@ void restore_thread_affinity(long long previous) {
 #endif
 }
 
+namespace {
+std::atomic<const ExpertPool*> g_diag_pool{nullptr};
+void diag_active_pool(std::FILE* f) {
+    if (const ExpertPool* p = g_diag_pool.load()) p->diag(f);
+}
+int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
+
+void ExpertPool::diag(std::FILE* f) const {
+    const uint64_t h = head_.load();
+    std::fprintf(f, "  expert pool: epoch %u, batch epoch %u: %u of %u jobs claimed, %u done; %u of %d workers parked, "
+                    "%u sleeping; mode %d\n", epoch_.load(), (uint32_t) (h >> 32), (uint32_t) h & 0xffffu,
+                 (uint32_t) (h >> 16) & 0xffffu, done_.load(), parked_.load(), n_, sleepers_.load(), mode_);
+    std::fprintf(f, "  expert pool threads:");
+    for (int i = 0; i < n_; ++i) {
+        const int32_t s = wstate_[(size_t) i].load();
+        if (s == kParked) std::fprintf(f, " w%d=parked", i);
+        else if (s == kSleeping) std::fprintf(f, " w%d=sleeping", i);
+        else if (s == kBetween) std::fprintf(f, " w%d=draining", i);
+        else std::fprintf(f, " w%d=job%d", i, s);
+    }
+    const int32_t hs = hstate_.load();
+    const char* hn = hs == kIdle ? "idle" : hs == kWaitParked ? "waiting for the workers to park"
+                   : hs == kWaitDone ? "waiting for the jobs to finish" : "running a job";
+    std::fprintf(f, "; host %s", hn);
+    if (hs >= 0) std::fprintf(f, " %d", hs);
+    std::fprintf(f, " for %lld ms\n", (long long) (now_ms() - hstate_ms_.load()));
+}
+
 ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works) : host_works_(host_works) {
+    if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
+        spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
     const std::vector<int> cores = physical_cores(true);
     n_ = n_workers > 0 ? n_workers : (int) cores.size();
     if (n_ < 1) n_ = 1;
     scratch_.resize((size_t) n_);
+    wstate_.reset(new std::atomic<int32_t>[(size_t) n_]);
+    for (int i = 0; i < n_; ++i) wstate_[(size_t) i].store(kParked);
+    hstate_ms_.store(now_ms());
+    g_diag_pool.store(this);
+    strata::core::diag_pool_fn().store(&diag_active_pool);
     split_.resize((size_t) kMaxSplit);
     split_multi_.resize((size_t) kMaxSplitMulti);
     threads_.reserve((size_t) n_);
@@ -126,6 +198,8 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works) : host_works_(h
 }
 
 ExpertPool::~ExpertPool() {
+    const ExpertPool* self = this;
+    g_diag_pool.compare_exchange_strong(self, nullptr);
     stop_.store(true, std::memory_order_release);
     // Bump the epoch so a PARKED worker notices the stop flag rather than sleeping through it.
     publish();
@@ -170,30 +244,106 @@ void ExpertPool::worker(int id) {
             if (stop_.load(std::memory_order_relaxed)) return;
             _mm_pause();
             if ((++spins & 1023u) != 0) continue;
-            if (std::chrono::steady_clock::now() - parked_at < kSpinBeforeSleep) continue;
+            if (std::chrono::steady_clock::now() - parked_at < spin_before_sleep_) continue;
             std::unique_lock<std::mutex> lk(sleep_mu_);
+            wstate_[(size_t) id].store(kSleeping, std::memory_order_relaxed);
             sleepers_.fetch_add(1, std::memory_order_seq_cst);
             sleep_cv_.wait(lk, [&] {
                 return epoch_.load(std::memory_order_seq_cst) != seen || stop_.load(std::memory_order_relaxed);
             });
             sleepers_.fetch_sub(1, std::memory_order_relaxed);
+            wstate_[(size_t) id].store(kParked, std::memory_order_relaxed);
         }
         if (stop_.load(std::memory_order_acquire)) return;
-        seen = epoch_.load(std::memory_order_relaxed);
+        // acquire: the batch this epoch published (`head`, and the description before it) is visible from here
+        seen = epoch_.load(std::memory_order_acquire);
         parked_.fetch_sub(1, std::memory_order_acq_rel);   // leaving the park
 
         // Drain: one claim per iteration, so a slow worker takes fewer experts and a fast one takes more.
-        // Every job is the same size (all experts are 1,382,400 bytes), so there is nothing to schedule.
-        drain(id, scratch_[(size_t) id]);
+        // Every job is the same size (all experts are 1,382,400 bytes), so there is nothing to schedule.  Only
+        // this epoch's jobs: if the host has already moved on, the claims fail and the worker parks again.
+        wstate_[(size_t) id].store(kBetween, std::memory_order_relaxed);
+        drain(id, scratch_[(size_t) id], seen);
+        wstate_[(size_t) id].store(kParked, std::memory_order_relaxed);
         parked_.fetch_add(1, std::memory_order_acq_rel);   // back at the park
     }
 }
 
-void ExpertPool::drain(int id, ExpertScratch& scratch) {
+int ExpertPool::claim(uint32_t epoch) {
+    uint64_t h = head_.load(std::memory_order_acquire);
+    for (;;) {
+        if ((uint32_t) (h >> 32) != epoch) return -1;               // not the batch this thread woke for
+        const uint32_t n = (uint32_t) (h >> 16) & 0xffffu, i = (uint32_t) h & 0xffffu;
+        if (i >= n) return -1;                                       // exhausted
+        if (head_.compare_exchange_weak(h, h + 1, std::memory_order_acq_rel, std::memory_order_acquire))
+            return (int) i;
+    }
+}
+
+uint32_t ExpertPool::begin_batch(int n) {
+    if (n < 0 || n > 0xffff) {
+        std::fprintf(stderr, "strata: expert pool batch of %d jobs is out of range\n", n);
+        std::abort();
+    }
+    // Every job of the previous batch has completed (`wait_done`), and a claim of it can no longer succeed, so
+    // nothing adds to `done` until this batch's first claim - which the release below orders after the reset.
+    done_.store(0, std::memory_order_relaxed);
+    const uint32_t e = epoch_.load(std::memory_order_relaxed) + 1;   // only the host bumps the epoch
+    head_.store(pack_head(e, (uint32_t) n, 0), std::memory_order_release);
+    publish();
+    return e;
+}
+
+void ExpertPool::wait_parked(const char* what) {
+    hstate_.store(kWaitParked, std::memory_order_relaxed);
+    hstate_ms_.store(now_ms(), std::memory_order_relaxed);
+    uint32_t spins = 0;
+    std::chrono::steady_clock::time_point t0{};
+    while (parked_.load(std::memory_order_acquire) != (uint32_t) n_) {
+        _mm_pause();
+        if ((++spins & 1023u) != 0) continue;
+        const auto now = std::chrono::steady_clock::now();
+        if (spins == 1024u) t0 = now;
+        else if (now - t0 > kStall) {
+            std::fprintf(stderr, "strata: the CPU expert pool stalled %s (%u of %d workers parked) - stopping the engine "
+                                 "so the server can start it again (issue #29)\n",
+                         what, parked_.load(), n_);
+            std::fflush(stderr);
+            std::abort();
+        }
+    }
+}
+
+void ExpertPool::wait_done(int n) {
+    hstate_.store(kWaitDone, std::memory_order_relaxed);
+    hstate_ms_.store(now_ms(), std::memory_order_relaxed);
+    uint32_t spins = 0, seen = 0;
+    std::chrono::steady_clock::time_point t0{};
+    for (;;) {
+        const uint32_t d = done_.load(std::memory_order_acquire);
+        if (d >= (uint32_t) n) return;                                // `>=`: never a wait that an overshoot outlives
+        _mm_pause();
+        if ((++spins & 1023u) != 0) continue;
+        const auto now = std::chrono::steady_clock::now();
+        if (spins == 1024u || d != seen) { t0 = now; seen = d; }     // progress restarts the clock
+        else if (now - t0 > kStall) {
+            std::fprintf(stderr, "strata: the CPU expert pool stalled: %u of %d jobs done, %u of %d workers parked - "
+                                 "stopping the engine so the server can start it again (issue #29)\n",
+                         d, n, parked_.load(), n_);
+            std::fflush(stderr);
+            std::abort();
+        }
+    }
+}
+
+void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
     (void) id;
     for (;;) {
-        const uint32_t i = head_.fetch_add(1, std::memory_order_relaxed);
-        if (i >= (uint32_t) njobs_) break;
+        const int ci = claim(epoch);
+        if (ci < 0) break;
+        const uint32_t i = (uint32_t) ci;
+        if (id >= 0) wstate_[(size_t) id].store(ci, std::memory_order_relaxed);
+        else { hstate_.store(ci, std::memory_order_relaxed); hstate_ms_.store(now_ms(), std::memory_order_relaxed); }
         if (mode_ == 0) {
             const ExpertJob& j = jobs_[i];
             s2_expert_vnni_q(j.blob, *j.act, j.out, scratch);
@@ -267,15 +417,15 @@ void ExpertPool::drain(int id, ExpertScratch& scratch) {
 }
 
 void ExpertPool::run_phase(int mode, int n_tasks) {
-    while (parked_.load(std::memory_order_acquire) != (uint32_t) n_) _mm_pause();
+    wait_parked("before a phase");
     mode_ = mode;
     njobs_ = n_tasks;
-    head_.store(0, std::memory_order_relaxed);
-    done_.store(0, std::memory_order_relaxed);
-    publish();
-    if (host_works_) drain(-1, host_scratch_);
-    while (done_.load(std::memory_order_acquire) != (uint32_t) n_tasks) _mm_pause();
-    while (parked_.load(std::memory_order_acquire) != (uint32_t) n_) _mm_pause();
+    const uint32_t e = begin_batch(n_tasks);
+    if (host_works_) drain(-1, host_scratch_, e);
+    wait_done(n_tasks);
+    wait_parked("after a phase");
+    hstate_.store(kIdle, std::memory_order_relaxed);
+    hstate_ms_.store(now_ms(), std::memory_order_relaxed);
 }
 
 void ExpertPool::run_split(ExpertJob* jobs, int n) {
@@ -376,14 +526,12 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
     // THE THREE PHASES ARE TIMED SEPARATELY.  They were one number, which cannot distinguish a pool that is
     // slow at the WORK from one that is slow at the SYNCHRONISATION - and those need opposite fixes.
     const auto t_a = std::chrono::steady_clock::now();
-    while (parked_.load(std::memory_order_acquire) != (uint32_t) n_) _mm_pause();
+    wait_parked("before a batch");
     const auto t_b = std::chrono::steady_clock::now();
     jobs_ = jobs;
     njobs_ = n;
     mode_ = 0;
-    head_.store(0, std::memory_order_relaxed);
-    done_.store(0, std::memory_order_relaxed);
-    publish();   // a release (seq_cst): jobs_/njobs_ are visible before the bump
+    const uint32_t e = begin_batch(n);   // done, then head (release), then the epoch: the batch is described first
 
     // ---- **THE HOST DRAINS TOO (R2.2), INSTEAD OF SPINNING ON `done_`.**
     //
@@ -401,19 +549,23 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
     // device after `run()` returns, so the write must be published, not merely performed.
     if (host_works_) {
         for (;;) {
-            const uint32_t i = head_.fetch_add(1, std::memory_order_relaxed);
-            if (i >= (uint32_t) n) break;
-            const ExpertJob& j = jobs_[i];
+            const int ci = claim(e);
+            if (ci < 0) break;
+            hstate_.store(ci, std::memory_order_relaxed);
+            hstate_ms_.store(now_ms(), std::memory_order_relaxed);
+            const ExpertJob& j = jobs_[ci];
             s2_expert_vnni_q(j.blob, *j.act, j.out, host_scratch_);
             done_.fetch_add(1, std::memory_order_release);
         }
     }
 
-    while (done_.load(std::memory_order_acquire) != (uint32_t) n) _mm_pause();
+    wait_done(n);
     // And park again, so the next `run` starts from a known state.  See the header for why `done` alone is
     // not enough.
     const auto t_c = std::chrono::steady_clock::now();
-    while (parked_.load(std::memory_order_acquire) != (uint32_t) n_) _mm_pause();
+    wait_parked("after a batch");
+    hstate_.store(kIdle, std::memory_order_relaxed);
+    hstate_ms_.store(now_ms(), std::memory_order_relaxed);
     const auto t_d = std::chrono::steady_clock::now();
 
     ms_wait_park_ += std::chrono::duration<double, std::milli>(t_b - t_a).count();

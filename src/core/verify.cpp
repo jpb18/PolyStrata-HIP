@@ -28,11 +28,13 @@
 #include "strata/kernels/rope.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/core/progress.hpp"
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,7 +93,23 @@ bool native_of(const WeightRef* w, const std::string& name, std::string& err) {
 
 }  // namespace
 
+namespace {
+std::atomic<const Verifier*> g_diag_verifier{nullptr};
+void diag_active_verifier(std::FILE* f) {
+    if (const Verifier* v = g_diag_verifier.load()) v->diag(f);
+}
+}  // namespace
+
+void Verifier::diag(std::FILE* f) const {
+    auto rd = [](const uint32_t* p) { return p ? *(const volatile uint32_t*) p : 0u; };
+    std::fprintf(f, "  verify window: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
+                    "served %u, plan (A) %u, copies (B) %u\n", last_t_, (long long) last_pos0_, cur_layer_ + 1,
+                 rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
+}
+
 Verifier::~Verifier() {
+    const Verifier* self = this;
+    g_diag_verifier.compare_exchange_strong(self, nullptr);
     if (cs_) cudaStreamSynchronize(cs_);
     for (auto& e : exec_)
         if (e) cudaGraphExecDestroy(e);
@@ -107,6 +125,8 @@ Verifier::~Verifier() {
 
 bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
                     const NativeHead* head, int max_t, std::string& err) {
+    g_diag_verifier.store(this);
+    diag_verify_fn().store(&diag_active_verifier);
     wt_ = &wt;
     g_ = &g;
     ss_ = &ss;
@@ -772,6 +792,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         const Clock::time_point a = Clock::now();
         auto last_flush = a;
         uint32_t spins = 0;
+        progress_at("verify window: waiting for the GPU to reach layer", l);
         while (*seq < want) {
             _mm_pause();
             if ((++spins & 1023u) != 0) continue;
@@ -792,10 +813,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         cur_layer_ = want - 1;
         set_plan_slot(grp);
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
+        progress_at("verify window: the CPU experts of layer", l);
         if (pool != nullptr)
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
         VDBG("layer %lld served\n", (long long) l);
+        progress_tick();
         std::atomic_thread_fence(std::memory_order_seq_cst);
         _mm_sfence();
         if (*(volatile uint32_t*) h_flagA_ != want) {        // the pool did not publish a plan: an empty one
@@ -812,8 +835,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
         ms_pool += ms_since(b);
     }
+    progress_at("verify window: waiting for the GPU to finish the window (flags A/B/M raised)", (int64_t) T);
     const cudaError_t se = cudaStreamSynchronize(cs_);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
+    progress_at("verify window: waiting for the expert copies", (int64_t) T);
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
     // ---- a sampled or penalized request: the head's sampling again, host-side so its parameters are this call's
     // own (a captured kernel would replay the same draws forever).  Row t's draw is Philox(seed, pos0 + t): tied to
@@ -830,8 +855,26 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         }
     }
     for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
+    if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {   // debug: the first non-finite head
+        static bool reported = false;
+        if (!reported) {
+            std::vector<float> h((size_t) T * (size_t) n_vocab_);
+            cudaMemcpy(h.data(), head_logits_, h.size() * 4, cudaMemcpyDeviceToHost);
+            for (int t = 0; t < T && !reported; ++t) {
+                int64_t bad = 0;
+                for (int64_t v = 0; v < n_vocab_; ++v) bad += !std::isfinite(h[(size_t) t * n_vocab_ + v]);
+                if (bad) {
+                    reported = true;
+                    std::fprintf(stderr, "strata dbg: verify window at position %lld, row %d: %lld of %lld logits non-finite "
+                                         "(token out %d)\n", (long long) pos0, t, (long long) bad, (long long) n_vocab_, out[t]);
+                }
+            }
+        }
+    }
     VDBG("window done\n");
     ++windows;
+    progress_at("decode");
+    progress_beat();
     return true;
 }
 

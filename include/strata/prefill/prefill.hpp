@@ -48,6 +48,16 @@ public:
               core::ExpertSource* src, const core::ExpertCache* cache, const int32_t* host_res, int64_t chunk,
               void* stream, std::string& err, void* borrow = nullptr, uint64_t borrow_bytes = 0);
 
+    /// With borrowed buffers: lay them out again for chunks of `chunk` tokens (at most `init`'s) in `borrow` - a
+    /// request lends only the slots its prompt needs.  The stream must be idle (between prompts).
+    bool relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err);
+    int64_t chunk() const;
+
+    /// The share of the streamed experts' bytes DMA-able straight from pinned RAM (1 = all).  Sizes the streamed
+    /// ring (a big one only pays when the copy engine, not the host copies, is the limit); set before bytes_needed.
+    static void set_pinned_share(double share);
+    static double pinned_share();
+
     /// Device bytes `init` needs for a chunk of `chunk` tokens (what a borrowed region must hold).
     static uint64_t bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk);
 
@@ -70,6 +80,7 @@ public:
     const float* const* embd_rows = nullptr;
 
 private:
+    bool carve(std::size_t T, void* alloc);   // the device buffers of a chunk (prefill.cpp's Alloc)
     struct Impl;
     std::unique_ptr<Impl> impl_;
     PrefillStats stats_;

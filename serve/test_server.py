@@ -221,6 +221,34 @@ class EngineDeath(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_engine_err_mid_stream(self):
+        """The engine's ERR line after the stream started reaches the client as an error event (it used to be a
+        400 written into the open stream, which clients read as an empty answer)."""
+        class ErrEngine(MockEngine):
+            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+                yield None                                  # a prompt-progress heartbeat: the stream has started
+                raise ValueError("verify: layer 31 never rang (an illegal memory access was encountered)")
+
+        tok = ByteTokenizer()
+        svc = Service(ErrEngine(tok, ANSWER, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            for path, body in [("/v1/chat/completions", {"model": "m", "stream": True, "max_tokens": 20,
+                                                          "messages": [{"role": "user", "content": "hi"}]}),
+                               ("/v1/messages", {"model": "m", "stream": True, "max_tokens": 20,
+                                                 "messages": [{"role": "user", "content": "hi"}]})]:
+                req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    text = r.read().decode()
+                self.assertIn("illegal memory access", text, path)
+                self.assertNotIn("HTTP/1", text, path)
+                self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
 
 class SharedSettings(unittest.TestCase):
     """The web app's "Use for other apps too": POST /settings makes its Chat settings every client's defaults."""

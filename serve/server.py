@@ -123,6 +123,24 @@ class StrataEngine:
         self.ended = True                               # its output closed: it is gone, even before the OS says so
         self.lines.put(None)
 
+    def death_note(self) -> str:
+        """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
+        tail = ""
+        try:
+            with open(self.log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4096))
+                tail = f.read().decode("utf-8", "replace")
+        except (OSError, TypeError):
+            pass
+        for line in reversed(tail.splitlines()):
+            if "issue #29" in line:
+                return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
+                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+        return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
+                "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
+                "smaller model (Q2_0 / IQ2_XS).")
+
     def alive(self) -> bool:
         return not getattr(self, "ended", False) and self.proc.poll() is None
 
@@ -423,7 +441,10 @@ class Service:
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
-        self.history = collections.deque(maxlen=30)     # the last finished requests, newest last (GET /metrics)
+        self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
+        # since the server started (the Monitor's totals, issue #35)
+        self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
+                       "prompt_ms": 0.0, "decode_ms": 0.0}
         self.status_lock = threading.Lock()
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
@@ -476,12 +497,13 @@ class Service:
             return 0.0
         return s["generated"] / max(1e-6, time.time() - s["first_token"])
 
-    def metrics(self) -> dict:
+    def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
         the hardware (with a minute of history per series)."""
         with self.status_lock:
             s = dict(self.status)
             hist = list(self.history)
+            totals = dict(self.totals)
         now = time.time()
         progress = getattr(self.engine, "progress", None)
         if s.get("busy") and s.get("first_token") is None:
@@ -501,7 +523,9 @@ class Service:
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
-        return {"engine": engine, "live": live, "requests": hist[::-1], "hardware": tel["now"], "hardware_static":
+        return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
+                "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
+                "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
 
     def prepare(self, messages, tools, kwargs, max_new=None):
@@ -576,7 +600,9 @@ class Service:
             s = dict(self.status)
         el = now - s.get("started", now)
         if s.get("first_token") is None:
-            print(f"[strata] reading the prompt: {s.get('prompt_tokens', 0)} tokens, {el:.0f} s so far", flush=True)
+            pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
+            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
+            print(f"[strata] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
             print(f"[strata] {s['phase']}: {s['generated']} of max {s.get('max_tokens')} tokens, {rate:.1f} tok/s, "
@@ -633,11 +659,14 @@ class Service:
                         finish = "cancel"
                 except EngineDied as e:
                     finish = "error"
-                    print(f"[strata] {e}. The usual cause is running out of RAM: Linux then ends the biggest program "
-                          "(check: sudo dmesg | grep -i -E 'killed process|out of memory'); Windows slows down instead. "
-                          "Close other programs or use a smaller model (Q2_0 / IQ2_XS). The next request starts the engine "
-                          f"again.{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
+                    note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
+                    print(f"[strata] {e}. {note} The next request starts the engine again."
+                          f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
                           flush=True)
+                    raise
+                except ValueError as e:                 # the engine's ERR line (it may have ended after it)
+                    finish = "error"
+                    print(f"[strata] the engine reported an error: {e}", flush=True)
                     raise
                 finally:
                     gen.close()                         # STOP+drain to THIS request's DONE while still holding the
@@ -662,6 +691,13 @@ class Service:
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                         "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                         if n and last.get("generated") and last.get("decode_ms") else None})
+                    t = self.totals
+                    t["requests"] += 1
+                    t["prompt_tokens"] += len(ids)
+                    t["reused"] += last.get("reused") or 0
+                    t["output_tokens"] += n
+                    t["prompt_ms"] += last.get("prompt_ms") or 0.0
+                    t["decode_ms"] += last.get("decode_ms") or 0.0
                     now = time.time()
                     el = now - self.status.get("started", now)
                     ft = self.status.get("first_token")
@@ -913,7 +949,8 @@ def make_handler(svc: Service):
                 return
             if path == "/metrics":
                 if self._authorized():
-                    self._json(200, svc.metrics())
+                    # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
+                    self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
             if path == "/settings":
                 if self._authorized():
@@ -1018,6 +1055,9 @@ def make_handler(svc: Service):
             except EngineDied as e:                          # mid-stream: say so, then end the stream properly
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+            except ValueError as e:                          # the engine's ERR after the stream started: the
+                err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _anthropic(self, req):
             req = svc.with_shared(req, "anthropic")
@@ -1044,6 +1084,9 @@ def make_handler(svc: Service):
                 events.close()
             except EngineDied as e:                          # mid-stream: Anthropic's error event
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
+            except ValueError as e:                          # the engine's ERR after the stream started
+                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler
