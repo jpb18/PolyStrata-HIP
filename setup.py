@@ -249,6 +249,7 @@ def find_nvcc():
             cands += [str(p / "bin" / "nvcc.exe") for p in sorted(base.iterdir(), reverse=True)]
     else:
         cands += [str(p / "bin" / "nvcc") for p in sorted(Path("/usr/local").glob("cuda*"), reverse=True)]
+        cands += [str(p / "bin" / "nvcc") for p in sorted(Path("/opt").glob("cuda*"), reverse=True)]   # Arch (#46)
     best = (None, None)
     for c in dict.fromkeys(cands):                     # every toolkit found; the newest wins
         if c and Path(c).exists():
@@ -550,8 +551,9 @@ def install_build_tools(gpu, yes):
     else:
         apt = shutil.which("apt-get")
         if apt is None:
-            fail("automatic install is only done on Ubuntu/Debian",
-                 "install g++ and the CUDA Toolkit 13 (https://developer.nvidia.com/cuda-downloads), then run it again")
+            fail("missing: " + " and ".join(missing) + " (the automatic install is only done on Ubuntu/Debian)",
+                 "install them with your distribution's packages (Arch: pacman -S base-devel cuda; nvcc is found on "
+                 "PATH, in /usr/local/cuda* and in /opt/cuda*), then run it again")
         if not have_cc:
             run(["sudo", "apt-get", "install", "-y", "build-essential"])
         if nvcc is None or cuda_v < need_cuda:
@@ -582,15 +584,20 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     conf = [cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-S", str(src), "-B", str(bdir),
             "-DCMAKE_BUILD_TYPE=Release", *defs]
     build = [cmake, "--build", str(bdir), "--target", target, "-j", str(max(2, (os.cpu_count() or 4) // 2))]
+    # A failed build is tried once more: CUDA 13.0's ptxas now and then fails to parse a PTX file it just wrote, and
+    # the same command then gets past it (issue #45); a second attempt only compiles what is still missing.
     if WIN:
         bat = ROOT / bat_name
         q = lambda c: " ".join(f'"{x}"' if " " in str(x) else str(x) for x in c)  # noqa: E731
-        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} || exit /b 1\r\n',
+        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
+                       f'echo   (the build stopped - trying it once more)\r\n{q(build)} || exit /b 1\r\n',
                        encoding="utf-8")
         run(["cmd", "/c", str(bat)])
     else:
         run(conf)
-        run(build)
+        if run(build, check=False).returncode != 0:
+            say("  (the build stopped - trying it once more)")
+            run(build)
 
 
 ENGINE_SOURCES = ("CMakeLists.txt", "src", "include", "third_party/ggml")
@@ -640,7 +647,8 @@ def build_engine(gpu, vision, yes, llama) -> Path:
         shutil.copy2(ROOT / "build-vision" / "bin" / VEXE, eng / VEXE)
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
-    stamp.write_text(json.dumps({"source": "local", "archs": [int(gpu["arch"])], "vision": vision,
+    stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": [int(gpu["arch"])],
+                                 "vision": vision,
                                  "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
@@ -651,15 +659,28 @@ def installed_configs():
     return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def source_version() -> str:
+    """The engine version the source tree builds (CMakeLists.txt's project version)."""
+    m = re.search(r"project\(strata VERSION ([\d.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
+    return m.group(1) if m else "0"
+
+
 def engine_version(exe: Path) -> tuple:
-    """The version in the engine folder's BUILD.json; a locally compiled engine is the current source's."""
+    """The version in the engine folder's BUILD.json, or else the one compiled into the binary.  A locally compiled
+    engine is not necessarily the source's version: when compiling a `git pull` fails, the previous engine is kept
+    (issue #49)."""
     try:
         meta = json.loads((Path(exe).parent / "BUILD.json").read_text())
     except (OSError, ValueError):
-        return (0, 0, 0)
-    if meta.get("source") == "local":
-        return MIN_ENGINE
-    return tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+        meta = {}
+    v = str(meta.get("version") or "")
+    if not v:                                          # the version compiled into the binary: 0.1.13 and newer
+        try:                                           # carry it, so a binary without it is older
+            m = re.search(rb"engine=(\d+\.\d+\.\d+)\n", Path(exe).read_bytes())
+            v = m.group(1).decode() if m else "0.1.12"
+        except OSError:
+            v = "0"
+    return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
 
 
 def is_wsl() -> bool:
@@ -672,10 +693,15 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     KV streaming is dropped: its RAM copy must be pinned, and the driver pins only about 1 GB there."""
     a = cfg.get("args", [])
     changed = False
-    if "--prefill" in a and a[a.index("--prefill") + 1] == "2048" and engine_version(cfg["exe"]) >= (0, 1, 13):
+    ver = engine_version(cfg["exe"]) if "--prefill" in a else (0, 0, 0)
+    if "--prefill" in a and a[a.index("--prefill") + 1] == "2048" and ver >= (0, 1, 13):
         a[a.index("--prefill") + 1] = "auto"
         changed = True
         ok("prompt reading: the engine now picks its chunk size (--prefill auto)")
+    elif "--prefill" in a and a[a.index("--prefill") + 1] == "auto" and (0, 0, 0) < ver < (0, 1, 13):
+        a[a.index("--prefill") + 1] = "2048"           # an older engine kept after a failed update (issue #49)
+        changed = True
+        warn(f"the installed engine is {'.'.join(map(str, ver))}: prompts are read in 2048-token chunks until it is updated")
     if is_wsl() and "--kv-resident" in a:
         i = a.index("--kv-resident")
         del a[i:i + 2]
