@@ -3520,11 +3520,13 @@ int main(int argc, char** argv) {
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
-                                     "(%.1f MiB with full rows) in this request\n", r + 1,
+                                     "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
+                                     "waiting for it (since start)\n", r + 1,
                              (long long) (remote_experts[(size_t) r].computed() - remote_before[(size_t) r]),
                              (long long) (remote_experts[(size_t) r].launched_layers() - launches_before[(size_t) r]),
                              (double) (remote_experts[(size_t) r].returned_bytes() - compact_before[(size_t) r]) / 1048576.0,
-                             (double) (remote_experts[(size_t) r].full_row_bytes() - full_before[(size_t) r]) / 1048576.0);
+                             (double) (remote_experts[(size_t) r].full_row_bytes() - full_before[(size_t) r]) / 1048576.0,
+                             remote_experts[(size_t) r].ms_begin(), remote_experts[(size_t) r].ms_wait());
         }
         return 0;
     }

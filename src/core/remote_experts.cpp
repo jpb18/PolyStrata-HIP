@@ -6,6 +6,7 @@
 #include "strata/kernels/s2_expert_grouped.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace strata::core {
@@ -214,6 +215,9 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
 bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int64_t n_tok,
                           int64_t k, const int32_t* kind, const int32_t* primary_res,
                           std::string& err) {
+    // cumulative host time in here (staging and launches), reported per request by the driver
+    struct Timer { double& acc; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timer() { acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); } } timer{ms_begin_};
     const int64_t n = n_tok * k;
     if (n <= 0 || n > CAP || n_tok > strata::kernels::cpu::MAXT || k != 10 || layer < 0 ||
         (size_t) layer >= layers_present_.size() || device_ < 0) {
@@ -296,7 +300,9 @@ bool RemoteExperts::finish(float* out, std::string& err) {
     if (group_id_.empty()) return true;
     DeviceScope scope(device_);
     if (!scope.ok) { err = scope.error(device_); return false; }
+    const auto w0 = std::chrono::steady_clock::now();
     if (!check(cudaStreamSynchronize(stream_), "finish", err, device_)) return false;
+    ms_wait_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
     for (size_t i = 0; i < original_row_.size(); ++i)
         std::memcpy(out + (size_t) original_row_[i] * H, h_out_ + i * H, (size_t) H * sizeof(float));
     return true;

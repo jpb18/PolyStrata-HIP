@@ -43,6 +43,9 @@ public:
     double gib() const { return cache_.gib(); }
     uint64_t returned_bytes() const { return returned_bytes_; }
     uint64_t full_row_bytes() const { return full_row_bytes_; }
+    /// host time spent in begin() (staging + launches) and in finish() (waiting for this GPU), cumulative
+    double ms_begin() const { return ms_begin_; }
+    double ms_wait() const { return ms_wait_; }
 
 private:
     int device_ = -1;
@@ -52,6 +55,7 @@ private:
     int64_t launched_layers_ = 0;
     uint64_t returned_bytes_ = 0;
     uint64_t full_row_bytes_ = 0;
+    double ms_begin_ = 0, ms_wait_ = 0;
     ExpertCache cache_;
     cudaStream_t stream_ = nullptr;
     float* h_x_ = nullptr;
