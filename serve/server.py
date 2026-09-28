@@ -436,6 +436,9 @@ def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
     env = dict(os.environ)
+    if cfg.get("gpu") is not None:                   # issue #51: the GPU to run on, numbered as nvidia-smi does; CUDA's
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
+        env["CUDA_VISIBLE_DEVICES"] = str(cfg["gpu"])
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -544,7 +547,8 @@ class Service:
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
-            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()})
+            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()},
+                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0))
 
     def _tok_s(self):
         with self.status_lock:
@@ -1309,6 +1313,7 @@ def main() -> int:
                          "on your network (set an API key); also \"host\" in the config")
     ap.add_argument("--script", default="Thinking about it.</think>\n\nHello from the mock engine.")
     ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--gpu", type=int, help="the GPU to run on, as nvidia-smi numbers them (also \"gpu\" in the config)")
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
                     help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
     ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
@@ -1319,6 +1324,8 @@ def main() -> int:
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    if a.gpu is not None:
+        cfg["gpu"] = a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
@@ -1365,6 +1372,7 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    svc.gpu_index = cfg.get("gpu") or 0                 # the Monitor reads the card the engine runs on (issue #51)
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:

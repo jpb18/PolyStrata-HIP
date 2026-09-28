@@ -169,13 +169,14 @@ class _CpuRamFallback:
 
 # ------------------------------------------------------------------------------------------------ the sampler
 class Telemetry:
-    def __init__(self, extra=None):
-        """`extra()` -> dict of more series to record each second (the server's tok/s)."""
+    def __init__(self, extra=None, gpu_index=0):
+        """`extra()` -> dict of more series to record each second (the server's tok/s).  `gpu_index`: the card the
+        engine runs on, numbered as nvidia-smi and NVML number them (by PCI bus)."""
         self.extra = extra
         self.lock = threading.Lock()
         self.now: dict = {}
         self.hist = collections.defaultdict(lambda: collections.deque(maxlen=HISTORY))
-        self.gpu = _Nvml()
+        self.gpu = _Nvml(gpu_index)
         try:
             import psutil  # noqa: F401
             self.ps = sys.modules["psutil"]

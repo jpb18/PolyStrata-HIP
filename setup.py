@@ -243,12 +243,38 @@ def _cpuid_avx512_full() -> bool:
         return False
 
 
-def gpu_info():
-    s = out(["nvidia-smi", "--query-gpu=name,memory.total,compute_cap,driver_version", "--format=csv,noheader,nounits"])
-    if not s.strip():
+def gpus():
+    """Every NVIDIA GPU, numbered as nvidia-smi numbers them (by PCI bus, the order the engine is told to use)."""
+    s = out(["nvidia-smi", "--query-gpu=index,name,memory.total,compute_cap,driver_version",
+             "--format=csv,noheader,nounits"])
+    found = []
+    for line in s.strip().splitlines():
+        try:
+            idx, name, mem, cc, drv = [x.strip() for x in line.split(",")]
+            found.append({"index": int(idx), "name": name, "vram_gb": float(mem) / 1024.0, "arch": cc.replace(".", ""),
+                          "driver": drv})
+        except ValueError:
+            continue
+    return found
+
+
+GPU_PICK = None                                         # --gpu N (issue #51); None: the card with the most VRAM
+
+
+def gpu_info(pick=None):
+    """The GPU Strata runs on: `pick` (nvidia-smi's number) if given, else the one with the most VRAM (ties: the
+    lower number).  None when there is no NVIDIA GPU.  The dict also says how many there are ("count")."""
+    found = gpus()
+    if not found:
         return None
-    name, mem, cc, drv = [x.strip() for x in s.strip().splitlines()[0].split(",")]
-    return {"name": name, "vram_gb": float(mem) / 1024.0, "arch": cc.replace(".", ""), "driver": drv}
+    pick = GPU_PICK if pick is None else pick
+    if pick is not None:
+        g = next((x for x in found if x["index"] == pick), None)
+        if g is None:
+            fail(f"there is no GPU {pick}: " + ", ".join(f"{x['index']} = {x['name']}" for x in found))
+    else:
+        g = max(found, key=lambda x: (round(x["vram_gb"]), -x["index"]))
+    return {**g, "count": len(found)}
 
 
 def find_nvcc():
@@ -852,7 +878,7 @@ def choices_from_config(cfg_path: Path) -> dict:
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
-            "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port")}
+            "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu")}
 
 
 def find_in(roots: list, rel: str):
@@ -921,7 +947,7 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     return cfg
 
 
-def start(cfg_path: Path, port: int | None, open_browser=True) -> int:
+def start(cfg_path: Path, port: int | None, gpu: int | None = None, open_browser=True) -> int:
     cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
@@ -929,6 +955,9 @@ def start(cfg_path: Path, port: int | None, open_browser=True) -> int:
     cfg_path.touch()                                     # the most recently used model
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
            "--port", str(port or cfg.get("port", 8080))]
+    if gpu is not None:
+        gpu_info(gpu)                                  # stops with the list of GPUs if there is no such one
+        cmd += ["--gpu", str(gpu)]
     if open_browser:
         cmd.append("--open")
     gb = 0.0
@@ -978,6 +1007,8 @@ def main() -> int:
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
     ap.add_argument("--port", type=int, help="the server's port (default: the one the install was set up with, 8080 for a new one)")
+    ap.add_argument("--gpu", type=int, help="the GPU to use, numbered as nvidia-smi numbers them (default: the one with the "
+                                            "most VRAM; with --setup it is saved, when starting it overrides the saved one)")
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
     ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0)")
@@ -1016,20 +1047,23 @@ def main() -> int:
                 a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
                 a.host, a.api_key = a.host or ch["host"], a.api_key or ch["api_key"]
                 a.port = a.port or ch["port"]
+                a.gpu = a.gpu if a.gpu is not None else ch.get("gpu")
                 a.yes = True
+    global GPU_PICK
+    GPU_PICK = a.gpu
     port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         if not a.build:
             update_installed_engine(a.prebuilt)
         if len(have) == 1:
-            return start(have[0], a.port)
+            return start(have[0], a.port, a.gpu)
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
         say(f"  {len(have) + 1}) install another model / change settings")
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
-            return start(have[pick - 1], a.port)
+            return start(have[pick - 1], a.port, a.gpu)
 
     # ---- 1. the PC
     step(1, "checking your PC")
@@ -1039,6 +1073,11 @@ def main() -> int:
              "install the NVIDIA driver from https://www.nvidia.com/drivers and restart the PC")
     ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {gpu['arch'][:-1]}.{gpu['arch'][-1]}, "
        f"driver {gpu['driver']}")
+    if gpu["count"] > 1:
+        say(f"       {gpu['count']} NVIDIA GPUs: Strata uses GPU {gpu['index']}"
+            + (" (the one with the most VRAM)" if a.gpu is None else "") + " - choose another with --gpu N:")
+        for x in gpus():
+            say(f"         {x['index']}: {x['name']}, {x['vram_gb']:.0f} GB")
     if int(gpu["arch"]) < 80:
         fail("this GPU is older than the RTX 30 series (compute capability 8.0 is required)")
     if driver_major(gpu) < MIN_DRIVER:
@@ -1280,6 +1319,8 @@ def main() -> int:
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port}
+    if gpu["count"] > 1 or a.gpu is not None:
+        cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
     if a.host:
         cfg["host"] = a.host
     if a.api_key:

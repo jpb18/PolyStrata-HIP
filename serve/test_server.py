@@ -236,6 +236,19 @@ class ClientShapes(unittest.TestCase):
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
 
 
+class GpuChoice(unittest.TestCase):
+    """Issue #51: the config's \"gpu\" reaches the engine as CUDA_VISIBLE_DEVICES, numbered like nvidia-smi."""
+
+    def test_env(self):
+        from serve.server import child_env
+        env = child_env({"gpu": 1})
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "1")
+        self.assertEqual(env["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
+        plain = child_env({})                     # no choice: the environment as it was (existing installs)
+        self.assertEqual(plain.get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
+        self.assertEqual(plain.get("CUDA_DEVICE_ORDER"), os.environ.get("CUDA_DEVICE_ORDER"))
+
+
 class RecordingPrompt(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_ids = list(ids)

@@ -197,6 +197,7 @@ START-HERE.bat --model IQ2_XS --context 32768 --vision yes --yes     no question
 START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
 START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port
+START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-smi; setup picks the one with the most VRAM)
 ```
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
