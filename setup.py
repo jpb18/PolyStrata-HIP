@@ -57,7 +57,7 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 14)                # v0.1.14: no host CUDA call inside a verify window (#31); v0.1.13: --prefill auto
+MIN_ENGINE = (0, 1, 15)                # v0.1.15: kernels loaded at start (IQ3_XXS 64K+); v0.1.14: #31; v0.1.13: --prefill auto
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
 
 MODELS = {
