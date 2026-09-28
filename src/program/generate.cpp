@@ -759,6 +759,16 @@ int main(int argc, char** argv) {
     // pipe or a file is block-buffered, so a program that dies loses every line it had already printed - which
     // turns "it crashed at step 7" into "it crashed somewhere", and the difference is a debugging session.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // Load every CUDA kernel when the context is created, before the expert cache takes the free VRAM.  With the
+    // default lazy loading, a kernel first used mid-prompt (MMQ for IQ3_XXS at 64K+ on a 12 GB card) found no VRAM
+    // left for its code and the engine ended ("out of memory: cudaFuncSetAttribute").  Costs ~30 MB of VRAM.
+    if (std::getenv("CUDA_MODULE_LOADING") == nullptr) {
+#if defined(_WIN32)
+        _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+#else
+        setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+#endif
+    }
     Options o;
     bool have_tokens = false;
     bool have_logits_stride = false;
