@@ -407,10 +407,10 @@ const MmqPlan& mmq_plan() {
     }();
     return plan;
 }
-uint64_t moe_set_bytes(size_t T) {
+uint64_t moe_set_bytes(size_t T, int64_t n_expert) {
     const MmqPlan& mp = mmq_plan();
     Alloc a; a.count_only = true; bool ok = true;
-    a.take<float>(T * NE, ok); a.take<float>(T * K, ok); a.take<int32_t>(T * K, ok); a.take<int32_t>(T * K, ok);
+    a.take<float>(T * n_expert, ok); a.take<float>(T * K, ok); a.take<int32_t>(T * K, ok); a.take<int32_t>(T * K, ok);
     a.take<int32_t>(T * K, ok);
     if (mp.fallback) a.take<uint16_t>(T * K * N, ok);
     a.take<float>(T * K * 1280, ok);
@@ -432,7 +432,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     Impl& m = *impl_;
     m.wt = &wt; m.g = &g; m.ss = &ss; m.src = src; m.cache = cache; m.host_res = host_res;
     m.T = chunk; m.cs = (cudaStream_t) stream; m.stats = &stats_;
-    if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert != NE || ss.k != K) {
+    if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert < 1 || ss.k != K) {
         err = "prefill: geometry differs from the artifact's"; return false;
     }
     if (cudaStreamCreateWithFlags(&m.copy, cudaStreamNonBlocking) != cudaSuccess) { err = "prefill: copy stream"; return false; }
@@ -451,7 +451,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         if (!m.stager->init((size_t) MAXBLOB(), std::max(2, std::min(4, hw / 4)))) ok = false;
     }
     m.steps_host.resize(T * strata::kernels::kStepCount);
-    m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(NE); m.off.resize(NE + 1);
+    m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(m.g->n_expert); m.off.resize(m.g->n_expert + 1);
     for (int b = 0; b < 2; ++b) {
         if (!m.ple_emb_host[b] &&
             cudaHostAlloc((void**) &m.ple_emb_host[b], (size_t) T * N * 4, cudaHostAllocDefault) != cudaSuccess) {
@@ -513,7 +513,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     {
         // one region for the attention half's and the MoE half's scratch (see gdn_set_bytes)
         const uint64_t region = std::max({gdn_set_bytes(T), qsa_set_bytes(T, m.cap, m.max_blocks, m.sel_batch,
-                                                                           m.attn_batch, s), moe_set_bytes(T)});
+                                                                           m.attn_batch, s), moe_set_bytes(T, m.g->n_expert)});
         uint8_t* base = o.take<uint8_t>((size_t) region, ok);
         m.region = base;
         m.region_bytes = region;
@@ -532,7 +532,7 @@ bool Prefill::carve(size_t T, void* alloc) {
         m.attn_scratch = b.take<float>((size_t) m.attn_batch * strata::kernels::qsa_decode_attn_scratch_floats(m.cap, s), ok);
         Alloc c;
         c.base = base; c.cap = region; c.owned = &m.owned;
-        m.logits = c.take<float>(T * NE, ok); m.w = c.take<float>(T * K, ok); m.ids = c.take<int32_t>(T * K, ok);
+        m.logits = c.take<float>(T * m.g->n_expert, ok); m.w = c.take<float>(T * K, ok); m.ids = c.take<int32_t>(T * K, ok);
         m.slot_dev = c.take<int32_t>(T * K, ok); m.src_dev = c.take<int32_t>(T * K, ok);
         const MmqPlan& mp = mmq_plan();
         m.Xs = mp.fallback ? c.take<uint16_t>(T * K * N, ok) : nullptr;
@@ -552,7 +552,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
         m.ids_identity = o.take<int32_t>(T * K, ok);
-        m.bounds_dev = o.take<int32_t>((size_t) (2 * (NE + NE / MMQ_GROUP + 2)), ok);
+        m.bounds_dev = o.take<int32_t>((size_t) (2 * (m.g->n_expert + m.g->n_expert / MMQ_GROUP + 2)), ok);
         m.grp_gu = o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
         m.grp_d = o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
         // (written at every run's start, not here: when serving, these are live expert-cache slots until a request
@@ -618,12 +618,12 @@ uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::Session
     const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
     const int64_t max_blocks = ss.qsa_states[0].max_cells / s.idx_block + 2;
     o.take<uint8_t>((size_t) std::max({gdn_set_bytes(T), qsa_set_bytes(T, cap, max_blocks, 256, 32, s),
-                                       moe_set_bytes(T)}), ok);
+                                       moe_set_bytes(T, g.n_expert)}), ok);
     for (int i = 0; i < DQ; ++i) { o.take<uint16_t>(1280 * 2560, ok); o.take<uint16_t>(2560 * 640, ok); }
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
         o.take<int32_t>(T * K, ok);
-        o.take<int32_t>((size_t) (2 * (NE + NE / MMQ_GROUP + 2)), ok);
+        o.take<int32_t>((size_t) (2 * (g.n_expert + g.n_expert / MMQ_GROUP + 2)), ok);
         o.take<uint8_t>(MMQ_GROUP * mp.gu_max + MMQ_TAIL, ok);
         o.take<uint8_t>(MMQ_GROUP * mp.d_max + MMQ_TAIL, ok);
     }
@@ -809,8 +809,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             std::vector<Stager::Job> js;
             for (int64_t l = 0; l < g.n_layers; ++l) {
                 seq_start[(size_t) l] = seq.size();
-                for (int32_t e = 0; e < NE; ++e) {
-                    if (m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0) continue;
+                for (int32_t e = 0; e < m.g->n_expert; ++e) {
+                    if (m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0) continue;
                     const uint8_t* b = m.src->blob(l, e);
                     if (!b) { err = "prefill: expert source has no blob"; return false; }
                     int job = -1;
@@ -1095,7 +1095,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     if (!wr || !wgi || !wsg || !wsu || !wsd) return false;
                     pt.mark(kPfRouter, cs);
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err)) return false;
-                    route(m.logits, m.ids, m.w, T, m.cs);
+                    route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
                     // the shared expert and its scalar gate
                     if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                     if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
@@ -1111,11 +1111,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     std::fill(m.cnt.begin(), m.cnt.end(), 0);
                     for (int64_t i = 0; i < T * K; ++i) {
                         const int32_t e = m.ids_host[(size_t) i];
-                        if (e < 0 || e >= NE) { err = "prefill: routed id out of range"; return false; }
+                        if (e < 0 || e >= m.g->n_expert) { err = "prefill: routed id out of range"; return false; }
                         ++m.cnt[(size_t) e];
                     }
                     m.off[0] = 0;
-                    for (int64_t e = 0; e < NE; ++e) m.off[(size_t) e + 1] = m.off[(size_t) e] + m.cnt[(size_t) e];
+                    for (int64_t e = 0; e < m.g->n_expert; ++e) m.off[(size_t) e + 1] = m.off[(size_t) e] + m.cnt[(size_t) e];
                     std::vector<int32_t> fill(m.off.begin(), m.off.end() - 1);
                     for (int64_t i = 0; i < T * K; ++i) {
                         const int32_t e = m.ids_host[(size_t) i];
@@ -1127,7 +1127,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     cudaMemcpyAsync(m.src_dev, m.src_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
                     // the experts, in id order: resident ones from VRAM, the others through the staging ring
                     std::vector<int32_t> order;
-                    for (int32_t e = 0; e < NE; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
+                    for (int32_t e = 0; e < m.g->n_expert; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
                     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
                     const bool use_mmq = mmq_plan().any && mmq_plan().layer[(size_t) l];
                     const int mmq_gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42;
@@ -1162,7 +1162,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         std::vector<Stager::Job> js;
                         for (size_t j = 0; j < order.size(); ++j) {
                             const int32_t e = order[j];
-                            if (m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0) continue;
+                            if (m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0) continue;
                             if (m.src->pinned(l, e)) continue;
                             const uint8_t* b = m.src->blob(l, e);
                             if (!b) { err = "prefill: expert source has no blob"; return false; }
@@ -1174,7 +1174,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     StagerDone stager_done{stream_all ? nullptr : m.stager.get()};
                     auto stage_one = [&](size_t j) -> bool {
                         const int32_t e = order[j];
-                        const bool resident = m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0;
+                        const bool resident = m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0;
                         if (resident) return true;
                         const int sl = stage_next;
                         stage_next = (stage_next + 1) % STAGE;
@@ -1273,7 +1273,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             const int32_t e = order[j];
                             if (stage_of[j] < 0) {
                                 ++stats_.experts_resident;
-                                if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * NE + e]), -1)) return false;
+                                if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]), -1)) return false;
                             } else {
                                 pt.mark(kPfWaitCopy, cs);
                                 cudaStreamWaitEvent(m.cs, m.copied[stage_of[j]], 0);
@@ -1304,10 +1304,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                 issue_until(consumed + (size_t) m.ring);
                             } else {
                                 ++stats_.experts_resident;
-                                if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * NE + e]), -1)) return false;
+                                if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]), -1)) return false;
                             }
                         }
-                        release_to(NE);
+                        release_to(m.g->n_expert);
                     }
                     pt.mark(kPfCombine, cs);
                     moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs);

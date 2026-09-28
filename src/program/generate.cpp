@@ -1192,8 +1192,21 @@ int main(int argc, char** argv) {
         strata::kernels::mrope_table_set(d_mrope);
     }
     strata::kernels::ple_set_native_postops(o.native_ple_postops);
-    const strata::core::ModelGeometry g;
-    const int64_t K = 10;
+    strata::core::ModelGeometry g;   // canonical defaults; the model file overrides the MoE shape below
+    int64_t K = 10;
+    if (!o.native_preset.empty()) {
+        // a pruned variant (GSQ-RCO Coder) ships fewer experts than the canonical 512x10; the model file
+        // is the authority on its own MoE shape - everything else in the geometry is unchanged
+        try {
+            strata::GgufFile model_gguf(o.native_preset);
+            if (const strata::MetaValue* v = model_gguf.get("qwen4exp.expert_count")) g.n_expert = (int64_t) v->u;
+            if (const strata::MetaValue* v = model_gguf.get("qwen4exp.expert_used_count")) K = (int64_t) v->u;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata generate: reading the model's expert shape from %s: %s\n",
+                         o.native_preset.c_str(), e.what());
+            return 1;
+        }
+    }
     // before session_init: every graph captured from here on has the vector's kernels where it applies
     std::string cvec_summary = "0";
     if (!o.cvec_files.empty()) {
@@ -1405,7 +1418,10 @@ int main(int argc, char** argv) {
             o.mtp.clear();
         }
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
-        if (!o.mtp.empty() && !mtp.load(o.mtp, g, ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
+        // the draft layer is the canonical model's MTP head (512 experts) even when the target is pruned,
+        // so it always sees the canonical geometry; `static` because MtpDrafter keeps a reference
+        static const strata::core::ModelGeometry draft_geometry{};
+        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
     }
     strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker);
     if (o.no_ple_prefetch) strata::kernels::ple_prefetch_enable(false);
@@ -2278,9 +2294,10 @@ int main(int argc, char** argv) {
         return 0;
     };
     if (o.serve) {
-        if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 || thits.d_res == nullptr || host_res.empty()) {
-            std::fprintf(stderr, "strata serve: needs --spec T, --mtp DIR, --prefill CHUNK, --expert-profile P and "
-                                 "--expert-cache\n");
+        if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
+            (graph_hits && (thits.d_res == nullptr || host_res.empty()))) {
+            std::fprintf(stderr, "strata serve: needs --spec T, --mtp DIR and --prefill CHUNK (and a fillable "
+                                 "--expert-cache; the graphed hit path additionally needs --expert-profile P)\n");
             return 2;
         }
         strata::prefill::Prefill sp;
