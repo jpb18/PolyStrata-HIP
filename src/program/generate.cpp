@@ -1734,11 +1734,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: profile %s: %zu ranked pairs, built for %lld slots\n",
                      o.expert_profile.c_str(), profile.size(), (long long) pslots);
     }
-    // ---- layer split across GPUs: "auto" places the split points.  Every placement is scored by what the caches
-    // would hold - each device takes its layers' profiled pairs, hottest first, until its free VRAM (less the reserve,
-    // the prompt path's buffers and, on a later stage, 1 GiB for its windows and the drafter) is used - weighting a
-    // pair by its rank; ties go to the placement that fills the fullest device least.  Up to 3 GPUs every
-    // placement is tried; beyond, the layers are shared in proportion to the room.
+    // ---- layer split across GPUs: "auto" places the split points by a cost model of one decode window, measured on
+    // the 5080 + 3090 rig (bench/results/2026-09-29-layer-split):
+    //   - every layer costs its GPU a time inversely proportional to SMs x clock (0.33 ms on an RTX 5080, 0.50 on a
+    //     3090: the per-layer round trip and kernels, not the bytes - both cards have ~950 GB/s);
+    //   - an expert no cache holds costs ~190 ms per unit of routed mass: the CPU pool in decode and the PCIe stream
+    //     in prompts (fitted: the sweep's best K, 26-28, is where one more layer on the faster card stops paying
+    //     for the ~0.1% of the mass it pushes out of its cache);
+    //   - which experts a cache holds: its layers' profiled pairs, hottest first, until its free VRAM (less the
+    //     reserve, the prompt path's buffers and, on a later GPU, 1 GiB for its windows and the drafter) is used;
+    //     the routed mass of rank r is taken as (r+1)^-1.2 (fits the sweep's hit rates: K=24/26/28 predicted
+    //     99.53/99.34/99.15%, measured 99.5/99.4/99.0%).
+    // Up to 3 GPUs every placement is tried; beyond, the layers are shared in proportion to speed.
+    // STRATA_SPLIT_MISS_MS tunes the miss cost (a slower CPU: higher).
     const int64_t split_pf_mib = o.prefill_chunk > 0 ? 160 + (o.prefill_chunk * 680) / 1024 : 0;
     auto stage_room = [&](int dev, bool later) -> int64_t {
         const strata::core::OnDevice on(dev);
@@ -1753,33 +1761,59 @@ int main(int argc, char** argv) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         const int ns = (int) stages.size() + 1;
         std::vector<int64_t> cap((size_t) ns), used((size_t) ns);
-        for (int i = 0; i < ns; ++i) cap[(size_t) i] = stage_room(i == 0 ? -1 : stages[(size_t) i - 1]->dev, i > 0);
+        std::vector<double> layer_ms((size_t) ns);
+        for (int i = 0; i < ns; ++i) {
+            const int dev = i == 0 ? 0 : stages[(size_t) i - 1]->dev;
+            cap[(size_t) i] = stage_room(i == 0 ? -1 : dev, i > 0);
+            int sms = 0, khz = 0;
+            cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+            if (cudaDeviceGetAttribute(&khz, cudaDevAttrClockRate, dev) != cudaSuccess || khz <= 0) khz = 1800000;
+            cudaGetLastError();
+            const double speed = std::max(1.0, (double) sms * (double) khz / 1e6);   // SMs x GHz
+            layer_ms[(size_t) i] = 0.33 * (84.0 * 2.617) / speed;
+            std::fprintf(stderr, "strata generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
+                                 "%.2f GiB for experts\n", dev, sms, khz / 1e6, layer_ms[(size_t) i],
+                         (double) cap[(size_t) i] / 1073741824.0);
+        }
+        const double miss_ms = std::getenv("STRATA_SPLIT_MISS_MS") ? std::atof(std::getenv("STRATA_SPLIT_MISS_MS")) : 190.0;
+        std::vector<double> mass(profile.size());
+        double total_mass = 0;
+        for (size_t r = 0; r < profile.size(); ++r) total_mass += (mass[r] = std::pow((double) r + 1.0, -1.2));
         auto cost = [&](int64_t l) -> int64_t {
             return native_pack ? ((int64_t) lay.blob_bytes(l) + 255) / 256 * 256 : (int64_t) lay.max_blob;
         };
-        auto score = [&](const std::vector<int64_t>& at, double& fill, int64_t& held) -> double {
+        // the predicted window time (ms) of a placement, and the routed mass its caches hold
+        auto predict = [&](const std::vector<int64_t>& at, double& held_mass, int64_t& held) -> double {
             std::fill(used.begin(), used.end(), 0);
-            double sc = 0;
+            held_mass = 0;
             held = 0;
-            const double P = (double) profile.size();
+            std::vector<bool> full((size_t) ns, false);
             for (size_t r = 0; r < profile.size(); ++r) {
                 const int64_t l = profile[r].first;
                 int st = 0;
                 while (st + 1 < ns && l >= at[(size_t) st]) ++st;
-                if (used[(size_t) st] + cost(l) <= cap[(size_t) st]) { used[(size_t) st] += cost(l); sc += P - (double) r; ++held; }
+                if (full[(size_t) st]) continue;
+                if (used[(size_t) st] + cost(l) > cap[(size_t) st]) { full[(size_t) st] = true; continue; }   // as the fill
+                used[(size_t) st] += cost(l);
+                held_mass += mass[r];
+                ++held;
             }
-            fill = 0;
-            for (int i = 0; i < ns; ++i) fill = std::max(fill, cap[(size_t) i] > 0 ? (double) used[(size_t) i] / (double) cap[(size_t) i] : 1.0);
-            return sc;
+            held_mass /= std::max(total_mass, 1e-9);
+            double ms = miss_ms * (1.0 - held_mass);
+            for (int i = 0; i < ns; ++i) {
+                const int64_t lb = i == 0 ? 0 : at[(size_t) i - 1], le = i + 1 < ns ? at[(size_t) i] : g.n_layers;
+                ms += (double) (le - lb) * layer_ms[(size_t) i];
+            }
+            return ms;
         };
         std::vector<int64_t> best, at((size_t) ns - 1);
-        double best_sc = -1, best_fill = 2;
+        double best_ms = 1e30, best_mass = 0;
         int64_t best_held = 0;
         auto consider = [&]() {
-            double fill = 0;
+            double hm = 0;
             int64_t held = 0;
-            const double sc = score(at, fill, held);
-            if (sc > best_sc + 0.5 || (sc > best_sc - 0.5 && fill < best_fill)) { best = at; best_sc = sc; best_fill = fill; best_held = held; }
+            const double ms = predict(at, hm, held);
+            if (ms < best_ms) { best = at; best_ms = ms; best_mass = hm; best_held = held; }
         };
         const int64_t L = g.n_layers;
         if (ns == 2) {
@@ -1789,11 +1823,11 @@ int main(int argc, char** argv) {
                 for (int64_t k2 = k1 + 1; k2 < L; ++k2) { at[0] = k1; at[1] = k2; consider(); }
         } else {
             double total = 0;
-            for (const int64_t c : cap) total += (double) c;
+            for (const double c : layer_ms) total += 1.0 / c;
             double acc = 0;
             for (int i = 0; i + 1 < ns; ++i) {
-                acc += (double) cap[(size_t) i];
-                at[(size_t) i] = std::clamp<int64_t>((int64_t) std::llround(acc / std::max(total, 1.0) * (double) L),
+                acc += 1.0 / layer_ms[(size_t) i];
+                at[(size_t) i] = std::clamp<int64_t>((int64_t) std::llround(acc / total * (double) L),
                                                     i == 0 ? 2 : at[(size_t) i - 1] + 1, L - (ns - 1 - i));
             }
             consider();
@@ -1801,8 +1835,9 @@ int main(int argc, char** argv) {
         split_at = best;
         std::string ks;
         for (const int64_t k : split_at) ks += (ks.empty() ? "" : ",") + std::to_string(k);
-        std::fprintf(stderr, "strata generate: layer split auto: K=%s - the caches hold %lld of %zu profiled pairs "
-                             "(fullest device %.0f%%)\n", ks.c_str(), (long long) best_held, profile.size(), 100.0 * best_fill);
+        std::fprintf(stderr, "strata generate: layer split auto: K=%s - predicted %.1f ms per decode window; the caches "
+                             "hold %lld of %zu profiled pairs (~%.1f%% of the routed mass)\n", ks.c_str(), best_ms,
+                     (long long) best_held, profile.size(), 100.0 * best_mass);
     }
     for (size_t i = 0; i < split_at.size(); ++i)
         if (split_at[i] >= g.n_layers) {
