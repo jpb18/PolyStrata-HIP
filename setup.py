@@ -419,9 +419,18 @@ def get_llama_cpp():
         f.extractall(tmp)
     top = next(tmp.iterdir())
     shutil.rmtree(llama, ignore_errors=True)
-    # pathlib.Path.replace() can fail on Windows with PermissionError
-    # when file handles or AV locks persist; use shutil.move instead.
-    shutil.move(str(top), str(llama.parent))
+    # PR #63: on Windows a rename can fail with PermissionError while an antivirus scanner still holds a file of the
+    # fresh unpack; shutil.move falls back to copy-and-delete, and a few retries let the scanner finish.  The target
+    # is `llama` itself - moving into its parent would keep the zip's `llama.cpp-<sha>` folder name.
+    for attempt in range(5):
+        try:
+            shutil.move(str(top), str(llama))
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            shutil.rmtree(llama, ignore_errors=True)   # a partial copy from the failed attempt
+            time.sleep(2)
     shutil.rmtree(tmp, ignore_errors=True)
     z.unlink(missing_ok=True)
     z.with_name(z.name + ".done").unlink(missing_ok=True)
