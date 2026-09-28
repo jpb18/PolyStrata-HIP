@@ -1042,14 +1042,15 @@ def make_handler(svc: Service):
         def do_POST(self):
             if not self._authorized():
                 return
-            if self.path.rstrip("/") == "/settings":
+            path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
+            if path == "/settings":
                 self._settings()
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-                if self.path.rstrip("/") == "/v1/chat/completions":
+                if path == "/v1/chat/completions":
                     self._openai(req)
-                elif self.path.rstrip("/") == "/v1/messages":
+                elif path == "/v1/messages":
                     self._anthropic(req)
                 else:
                     self._json(404, {"error": {"message": "not found"}})
