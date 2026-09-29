@@ -81,6 +81,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -1763,9 +1764,14 @@ int main(int argc, char** argv) {
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
     if (o.mmap_experts) {
-        if (native_pack) {   // FileExpertSource maps the canonical pack's experts.bin; a native pack has none
-            std::fprintf(stderr, "strata generate: --mmap-experts needs a canonical pack (experts.bin); %s is a native "
-                                 "(IQ) pack, whose experts are loaded into the arena\n", o.pack.c_str());
+        // FileExpertSource maps the pack's experts.bin: a canonical pack has it; a native (IQ) pack has it when
+        // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
+        // mode: the experts come from the file through the OS cache instead of a pinned copy in RAM, for a PC whose
+        // GPU holds most of them but whose RAM cannot hold them all.
+        if (native_pack && !std::filesystem::exists(std::filesystem::path(o.pack) / "experts.bin")) {
+            std::fprintf(stderr, "strata generate: --mmap-experts needs the pack's experts.bin; %s is a native (IQ) pack "
+                                 "built without it: python tools/iq_pack.py --gguf <shard 1> --out %s --experts-bin\n",
+                         o.pack.c_str(), o.pack.c_str());
             return 2;
         }
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
