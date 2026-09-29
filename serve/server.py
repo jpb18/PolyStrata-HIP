@@ -599,7 +599,8 @@ class Service:
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()},
-                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0))
+                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0),
+                                       gpu_indices=getattr(self, "gpu_indices", None))
 
     def _tok_s(self):
         with self.status_lock:
@@ -1557,6 +1558,7 @@ def main() -> int:
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
+    svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:
