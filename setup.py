@@ -1828,6 +1828,11 @@ def main() -> int:
            "lib_dirs": lib_dirs, "port": port}
     if hip:
         cfg["backend"] = "hip"
+        # the dense prompt GEMMs through hipBLASLt with kernels measured on this GPU generation (tools/hip; +40-60%
+        # prompt speed on the 7900 XTX); the engine refuses a table made for another hipBLASLt version and falls back
+        tables = sorted((ROOT / "tools" / "hip").glob(f"{gpu['arch']}-hipblaslt-*.txt"))
+        if tables:
+            cfg["env"] = {"STRATA_HIPBLASLT_TUNING": str(tables[-1])}
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start
