@@ -22,11 +22,23 @@ constexpr int CH = D1_CH;         // cells per chunk
 constexpr int THREADS = 128;      // 4 warps: scores by cell (8 each), p.v by dimension (64 each = one int8 scale group)
 constexpr int QS = HD + 8;        // q row stride in halves (bank-conflict-free fragment loads)
 
+// The MMA and cp.async below need sm_80. Builds for older cards (the experimental sm_75 one) compile them to a trap;
+// qsa_prompt_attn_batch refuses such a device at run time, so the old kernel runs there.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+#define STRATA_PA_SM80 1
+#else
+#define STRATA_PA_SM80 0
+#endif
+
 __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, const uint32_t* b) {
+#if !STRATA_PA_SM80
+    __trap();
+#else
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+#endif
 }
 
 // Two int8 codes (low byte first) as an exact half2: 1024 + (c + 128) built in the mantissa, minus 1152.
@@ -325,11 +337,23 @@ __device__ __forceinline__ int swz(int cell, int byte) {   // byte offset of (ce
     return cell * 64 + ((((byte >> 4) ^ (cell >> 1)) & 3) << 4) + (byte & 15);
 }
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool valid) {
+#if !STRATA_PA_SM80
+    __trap();
+#else
     const unsigned sa = (unsigned) __cvta_generic_to_shared(smem);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(sa), "l"(gmem), "r"(valid ? 16 : 0));
+#endif
 }
-__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-__device__ __forceinline__ void cp_async_wait1() { asm volatile("cp.async.wait_group 1;\n" ::); }
+__device__ __forceinline__ void cp_async_commit() {
+#if STRATA_PA_SM80
+    asm volatile("cp.async.commit_group;\n" ::);
+#endif
+}
+__device__ __forceinline__ void cp_async_wait1() {
+#if STRATA_PA_SM80
+    asm volatile("cp.async.wait_group 1;\n" ::);
+#endif
+}
 
 __global__ void __launch_bounds__(THREADS) prompt_attn_i8_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                  const int32_t* __restrict__ ids,
@@ -606,6 +630,20 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
 bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* attn, int64_t n_q, void* stream) {
     if (n_q <= 0) return true;
+    {   // sm_80 or newer (the MMA and cp.async above); an older card keeps the old kernel
+        static int cc_major[64] = {};
+        int dev = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+        if (cc_major[dev] == 0) {
+            int major = 0;
+            if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
+            cc_major[dev] = major;
+        }
+        if (cc_major[dev] < 8) return false;
+    }
     if (pools.k_q4 != nullptr || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids ||
         !steps || !pools.page_table)
         return false;
