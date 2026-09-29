@@ -50,6 +50,10 @@ from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
 CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
+# The live tok/s is a rate over a window, not a mean since the first token: a mean reads ~1/elapsed at the first
+# token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.
+RATE_WINDOW_S = 2.0
+RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean so far, with the span floored here
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -553,6 +557,7 @@ class Service:
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
+        self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
@@ -604,11 +609,26 @@ class Service:
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
-            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()},
+            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
                                        gpu_indices=getattr(self, "gpu_indices", None))
 
     def _tok_s(self):
+        """tok/s over the last RATE_WINDOW_S seconds.  Returns 0.0 while nothing is generating."""
+        with self.status_lock:
+            s = dict(self.status)
+            rate = list(self.rate)
+        if not s.get("busy") or not s.get("first_token"):
+            return 0.0
+        now = time.time()
+        newest = rate[-1] if rate else None
+        oldest = next(((t, g) for t, g in rate if now - t <= RATE_WINDOW_S), None)
+        if newest and oldest and newest[0] - oldest[0] >= RATE_MIN_SPAN_S:
+            return max(0.0, (newest[1] - oldest[1]) / (newest[0] - oldest[0]))
+        return s["generated"] / max(RATE_MIN_SPAN_S, now - s["first_token"])
+
+    def _tok_s_mean(self):
+        """The whole-request mean since the first token (the old formula), kept so the two can be compared."""
         with self.status_lock:
             s = dict(self.status)
         if not s.get("busy") or not s.get("first_token"):
@@ -635,7 +655,9 @@ class Service:
                 "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
                 "max_tokens": s.get("max_tokens") if s.get("busy") else None,
                 "elapsed_s": round(now - s["started"], 1) if s.get("busy") and s.get("started") else None,
-                "tok_s": round(self._tok_s(), 1) if state == "generating" else None}
+                "tok_s": round(self._tok_s(), 1) if state == "generating" else None,
+                "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
+                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
@@ -733,6 +755,7 @@ class Service:
             s["generated"] = n
             if s.get("first_token") is None:
                 s["first_token"] = time.time()
+            self.rate.append((time.time(), n))          # the live rate's window over the last RATE_WINDOW_S
             for ev in evs:
                 if ev.kind == "reasoning":
                     s["phase"] = "thinking"
@@ -773,6 +796,9 @@ class Service:
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
+        # Identity token: only a DONE line replaces engine.last, so a request that died, errored or was
+        # disconnected must not have the PREVIOUS request's decode figures recorded as its own.
+        engine_last0 = getattr(self.engine, "last", None)
         with self.status_lock:
             self.status["queued"] += 1
         try:
@@ -790,6 +816,7 @@ class Service:
                     self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids), generated=0,
                                        started=time.time(), first_token=None, tool=None, tail="", max_tokens=max_new)
                     self.last_request_at = time.time()
+                    self.rate.clear()               # the previous request's samples must not leak into this one
                 before = getattr(self.engine, "last", None)
                 last_print = time.time()
                 gen = self.engine.generate(ids, max_new, sampling, cancel, embeddings=emb) if emb else \
@@ -836,7 +863,9 @@ class Service:
                 Path(emb).unlink(missing_ok=True)
             with self.status_lock:
                 if self.status.get("busy"):
-                    last = dict(getattr(self.engine, "last", {}) or {})
+                    # only this request's DONE counts: same object means no DONE arrived (death, error, disconnect)
+                    last = dict(getattr(self.engine, "last", {}) or {}) \
+                        if getattr(self.engine, "last", None) is not engine_last0 else {}
                     started = self.status.get("started", time.time())
                     loaded = str((getattr(self.engine, "info", {}) or {}).get("cvec", 0)) not in ("0", "", "None")
                     hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
@@ -845,6 +874,7 @@ class Service:
                         if loaded else None,
                         "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
                         "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
+                        "engine_generated": last.get("generated"),
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                         "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                         if n and last.get("generated") and last.get("decode_ms") else None,
@@ -1273,7 +1303,8 @@ def make_handler(svc: Service):
                 if s.get("busy"):
                     s["elapsed_s"] = round(now - s["started"], 1)
                     if s.get("first_token"):
-                        s["tokens_per_s"] = round(s["generated"] / max(1e-6, now - s["first_token"]), 1)
+                        s["tokens_per_s"] = round(svc._tok_s(), 1)
+                        s["tokens_per_s_mean"] = round(svc._tok_s_mean(), 1)
                 for k in ("started", "first_token"):
                     s.pop(k, None)
                 self._json(200, s)
