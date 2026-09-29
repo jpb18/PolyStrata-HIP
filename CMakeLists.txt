@@ -585,8 +585,10 @@ if(STRATA_BUILD_TESTS)
   # Plan v0.3 P6: one expert applied to several tokens, bitwise vs the single-token kernel (synthetic, CPU only).
   # plan v0.3 P5: the device dequantizers vs the artifact's CPU dequantizers on the real shards (not a ctest: needs
   # the 38 GB model; run it by hand or from tools/gpu_session.py)
-  add_executable(dequant_bf16_test src/kernels/dequant_bf16_test.cpp)
-  target_link_libraries(dequant_bf16_test PRIVATE strata_kernels strata_artifact CUDA::cudart)
+  if(STRATA_ENABLE_CUDA)   # #93: it needs the device dequantizers and cudart (a CPU-only configure has neither)
+    add_executable(dequant_bf16_test src/kernels/dequant_bf16_test.cpp)
+    target_link_libraries(dequant_bf16_test PRIVATE strata_kernels strata_artifact CUDA::cudart)
+  endif()
 
   add_executable(expert_multi_test src/kernels/cpu/expert_multi_test.cpp)
   target_link_libraries(expert_multi_test PRIVATE strata_kernels_cpu)
