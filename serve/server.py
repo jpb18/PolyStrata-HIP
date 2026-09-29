@@ -24,6 +24,7 @@ import argparse
 import collections
 import base64
 import hashlib
+import codecs
 import json
 import os
 import queue
@@ -515,13 +516,19 @@ class ByteTokenizer:
 
 # ------------------------------------------------------------------------------------------------ core
 class Detokenizer:
-    """Incremental decode: re-decode the generated ids and emit only the new, complete suffix (a multi-byte
-    character split across tokens is held until complete)."""
+    """Incremental decode: each token's bytes go through an incremental UTF-8 decoder, which emits the complete
+    characters and holds a multi-byte character split across tokens until it is complete (invalid bytes become
+    U+FFFD, as a whole decode with errors="replace" makes them).  Constant time per token - the old re-decode of
+    every generated id cost 2 ms per token after 8K tokens and 4 ms after 16K (perf-review F-1).  A tokenizer
+    without `token_bytes` (the tests' byte tokenizer) keeps the re-decode."""
 
     def __init__(self, tok):
         self.tok, self.ids, self.sent = tok, [], 0
+        self.inc = codecs.getincrementaldecoder("utf-8")(errors="replace") if hasattr(tok, "token_bytes") else None
 
     def push(self, t: int) -> str:
+        if self.inc is not None:
+            return self.inc.decode(self.tok.token_bytes(t))
         self.ids.append(t)
         text = self.tok.decode(self.ids)
         if text.endswith("�"):
