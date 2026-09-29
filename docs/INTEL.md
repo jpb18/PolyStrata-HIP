@@ -159,10 +159,14 @@ that returns the n-th Fibonacci number", greedy, 64 tokens:
 > options: 1. **Recursive approach** - Simple but O(2^n) time complexity, very slow for large n. 2.
 > **Iterative approach** - O(n) time, O(1) ...
 
-Measured: **~13 tok/s steady state** (64 tokens in 52.0 s of which ~47 s is the first window: the SYCL
-runtime JIT-compiles every kernel on first use; 6 tokens take 47.5 s, 64 take 52.0 s). llama.cpp's SYCL
-build does 23-25 tok/s on the same card; Strata's kernels have had no tuning for Xe2 yet and its
-tensor-core paths are still the scalar fallbacks. Prompt reading is 2 tok/s and unoptimised.
+Measured, ahead-of-time build (`-DSTRATA_SYCL_AOT=bmg-g31`): **15.2 tok/s decode** (32 tokens in 2.1 s,
+1.23 tokens per speculative round of 6), **28.8 tok/s prompt reading**, first token 0.85 s after the
+prompt. A window of 4 tokens through all 48 layers takes 73 ms on the card. llama.cpp's SYCL build does
+23-25 tok/s on the same card; Strata's kernels have had no tuning for Xe2 yet and its tensor-core paths
+are still the scalar fallbacks. Without AOT the runtime JIT-compiles every kernel on first use, ~47 s the
+first time a process runs; `SYCL_CACHE_PERSISTENT=1 SYCL_CACHE_DIR=<dir>` keeps that across runs (15 MB,
+second start 15.6 tok/s from the first token) - the segfault llama.cpp's build has with the persistent
+cache did not show up here.
 
 How to run it (all of this is what `coderiq1/sycl/run-engine-test.sh` does):
 
@@ -197,8 +201,7 @@ What the port had to get right beyond compiling (each is an entry in `sycl/tools
 - `native_expert_parity` hand-ported: the GPU native expert kernel matches ggml's float reference on real
   IQ1_M rows (rel 1.1e-2, the same class as the CPU path).
 
-Known: the process segfaults at exit (teardown order; the output is complete by then), and the first
-window's JIT (an AOT build with `-DSTRATA_SYCL_AOT=bmg-g31` is the fix, in progress).
+Known: the process segfaults at exit (teardown order; the output is complete by then).
 
 **Not ported yet.**
 

@@ -24,7 +24,7 @@ set(STRATA_SYCL_AOT "" CACHE STRING "AOT device for the GPU code, e.g. bmg-g31 (
 set(_sycl_flags -fsycl)
 if(STRATA_SYCL_AOT)
   list(APPEND _sycl_flags -fsycl-targets=spir64_gen)
-  set(_sycl_link -fsycl -fsycl-targets=spir64_gen "-Xs=-device ${STRATA_SYCL_AOT}")
+  set(_sycl_link -fsycl -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen "-device ${STRATA_SYCL_AOT}")
 else()
   set(_sycl_link -fsycl)
 endif()
