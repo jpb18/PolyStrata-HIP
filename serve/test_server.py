@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -363,6 +365,97 @@ class EngineDeath(unittest.TestCase):
                 self.assertIn("illegal memory access", text, path)
                 self.assertNotIn("HTTP/1", text, path)
                 self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class LiveRate(unittest.TestCase):
+    """The Monitor's Speed readout: live.tok_s is a rate, and a request that never got a DONE keeps no counters.
+
+    It used to be `generated / (now - first_token)` - the mean since the first token, whose first sample is
+    1/elapsed.  Against a paced engine that reads five-digit numbers for the first instant of every answer and
+    undershoots for the first second after that.  It is now the rate over the last RATE_WINDOW_S, with the mean
+    still available as `live.tok_s_mean` for anyone who wants it."""
+
+    PACE_S = 0.02                    # 50 tokens/s: a 30-token answer takes about 0.6 s
+    TOKENS = 30
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.engine = MockEngine(self.tok, "x" * self.TOKENS, max_context=CTX, delay_s=self.PACE_S)
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def metrics(self):
+        with urllib.request.urlopen(self.base + "/metrics", timeout=10) as r:
+            return json.loads(r.read())
+
+    def test_the_live_number_is_a_rate(self):
+        live_samples, stop = [], threading.Event()
+
+        def poll():                                   # what the Monitor polls, at 10 ms
+            while not stop.is_set():
+                live = self.metrics()["live"]
+                if live["state"] == "generating" and live["tok_s"] is not None:
+                    live_samples.append((live["generated"], live["tok_s"], live["tok_s_mean"]))
+                time.sleep(0.01)
+
+        body = json.dumps({"model": "m", "max_tokens": self.TOKENS, "temperature": 0,
+                           "messages": [{"role": "user", "content": "hi"}]}).encode()
+        watcher = threading.Thread(target=poll, daemon=True)
+        watcher.start()
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(self.base + "/v1/chat/completions", data=body,
+                                                               headers={"Content-Type": "application/json"}),
+                                        timeout=30) as r:
+                usage = json.loads(r.read())["usage"]
+        finally:
+            stop.set()
+            watcher.join(2)
+        true_rate = usage["completion_tokens"] / (time.time() - t0)
+        self.assertGreaterEqual(len(live_samples), 3, "too few live readings to judge the readout")
+        self.assertLess(max(s for _g, s, _m in live_samples), 4 * true_rate,
+                        f"live.tok_s peaked at {max(s for _g, s, _m in live_samples):.1f} tok/s "
+                        f"for a {true_rate:.1f} tok/s engine")
+        self.assertEqual(self.metrics()["live"]["state"], "idle")
+        self.assertIsNone(self.metrics()["live"]["tok_s"])
+
+    def test_a_request_without_a_done_keeps_no_engine_counters(self):
+        """An engine that dies mid-answer: the previous request's `last` must not become this row's decode rate."""
+        class HalfDead(MockEngine):
+            last = {"generated": 99, "prompt_tokens": 9, "prompt_ms": 10.0, "decode_ms": 100.0, "finish": "stop"}
+
+            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+                    if i == 3:
+                        raise EngineDied("the engine stopped unexpectedly (exit code -9)")
+                    yield t
+
+        tok = ByteTokenizer()
+        svc = Service(HalfDead(tok, "x" * self.TOKENS, max_context=CTX), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            body = json.dumps({"model": "m", "max_tokens": self.TOKENS, "stream": True,
+                               "messages": [{"role": "user", "content": "hi"}]}).encode()
+            with urllib.request.urlopen(urllib.request.Request(base + "/v1/chat/completions", data=body,
+                                                               headers={"Content-Type": "application/json"}),
+                                        timeout=30) as r:
+                text = r.read().decode()
+            self.assertIn('"error"', text)
+            row = svc.metrics()["requests"][0]
+            self.assertEqual(row["finish"], "error")
+            self.assertEqual(row["output_tokens"], 3)
+            self.assertIsNone(row["decode_tok_s"], "the previous request's counters were recorded as this one's")
+            self.assertIsNone(row["engine_generated"])
         finally:
             httpd.shutdown()
             httpd.server_close()
