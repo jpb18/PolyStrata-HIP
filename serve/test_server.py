@@ -516,6 +516,86 @@ class WebApp(unittest.TestCase):
         self.assertEqual(m["live"]["state"], "idle")
         self.assertEqual(m["requests"][0]["output_tokens"], 5)
 
+    def test_model_discovery_and_props(self):
+        svc = self.svc
+        previous = svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared
+        try:
+            svc.engine.max_context = 262144
+            svc.sampling_defaults = {"temperature": 1.0, "repetition_penalty": 1.1}
+            svc.shared = {"temperature": 0.7, "max_tokens": 4096}
+            for vision in (None, object()):
+                svc.vision = vision
+                for path in ("/models", "/v1/models"):
+                    code, _, body = self.get(path)
+                    self.assertEqual(code, 200)
+                    models = json.loads(body)["data"]
+                    self.assertEqual(len(models), 1)
+                    model = models[0]
+                    self.assertEqual(model["id"], svc.model)
+                    self.assertEqual(model["status"]["value"], "loaded")
+                    self.assertEqual(model["meta"]["n_ctx"], 262144)
+                    self.assertEqual(model["architecture"]["input_modalities"],
+                                     ["text", "image"] if vision else ["text"])
+                code, _, body = self.get("/props?model=" + svc.model + "&autoload=false")
+                self.assertEqual(code, 200)
+                props = json.loads(body)
+                self.assertEqual(props["default_generation_settings"]["n_ctx"], 262144)
+                self.assertEqual(props["default_generation_settings"]["params"],
+                                 {"temperature": 0.7, "repeat_penalty": 1.1, "n_predict": 4096})
+                self.assertEqual(props["chat_template"], (ROOT / "serve/chat_template.jinja").read_text(encoding="utf-8"))
+                self.assertEqual(props["modalities"]["vision"], vision is not None)
+                self.assertEqual(props["total_slots"], 1)
+                self.assertFalse(props["models_autoload"])
+            svc.shared = {}
+            props = json.loads(self.get("/props")[2])
+            self.assertEqual(props["default_generation_settings"]["params"]["n_predict"], -1)
+            self.assertEqual(self.get("/props?model=not-loaded&autoload=true")[0], 404)
+        finally:
+            svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared = previous
+
+    def test_discovery_needs_the_api_key(self):
+        self.svc.api_key = "secret"
+        try:
+            for path in ("/models", "/v1/models", "/props", "/slots"):
+                self.assertEqual(self.get(path)[0], 401)
+                self.assertEqual(self.get(path, {"Authorization": "Bearer secret"})[0], 200)
+        finally:
+            self.svc.api_key = ""
+
+    def test_build_model_path_and_slot_status(self):
+        engine = self.svc.engine
+        engine.model_path = "models/example.gguf"
+        engine.info = {"version": "0.1.21"}
+        try:
+            props = json.loads(self.get("/props")[2])
+            self.assertEqual(props["model_path"], engine.model_path)
+            self.assertEqual(props["build_info"], "Strata 0.1.21")
+            for busy in (True, False):
+                with self.svc.status_lock:
+                    self.svc.status["busy"] = busy
+                code, _, body = self.get("/slots")
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(body), [{"id": 0, "n_ctx": CTX, "is_processing": busy}])
+        finally:
+            with self.svc.status_lock:
+                self.svc.status["busy"] = False
+            del engine.model_path, engine.info
+        props = json.loads(self.get("/props")[2])
+        self.assertNotIn("build_info", props)
+        self.assertNotIn("model_path", props)
+
+    def test_discovery_does_not_restart_a_dead_engine(self):
+        self.svc.engine.alive = lambda: False
+        try:
+            for path in ("/models", "/v1/models"):
+                code, _, body = self.get(path)
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(body)["data"], [])
+            self.assertEqual(self.get("/props")[0], 503)
+            self.assertEqual(json.loads(self.get("/slots")[2]), [])
+        finally:
+            del self.svc.engine.alive
+
     def test_metrics_need_the_key_when_one_is_set(self):
         self.svc.api_key = "secret"
         try:
