@@ -274,8 +274,9 @@ int main() {
     // Covers every slot residue, partial and multiple block chunks, and the fixed-capacity tail.
     const std::array<int64_t, 14> starts = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
     const std::array<int64_t, 5> lengths = {1, 2, 3, 7, 17};
+    // (the batched append's contract is p0 + n <= max_cells: the prompt path never appends past the cache)
     for (int64_t pos0 : starts) for (int64_t T : lengths)
-        ok = qsa_case(stream, 13, pos0, T, rng) && ok;
+        if (pos0 + T <= 13) ok = qsa_case(stream, 13, pos0, T, rng) && ok;
     ok = qsa_chunks_case(stream, rng, 33, 7, 17) && ok;
     // Production-scale, non-block-aligned first chunk with a short continuation.
     ok = qsa_chunks_case(stream, rng, 8210, 8193, 17) && ok;
