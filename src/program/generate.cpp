@@ -1772,6 +1772,7 @@ int main(int argc, char** argv) {
         // scheduler's defaults - Below normal priority and a least-privilege token - were the only
         // difference between the runs).  Say so instead of letting the user blame the disk; see
         // docs/DETAILS.md, "Running it at startup (Task Scheduler)".
+#ifdef _WIN32   // a Windows launch context; elsewhere a load this slow is the disk
         if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
             std::fprintf(stderr,
                          "strata generate: hint: ~24x below what this hardware streams from a normal "
@@ -1780,6 +1781,7 @@ int main(int argc, char** argv) {
                          "defaults (Below normal + a least-privilege token) throttle the load. See "
                          "docs/DETAILS.md ('Running it at startup').\n");
         }
+#endif
         srcp = &arena_src;
     }
     strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker);
