@@ -283,6 +283,13 @@ struct Prefill::Impl {
     std::vector<int32_t> bounds_host;
     std::unique_ptr<mmq::Context> mmq_ctx;
     std::vector<int32_t> ids_host, slot_host, src_host, cnt, off;
+    // The grouping tables in mapped pinned memory, [ids | slot | src] of T_max * K each, then the MMQ bounds: kernels
+    // read and write them in place.  A cudaMemcpyAsync of them queues behind the expert blobs the copy stream already
+    // holds (up to `ring` of them, ~70 us each), and the GPU idles meanwhile - measured 4.2 s of a 128K prompt's
+    // 70 s at the default ring, 0.7 s with a 16-slot one.  STRATA_GROUP_COPY=1: the copies (the A/B arm).
+    int32_t* grp_host = nullptr;
+    int32_t* grp_dev = nullptr;          // its device alias
+    size_t grp_n = 0, grp_tk = 0;        // int32s allocated; T_max * K (the offset of slot, and of src past it)
     uint16_t* dq_gu[DQ] = {};
     uint16_t* dq_d[DQ] = {};
     uint8_t* stage_dev[RING_MAX] = {};
@@ -362,6 +369,7 @@ Prefill::~Prefill() {
         if (impl_->ple_emb_host[b] && impl_->ple_pageable[b].empty()) cudaFreeHost(impl_->ple_emb_host[b]);
     }
     if (impl_->copy) cudaStreamDestroy(impl_->copy);
+    if (impl_->grp_host) cudaFreeHost(impl_->grp_host);
     for (void* p : impl_->owned) cudaFree(p);
 }
 
@@ -490,6 +498,26 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     }
     m.steps_host.resize(T * strata::kernels::kStepCount);
     m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(m.g->n_expert); m.off.resize(m.g->n_expert + 1);
+    {
+        const size_t need = 3 * T * K + (size_t) (2 * (m.g->n_expert + m.g->n_expert / MMQ_GROUP + 2));
+        const char* gc = std::getenv("STRATA_GROUP_COPY");
+        if (m.grp_n < need && !(gc && gc[0] == '1')) {
+            if (m.grp_host) cudaFreeHost(m.grp_host);
+            m.grp_host = m.grp_dev = nullptr;
+            m.grp_n = m.grp_tk = 0;
+            void *h = nullptr, *d = nullptr;
+            if (cudaHostAlloc(&h, need * 4, cudaHostAllocMapped) == cudaSuccess &&
+                cudaHostGetDevicePointer(&d, h, 0) == cudaSuccess) {
+                m.grp_host = (int32_t*) h;
+                m.grp_dev = (int32_t*) d;
+                m.grp_n = need;
+                m.grp_tk = T * K;
+            } else {                              // the copies, as before
+                if (h) cudaFreeHost(h);
+                cudaGetLastError();
+            }
+        }
+    }
     for (int b = 0; b < 2; ++b) {
         if (!m.ple_emb_host[b] &&
             cudaHostAlloc((void**) &m.ple_emb_host[b], (size_t) T * N * 4, cudaHostAllocDefault) != cudaSuccess) {
@@ -1303,12 +1331,19 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     m.gemm.bf16(m.mixed_bf, (const uint16_t*) wgi->data, m.sg, T, 1, N);
                     // group the (token, k) pairs by expert on the host
                     pt.mark(kPfHostGroup, cs);
-                    cudaMemcpyAsync(m.ids_host.data(), m.ids, (size_t) T * K * 4, cudaMemcpyDeviceToHost, m.cs);
+                    // (the sync below also orders this layer's writes of slot/src/bounds after the previous
+                    // layer's kernels that read them)
+                    const bool grp_mapped = m.grp_host != nullptr;
+                    int32_t* ids_h = grp_mapped ? m.grp_host : m.ids_host.data();
+                    int32_t* slot_h = grp_mapped ? m.grp_host + m.grp_tk : m.slot_host.data();
+                    int32_t* src_h = grp_mapped ? m.grp_host + 2 * m.grp_tk : m.src_host.data();
+                    if (grp_mapped) copy_i32(m.grp_dev, m.ids, T * K, m.cs);
+                    else cudaMemcpyAsync(m.ids_host.data(), m.ids, (size_t) T * K * 4, cudaMemcpyDeviceToHost, m.cs);
                     cudaStreamSynchronize(m.cs);
                     pt.fold();
                     std::fill(m.cnt.begin(), m.cnt.end(), 0);
                     for (int64_t i = 0; i < T * K; ++i) {
-                        const int32_t e = m.ids_host[(size_t) i];
+                        const int32_t e = ids_h[(size_t) i];
                         if (e < 0 || e >= m.g->n_expert) { err = "prefill: routed id out of range"; return false; }
                         ++m.cnt[(size_t) e];
                     }
@@ -1316,13 +1351,18 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     for (int64_t e = 0; e < m.g->n_expert; ++e) m.off[(size_t) e + 1] = m.off[(size_t) e] + m.cnt[(size_t) e];
                     std::vector<int32_t> fill(m.off.begin(), m.off.end() - 1);
                     for (int64_t i = 0; i < T * K; ++i) {
-                        const int32_t e = m.ids_host[(size_t) i];
+                        const int32_t e = ids_h[(size_t) i];
                         const int32_t p = fill[(size_t) e]++;
-                        m.slot_host[(size_t) i] = p;
-                        m.src_host[(size_t) p] = (int32_t) (i / K);
+                        slot_h[(size_t) i] = p;
+                        src_h[(size_t) p] = (int32_t) (i / K);
                     }
-                    cudaMemcpyAsync(m.slot_dev, m.slot_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
-                    cudaMemcpyAsync(m.src_dev, m.src_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
+                    if (grp_mapped) {
+                        copy_i32(m.slot_dev, m.grp_dev + m.grp_tk, T * K, m.cs);
+                        copy_i32(m.src_dev, m.grp_dev + 2 * m.grp_tk, T * K, m.cs);
+                    } else {
+                        cudaMemcpyAsync(m.slot_dev, m.slot_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
+                        cudaMemcpyAsync(m.src_dev, m.src_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
+                    }
                     // the experts, in id order: resident ones from VRAM, the others through the staging ring
                     std::vector<int32_t> order;
                     for (int32_t e = 0; e < m.g->n_expert; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
@@ -1346,8 +1386,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             for (size_t i = 0; i <= MMQ_GROUP; ++i)
                                 m.bounds_host[n + 1 + g * (MMQ_GROUP + 1) + i] =
                                     m.bounds_host[std::min(n, g * MMQ_GROUP + i)] - m.bounds_host[g * MMQ_GROUP];
-                        cudaMemcpyAsync(m.bounds_dev, m.bounds_host.data(), m.bounds_host.size() * 4,
-                                        cudaMemcpyHostToDevice, m.cs);
+                        if (grp_mapped) {
+                            int32_t* bh = m.grp_host + 3 * m.grp_tk;
+                            std::memcpy(bh, m.bounds_host.data(), m.bounds_host.size() * 4);
+                            copy_i32(m.bounds_dev, m.grp_dev + 3 * m.grp_tk, (int64_t) m.bounds_host.size(), m.cs);
+                        } else {
+                            cudaMemcpyAsync(m.bounds_dev, m.bounds_host.data(), m.bounds_host.size() * 4,
+                                            cudaMemcpyHostToDevice, m.cs);
+                        }
                     } else {
                         gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
                     }
