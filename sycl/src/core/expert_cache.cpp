@@ -316,7 +316,7 @@ bool ExpertCache::fill_slot_blocking(int32_t slot, const uint8_t *host_blob,
     synchronization behavior.
     */
     const dpct::err0 e =
-        DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(dst, host_blob, n));
+        DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(dst, host_blob, n).wait());
     /*
     DPCT1000:767: Error handling if-stmt was detected but could not be
     rewritten.
@@ -359,7 +359,7 @@ bool ExpertCache::fill_slot_queued(int32_t slot, const uint8_t *host_blob,
     ensure synchronization behavior.
     */
     const dpct::err0 e =
-        DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(dst, host_blob, n));
+        DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(dst, host_blob, n).wait());
     /*
     DPCT1000:771: Error handling if-stmt was detected but could not be
     rewritten.

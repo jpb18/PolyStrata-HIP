@@ -45,7 +45,7 @@ template <typename T> T* up(const std::vector<T>& h) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d, h.data(), h.size() * sizeof(T))),
+           d, h.data(), h.size() * sizeof(T)).wait()),
        "upload");
     return d;
 }

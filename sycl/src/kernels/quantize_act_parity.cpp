@@ -90,7 +90,7 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), (size_t)n * sizeof(float))),
+              d_x, x.data(), (size_t)n * sizeof(float)).wait()),
           "copy x");
     // PROBE: does the DEVICE hold what the host thinks it sent?  The scale byte differs with the SAME
     // exponent and a zeroed mantissa, which says the kernel's amax differs from the host's on identical
@@ -222,7 +222,7 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), (size_t)n * sizeof(float))),
+              d_x, x.data(), (size_t)n * sizeof(float)).wait()),
           "copy x");
     strata::kernels::quantize_q8_K(d_x, d_b, n, nullptr);
     strata::kernels::dequant_q8_K(d_b, d_back, n, nullptr);

@@ -60,7 +60,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_table, table.data(), pages * 4)),
+           dpct::get_in_order_queue().memcpy(d_table, table.data(), pages * 4).wait()),
        "table");
     int8_t *kq = dalloc<int8_t>((size_t) cells * H * D), *vq = dalloc<int8_t>((size_t) cells * H * D);
     uint16_t *ks = dalloc<uint16_t>((size_t) cells * H * G), *vs = dalloc<uint16_t>((size_t) cells * H * G);
@@ -89,7 +89,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep)),
+               dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep).wait()),
            "step");
         /*
         DPCT1114:426: cudaMemcpy is migrated to asynchronization memcpy,
@@ -98,7 +98,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(kcur, kv.data(),
-                                                              kv.size() * 4)),
+                                                              kv.size() * 4).wait()),
            "k");
         /*
         DPCT1114:427: cudaMemcpy is migrated to asynchronization memcpy,
@@ -107,7 +107,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(vcur, vv.data(),
-                                                              vv.size() * 4)),
+                                                              vv.size() * 4).wait()),
            "v");
         k::kv_append_q8_step(kq, vq, ks, vs, d_table, step, kcur, vcur, s, nullptr);
         k::kv_append_step(kp, vp, d_table, step, kcur, vcur, s, nullptr);
@@ -171,7 +171,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(d_ids, ids.data(), n_ids * 4)),
+               dpct::get_in_order_queue().memcpy(d_ids, ids.data(), n_ids * 4).wait()),
            "ids");
         int32_t hstep[k::kStepCount] = {0, 0, 0, n_ids};
         /*
@@ -181,7 +181,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep)),
+               dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep).wait()),
            "step");
         k::kv_gather_q8_step(kq, vq, ks, vs, d_table, d_ids, step, max_ids, s, k8, v8, nullptr);
         k::kv_gather_step(kp, vp, d_table, d_ids, step, max_ids, s, k16, v16, nullptr);

@@ -5,9 +5,6 @@
 // (a) float reference: ggml's own dequantizer (`to_float`) and a float SwiGLU expert, (b) the CPU path
 // (ggml-cpu vec_dot with its quantized activations), (c) the GPU path (`native_expert_grouped`, q8_1
 // activations).  (b) and (c) each differ from (a) by their activation rounding only (a few 1e-3 relative).
-#define DPCT_PROFILING_ENABLED
-#include <sycl/sycl.hpp>
-#include <dpct/dpct.hpp>
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/expert.hpp"
@@ -18,6 +15,9 @@
 #include "strata/kernels/iq_kernels.hpp"
 
 #include "ggml.h"
+
+#include <sycl/sycl.hpp>
+#include <dpct/dpct.hpp>   // SYCL port: hand-ported (dpct needs ggml-cpu.h to parse this file)
 
 #include <chrono>
 #include <cmath>
@@ -45,8 +45,7 @@ int main(int argc, char** argv) {
     const int NT = 3, E = 7;
     const int64_t H = 2560, FF = 640;
     int failures = 0;
-    dpct::queue_ptr s;
-    s = dpct::get_current_device().create_queue(true);
+    sycl::queue* s = &dpct::get_in_order_queue();
     for (int l : layers) {
         const strata::TensorInfo* t[3] = {};
         const char* roles[3] = {"gate", "up", "down"};
@@ -224,31 +223,31 @@ int main(int argc, char** argv) {
             float* dout;
             unsigned long long* dptr;
             int32_t *dstart, *dn, *ddst, *dtok;
-            cudaMalloc(&dblob, blob.size());
-            cudaMalloc(&dx, x.size() * 4);
-            cudaMalloc(&dxq, (size_t) NT * H / 32 * 36);
-            cudaMalloc(&dscr, strata::kernels::native_expert_scratch_bytes(NT, FF));
-            cudaMalloc((void**) &dout, (size_t) NT * H * 4);
-            cudaMalloc((void**) &dptr, 8);
-            cudaMalloc((void**) &dstart, 8);
-            cudaMalloc((void**) &dn, 4);
-            cudaMalloc((void**) &ddst, NT * 4);
-            cudaMalloc((void**) &dtok, NT * 4);
-            cudaMemcpy(dblob, blob.data(), blob.size(), cudaMemcpyHostToDevice);
-            cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice);
+            dblob = (decltype(dblob)) sycl::malloc_device(blob.size(), *s);
+            dx = (decltype(dx)) sycl::malloc_device(x.size() * 4, *s);
+            dxq = (decltype(dxq)) sycl::malloc_device((size_t) NT * H / 32 * 36, *s);
+            dscr = (decltype(dscr)) sycl::malloc_device(strata::kernels::native_expert_scratch_bytes(NT, FF), *s);
+            dout = (decltype(dout)) sycl::malloc_device((size_t) NT * H * 4, *s);
+            dptr = (decltype(dptr)) sycl::malloc_device(8, *s);
+            dstart = (decltype(dstart)) sycl::malloc_device(8, *s);
+            dn = (decltype(dn)) sycl::malloc_device(4, *s);
+            ddst = (decltype(ddst)) sycl::malloc_device(NT * 4, *s);
+            dtok = (decltype(dtok)) sycl::malloc_device(NT * 4, *s);
+            s->memcpy(dblob, blob.data(), blob.size()).wait();
+            s->memcpy(dx, x.data(), x.size() * 4).wait();
             const unsigned long long p = (unsigned long long) dblob;
             const int32_t st[2] = {0, NT}, one = 1, idx[NT] = {0, 1, 2};
-            cudaMemcpy(dptr, &p, 8, cudaMemcpyHostToDevice);
-            cudaMemcpy(dstart, st, 8, cudaMemcpyHostToDevice);
-            cudaMemcpy(dn, &one, 4, cudaMemcpyHostToDevice);
-            cudaMemcpy(ddst, idx, NT * 4, cudaMemcpyHostToDevice);
-            cudaMemcpy(dtok, idx, NT * 4, cudaMemcpyHostToDevice);
+            s->memcpy(dptr, &p, 8).wait();
+            s->memcpy(dstart, st, 8).wait();
+            s->memcpy(dn, &one, 4).wait();
+            s->memcpy(ddst, idx, NT * 4).wait();
+            s->memcpy(dtok, idx, NT * 4).wait();
             strata::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
             strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, dscr, dout, s);
-            cudaStreamSynchronize(s);
-            cudaMemcpy(got_g.data(), dout, got_g.size() * 4, cudaMemcpyDeviceToHost);
-            cudaFree(dblob); cudaFree(dx); cudaFree(dxq); cudaFree(dscr); cudaFree(dout); cudaFree(dptr);
-            cudaFree(dstart); cudaFree(dn); cudaFree(ddst); cudaFree(dtok);
+            s->wait();
+            s->memcpy(got_g.data(), dout, got_g.size() * 4).wait();
+            sycl::free(dblob, *s); sycl::free(dx, *s); sycl::free(dxq, *s); sycl::free(dscr, *s); sycl::free(dout, *s); sycl::free(dptr, *s);
+            sycl::free(dstart, *s); sycl::free(dn, *s); sycl::free(ddst, *s); sycl::free(dtok, *s);
         }
         const double ec = rel(got_c, ref), eg = rel(got_g, ref), ecg = rel(got_c, got_g);
         const bool ok = ec < 3e-2 && eg < 3e-2 && std::isfinite(ec) && std::isfinite(eg);

@@ -212,7 +212,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         memory is not pageable, call wait() on event return by memcpy API to
         ensure synchronization behavior.
         */
-        dpct::get_in_order_queue().memcpy(dense_, blob.data(), blob.size());
+        dpct::get_in_order_queue().memcpy(dense_, blob.data(), blob.size()).wait();
         vram_ += blob.size();
     }
     // ---- the 512 routed experts, one blob each
@@ -342,7 +342,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         memory is not pageable, call wait() on event return by memcpy API to
         ensure synchronization behavior.
         */
-        dpct::get_in_order_queue().memcpy(ident_, id.data(), id.size() * 4);
+        dpct::get_in_order_queue().memcpy(ident_, id.data(), id.size() * 4).wait();
     }
     /*
     DPCT1025:16: The SYCL queue is created ignoring the flag and priority
@@ -981,7 +981,7 @@ bool MtpDrafter::draft_first(int T, const float *R_row, int32_t token,
     for (int t = 0; t < T; ++t)
         if (DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                 (void *)(window_R_ + (size_t)t * HCN), R_row,
-                (size_t)HCN * sizeof(float))) != 0) {
+                (size_t)HCN * sizeof(float)).wait()) != 0) {
             err = "mtp: staging the first residual failed";
             return false;
         }

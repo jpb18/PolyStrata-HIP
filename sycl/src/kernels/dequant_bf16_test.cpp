@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
             strata::kernels::dequant_bf16(type, d_blocks, 0, rows, cols, d_h, nullptr);
             std::vector<float> gf((size_t) (rows * cols));
             std::vector<uint16_t> gh((size_t) (rows * cols));
-            dpct::get_in_order_queue().memcpy(gf.data(), d_f, gf.size() * 4);
+            dpct::get_in_order_queue().memcpy(gf.data(), d_f, gf.size() * 4).wait();
             dpct::get_in_order_queue()
                 .memcpy(gh.data(), d_h, gh.size() * 2)
                 .wait();

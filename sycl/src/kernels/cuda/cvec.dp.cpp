@@ -50,7 +50,7 @@ bool upload_here(std::string &err) try {
         to ensure synchronization behavior.
         */
         DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-            t.dir, g_dir_host.data(), g_dir_host.size() * sizeof(float))) !=
+            t.dir, g_dir_host.data(), g_dir_host.size() * sizeof(float)).wait()) !=
             0 ||
         /*
         DPCT1114:508: cudaMemcpy is migrated to asynchronization memcpy,
@@ -59,7 +59,7 @@ bool upload_here(std::string &err) try {
         to ensure synchronization behavior.
         */
         DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-            t.s, g_s_host.data(), g_s_host.size() * sizeof(float))) != 0 ||
+            t.s, g_s_host.data(), g_s_host.size() * sizeof(float)).wait()) != 0 ||
         DPCT_CHECK_ERROR(dpct::get_in_order_queue()
                              .memcpy(t.on, &flag, sizeof(int))
                              .wait()) != 0) {

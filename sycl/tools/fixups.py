@@ -69,6 +69,55 @@ for rel in all_sources():
 edit("src/kernels/cuda/s_gemv.dp.cpp", lambda s: s.replace("const float d = *blk;", "const float d = *(const float*) blk;")
      .replace("Q8K ? *xb", "Q8K ? *(const float*) xb"))
 
+# 7c. the doorbell: `volatile` device loads/stores of host-mapped flags do not bypass the GPU caches on Intel
+#     (the spin never saw the host's write). System-scope atomic load/store do (include/strata/sycl_doorbell.hpp).
+def doorbell(s):
+    if "sycl_doorbell.hpp" not in s:
+        s = s.replace('#include "strata/sycl_queue.hpp"\n', '#include "strata/sycl_queue.hpp"\n#include "strata/sycl_doorbell.hpp"\n', 1)
+    s = s.replace("    *seq = *seq + 1u;", "    strata::sys_store(seq, strata::sys_load(seq) + 1u);")
+    s = s.replace("    const uint32_t want = *seq;\n", "    const uint32_t want = strata::sys_load(seq);\n")
+    s = s.replace("    while (*flag != want) /* spin (no __nanosleep on SYCL) */;", "    while (strata::sys_load(flag) != want) /* spin (no __nanosleep on SYCL) */;")
+    s = s.replace("    while (*flag < value) /* spin (no __nanosleep on SYCL) */;", "    while (strata::sys_load(flag) < value) /* spin (no __nanosleep on SYCL) */;")
+    s = s.replace("    if (*skip == value) return;", "    if (strata::sys_load(skip) == value) return;")
+    s = s.replace("    *skip = ring;\n}", "    strata::sys_store(skip, ring);\n}")
+    s = s.replace("        *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;", "        strata::sys_store(seq, strata::sys_load(seq) + 1u);")
+    # bounded spins (see kSpinMax in sycl_doorbell.hpp)
+    s = s.replace("    while (strata::sys_load(flag) != want) /* spin (no __nanosleep on SYCL) */;",
+                  "    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) != want; ++spin) {}")
+    s = s.replace("    while (strata::sys_load(flag) < value) /* spin (no __nanosleep on SYCL) */;",
+                  "    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}")
+    return s
+edit("src/kernels/cuda/elementwise.dp.cpp", doorbell)
+edit("src/kernels/cuda/verify_kernels.dp.cpp", doorbell)
+
+# 7d. cudaMemcpy / cudaMemset are synchronous; dpct emitted `get_in_order_queue().memcpy(...)` with no wait where
+#     the source was pageable ("call wait() if needed"). The streaming expert source hands out ring-buffer blobs,
+#     so an unwaited fill copies from a buffer that has already been reused (measured: non-deterministic experts).
+#     Every default-queue memcpy/memset that is not already waited on gets its .wait() back.
+def wait_default_queue_copies(s):
+    out = []; i = 0; n = 0
+    key = "dpct::get_in_order_queue()."
+    while True:
+        j = s.find(key, i)
+        if j < 0: out.append(s[i:]); break
+        k = j + len(key)
+        if not (s.startswith("memcpy(", k) or s.startswith("memset(", k)):
+            out.append(s[i:k]); i = k; continue
+        p0 = s.find("(", k); depth = 0; q = p0
+        while q < len(s):
+            if s[q] == "(": depth += 1
+            elif s[q] == ")":
+                depth -= 1
+                if depth == 0: break
+            q += 1
+        tail = s[q + 1:q + 8]
+        if tail.startswith(".wait()"):
+            out.append(s[i:q + 1]); i = q + 1; continue
+        out.append(s[i:q + 1]); out.append(".wait()"); i = q + 1; n += 1
+    return "".join(out)
+for rel in all_sources():
+    edit(str(rel), wait_default_queue_copies)
+
 # 8. ggml-common.h has a SYCL declaration mode (sycl::half instead of cuda_fp16.h).
 edit("src/kernels/cuda/iq_kernels.dp.cpp", lambda s: s.replace("#define GGML_COMMON_DECL_CUDA", "#define GGML_COMMON_DECL_SYCL")
      .replace("#define GGML_COMMON_IMPL_CUDA", "#define GGML_COMMON_IMPL_SYCL"))

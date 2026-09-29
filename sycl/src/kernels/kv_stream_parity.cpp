@@ -142,7 +142,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(ident, t.data(),
-                                                              n_blocks * 4)),
+                                                              n_blocks * 4).wait()),
            "ident");
     }
     k::KvStreamMap m;
@@ -178,7 +178,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(kc, hk.data(), hk.size() * 4)),
+               dpct::get_in_order_queue().memcpy(kc, hk.data(), hk.size() * 4).wait()),
            "k");
         /*
         DPCT1114:889: cudaMemcpy is migrated to asynchronization memcpy,
@@ -187,7 +187,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(vc, hv.data(), hv.size() * 4)),
+               dpct::get_in_order_queue().memcpy(vc, hv.data(), hv.size() * 4).wait()),
            "v");
         /*
         DPCT1114:890: cudaMemcpy is migrated to asynchronization memcpy,
@@ -196,7 +196,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(step, st, sizeof(st))),
+               dpct::get_in_order_queue().memcpy(step, st, sizeof(st)).wait()),
            "step");
         append(ref, ident, step, kc, vc, s, fmt, nullptr);
         append(slots, m.page_table, step, kc, vc, s, fmt, &host.p);
@@ -221,7 +221,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(ids, hids.data(),
-                                                              hids.size() * 4)),
+                                                              hids.size() * 4).wait()),
            "ids");
         /*
         DPCT1114:892: cudaMemcpy is migrated to asynchronization memcpy,
@@ -230,7 +230,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(steps, hst.data(),
-                                                              hst.size() * 4)),
+                                                              hst.size() * 4).wait()),
            "steps");
         /*
         DPCT1114:893: cudaMemcpy is migrated to asynchronization memcpy,
@@ -239,7 +239,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(q, hq.data(), hq.size() * 4)),
+               dpct::get_in_order_queue().memcpy(q, hq.data(), hq.size() * 4).wait()),
            "q");
         k::qsa_decode_attn_batch(q, ref.attn(ident), ids, steps, cap, s, scratch, out_ref, n_q, nullptr);
         k::kv_stream_resolve(m, slots.attn(m.page_table), host.p, fmt, ids, steps, n_q, cap, s, nullptr);
@@ -304,7 +304,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(ids, hids.data(),
-                                                              hids.size() * 4)),
+                                                              hids.size() * 4).wait()),
            "ids");
         /*
         DPCT1114:895: cudaMemcpy is migrated to asynchronization memcpy,
@@ -313,7 +313,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(steps, hst.data(), 16)),
+               dpct::get_in_order_queue().memcpy(steps, hst.data(), 16).wait()),
            "steps");
         k::qsa_decode_attn_batch(q, ref.attn(ident), ids, steps, cap, s, scratch, out_ref, 1, nullptr);
         k::qsa_decode_attn_batch(q, ring.attn(rt), ids, steps, cap, s, scratch, out_str, 1, nullptr);

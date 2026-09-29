@@ -85,7 +85,7 @@ int run_case(const char* name, const std::vector<float>& logits, int n_tokens, i
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_l, logits.data(), logits.size() * sizeof(float))),
+              d_l, logits.data(), logits.size() * sizeof(float)).wait()),
           "copy");
     strata::kernels::router_top10(d_l, n_tokens, n_expert, k, d_ids, d_w, nullptr);
     check(DPCT_CHECK_ERROR(

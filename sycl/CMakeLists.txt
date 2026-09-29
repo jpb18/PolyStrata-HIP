@@ -36,6 +36,9 @@ list(APPEND _sycl_link "-Xsycl-target-backend=spir64" "-cl-fp32-correctly-rounde
 # Every translation unit gets -fsycl: the migrated host files construct queues and USM, not only the kernels.
 # icpx defaults to a fast floating-point model (reciprocal approximations, reassociation); the kernels are
 # compared byte-for-byte against ggml's, which nvcc built value-safe, so ask for the same here.
+# Every kernel was written for 32-lane warps (lane = tid & 31, warp-synchronous reductions). dpct pins the
+# sub-group size only where it saw a shuffle; the rest would get Xe2's default of 16 and race. Force 32 everywhere.
+list(APPEND _sycl_flags -fsycl-default-sub-group-size=32)
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${_sycl_flags}>" -fp-model=precise -Wno-unused-parameter
                     -Wno-unused-variable -Wno-deprecated-declarations)
 add_link_options(${_sycl_link})
@@ -141,7 +144,7 @@ target_link_libraries(strata_kernels PUBLIC strata_core)
 strata_resolve(_engine src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
                        src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp
                        src/core/mtp.cpp)
-add_library(strata_engine STATIC ${_engine})
+add_library(strata_engine STATIC ${_engine} ${CMAKE_CURRENT_SOURCE_DIR}/src/core/gguf_expert_source.cpp)
 target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu)
 
 # cuBLAS -> oneMKL through dpct::blas (needs the MKL SYCL BLAS domain)
@@ -172,4 +175,11 @@ if(STRATA_SYCL_PARITY)
   strata_resolve(_src src/kernels/qsa_prompt_attn_parity.cpp)
   add_executable(qsa_prompt_attn_parity ${_src})
   target_link_libraries(qsa_prompt_attn_parity PRIVATE strata_kernels)
+  # one native expert three ways on real GGUF rows (ggml reference, CPU path, GPU native_expert_grouped):
+  #   native_expert_parity <shard1.gguf> [layer ...]
+  if(STRATA_NATIVE_EXPERTS)
+    add_executable(native_expert_parity ${CMAKE_CURRENT_SOURCE_DIR}/src/kernels/native_expert_parity.cpp)
+    target_include_directories(native_expert_parity PRIVATE ${STRATA_ROOT}/third_party/ggml)
+    target_link_libraries(native_expert_parity PRIVATE strata_kernels strata_kernels_cpu)
+  endif()
 endif()

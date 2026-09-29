@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_codes, codes.data(), codes.size())),
+              d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
     DPCT1114:371: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_scales, scales.data(), scales.size() * sizeof(float))),
+              d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "copy scales");
 
     strata::kernels::dequant_s2(d_codes, d_scales, d_out, n_blocks);

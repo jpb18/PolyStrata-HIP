@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), x.size() * sizeof(uint16_t))),
+              d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "copy x");
     /*
     DPCT1114:483: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_codes, codes.data(), codes.size())),
+              d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
     DPCT1114:484: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_scales, scales.data(), scales.size() * sizeof(float))),
+              d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "copy scales");
 
     strata::kernels::s2_gemv(d_x, d_codes, d_scales, d_y, n_in, n_out);

@@ -20,6 +20,7 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/expert_source.hpp"
+#include "strata/core/gguf_expert_source.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/layer.hpp"
@@ -182,6 +183,7 @@ struct Options {
     /// is reserved for a host thread that has nothing to do while the drain runs.
     bool no_host_worker = false;
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
+    bool stream_experts = false;  ///< SYCL port: no host arena; blobs read from the GGUF on demand (all experts in VRAM)
     /// R4: slots of VRAM-resident experts.  **0 = off, and off is the default.**
     /// **THE COMMENT THAT USED TO BE HERE WAS FALSE AND ROUND 328 MEASURED IT.**  It said "the cache has no
     /// consumer yet - `moe_hit_grouped_s2` does not exist - so switching it on costs the fill traffic and
@@ -430,6 +432,8 @@ void usage() {
                  "                       except the one the host loop spins on.  A sweep is how the pool's\n"
                  "                       deviation from `cpu_s2` is attributed.\n"
                  "  --mmap-experts       R2.1: opt OUT of the resident expert arena, back to MapViewOfFile.\n"
+                 "  --stream-experts     no host arena: experts read from the GGUF on demand (needs a native pack and\n"
+                 "                       a VRAM cache that holds every expert; for machines with less RAM than experts)\n"
                  "                       The A/B arm: the mmap's rate depends on the OS page cache holding\n"
                  "                       34 GB, and measured 71.97 vs 34.78 ms/token cold vs warm.\n");
 }
@@ -782,7 +786,7 @@ bool checkpoint_restore(const ConvCheckpoint &c, strata::core::SessionState &ss,
     synchronization behavior.
     */
     if (DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-            ss.gdn_state, c.gdn.data(), z.gdn)) != 0) return false;
+            ss.gdn_state, c.gdn.data(), z.gdn).wait()) != 0) return false;
     /*
     DPCT1114:668: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
@@ -790,7 +794,7 @@ bool checkpoint_restore(const ConvCheckpoint &c, strata::core::SessionState &ss,
     synchronization behavior.
     */
     if (!c.ple.empty() && DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                              ss.ple_hist, c.ple.data(), z.ple)) != 0)
+                              ss.ple_hist, c.ple.data(), z.ple).wait()) != 0)
         return false;
     for (int64_t i = 0; i < g.n_qsa_layers(); ++i)
         /*
@@ -801,7 +805,7 @@ bool checkpoint_restore(const ConvCheckpoint &c, strata::core::SessionState &ss,
         */
         if (DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                 ss.qsa_states[i].idx_tail, c.tails.data() + (size_t)i * z.tail,
-                z.tail)) != 0)
+                z.tail).wait()) != 0)
             return false;
     // the PLE's token window is the last two tokens, OLDEST FIRST, -1 where there is none (as session_zero leaves it)
     const size_t L = c.ids.size();
@@ -916,7 +920,7 @@ double probe_pcie_h2d_gbps() try {
     ensure synchronization behavior.
     */
     dpct::get_in_order_queue().memcpy(
-        d, h, kBytes); // warmup: context up, copy engine primed
+        d, h, kBytes).wait(); // warmup: context up, copy engine primed
     dpct::sync_barrier(ev0);
     /*
     DPCT1124:671: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
@@ -925,7 +929,7 @@ double probe_pcie_h2d_gbps() try {
     ensure synchronization behavior.
     */
     for (int i = 0; i < kIters; ++i) dpct::get_in_order_queue().memcpy(d, h,
-                                                                       kBytes);
+                                                                       kBytes).wait();
     dpct::sync_barrier(ev1);
     const bool ok = DPCT_CHECK_ERROR(ev1->wait_and_throw()) == 0;
     float ms = 0.f;
@@ -1140,6 +1144,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-profile") o.expert_profile = next("--expert-profile");
         else if (a == "--gpu-stages") o.gpu_stages = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
+        else if (a == "--stream-experts") o.stream_experts = true;
         else if (a == "--stats") o.stats = true;
         else if (a == "--shared-late") o.shared_late = true;
         else if (a == "--keep-canonical") o.keep_canonical = true;
@@ -1528,7 +1533,7 @@ int main(int argc, char** argv) {
             */
             DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                 d_mrope, mrope_host.data(),
-                mrope_host.size() * sizeof(int32_t))) != 0) {
+                mrope_host.size() * sizeof(int32_t)).wait()) != 0) {
             std::fprintf(stderr, "strata generate: cannot allocate the image position table\n");
             return 1;
         }
@@ -1812,7 +1817,7 @@ int main(int argc, char** argv) {
                 */
                 DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                     st.mrope, mrope_host.data(),
-                    mrope_host.size() * sizeof(int32_t))) != 0) {
+                    mrope_host.size() * sizeof(int32_t)).wait()) != 0) {
                 std::fprintf(stderr, "strata generate: layer split, CUDA%d: the image position table failed\n", st.dev);
                 return 1;
             }
@@ -1888,6 +1893,7 @@ int main(int argc, char** argv) {
     // note in `pinned.cu`.
     strata::core::FileExpertSource src;
     strata::core::ArenaExpertSource arena_src;
+    strata::core::GgufExpertSource gguf_src;
     strata::core::ExpertSource* srcp = nullptr;
     if (o.mmap_experts) {
         if (native_pack) {   // FileExpertSource maps the canonical pack's experts.bin; a native pack has none
@@ -1901,6 +1907,21 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "strata generate: experts via mmap (--mmap-experts; the A/B arm of R2.1)\n");
         srcp = &src;
+    } else if (o.stream_experts) {
+        // the SYCL port: a card that holds every expert needs no host copy of them, and a 23 GiB machine cannot
+        // hold one. The profile fill reads each blob once from the shard; nothing reads from here afterwards
+        // unless a slot is lent to the prefill and refilled.
+        if (!native_pack || o.native_preset.empty()) {
+            std::fprintf(stderr, "strata generate: --stream-experts needs a native (IQ) pack and --native SHARD1\n");
+            return 2;
+        }
+        if (!gguf_src.open(o.native_preset, g.n_layers, g.n_expert, err)) {
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "strata generate: experts streamed from the GGUF on demand (--stream-experts): no host "
+                             "arena; every expert must fit the VRAM cache\n");
+        srcp = &gguf_src;
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
         // On the multi-GPU Windows experiment, start with at most 8 GiB of mapped host pages.
@@ -3142,7 +3163,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                d_res, host_res.data(), host_res.size() * sizeof(int32_t))) !=
+                d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait()) !=
                 0) {
             std::fprintf(stderr, "strata generate: the device residency table could not be staged\n");
             return 1;
@@ -3162,7 +3183,7 @@ int main(int argc, char** argv) {
                 */
                 DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                     st->d_res, host_res.data(),
-                    host_res.size() * sizeof(int32_t))) != 0) {
+                    host_res.size() * sizeof(int32_t)).wait()) != 0) {
                 std::fprintf(stderr, "strata generate: layer split: CUDA%d residency table failed\n", st->dev);
                 return 1;
             }
@@ -3621,7 +3642,7 @@ int main(int argc, char** argv) {
                 return by memcpy API to ensure synchronization behavior.
                 */
                 dpct::get_in_order_queue().memcpy(
-                    d_res, host_res.data(), host_res.size() * sizeof(int32_t));
+                    d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait();
             for (auto& st : stages) {
                 const strata::core::OnDevice on(st->dev);
                 dpct::get_in_order_queue()
@@ -5135,7 +5156,7 @@ int main(int argc, char** argv) {
                 return by memcpy API to ensure synchronization behavior.
                 */
                 dpct::get_in_order_queue().memcpy(
-                    d_res, host_res.data(), host_res.size() * sizeof(int32_t));
+                    d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait();
         }
         catch (sycl::exception const &exc) {
           std::cerr << exc.what() << "Exception caught at file:" << __FILE__

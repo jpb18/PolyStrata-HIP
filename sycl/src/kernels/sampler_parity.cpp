@@ -114,7 +114,7 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_l, logits.data(), logits.size() * sizeof(float))),
+              d_l, logits.data(), logits.size() * sizeof(float)).wait()),
           "copy");
     // -1 in every output slot first: a row the kernel leaves unwritten can never match (a verify window reads
     // every row, so "no output" is a wrong answer, not a skipped one)
@@ -135,7 +135,7 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_h, hist.data(), hist.size() * sizeof(int))),
+                  d_h, hist.data(), hist.size() * sizeof(int)).wait()),
               "copy hist");
     }
     strata::kernels::sample_tokens(d_l, n_tokens, (int) (logits.size() / n_tokens), d_h, hist_len, p, d_o,
@@ -378,7 +378,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_l, l.data(), l.size() * sizeof(float))),
+                  d_l, l.data(), l.size() * sizeof(float)).wait()),
               "c1");
         strata::kernels::sample_tokens(d_l, NT, NV, nullptr, 0, a, d_a, nullptr);
         strata::kernels::sample_tokens(d_l, NT, NV, nullptr, 0, b, d_b, nullptr);
@@ -887,7 +887,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  input, uniform.data(), uniform.size() * sizeof(float))),
+                  input, uniform.data(), uniform.size() * sizeof(float)).wait()),
               "counter upload");
         strata::kernels::SamplerParams p;
         p.top_k = vocab; p.top_p = 1.0f; p.seed = 123; p.counter = (uint64_t(1) << 32) + 7;

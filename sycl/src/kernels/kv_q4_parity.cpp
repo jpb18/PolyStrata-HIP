@@ -122,7 +122,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_src, h_in.data(), h_in.size() * sizeof(float))),
+           d_src, h_in.data(), h_in.size() * sizeof(float)).wait()),
        "memcpy H2D");
 
     k::fwht256_cuda(d_src, d_dst, n_vectors, nullptr);
@@ -219,7 +219,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_table, table.data(), pages * sizeof(int32_t))),
+           d_table, table.data(), pages * sizeof(int32_t)).wait()),
        "memcpy table");
 
     const size_t pool_bytes = (size_t) pages * H * P * k::kv_q4_bytes_per_head(D);
@@ -257,7 +257,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(d_step, hstep, sizeof(hstep))),
+               dpct::get_in_order_queue().memcpy(d_step, hstep, sizeof(hstep)).wait()),
            "memcpy step");
         /*
         DPCT1114:784: cudaMemcpy is migrated to asynchronization memcpy,
@@ -266,7 +266,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-               d_kcur, kv.data(), kv.size() * sizeof(float))),
+               d_kcur, kv.data(), kv.size() * sizeof(float)).wait()),
            "memcpy k");
         /*
         DPCT1114:785: cudaMemcpy is migrated to asynchronization memcpy,
@@ -275,7 +275,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-               d_vcur, vv.data(), vv.size() * sizeof(float))),
+               d_vcur, vv.data(), vv.size() * sizeof(float)).wait()),
            "memcpy v");
 
         k::kv_append_q4_step(d_k_q4, d_v_q4, d_table, d_step, d_kcur, d_vcur, s, nullptr);
@@ -357,7 +357,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_ids, ids.data(), max_ids * sizeof(int32_t))),
+           d_ids, ids.data(), max_ids * sizeof(int32_t)).wait()),
        "memcpy ids");
 
     int32_t hstep[k::kStepCount] = {0, 0, 0, max_ids};
@@ -368,7 +368,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_step, hstep, sizeof(hstep))),
+           dpct::get_in_order_queue().memcpy(d_step, hstep, sizeof(hstep)).wait()),
        "memcpy step");
 
     k::kv_gather_q4_step(d_k_q4, d_v_q4, d_table, d_ids, d_step, max_ids, s, d_k_scratch, d_v_scratch, nullptr);

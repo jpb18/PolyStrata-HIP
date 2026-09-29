@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue().memcpy(d_a, alpha.data(), n * 4)),
+                  dpct::get_in_order_queue().memcpy(d_a, alpha.data(), n * 4).wait()),
               "ca");
         /*
         DPCT1114:713: cudaMemcpy is migrated to asynchronization memcpy,
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue().memcpy(d_dt, dt.data(), n * 4)),
+                  dpct::get_in_order_queue().memcpy(d_dt, dt.data(), n * 4).wait()),
               "cd");
         /*
         DPCT1114:714: cudaMemcpy is migrated to asynchronization memcpy,
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue().memcpy(d_sa, a.data(), n * 4)),
+                  dpct::get_in_order_queue().memcpy(d_sa, a.data(), n * 4).wait()),
               "cs");
         strata::kernels::gdn_gate(d_a, d_dt, d_sa, d_g, 1, H_V, nullptr);
         std::vector<float> got((size_t) n);
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue().memcpy(d_x, x.data(), n * 4)),
+                  dpct::get_in_order_queue().memcpy(d_x, x.data(), n * 4).wait()),
               "csx");
         strata::kernels::silu_inplace(d_x, n, nullptr);
         std::vector<float> got((size_t) n);
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue().memcpy(d_x, x.data(), n * 4)),
+                  dpct::get_in_order_queue().memcpy(d_x, x.data(), n * 4).wait()),
               "cex");
         strata::kernels::scale_inplace(d_x, n, s, nullptr);
         std::vector<float> got((size_t) n);
@@ -344,7 +344,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_x, x.data(),
-                                                                 x.size() * 4)),
+                                                                 x.size() * 4).wait()),
               "c rmsx");
         /*
         DPCT1114:718: cudaMemcpy is migrated to asynchronization memcpy,
@@ -353,7 +353,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_w, w.data(),
-                                                                 w.size() * 4)),
+                                                                 w.size() * 4).wait()),
               "c rmsw");
         strata::kernels::rms_norm_weighted(d_x, d_w, rows, cols, eps, nullptr);
         std::vector<float> got((size_t) (rows * cols));
@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_x, x.data(),
-                                                                 x.size() * 4)),
+                                                                 x.size() * 4).wait()),
               "c rmsx2");
         strata::kernels::rms_norm_weighted(d_x, nullptr, rows, cols, eps, nullptr);
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()

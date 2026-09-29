@@ -577,7 +577,7 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
             by memcpy API to ensure synchronization behavior.
             */
             DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                m.ident_table, ident.data(), ident.size() * 4)) != 0)
+                m.ident_table, ident.data(), ident.size() * 4).wait()) != 0)
             ok = false;
         else
             m.owned.push_back(m.ident_table);

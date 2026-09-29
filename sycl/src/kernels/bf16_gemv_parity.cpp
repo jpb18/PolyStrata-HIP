@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_x, x.data(),
-                                                                 x.size() * 2)),
+                                                                 x.size() * 2).wait()),
               "cx");
         /*
         DPCT1114:1142: cudaMemcpy is migrated to asynchronization memcpy,
@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_w, w.data(),
-                                                                 w.size() * 2)),
+                                                                 w.size() * 2).wait()),
               "cw");
 
         std::vector<float> naive((size_t) s.n_out), warp((size_t) s.n_out), split((size_t) s.n_out);
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                      d_x, x.data(), x.size() * 2)),
+                      d_x, x.data(), x.size() * 2).wait()),
                   "cx2");
             std::vector<float> rival((size_t) s.n_out);
             strata::kernels::bf16_gemv(d_x, d_w, d_y, s.n_in, s.n_out, nullptr);

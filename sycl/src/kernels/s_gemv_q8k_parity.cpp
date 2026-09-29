@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_xf, xf.data(), (size_t)n_in * 4)),
+                  d_xf, xf.data(), (size_t)n_in * 4).wait()),
               "cxf");
         strata::kernels::quantize_q8_K(d_xf, d_xq, n_in, nullptr);
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_codes, codes.data(), codes.size())),
+                  d_codes, codes.data(), codes.size()).wait()),
               "cc");
         /*
         DPCT1114:849: cudaMemcpy is migrated to asynchronization memcpy,
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_scales, scales.data(), scales.size() * 4)),
+                  d_scales, scales.data(), scales.size() * 4).wait()),
               "cs");
         /*
         DPCT1114:850: cudaMemcpy is migrated to asynchronization memcpy,
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_offs, offs.data(), offs.size() * 4)),
+                  d_offs, offs.data(), offs.size() * 4).wait()),
               "co");
 
         std::vector<float> naive((size_t) n_out), warp((size_t) n_out);
@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                      d_x16, x16.data(), (size_t)n_in * 2)),
+                      d_x16, x16.data(), (size_t)n_in * 2).wait()),
                   "cx16");
             std::vector<float> fp16out((size_t) n_out);
             strata::kernels::s_gemv(d_x16, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in, n_out,

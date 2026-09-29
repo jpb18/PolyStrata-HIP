@@ -174,6 +174,8 @@ private:
     int32_t last_tokens_[8] = {};
     int64_t n_vocab_ = 0;
     dpct::queue_ptr cs_ = &dpct::get_in_order_queue();
+    float* dbgR_ = nullptr;   ///< SYCL port debug: R (token 0) after every layer, n_layers x n_embd
+    float* dbgM_ = nullptr;   ///< SYCL port debug: mixed_ (token 0) after every layer
     dpct::experimental::command_graph_exec_ptr exec_[9] = {};
     dpct::experimental::command_graph_exec_ptr commit_exec_ = nullptr;
 

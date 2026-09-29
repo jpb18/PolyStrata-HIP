@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        dpct::get_in_order_queue().memcpy(dw, raw.data(), raw.size());
+        dpct::get_in_order_queue().memcpy(dw, raw.data(), raw.size()).wait();
         double dq_err = 0.0;
         if (strata::kernels::iq_supported(type) && ((size_t) rows * cols) % 256 == 0) {
             strata::kernels::iq_dequant_f32(type, dw, (int64_t) rows * cols, dq, s);
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        dpct::get_in_order_queue().memcpy(dx, x.data(), x.size() * 4);
+        dpct::get_in_order_queue().memcpy(dx, x.data(), x.size() * 4).wait();
         strata::kernels::quantize_q8_1_rows(dx, 2, cols, xq, s);
         try {
             strata::kernels::native_mmvq(type, dw, xq, dy, cols, rows, 2, s);

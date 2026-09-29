@@ -98,7 +98,7 @@ struct Dev {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  p, v.data(), v.size() * sizeof(T))),
+                  p, v.data(), v.size() * sizeof(T)).wait()),
               "H2D");
     }
     std::vector<T> get(size_t n) const {

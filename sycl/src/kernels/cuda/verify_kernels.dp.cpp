@@ -6,6 +6,7 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
+#include "strata/sycl_doorbell.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 
 #include <cstdio>
@@ -911,7 +912,7 @@ __dpct_inline__ void wait_flag_ge_kernel(const volatile uint32_t *flag,
     hardware-specific feature. Consult with your hardware vendor to find a
     replacement.
     */
-    while (*flag < value) /* spin (no __nanosleep on SYCL) */;
+    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}
     /*
     DPCT1078:199: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
@@ -971,18 +972,18 @@ __dpct_inline__ void resident_plan_kernel(
     are needed.
     */
     sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::device);
-    *skip = ring;
+    strata::sys_store(skip, ring);
 }
 __dpct_inline__ void wait_flag_ge_or_kernel(const volatile uint32_t *flag,
                                             uint32_t value,
                                             const volatile uint32_t *skip) {
-    if (*skip == value) return;
+    if (strata::sys_load(skip) == value) return;
     /*
     DPCT1008:884: __nanosleep function is not defined in SYCL. This is a
     hardware-specific feature. Consult with your hardware vendor to find a
     replacement.
     */
-    while (*flag < value) /* spin (no __nanosleep on SYCL) */;
+    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}
     /*
     DPCT1078:201: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
@@ -995,7 +996,7 @@ __dpct_inline__ void copy_i32_unless_kernel(int32_t *__restrict__ dst,
                                             const uint32_t *skip,
                                             uint32_t value) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    if (*skip == value) return;
+    if (strata::sys_load(skip) == value) return;
 #pragma unroll
     for (int i = item_ct1.get_local_id(2); i < n;
          i += item_ct1.get_local_range(2)) dst[i] = src[i];

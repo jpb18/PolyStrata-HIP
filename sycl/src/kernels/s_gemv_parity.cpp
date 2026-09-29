@@ -253,7 +253,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), x.size() * sizeof(uint16_t))),
+              d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "copy x");
     /*
     DPCT1114:394: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -262,7 +262,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_codes, codes.data(), codes.size())),
+              d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
     DPCT1114:395: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -271,7 +271,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_scales, scales.data(), scales.size() * sizeof(float))),
+              d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "copy scales");
     /*
     DPCT1114:396: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -280,7 +280,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_offsets, offsets.data(), offsets.size() * sizeof(float))),
+              d_offsets, offsets.data(), offsets.size() * sizeof(float)).wait()),
           "copy offsets");
     strata::kernels::s_gemv(d_x, d_codes, d_scales, d_offsets, d_y, n_in, n_out, form);
     std::vector<float> got((size_t) n_out);
@@ -373,7 +373,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), x.size() * sizeof(uint16_t))),
+              d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "bench copy x");
     /*
     DPCT1114:398: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -382,7 +382,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_codes, codes.data(), codes.size())),
+              d_codes, codes.data(), codes.size()).wait()),
           "bench copy codes");
     /*
     DPCT1114:399: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -391,7 +391,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_scales, scales.data(), scales.size() * sizeof(float))),
+              d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "bench copy scales");
 
     for (int i = 0; i < 3; ++i) strata::kernels::s_gemv(d_x, d_codes, d_scales, nullptr, d_y, n_in, n_out, form);
@@ -670,7 +670,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_x, x.data(), x.size() * sizeof(uint16_t))),
+                  d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
               "copy x");
         /*
         DPCT1114:401: cudaMemcpy is migrated to asynchronization memcpy,
@@ -679,7 +679,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_codes, codes.data(), codes.size())),
+                  d_codes, codes.data(), codes.size()).wait()),
               "copy codes");
         /*
         DPCT1114:402: cudaMemcpy is migrated to asynchronization memcpy,
@@ -688,7 +688,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_scales, scales.data(), scales.size() * sizeof(float))),
+                  d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
               "copy scales");
         strata::kernels::s_gemv(d_x, d_codes, d_scales, nullptr, d_y, n_in, n_out, tc.form);
         std::vector<float> got((size_t) n_out);

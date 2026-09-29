@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), x.size() * sizeof(float))),
+              d_x, x.data(), x.size() * sizeof(float)).wait()),
           "copy x");
     /*
     DPCT1114:310: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_cos, hcos.data(), hcos.size() * sizeof(float))),
+              d_cos, hcos.data(), hcos.size() * sizeof(float)).wait()),
           "copy cos");
     /*
     DPCT1114:311: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_sin, hsin.data(), hsin.size() * sizeof(float))),
+              d_sin, hsin.data(), hsin.size() * sizeof(float)).wait()),
           "copy sin");
     /*
     DPCT1114:312: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_pos, pos.data(), pos.size() * sizeof(int))),
+              d_pos, pos.data(), pos.size() * sizeof(int)).wait()),
           "copy pos");
     strata::kernels::rope_neox_apply(d_x, d_out, rows, head_dim, n_rot, d_cos, d_sin, d_pos, nullptr);
     std::vector<float> got(ref.size());
@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                  d_x, e.data(), e.size() * sizeof(float))),
+                  d_x, e.data(), e.size() * sizeof(float)).wait()),
               "copy e");
         // position 7, NOT position 0: at pos 0 sin is exactly 0, so dim half legitimately does not move and
         // the check would report the correct kernel as wrong.  The first version made exactly that mistake.

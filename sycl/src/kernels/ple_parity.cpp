@@ -215,7 +215,7 @@ int history_advance_regression() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           history, expected.data(), count * sizeof(float))),
+           history, expected.data(), count * sizeof(float)).wait()),
        "history initial values");
     dpct::queue_ptr stream;
     dpct::experimental::command_graph_ptr graph;
@@ -770,7 +770,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_nk, cap.w_nk.data(), hcd * 4)),
+           dpct::get_in_order_queue().memcpy(d_nk, cap.w_nk.data(), hcd * 4).wait()),
        "cnk");
     /*
     DPCT1114:948: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -779,7 +779,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_nq, cap.w_nq.data(), hcd * 4)),
+           dpct::get_in_order_queue().memcpy(d_nq, cap.w_nq.data(), hcd * 4).wait()),
        "cnq");
     /*
     DPCT1114:949: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -788,7 +788,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_nc, cap.w_nc.data(), hcd * 4)),
+           dpct::get_in_order_queue().memcpy(d_nc, cap.w_nc.data(), hcd * 4).wait()),
        "cnc");
     /*
     DPCT1114:950: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -797,7 +797,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_kc, key_codes.data(), key_codes.size())),
+           d_kc, key_codes.data(), key_codes.size()).wait()),
        "ckc");
     /*
     DPCT1114:951: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -806,7 +806,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_vb, value_bf16.data(), value_bf16.size() * 2)),
+           d_vb, value_bf16.data(), value_bf16.size() * 2).wait()),
        "cvb");
     /*
     DPCT1114:952: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -815,7 +815,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_c1, conv1d_f16.data(), conv1d_f16.size() * 2)),
+           d_c1, conv1d_f16.data(), conv1d_f16.size() * 2).wait()),
        "cc1");
 
     k::PleWeights w{};
@@ -837,7 +837,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-           d_ks, key_scales.data(), key_scales.size() * 4)),
+           d_ks, key_scales.data(), key_scales.size() * 4).wait()),
        "cks");
     w.key_scales = d_ks;
 
@@ -867,7 +867,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-               d_emb, cap.emb.data() + (size_t)t * nd, nd * 4)),
+               d_emb, cap.emb.data() + (size_t)t * nd, nd * 4).wait()),
            "cemb");
         /*
         DPCT1114:955: cudaMemcpy is migrated to asynchronization memcpy,
@@ -876,7 +876,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-               d_hid, cap.hidden.data() + (size_t)t * hcd, hcd * 4)),
+               d_hid, cap.hidden.data() + (size_t)t * hcd, hcd * 4).wait()),
            "chid");
         /*
         DPCT1114:956: cudaMemcpy is migrated to asynchronization memcpy,
@@ -885,7 +885,7 @@ int main(int argc, char** argv) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-               d_hist, hist_state.data(), (size_t)k::NG_HIST * hcd * 4)),
+               d_hist, hist_state.data(), (size_t)k::NG_HIST * hcd * 4).wait()),
            "chist");
         k::PleOut out{};
         out.key = d_ck; out.value = d_cv; out.gate = d_g; out.gated = d_gd;
@@ -1016,7 +1016,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                   d_emb, witness.data(), nd * sizeof(float))),
+                   d_emb, witness.data(), nd * sizeof(float)).wait()),
                "native PLE witness");
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
             ck(DPCT_CHECK_ERROR(
@@ -1095,7 +1095,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                   d_emb, cap.emb.data(), nd * sizeof(float))),
+                   d_emb, cap.emb.data(), nd * sizeof(float)).wait()),
                "restore PLE embedding");
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
             ck(DPCT_CHECK_ERROR(
@@ -1153,7 +1153,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                   native_data, native_key.data(), native_bytes)),
+                   native_data, native_key.data(), native_bytes).wait()),
                "native PLE weights upload");
             k::PleWeights nw = w;
             nw.key_native_data = native_data; nw.key_native_type = 42; nw.key_native_q8_1 = native_q;
@@ -1209,7 +1209,7 @@ int main(int argc, char** argv) {
                 return by memcpy API to ensure synchronization behavior.
                 */
                 ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                       d_emb, cap.emb.data() + (size_t)p * nd, nd * 4)),
+                       d_emb, cap.emb.data() + (size_t)p * nd, nd * 4).wait()),
                    "native PLE key input");
                 k::native_q2_0_f32(native_data, d_emb, native_q, raw_projection, k::NG_N_EMBD, k::NG_HC_DIM, 1, stream);
                 ck(DPCT_CHECK_ERROR(stream->wait()), "native PLE raw key sync");
@@ -1306,7 +1306,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                   d_emb, cap.emb.data(), nd * 4)),
+                   d_emb, cap.emb.data(), nd * 4).wait()),
                "native PLE restore input");
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
             ck(DPCT_CHECK_ERROR(
@@ -1360,7 +1360,7 @@ int main(int argc, char** argv) {
             by memcpy API to ensure synchronization behavior.
             */
             ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-                   d_hid, cap.hidden.data(), hcd * sizeof(float))),
+                   d_hid, cap.hidden.data(), hcd * sizeof(float)).wait()),
                "restore PLE hidden input");
             sycl::free(compact_workspace, dpct::get_in_order_queue());
         }

@@ -354,6 +354,10 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
         */
         if (!ok2) {; device_plan_ = false; }
     }
+    if (std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {   // SYCL port: the per-layer residual ladder (token 0)
+        dbgR_ = (float*) sycl::malloc_device((size_t) g.n_layers * g.n_embd * 4, dpct::get_in_order_queue());
+        dbgM_ = (float*) sycl::malloc_device((size_t) g.n_layers * g.n_embd * 4, dpct::get_in_order_queue());
+    }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
                  (double) count.used / 1048576.0);
     return true;
@@ -813,6 +817,10 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
     for (int64_t l = lb_; l < le_; ++l)
         for (int grp = 0; grp < G; ++grp) {
             if (!post(l, grp)) return false;
+            if (dbgR_ && grp == 0) {   // recorded into the window graph as memcpy nodes
+                cs->memcpy(dbgR_ + (size_t) l * N, Rt(0), (size_t) N * 4);
+                cs->memcpy(dbgM_ + (size_t) l * N, mixed_, (size_t) N * 4);
+            }
             if (l + 1 < le_ && !pre(l + 1, grp)) return false;
         }
     if (le_ < g.n_layers) {   // a layer split's earlier stage: hand the residual on, no head
@@ -1133,7 +1141,13 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     volatile uint32_t* const flag = h_flag_;
     const int G = groups_[T] > 0 ? groups_[T] : 1;
     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
-    for (int64_t k = 0; k < (le_ - lb_) * G; ++k) {
+    // SYCL port: with every routed expert resident the GPU takes its own plan (`device_plan_`) and skips every
+    // host flag, so the host has nothing to do per layer - and on this platform a kernel's writes to host-mapped
+    // memory are not reliably visible while the graph runs (measured: the ring is seen late or not at all),
+    // so waiting on them per layer fails. STRATA_VERIFY_NO_HOST=1 waits for the whole window instead. Only for
+    // an all-resident cache: a missed expert would leave the GPU waiting for a plan that never comes.
+    static const bool no_host = std::getenv("STRATA_VERIFY_NO_HOST") != nullptr;
+    for (int64_t k = 0; !no_host && k < (le_ - lb_) * G; ++k) {
         const int64_t l = lb_ + k / G;
         const int grp = (int) (k % G);
         const uint32_t want = (uint32_t) (k + 1);
@@ -1210,6 +1224,64 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     if (se != 0) {
         err = std::string("verify: ") + dpct::get_error_string_dummy(se);
         return false;
+    }
+    if (no_host && std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {   // SYCL port: what the window left behind
+        const int Gd = groups_[T] > 0 ? groups_[T] : 1;
+        std::vector<uint32_t> sk((size_t) Gd, 0);
+        std::vector<int32_t> id0((size_t) ss.k, 0);
+        std::vector<int32_t> res0((size_t) 16, 0);
+        cs_->memcpy(sk.data(), skip_, sk.size() * 4).wait();
+        cs_->memcpy(id0.data(), ids_, id0.size() * 4).wait();
+        cs_->memcpy(res0.data(), hits_.d_res, res0.size() * 4).wait();
+        std::fprintf(stderr, "verify dbg: window T=%d: host seq=%u (expected %lld), skip[]=", T, *(volatile uint32_t*) h_seq_,
+                     (long long) ((le_ - lb_) * Gd));
+        for (int i = 0; i < Gd; ++i) std::fprintf(stderr, " %u", sk[(size_t) i]);
+        std::vector<float> w0((size_t) ss.k, 0.f);
+        cs_->memcpy(w0.data(), w_, w0.size() * 4).wait();
+        std::fprintf(stderr, "; layer-0 weights:");
+        for (size_t i = 0; i < w0.size(); ++i) std::fprintf(stderr, " %.3g", w0[i]);
+        std::fprintf(stderr, "; layer-0 ids:");
+        for (size_t i = 0; i < id0.size(); ++i) std::fprintf(stderr, " %d", id0[i]);
+        std::fprintf(stderr, "; d_res[0..15]:");
+        for (size_t i = 0; i < res0.size(); ++i) std::fprintf(stderr, " %d", res0[i]);
+        std::fprintf(stderr, "; out[0..3]: %d %d %d %d\n", ((volatile int32_t*) h_out_)[0], ((volatile int32_t*) h_out_)[1],
+                     ((volatile int32_t*) h_out_)[2], ((volatile int32_t*) h_out_)[3]);
+        auto stat = [&](const char* what, const float* dev, size_t n) {   // token 0's vector: where do the zeros begin?
+            std::vector<float> v(n, 0.f);
+            cs_->memcpy(v.data(), dev, n * 4).wait();
+            double sum = 0, mx = 0; size_t nonfinite = 0;
+            for (float x : v) { if (!std::isfinite(x)) { ++nonfinite; continue; } sum += std::fabs(x); mx = std::max(mx, (double) std::fabs(x)); }
+            std::fprintf(stderr, "verify dbg:   %-8s n=%zu mean|.|=%.4g max|.|=%.4g nonfinite=%zu first4=%g %g %g %g\n", what, n,
+                         sum / (double) n, mx, nonfinite, v[0], v[1], v[2], v[3]);
+        };
+        if (dbgR_) {
+            const size_t N = (size_t) g.n_embd;
+            std::vector<float> r((size_t) g.n_layers * N), m((size_t) g.n_layers * N);
+            cs_->memcpy(r.data(), dbgR_, r.size() * 4).wait();
+            cs_->memcpy(m.data(), dbgM_, m.size() * 4).wait();
+            for (int64_t l = 0; l < g.n_layers; ++l) {
+                double sr = 0, sm = 0; size_t nr = 0, nm = 0;
+                for (size_t i = 0; i < N; ++i) {
+                    const float x = r[(size_t) l * N + i], y = m[(size_t) l * N + i];
+                    if (std::isfinite(x)) sr += std::fabs(x); else ++nr;
+                    if (std::isfinite(y)) sm += std::fabs(y); else ++nm;
+                }
+                std::fprintf(stderr, "verify dbg:   layer %2lld %s  R mean|.|=%.4g nonfinite=%zu   mixed mean|.|=%.4g nonfinite=%zu\n",
+                             (long long) l, is_qsa_layer(g, l) ? "QSA" : "GDN", sr / N, nr, sm / N, nm);
+            }
+        }
+        {   // the device plan of the last layer group and the MoE parts it produced (token 0)
+            std::vector<int32_t> pc(4, 0);
+            cs_->memcpy(pc.data(), plan_, 16).wait();
+            std::fprintf(stderr, "verify dbg:   plan (last layer, grp 0): groups=%d entries=%d pcie=%d\n", pc[0], pc[1], pc[2]);
+        }
+        stat("parts_", parts_, (size_t) ss.k * g.n_embd);
+        stat("hit_out_", hit_out_, (size_t) ss.k * g.n_embd);
+        stat("shared_", shared_, (size_t) g.n_embd);
+        stat("emb_", emb_, (size_t) g.n_embd);
+        stat("ple_", ple_, (size_t) g.n_embd);
+        stat("R_", R_, (size_t) g.n_embd);
+        stat("mixed_", mixed_, (size_t) g.n_embd);
     }
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     copy_->wait(); // no host function of this window may raise flag B in the

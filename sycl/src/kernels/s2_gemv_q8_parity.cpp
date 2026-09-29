@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_x, x.data(), x.size() * sizeof(float))),
+              d_x, x.data(), x.size() * sizeof(float)).wait()),
           "c x");
     /*
     DPCT1114:932: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_codes, codes.data(), codes.size())),
+              d_codes, codes.data(), codes.size()).wait()),
           "c codes");
     /*
     DPCT1114:933: cudaMemcpy is migrated to asynchronization memcpy, assuming in
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_scales, scales.data(), scales.size() * sizeof(float))),
+              d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "c scales");
 
     strata::kernels::quantize_q8_0(d_x, d_act, n_in, nullptr);
@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
-              d_hx, hx.data(), hx.size() * sizeof(uint16_t))),
+              d_hx, hx.data(), hx.size() * sizeof(uint16_t)).wait()),
           "c hx");
     strata::kernels::SForm form{2, -1, 64, strata::kernels::Codebook::Affine, false};
     strata::kernels::s_gemv_split(d_hx, d_codes, d_scales, nullptr, d_y_fp16, n_in, n_out, form, tpr);
