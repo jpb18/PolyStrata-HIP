@@ -3512,7 +3512,8 @@ int main(int argc, char** argv) {
             // tuning keys (setup's calibration measures settings without restarting the engine): the PCIe share of
             // the missed experts and the draft-probability floor, for this request only
             double req_pcie_frac = o.pcie_frac, req_spec_min_p = o.spec_min_p;
-            if (endp != nullptr) {   // GENI takes only cvec=; its file path is the first token without an =
+            if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
+                                     // embedding file path is the first token without an =
                 for (;;) {
                     while (*endp == ' ') ++endp;
                     const char* start = endp;
@@ -3524,7 +3525,6 @@ int main(int argc, char** argv) {
                     const std::string key = tok.substr(0, eq);
                     const float fv = std::strtof(tok.c_str() + eq + 1, nullptr);
                     if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
-                    else if (geni) {}   // image requests decode greedily
                     else if (key == "temperature") req_temperature = fv;
                     else if (key == "top_p") req_top_p = fv;
                     else if (key == "top_k") req_top_k = std::atoi(tok.c_str() + eq + 1);
