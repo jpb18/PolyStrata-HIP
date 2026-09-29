@@ -1422,6 +1422,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
     cfg_path.touch()                                     # the most recently used model
+    if "--mtp" in cfg["args"][:-1]:
+        refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]))
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
            "--port", str(port or cfg.get("port", 8080))]
     if cfg.get("backend") == "hip":                    # AMD: one card, numbered as HIP numbers them
@@ -1481,6 +1483,24 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     say("  Later, closing this window stops the model.")
     say("  " + "-" * 100)
     return subprocess.call(cmd)
+
+
+# the draft subsets setup copied before (sha256): replaced by the current one, a subset made by hand is kept
+OLD_DRAFT_VOCABS = {"369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced9597fb25"}   # to 0.1.26: 27 Han tokens
+
+
+def refresh_draft_vocab(rt: Path) -> None:
+    """The draft layer's token subset (data/draft_vocab.bin) in the MTP folder: copied when missing, and an older
+    shipped one is replaced, so an update reaches existing installs (0.1.27 added the CJK scripts, #137)."""
+    new, dst = ROOT / "data" / "draft_vocab.bin", rt / "draft_vocab.bin"
+    if not new.exists() or not rt.is_dir():
+        return
+    if dst.exists():
+        old = hashlib.sha256(dst.read_bytes()).hexdigest()
+        if old not in OLD_DRAFT_VOCABS or old == hashlib.sha256(new.read_bytes()).hexdigest():
+            return
+        ok("draft layer: the token subset now includes Chinese, Japanese and Korean")
+    shutil.copyfile(new, dst)
 
 
 def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
@@ -1930,8 +1950,7 @@ def main() -> int:
              "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
         run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
             env=env)
-    if not (rt / "draft_vocab.bin").exists():
-        shutil.copyfile(ROOT / "data" / "draft_vocab.bin", rt / "draft_vocab.bin")
+    refresh_draft_vocab(rt)
     ok(f"MTP draft layer: {rt}")
 
     # ---- 7. the start script
