@@ -52,11 +52,21 @@ into the card that owns the layer.
 
 ## Limits (for now)
 
-- Not with images (`--vision`), control vectors / the speed projection, KV streaming (`--kv-resident`), the older
-  helper-GPU experiment (`--expert-cache-remote`, docs/SECOND_GPU.md) or `--mmap-experts`.
+- **Works across cards** (bench/results/2026-09-29-layer-split-limits):
+  - images (`--vision`): each card keeps its own image-position table;
+  - control vectors and the experimental speed projection: each card holds the vector's tables, switched on and
+    off per request on all of them;
+  - KV streaming (`--kv-resident`): each card streams the KV of its own session;
+  - mid-prompt checkpoints (`--prompt-cache-every`): each card saves its part of a checkpoint when it has read that
+    chunk;
+  - the older helper-GPU caches (`--expert-cache-remote`, docs/SECOND_GPU.md): they take the visible GPUs no stage
+    runs on, and hold only experts no stage's cache holds. On the test rig, a 2080 Ti helper made decoding slower,
+    as it did without a split: its per-layer round trip costs more than the CPU pool needs for those experts.
+- `--mmap-experts` needs a canonical pack (`experts.bin`), with or without a split; a native (IQ) pack says so at
+  start.
 - The prompt path has its own buffers on every card (1.5 GB each at the default 2048-token chunk; `--prefill 1024`
-  halves that) instead of borrowing cache slots as one card does.
-- Mid-prompt checkpoints (`--prompt-cache-every`) are off; the ones at turn boundaries - what a chat reuses - stay.
+  halves that) instead of borrowing cache slots as one card does. An explicit `--expert-cache` on the first card is
+  capped to leave room for them.
 - On Windows only 8 GiB of the expert arena is pinned (more, mapped into two GPU contexts, leaves WDDM refusing
   allocations); the PCIe share covers those layers.
 - Every card needs compute capability 8.0 (RTX 30 or newer). A Turing card (RTX 20, sm_75) builds only with the
