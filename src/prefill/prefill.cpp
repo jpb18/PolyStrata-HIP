@@ -19,6 +19,7 @@
 #include "strata/core/native_head.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/kernels/qsa_prompt_attn.hpp"
 #include "strata/kernels/qsa_select.hpp"
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_mmq.hpp"
@@ -1164,6 +1165,26 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         strata::kernels::qsa_block_topk(m.sel_scores, steps0, nb, m.max_blocks, m.cap, s,
                                                         m.sel_ids + t0 * m.cap, m.cs);
                     }
+                    // STRATA_SEL_OVERLAP (debug, D-1's question): how much do neighbouring queries' selections share?
+                    // Per tile of 16 queries: the union of their selected cells against the sum of their widths.
+                    if (static const bool ovl = std::getenv("STRATA_SEL_OVERLAP") != nullptr; ovl && qsa_index == 0) {
+                        std::vector<int32_t> ids((size_t) (T * m.cap));
+                        cudaMemcpyAsync(ids.data(), m.sel_ids, ids.size() * 4, cudaMemcpyDeviceToHost, m.cs);
+                        cudaStreamSynchronize(m.cs);
+                        double sum_w = 0, sum_u = 0;
+                        for (int64_t t0 = 0; t0 + 16 <= T; t0 += 16) {
+                            std::vector<int32_t> u;
+                            for (int64_t t = t0; t < t0 + 16; ++t) {
+                                const int64_t w = m.steps_host[(size_t) (t * strata::kernels::kStepCount + strata::kernels::kStepWidth)];
+                                sum_w += (double) w;
+                                u.insert(u.end(), ids.begin() + t * m.cap, ids.begin() + t * m.cap + w);
+                            }
+                            std::sort(u.begin(), u.end());
+                            sum_u += (double) (std::unique(u.begin(), u.end()) - u.begin());
+                        }
+                        std::fprintf(stderr, "strata prefill: selection overlap at %lld: 16-query tiles read %.1f%% of the "
+                                             "cells one query at a time does\n", (long long) p0, sum_w > 0 ? 100.0 * sum_u / sum_w : 0.0);
+                    }
                     // STRATA_IDX_FP16_CHECK: would FP16 pooled indexer keys select the same cells? (the KV-streaming
                     // design's last question). Every query is selected again from the pooled keys and `dead` rounded
                     // to fp16 (exactly what an fp16 store reads back); the agreement with the fp32 selection is
@@ -1232,12 +1253,18 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     const strata::kernels::QsaAttnPools pools = staged ? pools_of(m.stage, m.ident_table)
                                                                        : core::qsa_attn_pools(st);
                     pt.mark(kPfQsaAttn, cs);
-                    for (int64_t t0 = 0; t0 < T; t0 += m.attn_batch) {
-                        const int64_t nb = std::min(m.attn_batch, T - t0);
-                        strata::kernels::qsa_decode_attn_batch(m.q + t0 * ZV, pools, m.sel_ids + t0 * m.cap,
-                                                               m.steps_dev + t0 * strata::kernels::kStepCount, m.cap, s,
-                                                               m.attn_scratch, m.attn + t0 * ZV, nb, m.cs);
-                    }
+                    // perf-review D-1: the whole chunk on tensor cores, one block per (query, KV head), FP32-level
+                    // accuracy but not bitwise (qsa_prompt_attn.hpp). Q4_0 KV, or STRATA_PROMPT_ATTN_OLD=1: the
+                    // decode kernel, 32 queries at a time
+                    static const bool old_attn = std::getenv("STRATA_PROMPT_ATTN_OLD") != nullptr;
+                    if (old_attn || !strata::kernels::qsa_prompt_attn_batch(m.q, pools, m.sel_ids, m.steps_dev, m.cap, s,
+                                                                            m.attn, T, m.cs))
+                        for (int64_t t0 = 0; t0 < T; t0 += m.attn_batch) {
+                            const int64_t nb = std::min(m.attn_batch, T - t0);
+                            strata::kernels::qsa_decode_attn_batch(m.q + t0 * ZV, pools, m.sel_ids + t0 * m.cap,
+                                                                   m.steps_dev + t0 * strata::kernels::kStepCount, m.cap,
+                                                                   s, m.attn_scratch, m.attn + t0 * ZV, nb, m.cs);
+                        }
                     if (st.kv_q4) strata::kernels::fwht256_inplace_cuda(m.attn, T * 24, m.cs);
                     pt.mark(kPfQsa, cs);
                     gate_attn(m.attn, m.Qf, m.attn_h, T, m.cs);
