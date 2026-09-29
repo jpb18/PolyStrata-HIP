@@ -650,6 +650,7 @@ def cuda_lib_dirs():
 ROCM_INDEX = os.environ.get("STRATA_ROCM_INDEX", "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/")
 ROCM_VERSION = os.environ.get("STRATA_ROCM_VERSION", "7.10.0a20251120")   # what Strata's HIP build was tested with
 AMD_ARCHS = ("gfx1100",)
+AMD_NAMES = {"gfx1100": "AMD Radeon RX 7900 series (gfx1100)"}   # when sysfs has no product name
 
 
 def amd_gpus():
@@ -680,6 +681,8 @@ def amd_gpus():
             name = (dev / "product_name").read_text().strip() or f"AMD Radeon ({arch})"
         except OSError:
             name = f"AMD Radeon ({arch})"
+        if name == f"AMD Radeon ({arch})" and arch in AMD_NAMES:
+            name = AMD_NAMES[arch]
         found.append({"index": len(found), "name": name, "vram_gb": vram, "arch": arch, "driver": "amdgpu",
                       "vendor": "amd"})
     return found
@@ -1465,7 +1468,7 @@ def main() -> int:
             a.gpu = int(a.gpu)
         else:
             ap.error(f"--gpu takes a GPU number as nvidia-smi numbers them, e.g. --gpu 1 (or --gpus 0,2), not {a.gpu!r}")
-    say("Strata - Qwen3.8-Flash-Next on a normal PC (NVIDIA GPU + system RAM + CPU)")
+    say("Strata - Qwen3.8-Flash-Next on a normal PC (a GPU + system RAM + CPU)")
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:
