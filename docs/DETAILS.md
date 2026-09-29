@@ -216,6 +216,28 @@ install; `START-HERE.bat --calibrate` (Linux: `./setup.sh --calibrate`) does it 
 speed with each setting and keeps one only when it is more than 3% faster. The result is remembered per PC and model
 (in the settings file next to the data folder's record), so updates keep it.
 
+### Running it at startup (Task Scheduler)
+
+To have the model up at logon, people start the serve from **Task Scheduler** (or a service). Beware: Windows
+throttles such contexts, and the model's ~40 GB expert load then crawls at **~0.05 GiB/s (13-14 minutes)**
+instead of **~1.4-1.5 GiB/s (~35 seconds)** - a 24x slower start. Measured on an RTX 5070 Ti + Ryzen 7 9800X3D
++ NVMe, same binary, same args, same cache state:
+
+| How the serve starts | Expert load |
+| --- | ---: |
+| Double-click / terminal / SSH | 1.42-1.52 GiB/s (~35 s) |
+| Task Scheduler with its defaults | 0.05 GiB/s (821-841 s) |
+| Task Scheduler with the two settings below | 1.42 GiB/s (35 s) |
+
+In the task's properties set both of these (the defaults are the opposite):
+
+- **Priority level: Normal** (Options tab; the default is Below normal), and
+- **Run with highest privileges** (General tab; without it the task runs with a limited user token - which
+  also strips `SeLockMemoryPrivilege`, the privilege Windows large pages need).
+
+(Both were changed at once, so the isolated effect of each is not measured.) If the model still starts
+slowly, the engine prints a hint under its `loaded ... GiB at ...` line naming this cause.
+
 ### Chat in the terminal (optional)
 
 ```
