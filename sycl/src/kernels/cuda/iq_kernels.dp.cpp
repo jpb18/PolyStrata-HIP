@@ -7,6 +7,7 @@
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include "strata/sycl_math.hpp"
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 
@@ -67,7 +68,7 @@ __dpct_inline__ sycl::int2 get_int_from_table_16(const int &q4,
     return sycl::int2(dpct::byte_level_permute(tmp[0], tmp[1], 0x6420),
                       dpct::byte_level_permute(tmp[0], tmp[1], 0x7531));
 }
-#define ggml_cuda_dp4a(a, b, c) dpct::dp4a((a), (b), (c))
+#define ggml_cuda_dp4a(a, b, c) strata::dp4a((a), (b), (c))
 
 // ---------------------------------------------------------------- the dot products (vecdotq.cuh)
 __dpct_inline__ float vec_dot_q2_0_q8_1(const void *__restrict__ vbq,
@@ -403,6 +404,32 @@ __dpct_inline__ float warp_sum(float v) {
     return v;
 }
 
+// SYCL port: lanes per row for the grouped expert kernels. A 2560-wide row is 80 (block, part) calls; over 32
+// lanes that is 2.5 calls each and a 5-step reduction - the work per sub-group is too small for the fixed cost.
+// STRATA_EXPERT_LANES (compile time) lanes share a row; 256 / that many rows per work-group.
+#ifndef STRATA_EXPERT_LANES
+#define STRATA_EXPERT_LANES 8
+#endif
+constexpr int kExpertLanes = STRATA_EXPERT_LANES;
+constexpr int kExpertRows = 256 / kExpertLanes;
+template <int LANES>
+__dpct_inline__ float lanes_sum(float v) {
+#pragma unroll
+    for (int o = LANES / 2; o > 0; o >>= 1)
+        v += dpct::experimental::permute_sub_group_by_xor(0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(), v, o);
+    return v;
+}
+template <int TY, int LANES>
+__dpct_inline__ float row_dot_lanes(const uint8_t *row, const block_q8_1 *x, int nb, int sub) {
+    using F = Fmt<TY>;
+    float s = 0.0f;
+    for (int k = sub; k < nb * F::ipb; k += LANES) {
+        const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+        s += F::dot(row, x + kbx * (F::qk / 32), kbx, iqs);
+    }
+    return lanes_sum<LANES>(s);
+}
+
 // One row against one q8_1 activation, the whole warp: call k = (block, part) is lane-strided.
 template <int TY>
 __dpct_inline__ float row_dot(const uint8_t *row, const block_q8_1 *x, int nb,
@@ -440,6 +467,213 @@ mmvq_kernel(const uint8_t *__restrict__ w, size_t row_bytes,
 }
 
 // ---------------------------------------------------------------- grouped native experts
+
+// ---------------------------------------------------------------- SYCL port: multi-entry dots
+//
+// A window routes the same expert for several tokens (up to 6). The single-entry dot above recomputes the
+// dequantised weights - grid lookups, sign unpacking, the byte-wise compare/xor/subtract emulations - once per
+// token; only the dp4a against the activation and the scale differ. Multi<TY> splits each format into `prep`
+// (weights, once) and `acts` + `finish` (per token). NW packed int32s of weights per call.
+struct MultiW { int w[8]; int a = 0, b = 0; float d = 0.f; };
+
+template <int TY> struct Multi { static constexpr bool has = false; static constexpr int NW = 0; };
+
+template <> struct Multi<18> {   // iq3_xxs
+    static constexpr bool has = true; static constexpr int NW = 8;
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+        const block_iq3_xxs* bq3 = (const block_iq3_xxs*) vbq + kbx;
+        const sycl::int2 q3_packed = sycl::int2(get_int_b2(bq3->qs, iqs), get_int_b2(bq3->qs, iqs + 1));
+        const uint8_t* q3 = (const uint8_t*) &q3_packed;
+        const uint32_t aux32 = get_int_b2(bq3->qs, QK_K / 16 + iqs / 2);
+#pragma unroll
+        for (int l0 = 0; l0 < 8; l0 += 2) {
+            const sycl::int2 grid_pos = sycl::int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
+            const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
+            const int signs0 = dpct::vectorized_binary<sycl::uchar4>(signs & 0x08040201, 0, std::not_equal_to<>());
+            const int signs1 = dpct::vectorized_binary<sycl::uchar4>(signs & 0x80402010, 0, std::not_equal_to<>());
+            m.w[l0 + 0] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.x() ^ signs0, signs0, std::minus<>());
+            m.w[l0 + 1] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.y() ^ signs1, signs1, std::minus<>());
+        }
+        m.a = (int) (aux32 >> 28);
+        m.d = sycl::vec<sycl::half, 1>(bq3->d).convert<float, sycl::rounding_mode::automatic>()[0];
+    }
+    __dpct_inline__ static void acts(const block_q8_1* y, int iqs, int* u, float& ds) {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) u[j] = get_int_b4(y[iqs / 2].qs, j);
+        ds = y[iqs / 2].ds[0];
+    }
+    __dpct_inline__ static float finish(int s0, int s1, const MultiW& m, float ds) {
+        const int sumi = s0 + s1;
+        return m.d * ds * (float) ((m.a * sumi + sumi / 2) / 2);
+    }
+};
+
+template <> struct Multi<22> {   // iq2_s
+    static constexpr bool has = true; static constexpr int NW = 8;
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+        const block_iq2_s* bq2 = (const block_iq2_s*) vbq + kbx;
+        const int qs_packed = get_int_b2(bq2->qs, iqs / 2);
+        const uint8_t* qs = (const uint8_t*) &qs_packed;
+        const int qh = bq2->qh[iqs / 2];
+        const int signs_packed_32 = get_int_b2(bq2->qs, QK_K / 32 + iqs / 2);
+        const uint8_t* sp = (const uint8_t*) &signs_packed_32;
+#pragma unroll
+        for (int l0 = 0; l0 < 8; l0 += 2) {
+            const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
+            const int signs0 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21), 0, std::not_equal_to<>());
+            const int signs1 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17), 0, std::not_equal_to<>());
+            m.w[l0 + 0] = dpct::vectorized_binary<sycl::uchar4>(grid_pos[0] ^ signs0, signs0, std::minus<>());
+            m.w[l0 + 1] = dpct::vectorized_binary<sycl::uchar4>(grid_pos[1] ^ signs1, signs1, std::minus<>());
+        }
+        m.a = bq2->scales[iqs / 2] & 0x0F;
+        m.b = bq2->scales[iqs / 2] >> 4;
+        m.d = sycl::vec<sycl::half, 1>(bq2->d).convert<float, sycl::rounding_mode::automatic>()[0];
+    }
+    __dpct_inline__ static void acts(const block_q8_1* y, int iqs, int* u, float& ds) {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) u[j] = get_int_b4(y[iqs / 2].qs, j);
+        ds = y[iqs / 2].ds[0];
+    }
+    __dpct_inline__ static float finish(int s0, int s1, const MultiW& m, float ds) {
+        return m.d * ds * (float) ((s0 * m.a + s1 * m.b + (s0 + s1) / 2) / 4);
+    }
+};
+
+template <> struct Multi<21> {   // iq3_s
+    static constexpr bool has = true; static constexpr int NW = 8;
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+        const block_iq3_s* bq3 = (const block_iq3_s*) vbq + kbx;
+        const sycl::int2 qs_packed = sycl::int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
+        const uint8_t* qs = (const uint8_t*) &qs_packed;
+        const int qh = bq3->qh[iqs / 2];
+        const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
+        const uint8_t* sp = (const uint8_t*) &signs_packed_32;
+#pragma unroll
+        for (int l0 = 0; l0 < 8; l0 += 2) {
+            const sycl::int2 grid_pos = sycl::int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
+                                                   iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+            const int signs0 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21), 0, std::not_equal_to<>());
+            const int signs1 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17), 0, std::not_equal_to<>());
+            m.w[l0 + 0] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.x() ^ signs0, signs0, std::minus<>());
+            m.w[l0 + 1] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.y() ^ signs1, signs1, std::minus<>());
+        }
+        m.a = 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
+        m.d = sycl::vec<sycl::half, 1>(bq3->d).convert<float, sycl::rounding_mode::automatic>()[0];
+    }
+    __dpct_inline__ static void acts(const block_q8_1* y, int iqs, int* u, float& ds) {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) u[j] = get_int_b4(y[iqs / 2].qs, j);
+        ds = y[iqs / 2].ds[0];
+    }
+    __dpct_inline__ static float finish(int s0, int s1, const MultiW& m, float ds) {
+        return m.d * ds * (float) ((s0 + s1) * m.a);
+    }
+};
+
+template <> struct Multi<20> {   // iq4_nl (down)
+    static constexpr bool has = true; static constexpr int NW = 4;
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+        const block_iq4_nl* bq4 = (const block_iq4_nl*) vbq + kbx;
+#pragma unroll
+        for (int l = 0; l < 2; ++l) {
+            const int aux_q4 = get_int_b2(bq4->qs, iqs + l);
+            const sycl::int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
+            m.w[2 * l + 0] = v.x();
+            m.w[2 * l + 1] = v.y();
+        }
+        m.d = sycl::vec<sycl::half, 1>(bq4->d).convert<float, sycl::rounding_mode::automatic>()[0];
+    }
+    __dpct_inline__ static void acts(const block_q8_1* y, int iqs, int* u, float& ds) {
+        const int* q8 = (const int*) y->qs + iqs;
+#pragma unroll
+        for (int l = 0; l < 2; ++l) { u[2 * l + 0] = q8[l + 0]; u[2 * l + 1] = q8[l + 4]; }
+        ds = y->ds[0];
+    }
+    __dpct_inline__ static float finish(int s0, int s1, const MultiW& m, float ds) { return m.d * ds * (float) (s0 + s1); }
+};
+
+template <> struct Multi<42> {   // q2_0 (down)
+    static constexpr bool has = true; static constexpr int NW = 8;
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+        const block_q2_0* bq2_0 = (const block_q2_0*) vbq + kbx;
+        const int16_t* qs = (const int16_t*) bq2_0->qs + iqs * 4;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int q = qs[j];
+            const int qe = dpct::byte_level_permute(0x020100FF, 0x020100FF, q >> 0);
+            const int qo = dpct::byte_level_permute(0x020100FF, 0x020100FF, q >> 2);
+            m.w[2 * j + 0] = dpct::byte_level_permute(qe, qo, 0x5140);
+            m.w[2 * j + 1] = dpct::byte_level_permute(qe, qo, 0x7362);
+        }
+        m.d = bq2_0->d;
+    }
+    __dpct_inline__ static void acts(const block_q8_1* y, int iqs, int* u, float& ds) {
+        const block_q8_1* chunk = y + iqs;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) { u[2 * j + 0] = get_int_b4(chunk->qs, j * 2 + 0); u[2 * j + 1] = get_int_b4(chunk->qs, j * 2 + 1); }
+        ds = chunk->ds[0];
+    }
+    __dpct_inline__ static float finish(int s0, int s1, const MultiW& m, float ds) { return m.d * ds * (float) (s0 + s1); }
+};
+
+// One row against E activations at once, LANES lanes per row.
+template <int TY, int LANES, int E>
+__dpct_inline__ void row_dot_multi(const uint8_t* row, const block_q8_1* const* xs, int nb, int sub, float* out) {
+    using F = Fmt<TY>;
+    using M = Multi<TY>;
+    float s[E];
+#pragma unroll
+    for (int e = 0; e < E; ++e) s[e] = 0.f;
+    for (int k = sub; k < nb * F::ipb; k += LANES) {
+        const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+        MultiW m;
+        M::prep(row, kbx, iqs, m);
+#pragma unroll
+        for (int e = 0; e < E; ++e) {
+            int u[8];
+            float ds;
+            M::acts(xs[e] + kbx * (F::qk / 32), iqs, u, ds);
+            int s0 = 0, s1 = 0;
+#pragma unroll
+            for (int j = 0; j < M::NW / 2; ++j) s0 = ggml_cuda_dp4a(m.w[j], u[j], s0);
+#pragma unroll
+            for (int j = M::NW / 2; j < M::NW; ++j) s1 = ggml_cuda_dp4a(m.w[j], u[j], s1);
+            s[e] += M::finish(s0, s1, m, ds);
+        }
+    }
+#pragma unroll
+    for (int e = 0; e < E; ++e) out[e] = lanes_sum<LANES>(s[e]);
+}
+
+// The entries e0..e1 of one row: chunks of 4 through the multi-entry dot, the rest one at a time.
+template <int TY, int LANES>
+__dpct_inline__ void row_entries(const uint8_t* wr, const block_q8_1* x, int x_stride, const int32_t* ent_idx,
+                                 int e0, int e1, int nb, int sub, float* dst, size_t dst_stride) {
+    int e = e0;
+    if constexpr (Multi<TY>::has) {
+        for (; e + 4 <= e1; e += 4) {
+            const block_q8_1* xs[4] = {x + (size_t) ent_idx[e] * x_stride, x + (size_t) ent_idx[e + 1] * x_stride,
+                                       x + (size_t) ent_idx[e + 2] * x_stride, x + (size_t) ent_idx[e + 3] * x_stride};
+            float o[4];
+            row_dot_multi<TY, LANES, 4>(wr, xs, nb, sub, o);
+            if (sub == 0)
+#pragma unroll
+                for (int i = 0; i < 4; ++i) dst[(size_t) (e + i) * dst_stride] = o[i];
+        }
+        if (e + 2 <= e1) {
+            const block_q8_1* xs[2] = {x + (size_t) ent_idx[e] * x_stride, x + (size_t) ent_idx[e + 1] * x_stride};
+            float o[2];
+            row_dot_multi<TY, LANES, 2>(wr, xs, nb, sub, o);
+            if (sub == 0) { dst[(size_t) e * dst_stride] = o[0]; dst[(size_t) (e + 1) * dst_stride] = o[1]; }
+            e += 2;
+        }
+    }
+    for (; e < e1; ++e) {
+        const float v = row_dot_lanes<TY, LANES>(wr, x + (size_t) ent_idx[e] * x_stride, nb, sub);
+        if (sub == 0) dst[(size_t) e * dst_stride] = v;
+    }
+}
+
 constexpr int GU_ROWS = 8;     // rows per block (one warp each)
 
 template <int TG>
@@ -451,9 +685,9 @@ __dpct_inline__ void native_gu_kernel(
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int g = item_ct1.get_group(1);
     if (g >= *n_groups) return;
-    const int warp = item_ct1.get_local_id(2) >> 5,
-              lane = item_ct1.get_local_id(2) & 31;
-    const int row = item_ct1.get_group(2) * GU_ROWS + warp; // 0 .. 2*n_ff
+    const int rib = item_ct1.get_local_id(2) / kExpertLanes,
+              sub = item_ct1.get_local_id(2) % kExpertLanes;
+    const int row = item_ct1.get_group(2) * kExpertRows + rib; // 0 .. 2*n_ff
     if (row >= 2 * L.n_ff) return;
     const bool is_up = row >= L.n_ff;
     const int r = is_up ? row - (int) L.n_ff : row;
@@ -461,10 +695,7 @@ __dpct_inline__ void native_gu_kernel(
     const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    for (int e = e0; e < e1; ++e) {
-        const float s = row_dot<TG>(wr, xq + (size_t)ent_tok[e] * xb, nb, lane);
-        if (lane == 0) (is_up ? up : gate)[(size_t) e * L.n_ff + r] = s;
-    }
+    row_entries<TG, kExpertLanes>(wr, xq, xb, ent_tok, e0, e1, nb, sub, (is_up ? up : gate) + r, (size_t) L.n_ff);
 }
 
 __dpct_inline__ void swiglu_entries_kernel(const float *__restrict__ gate,
@@ -488,18 +719,38 @@ __dpct_inline__ void native_down_kernel(
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int g = item_ct1.get_group(1);
     if (g >= *n_groups) return;
-    const int warp = item_ct1.get_local_id(2) >> 5,
-              lane = item_ct1.get_local_id(2) & 31;
-    const int r = item_ct1.get_group(2) * 8 + warp;
+    const int rib = item_ct1.get_local_id(2) / kExpertLanes,
+              sub = item_ct1.get_local_id(2) % kExpertLanes;
+    const int r = item_ct1.get_group(2) * kExpertRows + rib;
     if (r >= L.n_embd) return;
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
     const uint8_t* wr = blob + L.down_off + (size_t) r * L.d_row;
     const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    for (int e = e0; e < e1; ++e) {
-        const float s =
-            row_dot<TD>(wr, hq + (size_t)e * hb, nb, lane);
-        if (lane == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = s;
+    // down: entry e's activation is row e of hq (identity index), its output row is ent_dst[e]
+    {
+        int e = e0;
+        if constexpr (Multi<TD>::has) {
+            for (; e + 4 <= e1; e += 4) {
+                const block_q8_1* xs[4] = {hq + (size_t) e * hb, hq + (size_t) (e + 1) * hb, hq + (size_t) (e + 2) * hb, hq + (size_t) (e + 3) * hb};
+                float o[4];
+                row_dot_multi<TD, kExpertLanes, 4>(wr, xs, nb, sub, o);
+                if (sub == 0)
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) out[(size_t) ent_dst[e + i] * L.n_embd + r] = o[i];
+            }
+            if (e + 2 <= e1) {
+                const block_q8_1* xs[2] = {hq + (size_t) e * hb, hq + (size_t) (e + 1) * hb};
+                float o[2];
+                row_dot_multi<TD, kExpertLanes, 2>(wr, xs, nb, sub, o);
+                if (sub == 0) { out[(size_t) ent_dst[e] * L.n_embd + r] = o[0]; out[(size_t) ent_dst[e + 1] * L.n_embd + r] = o[1]; }
+                e += 2;
+            }
+        }
+        for (; e < e1; ++e) {
+            const float v = row_dot_lanes<TD, kExpertLanes>(wr, hq + (size_t) e * hb, nb, sub);
+            if (sub == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = v;
+        }
     }
 }
 
@@ -1150,7 +1401,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     float* h = (float*) ((uint8_t*) scratch + 2 * fa);
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
-    const dpct::dim3 ggu((unsigned)((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS),
+    const dpct::dim3 ggu((unsigned)((2 * L.n_ff + kExpertRows - 1) / kExpertRows),
                          (unsigned)cap_groups);
     switch (L.gu_type) {
     case 16: {
@@ -1334,7 +1585,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
                 quantize_q8_1_kernel(h, hq, nh);
             });
     }
-    const dpct::dim3 gd((unsigned)((L.n_embd + 7) / 8), (unsigned)cap_groups);
+    const dpct::dim3 gd((unsigned)((L.n_embd + kExpertRows - 1) / kExpertRows), (unsigned)cap_groups);
     switch (L.d_type) {
     case 20: {
 

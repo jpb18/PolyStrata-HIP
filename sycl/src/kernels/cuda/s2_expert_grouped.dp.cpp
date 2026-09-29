@@ -16,6 +16,7 @@
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include "strata/sycl_math.hpp"
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
 
@@ -92,8 +93,8 @@ row_dot_s2_q8(const uint8_t *__restrict__ codes,
             // it rather than reasoning about which cast happens to work.
             int xw;
             memcpy(&xw, xq + 4 * j, 4);
-            s = dpct::dp4a(cw, xw, s);
-            hx = dpct::dp4a(ones, xw, hx);
+            s = strata::dp4a(cw, xw, s);
+            hx = strata::dp4a(ones, xw, hx);
         }
         // One weight scale per 64 elements, so per TWO 32-element chunks.
         const float dw = f16_at(scales + (size_t) (c >> 1) * 2);
@@ -250,7 +251,7 @@ __dpct_inline__ int dot4(const uint8_t *codes, const int8_t *q) {
                           (((c >> 4) & 3u) << 16) | (((c >> 6) & 3u) << 24));
     int xw;
     memcpy(&xw, q, sizeof xw);
-    return dpct::dp4a(cw, xw, 0);
+    return strata::dp4a(cw, xw, 0);
 }
 
 __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
@@ -885,8 +886,8 @@ __dpct_inline__ float chunk_dot(sycl::uint2 cb, const int *xw, float dw,
         const unsigned cbyte = cbytes[j];
         const int cw = (int) ((cbyte & 3u) | (((cbyte >> 2) & 3u) << 8) | (((cbyte >> 4) & 3u) << 16) |
                               (((cbyte >> 6) & 3u) << 24));
-        s = dpct::dp4a(cw, xw[j], s);
-        hx = dpct::dp4a(ones, xw[j], hx);
+        s = strata::dp4a(cw, xw[j], s);
+        hx = strata::dp4a(ones, xw[j], hx);
     }
     return dw * dx * (float) (s - hx);
 }

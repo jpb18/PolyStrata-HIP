@@ -26,6 +26,7 @@
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include "strata/sycl_math.hpp"
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -187,9 +188,9 @@ q5_q8_dot_impl(const int *__restrict__ vl, const int *__restrict__ vh,
         const int v0i = vl0i | vh0i;
         const int v1i = vl1i | vh1i;
         const int dot1 =
-            dpct::dp4a(v0i, u[2 * i], dpct::dp4a(v1i, u[2 * i + 1], 0));
-        const int dot2 = dpct::dp4a(0x01010101, u[2 * i],
-                                    dpct::dp4a(0x01010101, u[2 * i + 1], 0));
+            strata::dp4a(v0i, u[2 * i], strata::dp4a(v1i, u[2 * i + 1], 0));
+        const int dot2 = strata::dp4a(0x01010101, u[2 * i],
+                                    strata::dp4a(0x01010101, u[2 * i + 1], 0));
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
     }
@@ -317,8 +318,8 @@ __dpct_inline__ float q2_q8_dot(const Q20Block *__restrict__ w,
         const int qo = dpct::byte_level_permute(0x020100ff, 0x020100ff, q >> 2);
         const int qx = dpct::byte_level_permute(qe, qo, 0x5140);
         const int qy = dpct::byte_level_permute(qe, qo, 0x7362);
-        sumi = dpct::dp4a(u, qx, sumi);
-        sumi = dpct::dp4a(v, qy, sumi);
+        sumi = strata::dp4a(u, qx, sumi);
+        sumi = strata::dp4a(v, qy, sumi);
     }
     const float d8 = chunk->ds[0];
     return d2 * d8 * sumi;
@@ -405,7 +406,7 @@ __dpct_inline__ float q3_q8_dot_impl(int vl, int vh, const int *__restrict__ u,
         const int vih = ((vh >> i) << 2) & 0x04040404;
         const int vi =
             dpct::vectorized_binary<sycl::char4>(vil, vih, dpct::sub_sat());
-        sumf += d8[i] * (dpct::dp4a(vi, u[i], 0) * sc);
+        sumf += d8[i] * (strata::dp4a(vi, u[i], 0) * sc);
     }
     return d3 * sumf;
 }
@@ -517,8 +518,8 @@ __dpct_inline__ float iq4_xs_q8_dot(const IQ4XSBlock *__restrict__ w,
         const sycl::int2 v = iq4_table_lookup(aux_q4, iq4nl_values);
         const int u0 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j];
         const int u1 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j + 4];
-        sumi = dpct::dp4a(v.x(), u0, sumi);
-        sumi = dpct::dp4a(v.y(), u1, sumi);
+        sumi = strata::dp4a(v.x(), u0, sumi);
+        sumi = strata::dp4a(v.y(), u1, sumi);
     }
     const int ls = ((w->scales_l[iqs / 8] >> (iqs & 0x04)) & 0x0f) |
                    (((w->scales_h >> (iqs / 2)) & 0x03) << 4);
@@ -593,9 +594,9 @@ q4_q8_dot_impl(const int *__restrict__ v, const int *__restrict__ u,
         const int v0i = (v[0] >> (4 * i)) & 0x0f0f0f0f;
         const int v1i = (v[1] >> (4 * i)) & 0x0f0f0f0f;
         const int dot1 =
-            dpct::dp4a(v1i, u[2 * i + 1], dpct::dp4a(v0i, u[2 * i], 0));
-        const int dot2 = dpct::dp4a(0x01010101, u[2 * i + 1],
-                                    dpct::dp4a(0x01010101, u[2 * i], 0));
+            strata::dp4a(v1i, u[2 * i + 1], strata::dp4a(v0i, u[2 * i], 0));
+        const int dot2 = strata::dp4a(0x01010101, u[2 * i + 1],
+                                    strata::dp4a(0x01010101, u[2 * i], 0));
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
     }
@@ -707,7 +708,7 @@ __dpct_inline__ float q6_q8_dot_impl(int vl, int vh, const int *__restrict__ u,
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
         const int vi = dpct::vectorized_binary<sycl::char4>(
             vil | vih, 0x20202020, dpct::sub_sat());
-        sumf += d8[i] * (dpct::dp4a(vi, u[i], 0) * sc);
+        sumf += d8[i] * (strata::dp4a(vi, u[i], 0) * sc);
     }
     return d * sumf;
 }
@@ -793,9 +794,9 @@ __dpct_inline__ float small_q8_dot(const Q40Block *__restrict__ w,
         const int v = load_int_b2(w->qs, iqs + i);
         const int vi0 = (v >> 0) & 0x0f0f0f0f;
         const int vi1 = (v >> 4) & 0x0f0f0f0f;
-        sumi = dpct::dp4a(vi0, reinterpret_cast<const int *>(x->qs)[iqs + i],
+        sumi = strata::dp4a(vi0, reinterpret_cast<const int *>(x->qs)[iqs + i],
                           sumi);
-        sumi = dpct::dp4a(
+        sumi = strata::dp4a(
             vi1, reinterpret_cast<const int *>(x->qs)[iqs + i + 4], sumi);
     }
     const sycl::float2 ds =
@@ -817,14 +818,14 @@ __dpct_inline__ float small_q8_dot(const Q50Block *__restrict__ w,
         vi0 |= (vh << 11) & 0x00001000;
         vi0 |= (vh << 18) & 0x00100000;
         vi0 |= (vh << 25) & 0x10000000;
-        sumi = dpct::dp4a(vi0, reinterpret_cast<const int *>(x->qs)[iqs + i],
+        sumi = strata::dp4a(vi0, reinterpret_cast<const int *>(x->qs)[iqs + i],
                           sumi);
         int vi1 = (vl >> 4) & 0x0f0f0f0f;
         vi1 |= (vh >> 12) & 0x00000010;
         vi1 |= (vh >> 5) & 0x00001000;
         vi1 |= (vh << 2) & 0x00100000;
         vi1 |= (vh << 9) & 0x10000000;
-        sumi = dpct::dp4a(
+        sumi = strata::dp4a(
             vi1, reinterpret_cast<const int *>(x->qs)[iqs + i + 4], sumi);
     }
     const sycl::float2 ds =
@@ -841,7 +842,7 @@ __dpct_inline__ float small_q8_dot(const Q80Block *__restrict__ w,
     for (int i = 0; i < 2; ++i) {
         const int v = load_int_b2(w->qs, iqs + i);
         const int u = reinterpret_cast<const int*>(x->qs)[iqs + i];
-        sumi = dpct::dp4a(v, u, sumi);
+        sumi = strata::dp4a(v, u, sumi);
     }
     const float d0 = w->d;
     const float d1 = x->ds[0];
@@ -857,8 +858,8 @@ __dpct_inline__ float small_q8_dot(const IQ4NLBlock *__restrict__ w,
     for (int i = 0; i < 2; ++i) {
         const sycl::int2 v =
             iq4_table_lookup(load_int_b2(w->qs, iqs + i), iq4nl_values);
-        sumi = dpct::dp4a(v.x(), q8[i], sumi);
-        sumi = dpct::dp4a(v.y(), q8[i + 4], sumi);
+        sumi = strata::dp4a(v.x(), q8[i], sumi);
+        sumi = strata::dp4a(v.y(), q8[i + 4], sumi);
     }
     const float d = sycl::vec<sycl::half, 1>(w->d)
                         .convert<float, sycl::rounding_mode::automatic>()[0] *
@@ -1041,8 +1042,8 @@ struct Q20Traits {
         int sumi = 0;
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            sumi = dpct::dp4a(q8[j * 2], r.qx[j], sumi);
-            sumi = dpct::dp4a(q8[j * 2 + 1], r.qy[j], sumi);
+            sumi = strata::dp4a(q8[j * 2], r.qx[j], sumi);
+            sumi = strata::dp4a(q8[j * 2 + 1], r.qy[j], sumi);
         }
         const float d8 = chunk->ds[0];
         return r.d2 * d8 * sumi;
@@ -1123,8 +1124,8 @@ struct IQ4XSTraits {
         for (int j = 0; j < 4; ++j) {
             const int u0 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j];
             const int u1 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j + 4];
-            sumi = dpct::dp4a(r.v[j].x(), u0, sumi);
-            sumi = dpct::dp4a(r.v[j].y(), u1, sumi);
+            sumi = strata::dp4a(r.v[j].x(), u0, sumi);
+            sumi = strata::dp4a(r.v[j].y(), u1, sumi);
         }
         sumi *= r.ls - 32;
         const float d = r.dw * x[iqs / 4].ds[0];

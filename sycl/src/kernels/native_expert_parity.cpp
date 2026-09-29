@@ -246,6 +246,45 @@ int main(int argc, char** argv) {
             strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, dscr, dout, s);
             s->wait();
             s->memcpy(got_g.data(), dout, got_g.size() * 4).wait();
+            if (std::getenv("NATIVE_BENCH") != nullptr) {   // SYCL port: one layer's worth of hits, timed
+                // G distinct experts (copies of this blob at different addresses), E entries each = a T-token window
+                const int G = 10, E = 4, NE = G * E, iters = 20;
+                std::vector<void*> blobs((size_t) G);
+                std::vector<unsigned long long> ptrs((size_t) G);
+                for (int g = 0; g < G; ++g) {
+                    blobs[(size_t) g] = sycl::malloc_device(blob.size(), *s);
+                    s->memcpy(blobs[(size_t) g], blob.data(), blob.size()).wait();
+                    ptrs[(size_t) g] = (unsigned long long) blobs[(size_t) g];
+                }
+                std::vector<int32_t> starts((size_t) G + 1), dst((size_t) NE), tokv((size_t) NE);
+                for (int g = 0; g <= G; ++g) starts[(size_t) g] = g * E;
+                for (int e = 0; e < NE; ++e) { dst[(size_t) e] = e; tokv[(size_t) e] = e % NT; }
+                unsigned long long* bptr = sycl::malloc_device<unsigned long long>((size_t) G, *s);
+                int32_t* bstart = sycl::malloc_device<int32_t>((size_t) G + 1, *s);
+                int32_t* bn = sycl::malloc_device<int32_t>(1, *s);
+                int32_t* bdst = sycl::malloc_device<int32_t>((size_t) NE, *s);
+                int32_t* btok = sycl::malloc_device<int32_t>((size_t) NE, *s);
+                void* bscr = sycl::malloc_device(strata::kernels::native_expert_scratch_bytes(NE, FF), *s);
+                float* bout = sycl::malloc_device<float>((size_t) NE * H, *s);
+                const int32_t gn = G;
+                s->memcpy(bptr, ptrs.data(), (size_t) G * 8).wait();
+                s->memcpy(bstart, starts.data(), ((size_t) G + 1) * 4).wait();
+                s->memcpy(bn, &gn, 4).wait();
+                s->memcpy(bdst, dst.data(), (size_t) NE * 4).wait();
+                s->memcpy(btok, tokv.data(), (size_t) NE * 4).wait();
+                strata::kernels::native_expert_grouped(L, bptr, bstart, bn, bdst, btok, G, NE, dxq, bscr, bout, s);
+                s->wait();
+                const auto b0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < iters; ++i)
+                    strata::kernels::native_expert_grouped(L, bptr, bstart, bn, bdst, btok, G, NE, dxq, bscr, bout, s);
+                s->wait();
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0).count() / iters;
+                std::printf("          GPU grouped: %d experts x %d entries: %.3f ms per layer call  (%.1f GB/s of expert bytes)\n",
+                            G, E, ms, (double) G * (double) blob.size() / ms / 1e6);
+                for (int g = 0; g < G; ++g) sycl::free(blobs[(size_t) g], *s);
+                sycl::free(bptr, *s); sycl::free(bstart, *s); sycl::free(bn, *s); sycl::free(bdst, *s); sycl::free(btok, *s);
+                sycl::free(bscr, *s); sycl::free(bout, *s);
+            }
             sycl::free(dblob, *s); sycl::free(dx, *s); sycl::free(dxq, *s); sycl::free(dscr, *s); sycl::free(dout, *s); sycl::free(dptr, *s);
             sycl::free(dstart, *s); sycl::free(dn, *s); sycl::free(ddst, *s); sycl::free(dtok, *s);
         }

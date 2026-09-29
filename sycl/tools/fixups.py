@@ -118,6 +118,16 @@ def wait_default_queue_copies(s):
 for rel in all_sources():
     edit(str(rel), wait_default_queue_copies)
 
+# 7e. dpct::dp4a is emulation (eight integer ops); sycl::ext::oneapi::dot_acc is the DP4A instruction on Xe.
+def native_dp4a(s):
+    if "dpct::dp4a(" not in s: return s
+    s = s.replace("dpct::dp4a(", "strata::dp4a(")
+    if "sycl_math.hpp" not in s:
+        s = s.replace("#include <dpct/dpct.hpp>\n", '#include <dpct/dpct.hpp>\n#include "strata/sycl_math.hpp"\n', 1)
+    return s
+for rel in all_sources():
+    edit(str(rel), native_dp4a)
+
 # 8. ggml-common.h has a SYCL declaration mode (sycl::half instead of cuda_fp16.h).
 edit("src/kernels/cuda/iq_kernels.dp.cpp", lambda s: s.replace("#define GGML_COMMON_DECL_CUDA", "#define GGML_COMMON_DECL_SYCL")
      .replace("#define GGML_COMMON_IMPL_CUDA", "#define GGML_COMMON_IMPL_SYCL"))
