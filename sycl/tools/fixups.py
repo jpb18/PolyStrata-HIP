@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Hand fixes on top of the SYCLomatic output (sycl/migrate.sh). Idempotent: re-run after a re-migration.
+
+Each entry is a thing dpct 2025.3 got wrong or could not do, with the reason. Upstream files are never touched.
+"""
+import re, sys, pathlib
+root = pathlib.Path(__file__).resolve().parents[1]
+changed = 0
+
+def edit(rel, fn):
+    global changed
+    p = root / rel
+    if not p.exists():
+        print("  (absent)", rel); return
+    s = p.read_text(); t = fn(s)
+    if t != s:
+        p.write_text(t); changed += 1; print("  fixed", rel)
+
+def sub(pattern, repl, flags=0):
+    return lambda s: re.sub(pattern, repl, s, flags=flags)
+
+def all_sources():
+    return [p.relative_to(root) for p in (root / "src").rglob("*.cpp")]
+
+# 1. dpct's helper headers predate the 2026.1 compiler: the non-uniform group API was renamed.
+edit("include/dpct/util.hpp", lambda s: s.replace("experimental::get_tangle_group(", "experimental::entangle(")
+     .replace("experimental::get_fixed_size_group<", "experimental::chunked_partition<"))
+
+for rel in all_sources():
+    rel = str(rel)
+    # 2. `(dpct::queue_ptr)stream->memcpy(...)`: the cast binds to the member call result, not the pointer.
+    edit(rel, sub(r"\(dpct::queue_ptr\)\s*(\w+)\s*->", r"((dpct::queue_ptr)\1)->"))
+    # 3. cudaStreamSynchronize(x) came out as `(cudaStream_t)x->wait()`; a null stream is the default queue.
+    edit(rel, sub(r"\(cudaStream_t\)0->wait\(\)", "dpct::get_in_order_queue().wait()"))
+    edit(rel, sub(r"\(cudaStream_t\)(\w+)->wait\(\)", r"((dpct::queue_ptr)\1)->wait()"))
+    edit(rel, sub(r"DPCT_CHECK_ERROR\((main_cs|token_stream)->wait\(\)\)", r"DPCT_CHECK_ERROR(((dpct::queue_ptr)\1)->wait())"))
+    # a null stream: the default in-order queue
+    edit(rel, lambda s: s.replace("(nullptr)->ext_oneapi_graph(", "dpct::get_in_order_queue().ext_oneapi_graph("))
+    # cudaGraphUpload has no SYCL counterpart (an executable command_graph is ready when finalized).
+    edit(rel, sub(r"const dpct::err0 ue = cudaGraphUpload\(\w+(\[\w+\])?, \w+\);", "const dpct::err0 ue = 0;   // no cudaGraphUpload on SYCL: a finalized command_graph is already resident"))
+    edit(rel, sub(r"^(\s*)cudaGraphUpload\(\w+, \w+\);", r"\1// no cudaGraphUpload on SYCL: a finalized command_graph is already resident", re.M))
+    # __fadd_rn / __float_as_uint spellings
+    for _ in range(3):   # nested __fadd_rn(__fadd_rn(a, b), c)
+        edit(rel, sub(r"__fadd_rn\((\([^()]*\)|[^,()]+),\s*([^()]+)\)", r"(\1 + \2)"))
+    edit(rel, lambda s: s.replace("__float_as_uint(", "sycl::bit_cast<uint32_t>("))
+    # 4. volatile casts on kernel arguments (the kernels take plain pointers).
+    edit(rel, lambda s: s.replace("(const volatile sycl::float4 *)", "(const sycl::float4 *)"))
+    # 5. CUDA math intrinsics with no SYCL spelling.
+    edit(rel, lambda s: s.replace("__isnanf(", "sycl::isnan(").replace("__isinff(", "sycl::isinf("))
+    # 6. __nanosleep inside a doorbell spin: spin without the nap.
+    edit(rel, sub(r"__nanosleep\(\d+\);", "/* spin (no __nanosleep on SYCL) */;"))
+    # 7. `__fadd_rn(a, b ? c : d)` lost its parentheses.
+    edit(rel, sub(r"= (\w+) \+ (\w+) \? (\w+\[\w+\]) : 0\.0f;", r"= \1 + (\2 ? \3 : 0.0f);"))
+
+# 2b. every `(dpct::queue_ptr) stream` cast goes through strata::q_of(), which maps CUDA's null stream to the
+#     default in-order queue instead of dereferencing a null sycl::queue* (include/strata/sycl_queue.hpp).
+def q_of(s):
+    t = re.sub(r"\(\(sycl::queue \*\)\(\(dpct::queue_ptr\)\s*(\w+)\)\)", r"strata::q_of(\1)", s)
+    t = re.sub(r"(?<!\w)\(\(dpct::queue_ptr\)\s*(\w+)\)", r"strata::q_of(\1)", t)   # not a call's own paren
+    t = re.sub(r"\(dpct::queue_ptr\)\s*((?:\w+(?:->|\.))*\w+)\b", r"strata::q_of(\1)", t)
+    t = re.sub(r"static_cast<dpct::queue_ptr>\((\w+)\)", r"strata::q_of(\1)", t)
+    if t != s and '#include "strata/sycl_queue.hpp"' not in t:
+        t = t.replace("#include <dpct/dpct.hpp>\n", '#include <dpct/dpct.hpp>\n#include "strata/sycl_queue.hpp"\n', 1)
+    return t
+for rel in all_sources():
+    edit(str(rel), q_of)
+
+# 7b. `__ldg((const float*) p)` lost its cast: dpct rewrote it as `*p`, reading one byte of the scale.
+edit("src/kernels/cuda/s_gemv.dp.cpp", lambda s: s.replace("const float d = *blk;", "const float d = *(const float*) blk;")
+     .replace("Q8K ? *xb", "Q8K ? *(const float*) xb"))
+
+# 8. ggml-common.h has a SYCL declaration mode (sycl::half instead of cuda_fp16.h).
+edit("src/kernels/cuda/iq_kernels.dp.cpp", lambda s: s.replace("#define GGML_COMMON_DECL_CUDA", "#define GGML_COMMON_DECL_SYCL")
+     .replace("#define GGML_COMMON_IMPL_CUDA", "#define GGML_COMMON_IMPL_SYCL"))
+
+# 8b. with the SYCL declaration mode the ggml tables are plain arrays, not dpct::global_memory objects.
+edit("src/kernels/cuda/iq_kernels.dp.cpp", sub(r"\b(\w+)\.get_ptr\(\)", r"\1"))
+
+edit("src/kernels/cuda/iq_kernels.dp.cpp", sub(r"^\s*\w+\.init\([^;]*\);\n", "", re.M))
+#     ...and the kernels receive them as const pointers (dpct declared the parameters non-const).
+TABLES = r"(iq2xxs_grid|iq2xs_grid|iq2s_grid|iq3xxs_grid|iq3s_grid|iq1s_grid_gpu|kmask_iq2xs|ksigns_iq2xs|ksigns64|kvalues_iq4nl)"
+edit("src/kernels/cuda/iq_kernels.dp.cpp", sub(r"(?<!const )\b(uint64_t|uint32_t|uint8_t|int8_t) \*" + TABLES + r"\b", r"const \1 *\2"))
+# 8c. one nested __fadd_rn the generic rewrite above does not reach
+edit("src/kernels/cuda/native_qsa_score.dp.cpp", lambda s: s.replace(
+    "float sum=__fadd_rn(((h[0] + h[1]) + h[2]),h[3]);", "float sum=(((h[0] + h[1]) + h[2]) + h[3]);"))
+
+# 8d. dpct threaded every ggml table through kernel parameters, one name per template regardless of which table
+#     that quant type needs. With plain `static const` arrays (usable from device code, as ggml-sycl does) the
+#     device functions read the globals directly: drop the parameters, the arguments and the capture copies.
+def untangle_tables(s):
+    s = re.sub(r"^\s*auto \w+_ptr_ct\d+ = \w+;\n", "", s, flags=re.M)
+    s = re.sub(r",\s*const (uint64_t|uint32_t|uint8_t|int8_t) \*" + TABLES + r"\b", "", s)
+    s = re.sub(r"\(\s*const (uint64_t|uint32_t|uint8_t|int8_t) \*" + TABLES + r"\s*\)", "()", s)
+    s = re.sub(r",\s*" + TABLES + r"(_ptr_ct\d+)?\b(?![\[\w(])", "", s)
+    s = re.sub(r"\(\s*" + TABLES + r"(_ptr_ct\d+)?\s*\)(?![\[\w])", "()", s)
+    return s
+edit("src/kernels/cuda/iq_kernels.dp.cpp", untangle_tables)
+#     the one helper that took the table under another name keeps its parameter; the callers name the table
+edit("src/kernels/cuda/iq_kernels.dp.cpp", lambda s: s.replace("get_int_from_table_16(aux_q4);", "get_int_from_table_16(aux_q4, kvalues_iq4nl);"))
+
+# 9. a ternary on the stream argument of cudaMemcpyAsync was migrated around the wrong operand.
+edit("src/program/generate.cpp", lambda s: s.replace(
+    "gs ? gs->adapt_stream\n                           : adapt_stream->memcpy(",
+    "(gs ? gs->adapt_stream : adapt_stream)->memcpy("))
+
+# 10. %globaltimer: there is no device-side wall clock in SPIR-V; the verify-window stage profiler reads zeros.
+edit("src/kernels/cuda/verify_kernels.dp.cpp", lambda s: s.replace(
+    'asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));',
+    "t = 0;   // SYCL: no %globaltimer equivalent; the stage profiler is inert on this backend"))
+
+# 11. The three tensor-core kernels (inline PTX: mma.sync, ldmatrix, cp.async). dpct cannot migrate assembly.
+#     dpct.hpp defines DPCT_COMPATIBILITY_TEMP as 900, which selects the sm_80 path; select the other one, and
+#     make the launchers that have no in-kernel fallback refuse the device (their callers then use the older
+#     kernels, exactly as on a pre-Ampere card). The XMX joint_matrix versions are phase-4 follow-up work.
+OFF = "#if 0   // SYCL: inline PTX (mma/ldmatrix/cp.async) - the XMX port is pending; see tools/fixups.py"
+ON = "#if 1   // SYCL: the scalar path (the PTX one above is not ported yet)"
+for rel in ["src/kernels/cuda/qsa_prompt_attn.dp.cpp", "src/kernels/cuda/qsa_select.dp.cpp",
+            "src/kernels/cuda/native_qsa_score.dp.cpp"]:
+    edit(rel, lambda s: s.replace("#if !defined(DPCT_COMPATIBILITY_TEMP) || DPCT_COMPATIBILITY_TEMP >= 800", OFF)
+         .replace("#if defined(DPCT_COMPATIBILITY_TEMP) && DPCT_COMPATIBILITY_TEMP < 800", ON)
+         .replace("    __trap();", "    /* unreachable on SYCL: the launcher refuses this device */"))
+for rel in ["src/kernels/cuda/qsa_prompt_attn.dp.cpp", "src/kernels/cuda/qsa_select.dp.cpp"]:
+    edit(rel, lambda s: s.replace("        if (cc_major[dev] < 8) return false;",
+         "        (void) cc_major[dev];\n        return false;   // SYCL: the tensor-core kernel is not ported yet; the caller takes the older kernel"))
+
+# 12. IQ4_XS: dpct turned the __constant__ table into a kernel argument and gave that trait a 3-argument load(),
+#     which the shared multi-column kernel cannot call. A constexpr copy of the table restores the 2-argument form.
+def mmvq(s):
+    if "kIq4nlTable" in s: return s   # already applied (the table is the marker)
+    m = re.search(r"iq4nl_values\(sycl::range\(16\), \{([^}]*)\}", s, re.S)
+    vals = " ".join(m.group(1).split())
+    table = "static constexpr int8_t kIq4nlTable[16] = {%s};\n" % vals
+    s = s.replace("__dpct_inline__ sycl::int2 iq4_table_lookup(", table + "__dpct_inline__ sycl::int2 iq4_table_lookup(", 1)
+    s = s.replace("    static float apply(const W &r, const Q81Block *__restrict__ x, int k,\n                       int8_t *iq4nl_values) {",
+                  "    static float apply(const W &r, const Q81Block *__restrict__ x, int k) { return apply(r, x, k, const_cast<int8_t*>(kIq4nlTable)); }\n"
+                  "    static float apply(const W &r, const Q81Block *__restrict__ x, int k,\n                       int8_t *iq4nl_values) {", 1)
+    s = s.replace("    static W load(const Block* __restrict__ w, int iqs, int8_t *iq4nl_values) {",
+                  "    static W load(const Block* __restrict__ w, int iqs) { return load(w, iqs, const_cast<int8_t*>(kIq4nlTable)); }\n"
+                  "    static W load(const Block* __restrict__ w, int iqs, int8_t *iq4nl_values) {", 1)
+    return s
+edit("src/kernels/cuda/native_mmvq.dp.cpp", mmvq)
+
+# 13. sycl::free takes void*; the parity harness frees const device pointers.
+edit("src/kernels/qsa_prompt_attn_parity.cpp", sub(r"sycl::free\(([\w.]+),", r"sycl::free((void *)\1,"))
+
+# 14. verify.cpp: graph introspection (kernel names, a debug print) has no SYCL API; the node count stays.
+def verify(s):
+    a = s.find("            if (ty == sycl::ext::oneapi::experimental::node_type::kernel) {")
+    b = s.find("            } else if (ty == sycl::ext::oneapi::experimental::node_type::memcpy)")
+    if a > 0 and b > a:
+        s = s[:a] + "            if (ty == sycl::ext::oneapi::experimental::node_type::kernel) {\n                name = \"kernel\";   // SYCL: no kernel-name introspection on graph nodes\n" + s[b:]
+    # cudaLaunchHostFunc(stream, fn, &fs): the flag set lives in a ring on the verifier, so a pointer to it is safe
+    s = s.replace("""  v->copy_->submit([&](sycl::handler &cgh) {
+    cgh.host_task([=]() {
+      [](void *p) {
+        FlagSet *s = (FlagSet *)p; raise_flag(s->flag, s->value);
+      }(&fs);
+    });
+  });""", """  FlagSet* fsp = &fs;
+  v->copy_->submit([&](sycl::handler &cgh) {
+    cgh.host_task([=]() { raise_flag(fsp->flag, fsp->value); });
+  });""")
+    return s
+edit("src/core/verify.cpp", verify)
+# 15. cudaInitDevice(spin-wait scheduling, mapped host memory): device flags with no SYCL equivalent.
+edit("src/core/remote_experts.cpp", lambda s: s.replace(
+    "    if (!(spin && spin[0] == '0'))\n        cudaInitDevice(device, cudaDeviceScheduleSpin | cudaDeviceMapHost, 0);",
+    "    (void) spin;   // SYCL: no cudaInitDevice scheduling flags; the runtime picks its own wait policy"))
+# 16. graph.hpp: the event's timestamp is written from a const launch(); dpct added the member without `mutable`.
+edit("include/strata/core/graph.hpp", lambda s: s.replace(
+    "    std::chrono::time_point<std::chrono::steady_clock> done__ct1;", "    mutable std::chrono::time_point<std::chrono::steady_clock> done__ct1;"))
+print("files changed:", changed)

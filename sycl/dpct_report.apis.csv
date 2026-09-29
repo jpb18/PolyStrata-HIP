@@ -1,0 +1,167 @@
+ API name, Frequency 
+"_Bool isnan(float __x)",1
+"__half",18
+"__half __float2half(const float a)",4
+"__half __float2half_rn(const float a)",10
+"__half __ushort_as_half(const unsigned short i)",22
+"__half2",27
+"__half2 __floats2half2_rn(const float a,const float b)",3
+"__half2 __halves2half2(const __half a,const __half b)",3
+"__half2 __hsub2(const __half2 a,const __half2 b)",1
+"__half2 make_half2(const __half x,const __half y)",2
+"char4",4
+"const char * cudaGetErrorString(cudaError_t error)",142
+"cublasHandle_t",6
+"cublasStatus_t",1
+"cublasStatus_t cublasCreate_v2(cublasHandle_t * handle)",2
+"cublasStatus_t cublasDestroy_v2(cublasHandle_t handle)",1
+"cublasStatus_t cublasGemmEx(cublasHandle_t handle,cublasOperation_t transa,cublasOperation_t transb,int m,int n,int k,const void * alpha,const void * A,cudaDataType Atype,int lda,const void * B,cudaDataType Btype,int ldb,const void * beta,void * C,cudaDataType Ctype,int ldc,cublasComputeType_t computeType,cublasGemmAlgo_t algo)",2
+"cublasStatus_t cublasSetMathMode(cublasHandle_t handle,cublasMath_t mode)",2
+"cublasStatus_t cublasSetStream_v2(cublasHandle_t handle,cudaStream_t streamId)",2
+"cublasStatus_t cublasSetWorkspace_v2(cublasHandle_t handle,void * workspace,size_t workspaceSizeInBytes)",3
+"cudaDeviceProp",2
+"cudaError_t",113
+"cudaError_t cudaDeviceGetAttribute(int * value,enum cudaDeviceAttr attr,int device)",6
+"cudaError_t cudaDeviceSynchronize()",70
+"cudaError_t cudaDriverGetVersion(int * driverVersion)",1
+"cudaError_t cudaEventCreate(cudaEvent_t * event)",17
+"cudaError_t cudaEventCreateWithFlags(cudaEvent_t * event,unsigned int flags)",9
+"cudaError_t cudaEventDestroy(cudaEvent_t event)",21
+"cudaError_t cudaEventElapsedTime(float * ms,cudaEvent_t start,cudaEvent_t end)",17
+"cudaError_t cudaEventQuery(cudaEvent_t event)",6
+"cudaError_t cudaEventRecord(cudaEvent_t event,cudaStream_t stream)",39
+"cudaError_t cudaEventSynchronize(cudaEvent_t event)",10
+"cudaError_t cudaFree(void * devPtr)",176
+"cudaError_t cudaFreeHost(void * ptr)",32
+"cudaError_t cudaFuncSetAttribute(void (*)(const float *, const float *, const int *, long, long, long, float *) func,enum cudaFuncAttribute attr,int value)",1
+"cudaError_t cudaFuncSetAttribute(void (*)(const float *, const unsigned short *, const unsigned short *, const int *, int, int, int, float *, float *) func,enum cudaFuncAttribute attr,int value)",1
+"cudaError_t cudaFuncSetAttribute(void (*)(const float *, struct strata::kernels::QsaAttnPools, const int *, const int *, int, int, float, float *, int) func,enum cudaFuncAttribute attr,int value)",2
+"cudaError_t cudaFuncSetAttribute(void (*)(struct strata::kernels::(anonymous namespace)::GrMulti) func,enum cudaFuncAttribute attr,int value)",1
+"cudaError_t cudaGetDevice(int * device)",19
+"cudaError_t cudaGetDeviceCount(int * count)",5
+"cudaError_t cudaGetDeviceProperties_v2(struct cudaDeviceProp * prop,int device)",2
+"cudaError_t cudaGetLastError()",89
+"cudaError_t cudaGraphDestroy(cudaGraph_t graph)",11
+"cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)",14
+"cudaError_t cudaGraphGetNodes(cudaGraph_t graph,cudaGraphNode_t * nodes,size_t * numNodes)",1
+"cudaError_t cudaGraphInstantiate(cudaGraphExec_t * pGraphExec,cudaGraph_t graph,cudaGraphNode_t * pErrorNode,char * pLogBuffer,size_t bufferSize)",5
+"cudaError_t cudaGraphInstantiate(cudaGraphExec_t * pGraphExec,cudaGraph_t graph,unsigned long long flags)",5
+"cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec,cudaStream_t stream)",21
+"cudaError_t cudaHostAlloc(void ** pHost,size_t size,unsigned int flags)",15
+"cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned int flags)",9
+"cudaError_t cudaHostRegister(void * ptr,size_t size,unsigned int flags)",2
+"cudaError_t cudaHostUnregister(void * ptr)",2
+"cudaError_t cudaMalloc(float ** devPtr,size_t size)",130
+"cudaError_t cudaMalloc(int ** devPtr,size_t size)",17
+"cudaError_t cudaMalloc(signed char ** devPtr,size_t size)",1
+"cudaError_t cudaMalloc(unsigned char ** devPtr,size_t size)",22
+"cudaError_t cudaMalloc(unsigned short ** devPtr,size_t size)",26
+"cudaError_t cudaMalloc(void ** devPtr,size_t size)",42
+"cudaError_t cudaMallocHost(void ** ptr,size_t size)",1
+"cudaError_t cudaMemGetInfo(size_t * free,size_t * total)",11
+"cudaError_t cudaMemcpy(void * dst,const void * src,size_t count,enum cudaMemcpyKind kind)",339
+"cudaError_t cudaMemcpy2DAsync(void * dst,size_t dpitch,const void * src,size_t spitch,size_t width,size_t height,enum cudaMemcpyKind kind,cudaStream_t stream)",1
+"cudaError_t cudaMemcpyAsync(void * dst,const void * src,size_t count,enum cudaMemcpyKind kind,cudaStream_t stream)",70
+"cudaError_t cudaMemcpyToSymbol(const float &[256][4] symbol,const void * src,size_t count,size_t offset,enum cudaMemcpyKind kind)",1
+"cudaError_t cudaMemset(void * devPtr,int value,size_t count)",13
+"cudaError_t cudaMemsetAsync(void * devPtr,int value,size_t count,cudaStream_t stream)",22
+"cudaError_t cudaPeekAtLastError()",3
+"cudaError_t cudaRuntimeGetVersion(int * runtimeVersion)",1
+"cudaError_t cudaSetDevice(int device)",11
+"cudaError_t cudaStreamBeginCapture(cudaStream_t stream,enum cudaStreamCaptureMode mode)",10
+"cudaError_t cudaStreamCreate(cudaStream_t * pStream)",11
+"cudaError_t cudaStreamCreateWithFlags(cudaStream_t * pStream,unsigned int flags)",12
+"cudaError_t cudaStreamDestroy(cudaStream_t stream)",17
+"cudaError_t cudaStreamEndCapture(cudaStream_t stream,cudaGraph_t * pGraph)",10
+"cudaError_t cudaStreamQuery(cudaStream_t stream)",2
+"cudaError_t cudaStreamSynchronize(cudaStream_t stream)",57
+"cudaError_t cudaStreamWaitEvent(cudaStream_t stream,cudaEvent_t event,unsigned int flags)",8
+"cudaEvent_t",30
+"cudaStream_t",306
+"dim3",55
+"double __dadd_rn(double __a,double __b)",6
+"double __ddiv_rn(double __a,double __b)",2
+"double __dmul_rn(double __a,double __b)",3
+"double __dsqrt_rn(double __a)",2
+"double __shfl_down_sync(unsigned int __mask,double __val,unsigned int __offset,int __width)",6
+"double __shfl_sync(unsigned int __mask,double __val,int __offset,int __width)",2
+"double __shfl_xor_sync(unsigned int __mask,double __val,int __offset,int __width)",1
+"double exp(double __a)",10
+"double fmax(double __a,double __b)",1
+"double rint(double __a)",1
+"double sqrt(double __a)",2
+"float __expf(float __a)",33
+"float __fadd_rn(float __a,float __b)",29
+"float __fdiv_rn(float __a,float __b)",3
+"float __fdividef(float __a,float __b)",3
+"float __fmaf_rn(float __a,float __b,float __c)",18
+"float __fmul_rn(float __a,float __b)",24
+"float __fsub_rn(float __a,float __b)",1
+"float __half2float(const __half a)",45
+"float __high2float(const __half2 a)",6
+"float __int_as_float(int __a)",21
+"float __ldg(const float * ptr)",2
+"float __low2float(const __half2 a)",29
+"float __shfl_down_sync(unsigned int __mask,float __val,unsigned int __offset,int __width)",16
+"float __shfl_sync(unsigned int __mask,float __val,int __offset,int __width)",2
+"float __shfl_xor_sync(unsigned int __mask,float __val,int __offset,int __width)",51
+"float __uint_as_float(unsigned int __a)",24
+"float cosf(float __a)",4
+"float exp2f(float __a)",4
+"float expf(float __a)",26
+"float fabsf(float __a)",13
+"float fmaf(float __a,float __b,float __c)",63
+"float fmaxf(float __a,float __b)",48
+"float frexpf(float __a,int * __b)",2
+"float ldexpf(float __a,int __b)",4
+"float log1pf(float __a)",5
+"float logf(float __a)",2
+"float max(const float a,const float b)",2
+"float powf(float __a,float __b)",4
+"float roundf(float __a)",2
+"float rsqrtf(float __a)",25
+"float sinf(float __a)",4
+"float sqrtf(float __a)",4
+"float2",23
+"float2 __half22float2(const __half2 a)",16
+"float2 make_float2(float x,float y)",6
+"float4",64
+"float4 make_float4(float x,float y,float z,float w)",6
+"half",15
+"half2",8
+"int __dp4a(int srcA,int srcB,int c)",54
+"int __float2int_rn(float __a)",2
+"int __float2int_rz(float __a)",1
+"int __ldg(const int * ptr)",22
+"int __popc(unsigned int __a)",5
+"int __shfl_down_sync(unsigned int __mask,int __val,unsigned int __offset,int __width)",7
+"int __shfl_up_sync(unsigned int __mask,int __val,unsigned int __offset,int __width)",4
+"int __shfl_xor_sync(unsigned int __mask,int __val,int __offset,int __width)",2
+"int atomicAdd(int * address,int val)",4
+"int atomicCAS(int * address,int compare,int val)",1
+"int max(int __a,int __b)",1
+"int min(int __a,int __b)",7
+"int2",12
+"int2 make_int2(int x,int y)",7
+"long long __shfl_sync(unsigned int __mask,long long __val,int __offset,int __width)",1
+"size_t __cvta_generic_to_shared(const void * p)",1
+"uint2",19
+"uint2 make_uint2(unsigned int x,unsigned int y)",1
+"uint4",50
+"uint4 __ldg(const uint4 * ptr)",12
+"uint4 make_uint4(unsigned int x,unsigned int y,unsigned int z,unsigned int w)",2
+"unsigned int __ballot_sync(unsigned int mask,int pred)",2
+"unsigned int __byte_perm(unsigned int __a,unsigned int __b,unsigned int __c)",22
+"unsigned int __float_as_uint(float __a)",3
+"unsigned int __umulhi(unsigned int __a,unsigned int __b)",2
+"unsigned int __vcmpne4(unsigned int __a,unsigned int __b)",10
+"unsigned int __vsub4(unsigned int __a,unsigned int __b)",10
+"unsigned int __vsubss4(unsigned int __a,unsigned int __b)",2
+"unsigned int atomicOr(unsigned int * address,unsigned int val)",2
+"unsigned short __half_as_ushort(const __half h)",3
+"unsigned short __ldg(const unsigned short * ptr)",2
+"ushort4",3
+"void __nanosleep(unsigned int ns)",3
+"void __syncwarp(unsigned int mask)",10
+"void __threadfence()",1
+"void __threadfence_system()",6

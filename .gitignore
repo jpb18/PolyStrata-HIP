@@ -50,3 +50,7 @@ build-vision.bat
 
 # Intel Arc path (setup.py): the llama-server container start script
 /start-llama.sh
+/build-sycl/
+/compile_commands.json
+/sycl-migrate.log
+/sycl/migrate.log
