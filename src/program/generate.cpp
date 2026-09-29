@@ -3014,6 +3014,8 @@ int main(int argc, char** argv) {
             } else if (o.prefill_auto) {
                 o.prefill_chunk = 1024;   // nothing lendable: small buffers of its own
             }
+        } else if (o.prefill_auto && d_res == nullptr) {
+            o.prefill_chunk = 1024;       // #85: no expert cache at all (a full 8 GB card): small buffers of its own
         }
         if (borrow != nullptr)
             std::fprintf(stderr, "strata serve: the prompt path borrows %lld cache slots (%.2f GiB)\n",
@@ -3033,6 +3035,10 @@ int main(int argc, char** argv) {
         if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
         if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes)) {
             std::fprintf(stderr, "strata serve: %s\n", err.c_str());
+            if (err.find("fit") != std::string::npos)   // #85: say what frees VRAM
+                std::fprintf(stderr, "strata serve: the GPU has too little free VRAM for the prompt path: turn images "
+                                     "off (setup: --vision no), close other programs using the GPU, use a shorter "
+                                     "context, or read prompts in smaller chunks (--prefill 512)\n");
             return 1;
         }
         mem_mark("the head and the prompt path");
