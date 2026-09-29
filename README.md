@@ -84,8 +84,9 @@ one later with `SETUP.bat` (the same as `START-HERE.bat --setup`; on Linux `./se
 For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](docs/ORCA.md).
 It needs an explicit packing conversion and is not an installer menu option.
 
-For an **experimental RX 7900 XTX (gfx1100) Linux source build**, see the
-[AMD HIP instructions](docs/AMD_HIP.md). The automatic installer below remains NVIDIA-only.
+An **AMD Radeon RX 7900 XT / XTX on Linux** works too (experimental): `./setup.sh --backend hip`, chosen by itself on
+a PC with no NVIDIA card Strata can use. It installs ROCm without sudo and compiles the engine (one GPU, no images
+yet). Details: [AMD HIP](docs/AMD_HIP.md).
 
 ## Install
 
