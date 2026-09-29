@@ -17,7 +17,7 @@ Written for and measured on an **Arc Pro B70 (32 GB)** running the Coder (IQ1_M)
 | prompt reading | ~1,870 tok/s | ~150 tok/s |
 | speculative decoding (MTP) | yes | no (the GGUF carries no draft layer llama.cpp can use) |
 | images | yes | not yet |
-| context | up to 262K | 32K by default; more as VRAM allows |
+| context | up to 262K | 32K by default; 131K is the measured ceiling on a 32 GB card (see below); 262K does not fit |
 
 The speed gap is the SYCL backend's known state on Battlemage: general matrix multiplies do not use
 the XMX units yet (only the oneDNN flash-attention path does). It is upstream llama.cpp work, not
@@ -78,6 +78,29 @@ with `"exe"` and `"args"` instead spawns a native binary directly. See `serve/en
   config, or send `chat_template_kwargs: {"enable_thinking": false}` per request. Without one of
   those a short `max_tokens` is spent entirely inside the think block and the answer looks empty.
 - **`/health` says 503 while loading**; the server polls `/props` instead.
+
+## How much context fits
+
+The architecture keeps this small: only every fourth layer is full attention (12 of 48); the other
+36 are gated-delta-net layers with a fixed-size recurrent state that does not grow with context.
+Per token, the 12 attention layers keep 2 KV heads x 256 x (K + V) at q8_0, plus the
+sparse-attention indexer's keys. **Measured: about 20 KiB per token** (VRAM grows 0.6 GB per 32k
+of context with everything else unchanged).
+
+| context | VRAM in use, model loaded | headroom on 32 GB | status |
+|---|---|---|---|
+| 32,768 | 28.4 GB | 3.5 GB | measured, the default |
+| 65,536 | 29.0 GB | 2.9 GB | measured, loads |
+| 98,304 | 29.6 GB | 2.3 GB | measured, loads |
+| 131,072 | 30.3 GB | 1.6 GB | measured, loads: the practical ceiling |
+| 163,840 | ~31.0 GB | ~0.9 GB | not attempted: under the 1.2 GB safety margin |
+| 262,144 | ~32.6 GB | none | **does not fit - asking for it took the host down** |
+
+**Do not ask for more than fits.** On this driver a GPU allocation past VRAM does not fail: the xe
+driver evicts buffers into host RAM, the kernel runs out of memory, and the machine livelocks until
+its hardware watchdog resets it. A 262K request did exactly that on 2026-09-29, and llama.cpp's own
+"failed to fit params" check fired too late to prevent it. Compute the KV size first and leave
+1.5 GB free. Measured ceilings are in the table at the end.
 
 ## Not done
 
