@@ -352,6 +352,7 @@ Prefill::Prefill() : impl_(new Impl) {}
 Prefill::~Prefill() {
     if (!impl_) return;
     if (impl_->cs) cudaStreamSynchronize(impl_->cs);
+    if (impl_->copy) cudaStreamSynchronize(impl_->copy);
     for (int i = 0; i < RING_MAX; ++i) {
         if (impl_->copied[i]) cudaEventDestroy(impl_->copied[i]);
         if (impl_->used[i]) cudaEventDestroy(impl_->used[i]);
@@ -1613,6 +1614,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     }
     if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
         err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    // (PR #121) an expert copy that failed on the copy stream surfaces here, not in the next request
+    if (const cudaError_t cst = cudaStreamSynchronize(m.copy); cst != cudaSuccess) {
+        err = std::string("prefill: expert copy stream: ") + cudaGetErrorString(cst);
         return false;
     }
     stats_.ms_total += ms_since(t_start);
