@@ -25,5 +25,5 @@ inline void sys_store(volatile uint32_t* p, uint32_t v) {
 // xe driver times the queue out, resets the GT node by node (a window graph has 2,366 of them), and the card
 // stays wedged until a reboot - measured twice. With a bound the failure is a wrong window instead, which the
 // verifier's checks catch. ~2 M host-memory reads is a few seconds at PCIe latency.
-inline constexpr uint32_t kSpinMax = 2u * 1000u * 1000u;
+inline constexpr uint32_t kSpinMax = 20u * 1000u;   // experiment: 100x smaller
 }  // namespace strata

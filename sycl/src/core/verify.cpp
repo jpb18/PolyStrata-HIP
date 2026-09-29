@@ -398,7 +398,14 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
     auto Rt = [&](int t) { return R_ + (size_t) t * HC * N; };
     const int G = (split_ && T >= 2) ? 2 : 1;
     static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    auto stamp = [&](int64_t l, int i, int grp) { if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs); };
+    // SYCL port, STRATA_VERIFY_EAGER=1: the window runs on the queue instead of as a graph, and each stage stamp is
+    // a host-side wait + clock (there is no %globaltimer here), so the existing stage profiler reports ms per stage.
+    static const bool eager = std::getenv("STRATA_VERIFY_EAGER") != nullptr;
+    auto stamp = [&](int64_t l, int i, int grp) {
+        if (!prof_on_ || grp != 0) return;
+        if (eager) { cs->wait(); prof_h_[(size_t) (l * kProfPer + i)] = (unsigned long long) std::chrono::steady_clock::now().time_since_epoch().count(); }
+        else gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
+    };
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
     groups_[T] = G;
 
@@ -897,6 +904,7 @@ std::string Verifier::profile_report() {
 
 bool Verifier::capture(int T, std::string &err) try {
     if (exec_[T] != nullptr) return true;
+    if (std::getenv("STRATA_VERIFY_EAGER") != nullptr) return true;   // SYCL port: no graph, run() replays the body
     if (DPCT_CHECK_ERROR(dpct::experimental::begin_recording(cs_)) != 0) {
         err = "verify: begin capture failed";
         return false;
@@ -1118,7 +1126,11 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     for (int t = 0; t < T; ++t) last_tokens_[t] = tokens[t];
     ms_host += ms_since(t0);
     VDBG("staged; launching\n");
-    const dpct::err0 le = DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*exec_[T]));
+    static Clock::time_point t_prev_end;   // SYCL port timing: where does a round's wall clock go?
+    const Clock::time_point t_launch = Clock::now();
+    const dpct::err0 le = (std::getenv("STRATA_VERIFY_EAGER") != nullptr)
+                              ? (record_window(T, cs_, err) ? 0 : 1)   // SYCL port: eager replay of the window body
+                              : DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*exec_[T]));
     /*
     DPCT1009:58: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
@@ -1210,6 +1222,14 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     }
     progress_at("verify window: waiting for the GPU to finish the window (flags A/B/M raised)", (int64_t) T);
     const dpct::err0 se = DPCT_CHECK_ERROR(cs_->wait());
+    if (std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {
+        const Clock::time_point t_done = Clock::now();
+        std::fprintf(stderr, "verify dbg: T=%d window: since previous window %.1f ms, staging %.1f ms, gpu %.1f ms\n", T,
+                     t_prev_end.time_since_epoch().count() ? std::chrono::duration<double, std::milli>(t0 - t_prev_end).count() : 0.0,
+                     std::chrono::duration<double, std::milli>(t_launch - t0).count(),
+                     std::chrono::duration<double, std::milli>(t_done - t_launch).count());
+        t_prev_end = t_done;
+    }
     /*
     DPCT1009:60: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
@@ -1287,9 +1307,10 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     copy_->wait(); // no host function of this window may raise flag B in the
                    // next one
     if (prof_on_ && G == 1) {       // the window's GPU stage stamps
-        dpct::get_in_order_queue()
-            .memcpy(prof_h_.data(), prof_, prof_h_.size() * 8)
-            .wait();
+        if (std::getenv("STRATA_VERIFY_EAGER") == nullptr)   // eager: prof_h_ already holds the host clocks
+            dpct::get_in_order_queue()
+                .memcpy(prof_h_.data(), prof_, prof_h_.size() * 8)
+                .wait();
         const int64_t L = g.n_layers;
         auto at = [&](int64_t l, int i) { return prof_h_[(size_t) (l * kProfPer + i)]; };
         for (int64_t l = 0; l < L; ++l) {
@@ -1309,6 +1330,8 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
         }
         prof_sum_[0][26] += (double) (at(L, 1) - at(L, 0));
         ++prof_windows_;
+        if (std::getenv("STRATA_VERIFY_EAGER") != nullptr)   // SYCL port: the stage table per window, host-clocked
+            std::fprintf(stderr, "verify stages T=%d (ms/window):%s\n", T, profile_report().c_str());
     }
     // ---- a sampled or penalized request: the head's sampling again, host-side so its parameters are this call's
     // own (a captured kernel would replay the same draws forever).  Row t's draw is Philox(seed, pos0 + t): tied to
