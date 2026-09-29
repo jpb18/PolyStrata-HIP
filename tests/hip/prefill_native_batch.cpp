@@ -94,7 +94,7 @@ bool qsa_case(cudaStream_t stream, int64_t max_cells, int64_t pos0, int64_t T, s
                                                        shapes, max_cells, 10000.0f, stream);
         }
     }
-    strata::kernels::native_qsa_indexer_append_chunk(raw_d + pos0 * IDX, T, pos0, 0, gamma_d, EPS,
+    strata::kernels::native_qsa_indexer_append_batch(raw_d + pos0 * IDX, T, pos0, 0, gamma_d, EPS,
                                                       bb, shapes, max_cells, 10000.0f, stream);
     CHECK(cudaStreamSynchronize(stream));
 
@@ -148,9 +148,9 @@ bool qsa_chunks_case(cudaStream_t stream, std::mt19937& rng, int64_t max_cells,
         strata::kernels::native_qsa_indexer_append(raw_d + (size_t) p * IDX, pos_d, 0, gamma_d, EPS, sb,
                                                    shapes, max_cells, 10000.0f, stream);
     }
-    strata::kernels::native_qsa_indexer_append_chunk(raw_d, first, 0, 0, gamma_d, EPS, cb, shapes,
+    strata::kernels::native_qsa_indexer_append_batch(raw_d, first, 0, 0, gamma_d, EPS, cb, shapes,
                                                       max_cells, 10000.0f, stream);
-    strata::kernels::native_qsa_indexer_append_chunk(raw_d + (size_t) first * IDX, second, first, 0,
+    strata::kernels::native_qsa_indexer_append_batch(raw_d + (size_t) first * IDX, second, first, 0,
                                                       gamma_d, EPS, cb, shapes, max_cells, 10000.0f, stream);
     CHECK(cudaStreamSynchronize(stream));
     const size_t tail_n = (BLOCK - 1) * IDX, pooled_n = (size_t) (max_cells / BLOCK + 1) * IDX;
