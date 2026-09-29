@@ -119,12 +119,14 @@ struct Alloc {
 // j-th unpinned expert, in launch order - lands in host buffer j % kRing, which is free again once the DMA of job
 // j - kRing (recorded by the launching thread, `issued`) is done.
 struct Stager {
-    static constexpr int kRing = 16;
+    // D-5: the pinned ring's depth (STRATA_STAGER_RING, default 16) - how far the host copies can run ahead of the
+    // DMAs of the unpinned experts' blobs
+    int kRing = 16;
     struct Job { const uint8_t* src; size_t bytes; };
-    uint8_t* buf[kRing] = {};
-    bool pinned[kRing] = {};
+    std::vector<uint8_t*> buf;
+    std::vector<char> pinned;
     std::vector<std::vector<uint8_t>> pageable;   // the fallback when no more RAM can be pinned
-    cudaEvent_t dma_done[kRing] = {};
+    std::vector<cudaEvent_t> dma_done;
     std::vector<Job> jobs;
     std::unique_ptr<std::atomic<int>[]> ready;
     size_t ready_cap = 0;
@@ -140,6 +142,10 @@ struct Stager {
     int device = 0;
 
     bool init(size_t blob_bytes, int nthreads) {
+        if (const char* v = std::getenv("STRATA_STAGER_RING")) kRing = std::clamp(std::atoi(v), 2, 256);
+        buf.assign((size_t) kRing, nullptr);
+        pinned.assign((size_t) kRing, 0);
+        dma_done.assign((size_t) kRing, nullptr);
         pageable.resize(kRing);
         for (int i = 0; i < kRing; ++i) {
             pinned[i] = cudaHostAlloc((void**) &buf[i], blob_bytes, cudaHostAllocDefault) == cudaSuccess;
@@ -477,7 +483,9 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     if (!m.stager) {
         m.stager = std::make_unique<Stager>();
         const int hw = (int) std::thread::hardware_concurrency();
-        if (!m.stager->init((size_t) MAXBLOB(), std::max(2, std::min(4, hw / 4)))) ok = false;
+        const char* stv = std::getenv("STRATA_STAGER_THREADS");   // D-5: the host copy threads of unpinned blobs
+        if (!m.stager->init((size_t) MAXBLOB(), stv ? std::clamp(std::atoi(stv), 1, 32) : std::max(2, std::min(4, hw / 4))))
+            ok = false;
     }
     m.steps_host.resize(T * strata::kernels::kStepCount);
     m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(m.g->n_expert); m.off.resize(m.g->n_expert + 1);
@@ -931,7 +939,65 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 ++issued;
             }
         };
-        if (stream_all) issue_until((size_t) m.ring);   // layer 0's first experts, behind the embedding and the PLE
+        // D-5: the stream is issued by its own host thread, so the thread launching the layers' kernels never waits
+        // behind a host copy of an unpinned blob (that wait left the GPU idle: the 'wait copy' / 'dequant' time of the
+        // i-quant prompts).  The same copies in the same order into the same slots, and a slot is refilled only once
+        // the compute stream has recorded that it is done with it: the same results.  STRATA_PREFILL_ISSUER=0: inline.
+        static const bool issuer_on = [] {
+            const char* v = std::getenv("STRATA_PREFILL_ISSUER");
+            return v == nullptr || std::atoi(v) != 0;
+        }();
+        std::atomic<size_t> a_issued{0}, a_consumed{0};
+        std::atomic<bool> a_stop{false};
+        double iss_ms = 0;
+        int64_t iss_streamed = 0, iss_dma = 0;
+        std::thread issuer;
+        struct IssuerJoin {
+            std::atomic<bool>* stop;
+            std::thread* t;
+            ~IssuerJoin() { if (t->joinable()) { stop->store(true); t->join(); } }
+        } issuer_join{&a_stop, &issuer};
+        const bool threaded_issue = stream_all && issuer_on;
+        if (threaded_issue) {
+            issuer = std::thread([&] {
+                const core::OnDevice od(m.device);
+                for (size_t idx = 0; idx < seq.size(); ++idx) {
+                    while (idx >= a_consumed.load(std::memory_order_acquire) + (size_t) m.ring) {
+                        if (a_stop.load(std::memory_order_acquire)) return;
+                        std::this_thread::yield();
+                    }
+                    const StreamEntry& en = seq[idx];
+                    const int sl = (int) (idx % (size_t) m.ring);
+                    const auto th = Clock::now();
+                    const size_t bytes = (size_t) lay0.blob_bytes(en.l);
+                    if (m.stage_live[sl]) cudaStreamWaitEvent(m.copy, m.used[sl], 0);
+                    if (en.job < 0) {
+                        cudaMemcpyAsync(m.stage_dev[sl], en.blob, bytes, cudaMemcpyHostToDevice, m.copy);
+                        ++iss_dma;
+                    } else {
+                        const uint8_t* hb = m.stager->wait(en.job);
+                        cudaMemcpyAsync(m.stage_dev[sl], hb, bytes, cudaMemcpyHostToDevice, m.copy);
+                        m.stager->issued_one(en.job, m.copy);
+                    }
+                    cudaEventRecord(m.copied[sl], m.copy);
+                    m.stage_live[sl] = true;
+                    iss_ms += ms_since(th);
+                    ++iss_streamed;
+                    a_issued.store(idx + 1, std::memory_order_release);
+                }
+            });
+        } else if (stream_all) {
+            issue_until((size_t) m.ring);   // layer 0's first experts, behind the embedding and the PLE
+        }
+        // the consumer's side: entry k's copy is on the copy stream (the thread issued it), then k is given back
+        auto wait_issued = [&](size_t k) {
+            if (!threaded_issue) return;
+            while (a_issued.load(std::memory_order_acquire) <= k) std::this_thread::yield();
+        };
+        auto give_back = [&](size_t upto) {
+            if (threaded_issue) a_consumed.store(upto, std::memory_order_release);
+            else issue_until(upto + (size_t) m.ring);
+        };
         host_setup_ms += ms_since(tsetup);
         for (int64_t l = LB; l < LE; ++l) {
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
@@ -1381,7 +1447,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             while (k < kend && seq[k].e < e_stop) {
                                 cudaEventRecord(m.used[k % (size_t) m.ring], m.cs);
                                 consumed = ++k;
-                                issue_until(consumed + (size_t) m.ring);
+                                give_back(consumed);
                             }
                         };
                         for (size_t j = 0; j < order.size(); ++j) {
@@ -1390,10 +1456,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             if (k < kend && seq[k].e == e) {
                                 const int sl = (int) (k % (size_t) m.ring);
                                 pt.mark(kPfWaitCopy, cs);
+                                wait_issued(k);
                                 cudaStreamWaitEvent(m.cs, m.copied[sl], 0);
                                 if (!compute(j, m.stage_dev[sl], sl)) return false;
                                 consumed = ++k;
-                                issue_until(consumed + (size_t) m.ring);
+                                give_back(consumed);
                             } else {
                                 ++stats_.experts_resident;
                                 if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]), -1)) return false;
@@ -1430,6 +1497,12 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 if (half == 1 && strata::kernels::cvec().covers(l))   // --control-vector-scaled
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
+        }
+        if (issuer.joinable()) {
+            issuer.join();
+            stats_.ms_experts_host += iss_ms;
+            stats_.experts_streamed += iss_streamed;
+            stats_.experts_dma += iss_dma;
         }
         stats_.tokens += T;
         pt.mark(kPfStart, cs);
