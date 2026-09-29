@@ -1530,8 +1530,20 @@ def main() -> int:
     step(1, "checking your PC")
     found = gpus()
     amd = [] if WIN else amd_gpus()
-    hip = a.backend == "hip" or (a.backend is None and not any(gpu_problem(g) is None for g in found)
-                                 and any(amd_problem(g) is None for g in amd))
+    nv_ok = any(gpu_problem(g) is None for g in found)
+    amd_ok = [g for g in amd if amd_problem(g) is None]
+    hip = a.backend == "hip" or (a.backend is None and not nv_ok and bool(amd_ok))
+    if a.backend is None and nv_ok and amd_ok:
+        # both kinds of card: asked (a first run on such a PC used to take NVIDIA without mentioning the Radeon)
+        say()
+        say("  This PC has NVIDIA and AMD cards Strata can use:")
+        say("  1) NVIDIA: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB)" for g in found if gpu_problem(g) is None)
+            + "   (recommended)")
+        say("  2) AMD: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB)" for g in amd_ok)
+            + "   (experimental: compiled here, one GPU, no images - docs/AMD_HIP.md)")
+        hip = ask("Which cards?", ["1", "2"], "1", a.yes or a.check) == "2"
+        if a.check and not hip:
+            say("  (the AMD card: ./setup.sh --backend hip)")
     if hip:                                            # AMD (experimental): one card, compiled here
         if WIN:
             fail("Strata's AMD backend runs on Linux only", "use an NVIDIA RTX 30 series or newer card on Windows")
