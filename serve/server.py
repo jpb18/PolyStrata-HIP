@@ -557,6 +557,9 @@ class Service:
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0}
+        self.last_timings = None                         # the last finished request's, llama.cpp's names (/v1/status)
+        self.last_request_at = None                      # when a request last started or finished
+        self.started_at = time.time()
         self.status_lock = threading.Lock()
         self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
@@ -642,6 +645,41 @@ class Service:
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
+
+    def v1_status(self) -> dict:
+        """GET /v1/status: what this server is and does, for a client that would rather ask than guess (a front-end
+        that polls its OpenAI-compatible server's status, collabosm's for one): the model and its window, images,
+        the APIs, what is running, and the last request's timings in llama.cpp's names.  /metrics has the rest."""
+        with self.status_lock:
+            s, totals = dict(self.status), dict(self.totals)
+            last_t, last_at = (dict(self.last_timings) if self.last_timings else None), self.last_request_at
+        tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "static": {}}
+        hw, static = tel.get("now") or {}, tel.get("static") or {}
+
+        def scaled(v, unit, digits=0):
+            return round(v / unit, digits) if isinstance(v, (int, float)) else None
+
+        busy, ctx = bool(s.get("busy")), self.engine.max_context
+        images = self.vision is not None
+        return {
+            "service": "strata", "model": self.model,
+            "engine": (getattr(self.engine, "info", {}) or {}).get("version"),
+            "started": int(self.started_at), "uptime_s": int(time.time() - self.started_at),
+            "cache_max_tokens": ctx,
+            "context": {"native": ctx, "max_positions": ctx},
+            "concurrency": {"serving": 1, "requested": 1},       # one request at a time; more wait their turn
+            "dialects": ["/v1/chat/completions", "/v1/messages"],
+            "vision": {"enabled": images, "available": images, "error": None},
+            "activity": {"requests": totals["requests"] + int(busy), "in_flight": int(busy) + int(s.get("queued") or 0),
+                         "last_request_at": int(last_at) if last_at else None},
+            "last_timings": last_t,
+            "machine": {
+                "at": int(time.time()),
+                "gpu": {"name": static.get("gpu_name"), "used_mib": scaled(hw.get("gpu_mem_used"), 2 ** 20),
+                        "total_mib": scaled(hw.get("gpu_mem_total"), 2 ** 20), "util_pct": hw.get("gpu_util"),
+                        "temp_c": hw.get("gpu_temp"), "power_w": hw.get("gpu_power")} if static.get("gpu_name") else None,
+                "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
+                        "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
     def prepare(self, messages, tools, kwargs, max_new=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
@@ -732,6 +770,7 @@ class Service:
             sampling = {**defaults, **req_values}
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
+        timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
         with self.status_lock:
@@ -750,6 +789,8 @@ class Service:
                 with self.status_lock:
                     self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids), generated=0,
                                        started=time.time(), first_token=None, tool=None, tail="", max_tokens=max_new)
+                    self.last_request_at = time.time()
+                before = getattr(self.engine, "last", None)
                 last_print = time.time()
                 gen = self.engine.generate(ids, max_new, sampling, cancel, embeddings=emb) if emb else \
                     self.engine.generate(ids, max_new, sampling, cancel)
@@ -815,6 +856,11 @@ class Service:
                     t["output_tokens"] += n
                     t["prompt_ms"] += last.get("prompt_ms") or 0.0
                     t["decode_ms"] += last.get("decode_ms") or 0.0
+                    fresh = getattr(self.engine, "last", None)
+                    if fresh is not None and fresh is not before:      # the engine's clock for THIS request
+                        timings = request_timings(len(ids), n, last)
+                        self.last_timings = dict(timings, at=int(time.time())) if timings else None
+                    self.last_request_at = time.time()
                     now = time.time()
                     el = now - self.status.get("started", now)
                     ft = self.status.get("first_token")
@@ -827,7 +873,25 @@ class Service:
                 self.status["busy"] = False
         for ev in parser.finish():
             yield "event", ev
-        yield "done", {"finish": finish, "completion_tokens": n}
+        yield "done", {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
+                       "timings": timings}
+
+
+def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | None:
+    """One request's `timings` in llama.cpp's names (what its clients show as speed), from the engine's own clock
+    (StrataEngine.last): prompt_n is what was read, cache_n what the conversation cache already held.  None when the
+    engine keeps no clock (MockEngine)."""
+    if last.get("prompt_ms") is None:
+        return None
+    cache_n = int(last.get("reused") or 0)
+    prompt_n, prompt_ms, decode_ms = max(0, prompt_tokens - cache_n), float(last["prompt_ms"]), float(last.get("decode_ms") or 0)
+    decoded = int(last.get("generated") or generated)          # the engine's count gives its rate, as /metrics does
+    return {"cache_n": cache_n, "prompt_n": prompt_n, "prompt_ms": round(prompt_ms, 1),
+            "prompt_per_token_ms": round(prompt_ms / prompt_n, 3) if prompt_n else None,
+            "prompt_per_second": round(prompt_n / (prompt_ms / 1000), 1) if prompt_n and prompt_ms > 0 else None,
+            "predicted_n": generated, "predicted_ms": round(decode_ms, 1),
+            "predicted_per_token_ms": round(decode_ms / decoded, 3) if decoded else None,
+            "predicted_per_second": round(decoded / (decode_ms / 1000), 1) if decoded and decode_ms > 0 else None}
 
 
 def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
@@ -978,7 +1042,11 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
             last = chunk({}, finish)
             pt = x.get("prompt_tokens", len(ids))     # after MCP rounds: the last round's prompt
             last["usage"] = {"prompt_tokens": pt, "completion_tokens": x["completion_tokens"],
-                             "total_tokens": pt + x["completion_tokens"]}
+                             "total_tokens": pt + x["completion_tokens"],
+                             # the part of the prompt the conversation cache already held (OpenAI's field)
+                             "prompt_tokens_details": {"cached_tokens": x.get("reused") or 0}}
+            if x.get("timings"):
+                last["timings"] = x["timings"]          # llama.cpp's field: the speed its clients show
             yield last
 
 
@@ -1008,9 +1076,12 @@ def openai_collect(chunks) -> dict:
         msg["tool_calls"] = calls
     if mcp:
         msg["strata_mcp"] = mcp
-    return {"id": last["id"], "object": "chat.completion", "created": last["created"], "model": last["model"],
-            "choices": [{"index": 0, "message": msg, "finish_reason": last["choices"][0]["finish_reason"]}],
-            "usage": last["usage"]}
+    out = {"id": last["id"], "object": "chat.completion", "created": last["created"], "model": last["model"],
+           "choices": [{"index": 0, "message": msg, "finish_reason": last["choices"][0]["finish_reason"]}],
+           "usage": last["usage"]}
+    if last.get("timings"):
+        out["timings"] = last["timings"]
+    return out
 
 
 # ------------------------------------------------------------------------------------------------ Anthropic
@@ -1070,8 +1141,12 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                 yield close()
             stop = "tool_use" if used_tool and x["finish"] == "stop" else \
                 {"stop": "end_turn", "length": "max_tokens", "cancel": "end_turn"}[x["finish"]]
+            # the final counts, Anthropic's way: input_tokens leaves out what the conversation cache already held,
+            # which is cache_read_input_tokens (message_start could only say the whole prompt)
+            reused = min(x.get("reused") or 0, len(ids))
             yield "message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
-                                    "usage": {"output_tokens": x["completion_tokens"]}}
+                                    "usage": {"input_tokens": len(ids) - reused, "cache_read_input_tokens": reused,
+                                              "output_tokens": x["completion_tokens"]}}
             yield "message_stop", {"type": "message_stop"}
 
 
@@ -1098,7 +1173,7 @@ def anthropic_collect(events) -> dict:
             b["input"] = json.loads(b.pop("_json") or "{}")
         elif name == "message_delta":
             msg["stop_reason"] = e["delta"]["stop_reason"]
-            msg["usage"]["output_tokens"] = e["usage"]["output_tokens"]
+            msg["usage"].update(e["usage"])
     msg["content"] = blocks
     return msg
 
@@ -1217,6 +1292,9 @@ def make_handler(svc: Service):
                         busy = bool(svc.status.get("busy"))
                     slot = {"id": 0, "n_ctx": svc.engine.max_context, "is_processing": busy}
                     self._json(200, [slot] if loaded else [])
+            elif path == "/v1/status":
+                if self._authorized():
+                    self._json(200, svc.v1_status())
             else:
                 self._json(404, {"error": {"message": "not found"}})
 
