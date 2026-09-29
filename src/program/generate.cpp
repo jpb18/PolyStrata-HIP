@@ -560,6 +560,7 @@ struct GpuStage {
     cudaStream_t adapt_stream = nullptr;
     cudaEvent_t adapt_ev = nullptr;
     bool adapt_live = false;                             ///< swaps of this request are in flight on it
+    int32_t* mrope = nullptr;                            ///< --vision: the image-position table on its device
 };
 
 // ---- issue #31: what the watchdog prints before it stops a stalled engine
@@ -1111,15 +1112,30 @@ int main(int argc, char** argv) {
         }
     }
     const bool multi_gpu = !split_devs.empty() && !split_same;
+    // the helper-GPU expert caches (--expert-cache-remote, docs/SECOND_GPU.md): CUDA1..3 on one GPU; with a layer
+    // split, the visible GPUs no stage runs on, in order
+    int remote_dev[3] = {1, 2, 3};
     if (multi_gpu) {
-        if (o.vision || !o.cvec_files.empty() || o.expert_cache_remote[0] > 0 || o.mmap_experts ||
-            o.expert_profile.empty()) {
-            std::fprintf(stderr, "strata generate: a layer split across GPUs needs --expert-profile, and does not "
-                                 "take --vision, --control-vector, --expert-cache-remote or --mmap-experts yet\n");
+        if (o.expert_profile.empty()) {
+            std::fprintf(stderr, "strata generate: a layer split across GPUs needs --expert-profile\n");
             return 2;
         }
         o.no_prefill_borrow = true;   // each stage's prompt path has its own buffers
-        o.kv_resident = 0;            // one KV streaming arena per process
+        int n_vis = 1;
+        if (cudaGetDeviceCount(&n_vis) != cudaSuccess || n_vis < 1) n_vis = 1;
+        cudaGetLastError();
+        int next_free = 1;
+        for (int r = 0; r < 3; ++r) {
+            if (o.expert_cache_remote[(size_t) r] <= 0) continue;
+            while (next_free < n_vis &&
+                   std::find(split_devs.begin(), split_devs.end(), next_free) != split_devs.end()) ++next_free;
+            if (next_free >= n_vis) {
+                std::fprintf(stderr, "strata generate: --expert-cache-remote with a layer split needs a GPU that runs no "
+                                     "stage (%d visible, %zu used by the split)\n", n_vis, split_devs.size() + 1);
+                return 2;
+            }
+            remote_dev[r] = next_free++;
+        }
         std::string devs;
         for (const int d : split_devs) devs += (devs.empty() ? "" : ",") + std::to_string(d);
         std::fprintf(stderr, "strata generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
@@ -1270,12 +1286,12 @@ int main(int argc, char** argv) {
         // Keep CUDA1's proven startup order: initialise its context before
         // allocating GPU0 weights or mapping the large host expert arena.
         double free_gib = 0;
-        if (!strata::core::RemoteExperts::preflight(1, free_gib, err)) {
+        if (!strata::core::RemoteExperts::preflight(remote_dev[0], free_gib, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: CUDA1 context ready, %.2f GiB free before expert arena registration\n",
-                     free_gib);
+        std::fprintf(stderr, "strata generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+                     remote_dev[0], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
     // PR #44: a x8 link carries half of what the native default assumes - the GPU's SMs read that share over the
@@ -1623,6 +1639,22 @@ int main(int argc, char** argv) {
                          wo_s == nullptr ? "output.weight is missing" : err.c_str());
             return 1;
         }
+        // a control vector (the speed projection): its tables on this device too - the stage's layers apply it here
+        if (!strata::kernels::cvec_replicate(err)) {
+            std::fprintf(stderr, "strata generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
+            return 1;
+        }
+        // --vision: this device's image-position table (the identity until a picture request), read by every rope
+        // kernel its stage runs - set before any of its graphs is captured
+        if (o.vision) {
+            if (cudaMalloc(&st.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
+                cudaMemcpy(st.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
+                    cudaSuccess) {
+                std::fprintf(stderr, "strata generate: layer split, CUDA%d: the image position table failed\n", st.dev);
+                return 1;
+            }
+            strata::kernels::mrope_table_set(st.mrope);
+        }
         // its own PCIe share of the missed experts (the same rule as CUDA0's above: its link is probed)
         st.pcie_frac = o.pcie_frac;
         if (!pcie_given && native_pack) {
@@ -1658,12 +1690,12 @@ int main(int argc, char** argv) {
     // before the host arena maps its expert pages into their address spaces.
     for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
         double free_gib = 0;
-        if (!strata::core::RemoteExperts::preflight(r + 1, free_gib, err)) {
+        if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
         std::fprintf(stderr, "strata generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
-                     r + 1, free_gib);
+                     remote_dev[r], free_gib);
     }
 
     // ---- the CPU expert pool
@@ -2124,6 +2156,11 @@ int main(int argc, char** argv) {
             return 2;
         }
         std::vector<std::pair<int32_t, int32_t>> ranked = profile;
+        if (!stages.empty()) {   // a layer split: CUDA0's share of the profile, then the later stages' pairs no cache holds
+            for (auto& st : stages)
+                for (const auto& pr : st->profile)
+                    if (st->cache.slot_of(pr.first, pr.second) < 0) ranked.push_back(pr);
+        }
         if (multi_remote) {
             // The shipped frequency profile names only 8000 of 24576 experts. Once exhausted,
             // fill remaining VRAM from unranked pairs in expert-then-layer order: this spreads
@@ -2177,14 +2214,18 @@ int main(int argc, char** argv) {
             by_device[0] = std::move(ranked);
         }
         std::vector<uint8_t> claimed((size_t) g.n_layers * (size_t) g.n_expert, 0);
+        for (auto& st : stages)   // a layer split: what a stage's cache holds is no helper's
+            for (const auto& pr : st->profile)
+                if (st->cache.slot_of(pr.first, pr.second) >= 0)
+                    claimed[(size_t) pr.first * (size_t) g.n_expert + (size_t) pr.second] = 1;
         for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
-            if (!remote_experts[(size_t) r].open(r + 1, o.expert_cache_remote[(size_t) r],
+            if (!remote_experts[(size_t) r].open(remote_dev[r], o.expert_cache_remote[(size_t) r],
                      g.n_layers, g.n_expert, by_device[(size_t) r], xcache, *srcp, claimed, err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
             }
             std::fprintf(stderr, "strata generate: CUDA%d: %lld additional experts, %.2f GiB; "
-                                 "results return through pinned host rows\n", r + 1,
+                                 "results return through pinned host rows\n", remote_dev[r],
                          (long long) remote_experts[(size_t) r].resident(), remote_experts[(size_t) r].gib());
         }
     }
@@ -3490,13 +3531,23 @@ int main(int argc, char** argv) {
                 tr("positions built", (long long) img_rows.size());
                 cudaDeviceSynchronize();
                 tr("device idle");
-                if (ve.empty() && cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t),
-                                             cudaMemcpyHostToDevice) != cudaSuccess)
-                    ve = "the image position upload failed";
+                // CUDA0's table and, with a layer split, every later stage's (each device reads its own)
+                auto upload_mrope = [&]() -> bool {
+                    bool ok = cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t),
+                                         cudaMemcpyHostToDevice) == cudaSuccess;
+                    for (auto& st : stages) {
+                        const strata::core::OnDevice on(st->dev);
+                        cudaDeviceSynchronize();
+                        ok = ok && cudaMemcpy(st->mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t),
+                                              cudaMemcpyHostToDevice) == cudaSuccess;
+                    }
+                    return ok;
+                };
+                if (ve.empty() && !upload_mrope()) ve = "the image position upload failed";
                 if (!ve.empty()) {
                     // leave the table as the identity so the next text request is untouched
                     for (int64_t c = 0; c < cells; ++c) put(c, c, c, c);
-                    cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+                    upload_mrope();
                     mrope_identity = true;
                     std::printf("ERR %s\n", ve.c_str());
                     std::fflush(stdout);
