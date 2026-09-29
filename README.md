@@ -1,7 +1,7 @@
 <h1 align="center">Strata</h1>
 
 <p align="center"><b>Run a 125-billion-parameter AI model on a normal gaming PC</b><br>
-one NVIDIA card (12-24 GB) + 64 GB of RAM · Windows or Linux · one click to install</p>
+one NVIDIA card (12-24 GB) + 64 GB of RAM · Windows or Linux · one click to install<br>or an <b>Intel Arc</b> (32 GB) with llama.cpp underneath: <a href="docs/INTEL.md">docs/INTEL.md</a></p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
 <sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with Strata (IQ3_S, 128K context) ·

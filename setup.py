@@ -274,6 +274,93 @@ def gpus():
     return found
 
 
+# ---------------------------------------------------------------- Intel Arc: the llama.cpp backend
+# Strata's engine is CUDA. On an Intel Arc the same GGUF runs through llama.cpp's SYCL backend behind the same
+# server (serve/engine_llama.py). Setup then needs no compiler and no CUDA: it downloads the model, exports the
+# tokenizer, finds a llama-server and writes a config that attaches to (or spawns) it. Measured on an Arc Pro
+# B70 with the Coder IQ1_M: the whole 29.6 GB shard on the card, 23-25 tok/s decode. docs/INTEL.md.
+LLAMA_IMAGE = "ghcr.io/snailium/llama.cpp-sycl-intel-b70/llama-sycl-b70:stable"   # a community SYCL build
+
+
+# Battlemage / Alchemist PCI device ids -> (name, VRAM GB). lspci's database lags new cards (an Arc Pro B70
+# reads "Intel Corporation Device [8086:e223]"), so sysfs ids are the reliable signal, and the name table is ours.
+INTEL_ARC = {"e223": ("Arc Pro B70", 32.0), "e221": ("Arc Pro B60", 24.0), "e20b": ("Arc B580", 12.0),
+             "e20c": ("Arc B570", 10.0), "e212": ("Arc B50", 16.0),
+             "56a0": ("Arc A770", 16.0), "56a1": ("Arc A750", 8.0), "56a2": ("Arc A580", 8.0),
+             "56a5": ("Arc A380", 6.0), "56a6": ("Arc A310", 4.0), "5690": ("Arc A770M", 16.0)}
+
+
+def intel_gpus():
+    """Intel discrete GPUs from sysfs: vendor 0x8086 under the xe or i915 driver, named by PCI device id. VRAM
+    comes from the id table, else from clinfo's global memory size when it is installed."""
+    found = []
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        dev = card / "device"
+        try:
+            vendor = (dev / "vendor").read_text().strip().lower()
+            devid = (dev / "device").read_text().strip().lower().replace("0x", "")
+            driver = os.path.basename(os.path.realpath(dev / "driver")) if (dev / "driver").exists() else ""
+        except OSError:
+            continue
+        if vendor != "0x8086" or driver not in ("xe", "i915"):
+            continue
+        name, vram = INTEL_ARC.get(devid, (None, 0.0))
+        if name is None:
+            if driver != "xe":                      # i915 without a known Arc id is an integrated GPU: not for this
+                continue
+            name = f"Intel GPU {devid} (xe)"
+        if not vram:
+            m = re.search(r"Global memory size\s+(\d+)", out(["clinfo"]))
+            vram = int(m.group(1)) / 2**30 if m else 0.0
+        found.append({"index": len(found), "name": name, "vram_gb": vram, "arch": "sycl", "driver": driver,
+                      "pci_id": devid})
+    return found
+
+
+def llama_block(kind, server, gguf, context, port):
+    """The config's "llama" block: how serve/engine_llama.py gets its llama-server.
+
+    A binary is spawned by the server itself. A container is attached to: docker owns the GPU passthrough
+    and the SYCL environment (the persistent JIT cache must be OFF on Xe2, it segfaults), and this writes a
+    start-llama script beside the config that runs it. Either way the whole model goes on the card
+    (--n-gpu-layers 999) except the per-layer embedding table, the single tensor of shard 2, which stays
+    mmapped in host memory and is paged from disk by row, as the model's authors serve it."""
+    common = ["--n-gpu-layers", "999", "--override-tensor", "per_layer_token_embd=CPU",
+              "--ctx-size", str(int(context)), "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+              "--flash-attn", "on", "--parallel", "1"]
+    if kind == "exe":
+        return {"exe": server, "args": common, "port": port, "host": "127.0.0.1", "model": str(gguf)}
+    gguf = Path(gguf).resolve()
+    script = ROOT / "start-llama.sh"
+    script.write_text(
+        "#!/bin/sh\n# llama-server for Strata on an Intel Arc, in a container that owns the GPU.\n"
+        f"exec docker run --rm --name strata-llama --device /dev/dri \\\n"
+        f"  --group-add $(getent group render | cut -d: -f3) --group-add $(getent group video | cut -d: -f3) \\\n"
+        f"  -v \"{gguf.parent}\":/models:ro -p 127.0.0.1:{port}:8080 \\\n"
+        "  -e ONEAPI_DEVICE_SELECTOR=level_zero:0 -e SYCL_CACHE_PERSISTENT=0 -e ZES_ENABLE_SYSMAN=1 \\\n"
+        f"  {server} -m /models/{gguf.name} " + " ".join(common) + " --port 8080 --host 0.0.0.0\n",
+        encoding="utf-8")
+    script.chmod(0o755)
+    return {"url": f"http://127.0.0.1:{port}", "model": str(gguf), "start": str(script), "image": server}
+
+
+def find_llama_server(explicit=None):
+    """A llama-server for the Intel path: --llama-server PATH, else one on PATH, else the container image if
+    docker is here. Returns (kind, value): ("exe", path) to spawn, ("image", name) to run in docker."""
+    if explicit:
+        if explicit.startswith(("ghcr.io/", "docker.io/")) or "/" in explicit and not Path(explicit).exists():
+            return "image", explicit
+        return "exe", str(Path(explicit).resolve())
+    exe = shutil.which("llama-server")
+    if exe:
+        return "exe", exe
+    if shutil.which("docker") and out(["docker", "image", "inspect", LLAMA_IMAGE, "--format", "{{.Id}}"]).strip():
+        return "image", LLAMA_IMAGE
+    if shutil.which("docker"):
+        return "image", LLAMA_IMAGE       # not pulled yet: docker run pulls it (9 GB) on first start
+    return None, None
+
+
 GPU_PICK = None                                         # --gpu N (issue #51); None: the card with the most VRAM
 SPLIT_MIN_VRAM_GB = 8                                   # a card sharing a model holds the dense weights and its own
                                                         # prompt buffers too (docs/MULTI_GPU.md)
@@ -1262,8 +1349,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     return subprocess.call(cmd)
 
 
-def write_run_script(model, cfg_path, port):
-    serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
+def write_run_script(model, cfg_path, port, engine="strata"):
+    serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", engine, "--config", str(cfg_path),
              "--port", str(port), "--open"]
     if WIN:
         script = ROOT / f"run-{model.lower()}.bat"
@@ -1286,6 +1373,9 @@ def main() -> int:
     ap.add_argument("--kv", choices=["int8", "q4_0"],
                     help="KV cache precision above 8K context: int8 (default) or q4_0 (half the memory, a little less "
                          "precise)")
+    ap.add_argument("--llama-server", metavar="PATH|IMAGE",
+                    help="Intel Arc only: the llama-server to run the model with (a binary built with -DGGML_SYCL=ON, "
+                         "or a container image); default: one on PATH, else the B70 image via docker")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (yes = the encoder on the GPU)")
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
@@ -1385,29 +1475,63 @@ def main() -> int:
     # ---- 1. the PC
     step(1, "checking your PC")
     found = gpus()
+    backend = "cuda"
     if not found:
-        fail("no NVIDIA GPU found (nvidia-smi did not answer)",
-             "install the NVIDIA driver from https://www.nvidia.com/drivers and restart the PC")
-    if len(found) > 1 or gpu_problem(found[0]) is not None:
-        gpu_table(found)
-    sel = choose_gpus(a, found)                        # asked when two or more cards can share the model
-    multi = sel if len(sel) > 1 else []
-    a.gpu = sel[0]                                     # the main GPU: the checks and the sizing below are its
-    GPU_PICK = a.gpu
-    gpu = gpu_info(a.gpu)
-    chosen = [gpu_info(i) for i in sel]
-    gpu["archs"] = sorted({x["arch"] for x in chosen})  # the engine needs code for every one of them
+        intel = intel_gpus()
+        if intel:
+            backend = "llama"
+            g = max(intel, key=lambda x: x["vram_gb"])
+            ok(f"Intel {g['name']} ({g['vram_gb']:.0f} GB): using llama.cpp's SYCL backend instead of the CUDA engine")
+            if a.vision not in (None, "no", "none"):
+                warn("images are not wired on the llama.cpp engine yet: continuing without vision")
+            a.vision = "none"
+            found = intel
+        else:
+            fail("no NVIDIA or Intel Arc GPU found (nvidia-smi did not answer, sycl-ls/lspci show no Arc)",
+                 "install the NVIDIA driver from https://www.nvidia.com/drivers and restart the PC")
+    if backend != "llama" and (len(found) > 1 or gpu_problem(found[0]) is not None):
+        gpu_table(found)                               # CUDA compute-capability checks; not for an Intel card
+    if backend == "llama":
+        sel, multi = [found[0]["index"]], []
+        a.gpu = sel[0]
+        GPU_PICK = a.gpu
+        gpu = {**found[0], "count": len(found), "archs": ["sycl"]}
+        chosen = [gpu]                                 # the one card the model runs on (no layer split here)
+    else:
+        sel = choose_gpus(a, found)                    # asked when two or more cards can share the model
+        multi = sel if len(sel) > 1 else []
+        a.gpu = sel[0]                                 # the main GPU: the checks and the sizing below are its
+        GPU_PICK = a.gpu
+        gpu = gpu_info(a.gpu)
+        chosen = [gpu_info(i) for i in sel]
+        gpu["archs"] = sorted({x["arch"] for x in chosen})  # the engine needs code for every one of them
     if multi:
         ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
-    ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
-    if driver_major(gpu) < MIN_DRIVER:
-        fail(f"the NVIDIA driver is too old ({gpu['driver']}; {MIN_DRIVER} or newer is needed)",
-             "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again")
+    if backend == "llama":
+        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, {gpu['driver']} driver, SYCL via llama.cpp")
+    else:
+        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
+        if driver_major(gpu) < MIN_DRIVER:
+            fail(f"the NVIDIA driver is too old ({gpu['driver']}; {MIN_DRIVER} or newer is needed)",
+                 "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again")
     if gpu["vram_gb"] < 11:
         warn("less than 12 GB of VRAM: Strata will run, but most experts stay on the CPU and it will be slow")
     ram = ram_gb()
     cpu, avx2, avx512 = cpu_info()
     need = min(d["ram_gb"] for d in MODELS.values())
+    if backend == "llama":
+        # The CUDA engine keeps every expert in RAM. llama.cpp puts the whole first shard on the card and only
+        # the second shard's lookup table (28.8 GB, read by row) in host memory as page cache, so the fit is a
+        # VRAM question: shard 1 = the download minus that table. Below that, experts spill to RAM (slower).
+        need = 8
+        fit = {m: round(d["download_gb"] - 28.8, 1) for m, d in MODELS.items()}
+        best = [m for m, g in fit.items() if g + 1.5 <= gpu["vram_gb"]]
+        if best:
+            ok(f"VRAM: {gpu['vram_gb']:.0f} GB fits the whole model for " + ", ".join(best) +
+               f" (shard 1: " + ", ".join(f"{m} {g} GB" for m, g in fit.items() if m in best) + ")")
+        else:
+            warn(f"VRAM: {gpu['vram_gb']:.0f} GB is less than any shard 1 (" +
+                 ", ".join(f"{m} {g} GB" for m, g in fit.items()) + "): experts will spill to RAM and it will be slow")
     if ram < need - 4 and not a.check:
         # every model keeps ALL its experts in RAM (23+ GB); VRAM only holds a copy of the most-used ones, so a
         # bigger GPU does not lower this
@@ -1451,21 +1575,22 @@ def main() -> int:
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
     for i, m in enumerate(names, 1):
         d = MODELS[m]
-        fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
+        fit = "" if ram >= d["ram_gb"] or backend == "llama" else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
         say(f"  {i}) {m:8s} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
     rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 and "IQ3_XXS" in names else "1"
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
-    if ram < MODELS[model]["ram_gb"] - 4:
-        # #125: a warning and a question, not a stop: the user may accept paging (asked, "no" by default, so an
-        # unattended --yes install still stops here)
-        need_gb, arena = MODELS[model]["ram_gb"], MODELS[model]["arena_gb"]
-        warn(f"{model} needs about {need_gb} GB of RAM and this PC has {ram:.0f} GB: its experts alone are "
-             f"{arena:.0f} GB and must stay in RAM, so Windows/Linux will page part of them from disk. Expect it "
-             "to be much slower, and it may not start at all.")
-        say("       A smaller size (Q2_0 or IQ2_XS) fits; more RAM fixes it.")
-        if ask("  Install it anyway?", ["y", "n"], "n", a.yes) != "y":
-            fail(f"{model} needs about {need_gb} GB of RAM; this PC has {ram:.0f} GB",
-                 "choose Q2_0 or IQ2_XS, or add RAM")
+    if backend != "llama":                          # the CUDA engine's experts-in-RAM rule; on llama.cpp the fit is VRAM (step 1)
+        if ram < MODELS[model]["ram_gb"] - 4:
+            # #125: a warning and a question, not a stop: the user may accept paging (asked, "no" by default, so an
+            # unattended --yes install still stops here)
+            need_gb, arena = MODELS[model]["ram_gb"], MODELS[model]["arena_gb"]
+            warn(f"{model} needs about {need_gb} GB of RAM and this PC has {ram:.0f} GB: its experts alone are "
+                 f"{arena:.0f} GB and must stay in RAM, so Windows/Linux will page part of them from disk. Expect it "
+                 "to be much slower, and it may not start at all.")
+            say("       A smaller size (Q2_0 or IQ2_XS) fits; more RAM fixes it.")
+            if ask("  Install it anyway?", ["y", "n"], "n", a.yes) != "y":
+                fail(f"{model} needs about {need_gb} GB of RAM; this PC has {ram:.0f} GB",
+                     "choose Q2_0 or IQ2_XS, or add RAM")
         warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
     ok(f"size: {model}")
     tag = fam["tag"] + model                           # names of the pack, config and start script
@@ -1546,17 +1671,28 @@ def main() -> int:
     step(4, "the Strata engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml, mtmd)")
-    eng = None if a.build else get_prebuilt(a.prebuilt, gpu, vision)
+    if backend == "llama":
+        kind, server = find_llama_server(a.llama_server)
+        if kind is None:
+            fail("no llama-server found for the Intel card",
+                 "build llama.cpp with -DGGML_SYCL=ON and put llama-server on PATH, pass --llama-server PATH, "
+                 f"or install docker so the image {LLAMA_IMAGE} can run it")
+        ok(f"engine: llama-server ({'container ' if kind == 'image' else ''}{server})")
+        eng, lib_dirs = None, []
+    else:
+        kind = server = None
+        eng = None if a.build else get_prebuilt(a.prebuilt, gpu, vision)
     if eng is not None and json.loads((eng / "BUILD.json").read_text()).get("source") != "local":
         pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
         if vision != "none" and not (eng / VEXE).exists():
             warn("the ready-made engine has no image encoder: compiling it")
             eng = None
-    if eng is None:
-        eng = build_engine(gpu, vision, a.yes, llama)
-    meta = json.loads((eng / "BUILD.json").read_text())
-    lib_dirs = meta.get("cuda_dirs") or cuda_lib_dirs()
-    ok(f"engine: {eng / EXE}")
+    if backend != "llama":
+        if eng is None:
+            eng = build_engine(gpu, vision, a.yes, llama)
+        meta = json.loads((eng / "BUILD.json").read_text())
+        lib_dirs = meta.get("cuda_dirs") or cuda_lib_dirs()
+        ok(f"engine: {eng / EXE}")
 
     # ---- 5. the model files
     step(5, f"downloading {fam['title']} {model}")
@@ -1602,24 +1738,31 @@ def main() -> int:
         if not (pack / "tokenizer" / "vocab.json").exists():
             run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(shards[0]),
                  "--out", str(pack)], env=env)   # writes <pack>/tokenizer/
+    elif backend == "llama":
+        # llama-server reads the GGUF as it is; Strata's server only needs the tokenizer beside it
+        if not (pack / "tokenizer" / "vocab.json").exists():
+            run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(shards[0]),
+                 "--out", str(pack)], env=env)
     elif not (pack / "native_experts.txt").exists() or not (pack / "tokenizer" / "vocab.json").exists():
         # every tensor as the GGUF stores it; the experts are read from the GGUF at start (seconds to build)
         run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack)], env=env)
     ok(f"model prepared: {pack}")
-    mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
-    rt = mtp / "rt"
-    if not (rt / "experts.bin").exists():
-        say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
-        say("  only its ~5 GB of MTP tensors are downloaded.")
-        run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)], env=env)
-        run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
-             "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
-        run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
-            env=env)
-    if not (rt / "draft_vocab.bin").exists():
-        shutil.copyfile(ROOT / "data" / "draft_vocab.bin", rt / "draft_vocab.bin")
-    ok(f"MTP draft layer: {rt}")
-
+    if backend == "llama":
+        ok("MTP draft layer: not used by the llama.cpp engine (no speculative decoding for this model there)")
+    else:
+        mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
+        rt = mtp / "rt"
+        if not (rt / "experts.bin").exists():
+            say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
+            say("  only its ~5 GB of MTP tensors are downloaded.")
+            run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)], env=env)
+            run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
+                 "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
+            run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
+                env=env)
+        if not (rt / "draft_vocab.bin").exists():
+            shutil.copyfile(ROOT / "data" / "draft_vocab.bin", rt / "draft_vocab.bin")
+        ok(f"MTP draft layer: {rt}")
     # ---- 7. the start script
     step(7, "writing the start script")
     sys.path.insert(0, str(ROOT / "tools"))
@@ -1627,31 +1770,39 @@ def main() -> int:
     ple = next((s for s in shards if any(t.name == "per_layer_token_embd.weight" for t in GGUFFile(s).tensors)), None)
     if ple is None:
         fail("the model has no per_layer_token_embd tensor (is this a Qwen3.8-Flash-Next GGUF?)")
-    args = ["--pack", str(pack), "--native", str(shards[0]), "--ple-gguf", str(ple),
-            "--expert-profile", str(ROOT / "data" / fam.get("profile", "expert-profile.bin")), "--expert-cache", "auto",
-            "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
-            "--max-context", str(ctx)]
-    if ctx > 8192:
-        args += ["--kv", kv]
-    # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
-    # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
-    # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with 4-bit, so only when it fits.
-    kv_ram_gb = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9   # 12 QSA layers + the draft layer
-    # the RAM copy must be pinned, and under WSL the NVIDIA driver pins only about 1 GB in all
-    if is_wsl() and ctx >= 65536:
-        ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
-    elif ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
-        args += ["--kv-resident", "32768"]
-        ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
-    if vision != "none":
-        args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
-    if esp is not None:
-        # the package's profile, with llama.cpp's flags (the engine takes the same ones)
-        args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
-                 "--cvec-mode", "project", "--cvec-dir", "per-layer"]
-    cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
-           "lib_dirs": lib_dirs, "port": port}
+    args = []
+    if backend != "llama":                          # the CUDA engine's command line; nothing here applies to llama-server
+        args = ["--pack", str(pack), "--native", str(shards[0]), "--ple-gguf", str(ple),
+                "--expert-profile", str(ROOT / "data" / fam.get("profile", "expert-profile.bin")), "--expert-cache", "auto",
+                "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
+                "--max-context", str(ctx)]
+        if ctx > 8192:
+            args += ["--kv", kv]
+        # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
+        # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
+        # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with 4-bit, so only when it fits.
+        kv_ram_gb = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9   # 12 QSA layers + the draft layer
+        # the RAM copy must be pinned, and under WSL the NVIDIA driver pins only about 1 GB in all
+        if is_wsl() and ctx >= 65536:
+            ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
+        elif ctx >= 65536 and ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1:
+            args += ["--kv-resident", "32768"]
+            ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
+        if vision != "none":
+            args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
+        if esp is not None:
+            # the package's profile, with llama.cpp's flags (the engine takes the same ones)
+            args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
+                     "--cvec-mode", "project", "--cvec-dir", "per-layer"]
+
+    if backend == "llama":
+        cfg = {"engine": "llama", "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+               "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+               "port": port, "llama": llama_block(kind, server, shards[0], a.context or 32768, port + 1)}
+    else:
+        cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+               "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+               "lib_dirs": lib_dirs, "port": port}
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start
@@ -1663,22 +1814,22 @@ def main() -> int:
         cfg["host"] = a.host
     if a.api_key:
         cfg["api_key"] = a.api_key
-    if vision != "none":
+    if vision != "none" and backend != "llama":
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
                          "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
-    cal = saved_calibration(cfg)
+    cal = None if backend == "llama" else saved_calibration(cfg)
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))
         import calibrate as CAL
         cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
         ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-    script = write_run_script(tag, cfg_path, port)
+    script = write_run_script(tag, cfg_path, port, engine="llama" if backend == "llama" else "strata")
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
-    if cal is None and not a.no_start and not a.yes and ask(
+    if cal is None and backend != "llama" and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 5-10 minutes; the PC is busy "
             "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
         calibrate_config(cfg_path)

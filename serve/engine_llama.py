@@ -269,7 +269,7 @@ class LlamaEngine:
             return
         try:
             self.proc.terminate()
-            self.proc.wait(timeout=15)
+            self.proc.wait(timeout=60)      # a container unloading 30 GB takes a moment
         except Exception:
             try:
                 self.proc.kill()
@@ -297,4 +297,20 @@ def engine_from_config(cfg: dict, env: dict | None = None) -> LlamaEngine:
     url = L.get("url")
     if not url:
         raise ValueError('the config\'s "llama" block needs either "url" (attach) or "exe" (spawn)')
+    start = L.get("start")
+    if start and not _answering(url):
+        # setup wrote a start script (a container that owns the GPU): run it as our child, so the run script is
+        # one click and closing the server stops the container. If something already answers at the url, use it.
+        print(f"[strata] starting llama-server: {start}", flush=True)
+        return LlamaEngine.spawn([start], url, cwd=cfg.get("cwd"), log=cfg.get("log"), env=env, model_path=model)
     return LlamaEngine.attach(url, model_path=model)
+
+
+def _answering(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=3) as r:
+            return r.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500                 # 503 = loading: someone is already bringing it up
+    except Exception:
+        return False
