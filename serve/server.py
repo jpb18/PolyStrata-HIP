@@ -1636,7 +1636,8 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
+    ap.add_argument("--engine", choices=["mock", "strata", "llama"], default="mock",
+                    help="strata = the CUDA engine; llama = llama.cpp's llama-server (any GPU llama.cpp runs on, e.g. Intel Arc via SYCL); see serve/engine_llama.py")
     ap.add_argument("--config", help="strata engine config (JSON: exe, args, cwd, tokenizer, model_name), "
                                      "written by setup.py")
     ap.add_argument("--host", default=None,
@@ -1673,7 +1674,7 @@ def main() -> int:
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()
     tpath = Path(a.tokenizer)
-    if a.engine == "strata" and not (tpath / "vocab.json").exists():
+    if a.engine in ("strata", "llama") and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
     if (tpath / "vocab.json").exists():
         import strata_tokenizer as ST
@@ -1703,6 +1704,22 @@ def main() -> int:
             print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
         engine = StrataEngine(cfg["exe"], engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env)
         warn_tight_ram(engine.info.get("arena_mib"))
+    elif a.engine == "llama":
+        if not cfg:
+            ap.error("--engine llama needs --config (with a \"llama\" block: url to attach, or exe to spawn)")
+        from serve.engine_llama import engine_from_config as llama_engine
+        vision = None                                       # images: not on this engine yet (engine_llama.py)
+        sampling_defaults = sampling_defaults_from_config(cfg)
+        if sampling_defaults:
+            pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
+            print(f"[strata] sampling defaults from the config: {pretty}", flush=True)
+        if cfg.get("vision"):
+            print("[strata] note: \"vision\" in the config is ignored on the llama engine (images not wired yet)",
+                  flush=True)
+        print("connecting to llama-server (or starting it: a 30 GB model takes a few minutes) ...", flush=True)
+        engine = llama_engine(cfg, env=child_env(cfg))
+        print(f"[strata] llama.cpp engine up: {engine.info.get('model') or engine.model_path}, "
+              f"context {engine.max_context}, build {engine.info.get('version') or '?'}", flush=True)
     else:
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
             "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}
