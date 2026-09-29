@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, StrataEngine, serve  # noqa: E402
+from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, StrataEngine, request_timings, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
@@ -708,6 +708,17 @@ class UsageAndStatus(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+
+class TimingsDrafts(unittest.TestCase):
+    """`timings` carries the speculative draft counts (PR #83's fields) only when the engine reported them."""
+
+    def test_draft_fields(self):
+        base = {"prompt_ms": 100.0, "decode_ms": 200.0, "generated": 20, "reused": 4}
+        t = request_timings(24, 20, dict(base, drafts_offered=15, drafts_accepted=11))
+        self.assertEqual((t["draft_n"], t["draft_n_accepted"]), (15, 11))
+        self.assertEqual((t["prompt_n"], t["cache_n"]), (20, 4))
+        self.assertNotIn("draft_n", request_timings(24, 20, base))
+        self.assertIsNone(request_timings(24, 20, {}))
 
 if __name__ == "__main__":
     unittest.main()

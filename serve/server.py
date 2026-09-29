@@ -891,7 +891,10 @@ def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | No
             "prompt_per_second": round(prompt_n / (prompt_ms / 1000), 1) if prompt_n and prompt_ms > 0 else None,
             "predicted_n": generated, "predicted_ms": round(decode_ms, 1),
             "predicted_per_token_ms": round(decode_ms / decoded, 3) if decoded else None,
-            "predicted_per_second": round(decoded / (decode_ms / 1000), 1) if decoded and decode_ms > 0 else None}
+            "predicted_per_second": round(decoded / (decode_ms / 1000), 1) if decoded and decode_ms > 0 else None,
+            # the speculative drafts, as llama.cpp names them (from PR #83, @mikicvi): only when the engine reported them
+            **({"draft_n": int(last["drafts_offered"]), "draft_n_accepted": int(last["drafts_accepted"])}
+               if last.get("drafts_offered") is not None else {})}
 
 
 def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
