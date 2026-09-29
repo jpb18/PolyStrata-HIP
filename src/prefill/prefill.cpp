@@ -86,6 +86,12 @@ inline int ring_slots(size_t T) {
 }
 constexpr int DQ = 2;              // dequantized-expert ring (FP16 gate/up + down)
 
+// F-1: STRATA_GR_UNFUSED=1 keeps the FP32 copy of the normalized rows (gr_norm + gr_mix), the A/B arm
+inline bool gr_unfused() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_GR_UNFUSED"); return e && e[0] == '1'; }();
+    return v;
+}
+
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 // Either cudaMalloc (owned, freed with the object) or a bump allocation from a borrowed region; with no base and
@@ -252,6 +258,7 @@ struct Prefill::Impl {
     std::vector<void*> owned;
     // chunk buffers
     float *emb = nullptr, *R = nullptr, *xn = nullptr, *lo = nullptr, *gated = nullptr, *inj = nullptr;
+    float* grs = nullptr;                    // F-1: the hyper-connection read's row scales (T x 4)
     uint16_t *xn16 = nullptr, *lo16 = nullptr;
     float* mixed = nullptr;
     uint16_t *mixed_bf = nullptr, *mixed_h = nullptr;
@@ -565,7 +572,9 @@ bool Prefill::carve(size_t T, void* alloc) {
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
     bool ok = true;
-    m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok); m.xn = o.take<float>(T * D, ok);
+    m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok);
+    m.xn = gr_unfused() ? o.take<float>(T * D, ok) : nullptr;   // F-1: not needed (gr_mix_r reads R)
+    m.grs = o.take<float>(T * HC, ok);
     m.xn16 = o.take<uint16_t>(T * D, ok); m.lo = o.take<float>(T * LR, ok); m.lo16 = o.take<uint16_t>(T * LR, ok);
     m.gated = o.take<float>(T * D, ok); m.inj = o.take<float>(T * HC, ok);
     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
@@ -1094,12 +1103,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                       *wu = need(v, su.c_str(), err), *wi = need(v, si.c_str(), err);
                 if (!wn || !wd || !wu || !wi) return false;
                 pt.mark(kPfHc, cs);
-                gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs);
+                if (gr_unfused()) gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs);
+                else gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs);
                 if (!bf16_proj(m.gemm, wd, m.xn16, m.lo, T, sd, err)) return false;
                 gr_silu(m.lo, m.lo16, T, m.cs);
                 if (!bf16_proj(m.gemm, wu, m.lo16, m.gated, T, su, err)) return false;
                 if (!bf16_proj(m.gemm, wi, m.xn16, m.inj, T, si, err)) return false;
-                gr_mix(m.xn, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h);
+                if (gr_unfused()) gr_mix(m.xn, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h);
+                else gr_mix_r(m.R, m.grs, (const float*) wn->data, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h);
 
                 if (half == 0 && !core::is_qsa_layer(g, l)) {
                     // ======================= GDN =======================
