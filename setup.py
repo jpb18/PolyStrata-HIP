@@ -910,7 +910,8 @@ def choices_from_config(cfg_path: Path) -> dict:
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
-            "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu")}
+            "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
+            "layer_split": cfg.get("layer_split")}
 
 
 def find_in(roots: list, rel: str):
@@ -1023,7 +1024,7 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     return cfg
 
 
-def start(cfg_path: Path, port: int | None, gpu: int | None = None, open_browser=True) -> int:
+def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True) -> int:
     cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
@@ -1031,9 +1032,10 @@ def start(cfg_path: Path, port: int | None, gpu: int | None = None, open_browser
     cfg_path.touch()                                     # the most recently used model
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
            "--port", str(port or cfg.get("port", 8080))]
-    if gpu is not None:
-        gpu_info(gpu)                                  # stops with the list of GPUs if there is no such one
-        cmd += ["--gpu", str(gpu)]
+    if gpu is not None:                                # one card, or several (--gpus): the server splits the layers
+        for g in (gpu if isinstance(gpu, list) else [gpu]):
+            gpu_info(g)                                # stops with the list of GPUs if there is no such one
+        cmd += ["--gpu", ",".join(str(g) for g in gpu) if isinstance(gpu, list) else str(gpu)]
     if open_browser:
         cmd.append("--open")
     gb = 0.0
@@ -1083,7 +1085,7 @@ def main() -> int:
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
     ap.add_argument("--port", type=int, help="the server's port (default: the one the install was set up with, 8080 for a new one)")
-    ap.add_argument("--gpu", type=int, help="the GPU to use, numbered as nvidia-smi numbers them (default: the one with the "
+    ap.add_argument("--gpu", help="the GPU to use, numbered as nvidia-smi numbers them (default: the one with the "
                                             "most VRAM; with --setup it is saved, when starting it overrides the saved one)")
     ap.add_argument("--gpus", help="several GPUs for one model, as nvidia-smi numbers them (\"0,2\"): the layers are "
                                    "split across them, the first GPU is the main one (saved with --setup; see "
@@ -1108,6 +1110,13 @@ def main() -> int:
                     help="tune the engine's settings for this PC (about 5-10 minutes), then start the model")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    if a.gpu is not None:                              # --gpu 0,2 means --gpus 0,2 (a user tried it: issue report)
+        if "," in a.gpu:
+            a.gpus, a.gpu = a.gpus or a.gpu, None
+        elif a.gpu.strip().isdigit():
+            a.gpu = int(a.gpu)
+        else:
+            ap.error(f"--gpu takes a GPU number as nvidia-smi numbers them, e.g. --gpu 1 (or --gpus 0,2), not {a.gpu!r}")
     say("Strata - Qwen3.8-Flash-Next on a normal PC (NVIDIA GPU + system RAM + CPU)")
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
@@ -1130,7 +1139,11 @@ def main() -> int:
                 a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
                 a.host, a.api_key = a.host or ch["host"], a.api_key or ch["api_key"]
                 a.port = a.port or ch["port"]
-                a.gpu = a.gpu if a.gpu is not None else ch.get("gpu")
+                if isinstance(ch.get("gpu"), list):     # a layer split: set up across the same cards again
+                    a.gpus = a.gpus or ",".join(str(g) for g in ch["gpu"])
+                    a.layer_split = a.layer_split or ch.get("layer_split")
+                else:
+                    a.gpu = a.gpu if a.gpu is not None else ch.get("gpu")
                 a.yes = True
     global GPU_PICK
     multi = [int(x) for x in a.gpus.split(",") if x.strip()] if a.gpus else []
@@ -1139,6 +1152,9 @@ def main() -> int:
             fail("--gpus takes two or more different GPUs, e.g. --gpus 0,2")
         a.gpu = multi[0]                               # the main GPU: the checks and the sizing below are its
     GPU_PICK = a.gpu
+    # starting an installed model: --gpus 0,2 splits it across those cards now (it used to start on the first one
+    # alone unless given with --setup), --gpu N runs it on one card; neither: the saved choice
+    run_gpu = multi or a.gpu
     port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
     if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
         if not a.build:
@@ -1150,19 +1166,19 @@ def main() -> int:
                 say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
         calibrate_config(pick_cfg)
-        return 0 if a.no_start else start(pick_cfg, a.port, a.gpu)
+        return 0 if a.no_start else start(pick_cfg, a.port, run_gpu)
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         if not a.build:
             update_installed_engine(a.prebuilt)
         if len(have) == 1:
-            return start(have[0], a.port, a.gpu)
+            return start(have[0], a.port, run_gpu)
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
         say(f"  {len(have) + 1}) install another model / change settings")
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
-            return start(have[pick - 1], a.port, a.gpu)
+            return start(have[pick - 1], a.port, run_gpu)
 
     # ---- 1. the PC
     step(1, "checking your PC")
