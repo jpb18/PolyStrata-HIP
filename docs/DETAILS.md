@@ -12,7 +12,7 @@ New here? Start with the [README](../README.md) - it has everything you need to 
 
 ## Speed (measured)
 
-RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.22 (prompts) / 0.1.14 (output) with the settings setup writes
+RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.26 with the settings setup writes
 (`--prefill auto`, 8-bit KV above 4K, KV streaming from 64K). One code-agent prompt per length, 256 generated tokens,
 MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt). The IQ2_XS row was
 measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
@@ -21,24 +21,27 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 519 | 1,226 | 1,844 | 1,836 | 1,682 | 1,304 |
-| **IQ2_XS** | 524 | 1,196 | 1,799 | 1,611 | 1,495 | 1,181* |
-| **IQ3_XXS** | 472 | 974 | 1,555 | 1,449 | 1,386 | - |
-| **IQ3_S** | 419 | 893 | 1,499 | 1,285 | 1,245 | - |
-| **Coder** | 660 | 1,522 | 1,871 | 1,938 | 1,779 | 1,034** |
+| **Q2_0** | 536 | 1,299 | 2,171 | 2,126 | 2,107 | 1,304† |
+| **IQ2_XS** | 534 | 1,256 | 2,092 | 1,754 | 1,752 | 1,181*† |
+| **IQ3_XXS** | 482 | 1,007 | 1,745 | 1,609 | 1,602 | - |
+| **IQ3_S** | 427 | 913 | 1,624 | 1,640 | 1,443 | - |
+| **Coder** | 656 | 1,583 | 2,177 | 2,236 | 2,208 | 1,034** |
 
-Engine 0.1.22 (the prompt path of 0.1.23 is the same); `bench/results/2026-09-29-speed-0122`. \* measured with
-images on (the image encoder's VRAM reserve leaves fewer experts cached). \*\* not measured again: 0.1.14.
+Engine 0.1.26; `bench/results/2026-09-29-speed-0126`. At 32K-128K that is 8-28% faster than 0.1.22. † not measured
+again: 0.1.22. \* measured with images on (the image encoder's VRAM reserve leaves fewer experts cached). \*\* not
+measured again: 0.1.14.
 
 ### Output (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 84.3 | 90.3 | 73.6 | 69.0 | 67.2 | 60.3 |
-| **IQ2_XS** | 74.4 | 73.8 | 71.5 | 64.3 | 59.8 | 52.8 |
-| **IQ3_XXS** | 60.3 | 62.1 | 51.4 | 50.0 | 45.8 | - |
-| **IQ3_S** | 51.5 | 51.6 | 48.2 | 48.8 | 40.5 | - |
-| **Coder** | 53.3 | 50.6 | 53.3 | 50.8 | 44.0 | 42.8 |
+| **Q2_0** | 87.3 | 93.0 | 81.8 | 76.2 | 73.7 | 60.3† |
+| **IQ2_XS** | 79.6 | 78.6 | 76.3 | 63.7 | 62.7 | 52.8† |
+| **IQ3_XXS** | 61.9 | 61.6 | 58.5 | 57.2 | 49.0 | - |
+| **IQ3_S** | 52.4 | 53.3 | 48.3 | 46.3 | 45.5 | - |
+| **Coder** | 58.9 | 55.1 | 54.9 | 53.2 | 43.0 | 42.8† |
+
+Engine 0.1.26, the same runs. † not measured again: 0.1.14.
 
 Output speed depends on the text as well: speculative decoding runs faster when more of the drafted tokens are
 accepted, so a different answer to the same prompt moves it by several percent. Run back to back on the 4K prompt,
