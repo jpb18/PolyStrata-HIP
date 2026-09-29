@@ -43,6 +43,10 @@ Where the `llama-server` comes from, in order:
 Then `run-<model>.sh` (or `./setup.sh` again) starts the model. First start of a 30 GB model: about
 two minutes.
 
+Two flags worth knowing on a box that already runs things: `--port N` (the default 8080 is also what
+open-webui takes; the llama-server container gets N+1) and `--host 0.0.0.0` to reach it from other
+machines (the default binds localhost only, as upstream does).
+
 ## The config
 
 ```json
