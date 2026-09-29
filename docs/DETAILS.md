@@ -67,6 +67,15 @@ VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the
 slower. It does not stream its KV cache (KV streaming is on by default from 64K), so it pays off mostly on large
 cards at long contexts.
 
+**Low-RAM mode (engine 0.1.26, chosen by setup):** normally all of a model's experts are copied into RAM (23-50 GB,
+pinned) and the GPU holds a copy of the most-used ones. On a PC whose RAM cannot hold them beside the system (the
+experts plus ~10 GB), setup instead maps them from one file in the model's folder (`--mmap-experts`, the pack's
+`experts.bin`, +23-50 GB of disk). The OS file cache holds what the GPU does not, and it can give that memory back.
+On the Coder the engine's committed memory drops from 36 to ~13 GB, with the same answers. With a big GPU (an RTX
+5090 holds all of the Coder's experts, most of Q2_0's) it runs at nearly the usual speed. With a small one, most
+experts come from the SSD and it is much slower (setup says so). `START-HERE.bat --setup --low-ram on|off` overrides
+the choice.
+
 Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
 and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
 

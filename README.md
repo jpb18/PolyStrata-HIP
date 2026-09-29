@@ -90,7 +90,8 @@ yet). Details: [AMD HIP](docs/AMD_HIP.md).
 
 ## Install
 
-**You need:** an NVIDIA RTX 30, 40 or 50 card with 12 GB of VRAM or more, enough RAM for the size you pick (above),
+**You need:** an NVIDIA RTX 30, 40 or 50 card with 12 GB of VRAM or more, enough RAM for the size you pick (above;
+a big GPU makes up for less RAM - the [low-RAM mode](docs/DETAILS.md)),
 ~80 GB of free disk space (an SSD makes the first start much faster), and Windows 10/11 or Linux. The only thing you
 install yourself is a current **NVIDIA driver** ([nvidia.com/drivers](https://www.nvidia.com/drivers) or the NVIDIA
 App). Everything else - Python, the engine, the model - is set up for you.
