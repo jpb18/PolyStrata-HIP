@@ -572,15 +572,18 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_i8_kernel(const float* __
 
 bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
                const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
-    static bool attr = false;
+    static bool attr[64] = {};   // the shared-memory opt-in is per device (a layer split runs this on several)
+    int dev = 0;
+    cudaGetDevice(&dev);
     const int bytes = (int) sizeof(Smem2);
-    if (!attr) {
+    if (dev < 0 || dev >= 64) return false;
+    if (!attr[dev]) {
         if (cudaFuncSetAttribute(prompt_attn_i8_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
         }
-        attr = true;
+        attr[dev] = true;
     }
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
@@ -600,15 +603,18 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
 template <int KV_MODE>
 bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
             const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
-    static bool attr = false;
+    static bool attr[64] = {};   // per device, as above
+    int dev = 0;
+    cudaGetDevice(&dev);
     const int bytes = (int) sizeof(Smem<KV_MODE>);
-    if (!attr) {
+    if (dev < 0 || dev >= 64) return false;
+    if (!attr[dev]) {
         if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
         }
-        attr = true;
+        attr[dev] = true;
     }
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
