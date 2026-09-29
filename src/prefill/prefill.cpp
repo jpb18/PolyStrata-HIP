@@ -16,6 +16,8 @@
 #include "strata/kernels/cvec.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/core/layer.hpp"
+#include "strata/core/native_head.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/qsa_select.hpp"
 #include "strata/prefill/gemm.hpp"
@@ -297,6 +299,9 @@ struct Prefill::Impl {
     // layer split: the device, and the hand-off to the next stage (two pinned chunk buffers, used in turn)
     int device = -1;
     float* hand[2] = {};
+    // C-4: the chunk's token ids on the device, for one batched embedding gather
+    int32_t* tok_dev = nullptr;
+    std::vector<int32_t> tok_host;
 };
 
 namespace {
@@ -451,6 +456,14 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
             err = "prefill: the layer split's hand-off buffers";
             return false;
         }
+    if (m.tok_dev == nullptr) {
+        if (cudaMalloc((void**) &m.tok_dev, (size_t) chunk * sizeof(int32_t)) != cudaSuccess) {
+            err = "prefill: the token id buffer";
+            return false;
+        }
+        m.owned.push_back(m.tok_dev);
+        m.tok_host.resize((size_t) chunk);
+    }
     if (cudaStreamCreateWithFlags(&m.copy, cudaStreamNonBlocking) != cudaSuccess) { err = "prefill: copy stream"; return false; }
     const size_t T = (size_t) chunk;
     m.T_max = chunk;
@@ -730,6 +743,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     std::string next_err;
     std::future<bool> next_run;
     int hand_buf = 0;
+    double host_sync_ms = 0, host_chunk_ms = 0, host_setup_ms = 0;   // STRATA_PREFILL_TIMING: the host's share
     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
     s.idx_dim = g.idx_key_dim;
@@ -778,6 +792,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         const int64_t T = std::min(m.T, n - c0), p0 = pos0 + c0;
         ++stats_.chunks;
         pt.mark(kPfStart, cs);
+        const auto tsetup = Clock::now();
         // ---- embeddings, broadcast to the four streams - or, in a later stage of a layer split, the rows the
         // previous stage handed on
         if (hand_in_ != nullptr) {
@@ -787,7 +802,40 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 return false;
             }
         }
-        for (int64_t t = 0; hand_in_ == nullptr && t < T; ++t) {
+        // C-4: the whole chunk's rows in one gather (the same per-element arithmetic as the per-token path, so the
+        // same bits); a chunk with picture rows, or a token outside the table, takes the per-token path
+        bool batched = hand_in_ == nullptr && m.tok_dev != nullptr;
+        const core::NativeEmbed* nemb = core::native_embed();
+        const core::WeightRef* wemb = nemb ? nullptr : m.wt->find("token_embd.weight");
+        if (batched && nemb == nullptr &&
+            (wemb == nullptr || wemb->codebook_iq4nl || wemb->ne0 != g.n_embd || wemb->group_elems <= 0 ||
+             (wemb->code_bits != 2 && wemb->code_bits != 4 && wemb->code_bits != 8)))
+            batched = false;
+        for (int64_t t = 0; batched && t < T; ++t) {
+            const int64_t tok = tokens[c0 + t];
+            if ((embd_rows && embd_rows[p0 + t]) || tok < 0 || (wemb && tok >= wemb->ne1)) batched = false;
+            else m.tok_host[(size_t) t] = (int32_t) tok;
+        }
+        if (batched) {
+            if (cudaMemcpyAsync(m.tok_dev, m.tok_host.data(), (size_t) T * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                m.cs) != cudaSuccess) {
+                err = "prefill: the token id upload failed";
+                return false;
+            }
+            if (nemb) {
+                nemb->gather_dev(m.tok_dev, T, m.emb, m.cs);
+            } else {
+                const auto* codes = (const uint8_t*) wemb->data;
+                const auto* scales = (const float*) (codes + wemb->codes_bytes);
+                const auto* offsets = wemb->has_offset ? (const float*) (codes + wemb->codes_bytes + wemb->scales_bytes)
+                                                       : nullptr;
+                strata::kernels::embedding_gather_dev(codes, scales, offsets, m.tok_dev, (int) T, wemb->ne0,
+                                                      wemb->code_bits, wemb->code_bias, wemb->group_elems,
+                                                      (uint64_t) (wemb->ne0 / (8 / wemb->code_bits)),
+                                                      (uint64_t) (wemb->ne0 / wemb->group_elems), m.emb, m.cs);
+            }
+        }
+        for (int64_t t = 0; hand_in_ == nullptr && !batched && t < T; ++t) {
             const float* row = embd_rows ? embd_rows[p0 + t] : nullptr;
             if (row) {
                 if (cudaMemcpyAsync(m.emb + t * N, row, (size_t) N * 4, cudaMemcpyHostToDevice, m.cs) != cudaSuccess) {
@@ -884,6 +932,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             }
         };
         if (stream_all) issue_until((size_t) m.ring);   // layer 0's first experts, behind the embedding and the PLE
+        host_setup_ms += ms_since(tsetup);
         for (int64_t l = LB; l < LE; ++l) {
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             const core::LayerView v(*m.wt, l);
@@ -1403,11 +1452,15 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             }
         }
         if (on_chunk) {
+            const auto toc = Clock::now();
             if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
                 err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
             }
+            const auto toc2 = Clock::now();
             if (!on_chunk(m.R, T, p0, err)) return false;
+            host_sync_ms += std::chrono::duration<double, std::milli>(toc2 - toc).count();
+            host_chunk_ms += ms_since(toc2);
         }
     }
     if (next_run.valid() && !next_run.get()) { err = next_err; return false; }
@@ -1449,6 +1502,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         }
         std::fprintf(stderr, "strata prefill timing: %lld tokens, GPU timeline %.0f ms, wall %.0f ms, host staging %.0f ms:%s\n",
                      (long long) n, total, ms_since(t_start), stats_.ms_experts_host, line.c_str());
+        std::fprintf(stderr, "strata prefill timing: host: chunk setup (PLE rows, the expert stream plan) %.0f ms, "
+                             "waiting for each chunk %.0f ms, after each chunk (the draft layer, progress) %.0f ms, "
+                             "PLE %.0f ms\n", host_setup_ms, host_sync_ms, host_chunk_ms, stats_.ms_ple);
     }
     if (std::getenv("STRATA_STATE_HASH_GDN") != nullptr) {   // debug: the GDN states as the prompt path leaves them
         cudaStreamSynchronize(m.cs);
