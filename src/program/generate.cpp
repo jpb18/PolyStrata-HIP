@@ -1723,6 +1723,11 @@ int main(int argc, char** argv) {
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
     if (o.mmap_experts) {
+        if (native_pack) {   // FileExpertSource maps the canonical pack's experts.bin; a native pack has none
+            std::fprintf(stderr, "strata generate: --mmap-experts needs a canonical pack (experts.bin); %s is a native "
+                                 "(IQ) pack, whose experts are loaded into the arena\n", o.pack.c_str());
+            return 2;
+        }
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -1933,6 +1938,20 @@ int main(int argc, char** argv) {
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
         std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved -> %d slots\n",
                      (double) free_b / 1073741824.0, o.vram_reserve_mib, o.expert_cache);
+    } else if (multi_gpu && o.expert_cache > 0) {
+        // a layer split's prompt path has its own buffers (it borrows no slots): an explicit cache size leaves room
+        // for them and the reserve, or the first prompt fails with "device buffers ... do not fit"
+        size_t free_b = 0, total_b = 0;
+        cudaMemGetInfo(&free_b, &total_b);
+        const int64_t prefill_mib = o.prefill_chunk > 0 ? 160 + (o.prefill_chunk * 680) / 1024 : 0;
+        const int64_t reserve = ((int64_t) o.vram_reserve_mib + prefill_mib) << 20;
+        const int64_t fit = std::max<int64_t>(((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob, 0);
+        if (o.expert_cache > fit) {
+            std::fprintf(stderr, "strata generate: layer split: --expert-cache %d leaves no room for the prompt path's "
+                                 "buffers (%lld MiB) on CUDA0: %lld slots\n", o.expert_cache, (long long) prefill_mib,
+                         (long long) fit);
+            o.expert_cache = (int) fit;
+        }
     }
     // plan v0.3 P6: a native pack's blobs differ per layer, so with a profile its slots are sized per pair: the
     // same VRAM holds ~30% more IQ3_XXS experts than slots of the largest blob would
