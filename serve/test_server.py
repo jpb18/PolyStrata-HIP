@@ -526,5 +526,108 @@ class WebApp(unittest.TestCase):
             self.svc.api_key = ""
 
 
+class ClockedEngine(MockEngine):
+    """The mock engine with StrataEngine's clock: `last` as the engine's DONE line gives it, the conversation cache
+    holding the first REUSED tokens of every prompt."""
+    REUSED = 5
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        n = 0
+        try:
+            for t in super().generate(ids, max_new, sampling, cancel, embeddings):
+                n += 1
+                yield t
+        finally:          # as StrataEngine reads its DONE line: also when the server closes the request at a stop token
+            self.last = {"generated": n, "prompt_tokens": len(ids), "prompt_ms": 40.0, "decode_ms": 20.0 * n,
+                         "finish": "stop", "reused": min(self.REUSED, len(ids)), "hits": 9, "lookups": 10}
+
+
+class UsageAndStatus(unittest.TestCase):
+    """What clients read besides the text: the part of the prompt the conversation cache held (OpenAI's
+    prompt_tokens_details.cached_tokens, Anthropic's cache_read_input_tokens), llama.cpp's timings, GET /v1/status."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.engine = ClockedEngine(tok, "</think>\n\nok", max_context=CTX)
+        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.httpd = serve(cls.svc, port=0)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def request(self, path, body=None):
+        req = urllib.request.Request(self.base + path, data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read()
+
+    def chat(self, path, stream=False):
+        body = {"model": "x", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}], "stream": stream}
+        status, raw = self.request(path, body)
+        self.assertEqual(status, 200)
+        if not stream:
+            return json.loads(raw)
+        return [json.loads(line[6:]) for line in raw.decode().splitlines()
+                if line.startswith("data: {")]
+
+    def test_openai(self):
+        b = self.chat("/v1/chat/completions")
+        u, t = b["usage"], b["timings"]
+        self.assertEqual(u["prompt_tokens_details"]["cached_tokens"], ClockedEngine.REUSED)
+        self.assertEqual(t["cache_n"], ClockedEngine.REUSED)
+        self.assertEqual(t["prompt_n"] + t["cache_n"], u["prompt_tokens"])
+        self.assertEqual(t["predicted_n"], u["completion_tokens"])
+        self.assertAlmostEqual(t["prompt_per_second"], t["prompt_n"] / 0.040, delta=0.1)
+        self.assertAlmostEqual(t["predicted_per_second"], 50.0, delta=0.1)            # 20 ms a token
+
+    def test_openai_stream(self):
+        last = self.chat("/v1/chat/completions", stream=True)[-1]
+        self.assertEqual(last["usage"]["prompt_tokens_details"]["cached_tokens"], ClockedEngine.REUSED)
+        self.assertEqual(last["timings"]["cache_n"], ClockedEngine.REUSED)
+
+    def test_anthropic(self):
+        u = self.chat("/v1/messages")["usage"]
+        self.assertEqual(u["cache_read_input_tokens"], ClockedEngine.REUSED)
+        self.assertEqual(u["input_tokens"] + u["cache_read_input_tokens"], len(self.engine.last_prompt))
+        self.assertGreater(u["output_tokens"], 0)
+
+    def test_v1_status(self):
+        self.chat("/v1/chat/completions")
+        status, raw = self.request("/v1/status")
+        self.assertEqual(status, 200)
+        s = json.loads(raw)
+        self.assertEqual(s["model"], self.svc.model)
+        self.assertEqual(s["context"]["max_positions"], CTX)
+        self.assertEqual(s["concurrency"]["serving"], 1)
+        self.assertFalse(s["vision"]["available"])
+        self.assertEqual(s["activity"]["in_flight"], 0)
+        self.assertGreaterEqual(s["activity"]["requests"], 1)
+        self.assertEqual(s["last_timings"]["cache_n"], ClockedEngine.REUSED)
+        self.assertIn("at", s["last_timings"])
+
+    def test_no_clock(self):
+        """An engine without a clock (MockEngine): no timings, nothing cached."""
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        try:
+            data = json.dumps({"model": "x", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions", data=data,
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                b = json.loads(r.read())
+            self.assertNotIn("timings", b)
+            self.assertEqual(b["usage"]["prompt_tokens_details"]["cached_tokens"], 0)
+            self.assertIsNone(svc.v1_status()["last_timings"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()
