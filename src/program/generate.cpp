@@ -1711,6 +1711,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: loaded %.2f GiB at %.2f GiB/s\n",
                      (double) strata::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
                      arena_src.load_gib_per_second());
+        // A rate under ~0.2 GiB/s is not the hardware.  Task Scheduler / service contexts throttle this
+        // read+fill about 24x (measured 0.05 vs 1.42 GiB/s for the same binary, args and cache state; the
+        // scheduler's defaults - Below normal priority and a least-privilege token - were the only
+        // difference between the runs).  Say so instead of letting the user blame the disk; see
+        // docs/DETAILS.md, "Running it at startup (Task Scheduler)".
+        if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
+            std::fprintf(stderr,
+                         "strata generate: hint: ~24x below what this hardware streams from a normal "
+                         "launch. If Strata is started by Task Scheduler or a service, register the task "
+                         "with Priority 4 (Normal) and 'Run with highest privileges' - the scheduler's "
+                         "defaults (Below normal + a least-privilege token) throttle the load. See "
+                         "docs/DETAILS.md ('Running it at startup').\n");
+        }
         srcp = &arena_src;
     }
     strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker);
