@@ -230,7 +230,9 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     window_ = (window > 0 && window < max_cells) ? window : 0;
     cap_ = (((window_ > 0 ? window_ : max_cells) + 63) / 64) * 64;
     attn_scratch_floats_ = (int64_t) strata::kernels::qsa_decode_attn_scratch_floats(cap_, s);
-    const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
+    // E-8: the row buffers hold kVerifyMaxT rows (the prompt pass runs 8 rows a time; the rounds use max_t)
+    const uint64_t T = (uint64_t) std::max(max_t, strata::kernels::kVerifyMaxT), N = (uint64_t) g.n_embd,
+                   HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
     const uint64_t NH = (uint64_t) g.n_head, HD = (uint64_t) g.head_dim, NKV = (uint64_t) g.n_head_kv;
     const uint64_t R2 = 2 * T;   // step/pos rows: T catch-up rows + up to T-2 chain steps
     bool ok = mapped(T * 4 + 64, (void**) &h_tok_, (void**) &m_tok_) &&
@@ -621,8 +623,15 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
         const int32_t* d_tk = pf_dev_;
         const int32_t* d_stp = d_tk + n;
         const int32_t* d_ps = d_stp + 4 * n;
-        for (int64_t c = 0; c < n; c += max_t_) {
-            const int T = (int) std::min<int64_t>(max_t_, n - c);
+        // E-8: 8 rows a group (the kernels' batch limit), not max_t: a third fewer passes over the layer's weights.
+        // STRATA_MTP_PREFILL_T=N (1..8) sets it (the A/B arm: 6 = max_t with --spec 4)
+        static const int pf_t = [] {
+            const char* v = std::getenv("STRATA_MTP_PREFILL_T");
+            const int t = v ? std::atoi(v) : strata::kernels::kVerifyMaxT;
+            return std::clamp(t, 1, strata::kernels::kVerifyMaxT);
+        }();
+        for (int64_t c = 0; c < n; c += pf_t) {
+            const int T = (int) std::min<int64_t>(pf_t, n - c);
             if (cell0 + c + T <= first_needed) continue;
             if (!capture_prefill_dev(T, err)) return false;
             if (cudaMemcpyAsync(tok_, d_tk + c, (size_t) T * 4, cudaMemcpyDeviceToDevice, cs_) != cudaSuccess ||
