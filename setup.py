@@ -1456,8 +1456,17 @@ def main() -> int:
     rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 and "IQ3_XXS" in names else "1"
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
     if ram < MODELS[model]["ram_gb"] - 4:
-        fail(f"{model} needs about {MODELS[model]['ram_gb']} GB of RAM; this PC has {ram:.0f} GB",
-             "choose Q2_0 or IQ2_XS, or add RAM")
+        # #125: a warning and a question, not a stop: the user may accept paging (asked, "no" by default, so an
+        # unattended --yes install still stops here)
+        need_gb, arena = MODELS[model]["ram_gb"], MODELS[model]["arena_gb"]
+        warn(f"{model} needs about {need_gb} GB of RAM and this PC has {ram:.0f} GB: its experts alone are "
+             f"{arena:.0f} GB and must stay in RAM, so Windows/Linux will page part of them from disk. Expect it "
+             "to be much slower, and it may not start at all.")
+        say("       A smaller size (Q2_0 or IQ2_XS) fits; more RAM fixes it.")
+        if ask("  Install it anyway?", ["y", "n"], "n", a.yes) != "y":
+            fail(f"{model} needs about {need_gb} GB of RAM; this PC has {ram:.0f} GB",
+                 "choose Q2_0 or IQ2_XS, or add RAM")
+        warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
     ok(f"size: {model}")
     tag = fam["tag"] + model                           # names of the pack, config and start script
     small = min(x["vram_gb"] for x in chosen)         # each card keeps its layers' KV of the whole context
