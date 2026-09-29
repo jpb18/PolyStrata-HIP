@@ -52,15 +52,40 @@ struct PinnedArena {
 
 struct LoadStats {
     double seconds = 0.0;
+    // Loader fix: the two halves of `seconds`, both SUMMED OVER THE READER THREADS rather than wall clock, so
+    // either can exceed `seconds` when the threads overlap.  They exist to separate the read from the copy and
+    // the hash: an 8 MiB chunk that reaches the disk as ~2048 4 KiB reads spends its time in the first one.
+    double read_seconds = 0.0;                  // inside the read call only: no seek, no copy, no hash
+    double copy_seconds = 0.0;                  // memcpy + FNV-1a
+    // A short read is not a slow load, it is a WRONG one: the caller must refuse the pack rather than run
+    // on an arena whose tail was never written.  `seconds` alone cannot say that (it is -1.0 on failure, but
+    // the caller's own check is on the REQUESTED byte count, which a refused read does not change).
+    bool ok = true;                             // false: the load failed, see `error`
+    std::string error;                          // why it failed, for the caller's message
     uint64_t bytes = 0;
     uint64_t layers = 0;
     std::vector<uint64_t> layer_checksums;      // one FNV-1a per layer
     double gib_per_second() const { return seconds > 0 ? (double) bytes / (1024.0 * 1024 * 1024) / seconds : 0.0; }
+    // Aggregate rate of the readers WHILE THEY WERE INSIDE THE READ CALL: `bytes` over the mean per-thread
+    // read time.  `gib_per_second()` above divides the same bytes by the wall clock of the whole loop, which
+    // also contains the copy and the hash, so the two differ by how much of the loop was not I/O.
+    double read_gib_per_second(int threads) const {
+        if (read_seconds <= 0.0 || threads < 1) return 0.0;
+        return (double) bytes / (1024.0 * 1024 * 1024) / (read_seconds / (double) threads);
+    }
 };
 
 // Load `layers` layers of the expert arena into `dst` with `threads` readers, `chunk` bytes at a time.
 // Each thread opens its OWN handle and seeks, which is the portable form of parallel pread: a shared handle
 // needs a lock around the seek and defeats the parallelism on Windows.
+//
+// The reads go through `fread()` on a per-thread `FILE*`, NOT through `std::ifstream`.  MSVC's
+// `basic_filebuf::xsgetn` splits every request larger than `_INTERNAL_BUFSIZ - 1` into 4095-byte `fread()`
+// calls, so an 8 MiB `chunk` reached the disk as ~2048 4 KiB operations and the chunking did nothing at all
+// (measured on a 42.9 GB pack: 1222 s, 4096 bytes per operation, 0.03 GiB/s).  `fread()` hands a request
+// larger than the stream buffer straight to `_read()`/`ReadFile()`, which is what `chunk` is for.  The
+// control flow, the copy, the per-layer FNV-1a and therefore the checksums are unchanged, so a pack loaded
+// by the old and the new reader must produce identical `layer_checksums`.
 LoadStats load_experts(const std::string& path, uint8_t* dst, uint64_t blob_bytes, uint64_t blobs_per_layer,
                        uint64_t layers, int threads, uint64_t chunk);
 /// Plan v0.3 P6: the same with one byte range per layer (`layer_off[L]`, `layer_bytes[L]`).

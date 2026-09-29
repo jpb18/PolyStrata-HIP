@@ -341,6 +341,12 @@ public:
     /// only true if the engine says what it got.
     const std::string& note() const { return note_; }
     double load_gib_per_second() const { return gib_per_s_; }
+    // Loader fix: the load, split.  `load_seconds()` is the wall clock of the load loop; the other two are
+    // sums over the reader threads (see LoadStats), so on their own they say how much of that wall was spent
+    // waiting for the disk and how much in memcpy + FNV-1a.
+    double load_seconds() const { return load_seconds_; }
+    double load_read_seconds() const { return load_read_s_; }
+    double load_copy_seconds() const { return load_copy_s_; }
 
 private:
     void* arena_ = nullptr;          ///< the PinnedArena, owned
@@ -352,6 +358,9 @@ private:
     int64_t reads_ = 0;
     std::string note_;
     double gib_per_s_ = 0.0;
+    double load_seconds_ = 0.0;
+    double load_read_s_ = 0.0;
+    double load_copy_s_ = 0.0;
     uint64_t pinned_bytes_ = 0;
     std::string gguf_;
 };
