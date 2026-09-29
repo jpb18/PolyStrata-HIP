@@ -1070,20 +1070,31 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     // a query reads completed blocks (final once completed) and `dead` for its own tail block
                     const strata::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
                     pt.mark(kPfQsaIdx, cs);
-                    for (int64_t t = 0; t < T; ++t) {
-                        const int32_t* step_t = m.steps_dev + t * strata::kernels::kStepCount;
-                        try {
+                    // C-2: the chunk's appends in three launches instead of one per token (the same end state:
+                    // the queries below read it only after the whole chunk is appended). STRATA_INDEXER_PER_TOKEN=1: the old
+                    try {
+                        static const bool per_token = std::getenv("STRATA_INDEXER_PER_TOKEN") != nullptr;
+                        if (!per_token) {
+                            strata::kernels::native_qsa_indexer_append_batch(m.idx_raw, T, p0, 0, (const float*) wikn->data,
+                                                                             EPS, ib, s, st.max_cells,
+                                                                             (float) strata::kernels::qsa_freq_base(), m.cs);
+                        }
+                        for (int64_t t = 0; per_token && t < T; ++t) {
+                            const int32_t* step_t = m.steps_dev + t * strata::kernels::kStepCount;
                             strata::kernels::native_qsa_indexer_append(m.idx_raw + t * 128, step_t + strata::kernels::kStepPos, 0,
                                                                        (const float*) wikn->data, EPS, ib, s, st.max_cells,
                                                                        (float) strata::kernels::qsa_freq_base(), m.cs);
-                        } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
-                    }
+                        }
+                    } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
                     pt.mark(kPfQsaSel, cs);
                     for (int64_t t0 = 0; t0 < T; t0 += m.sel_batch) {
                         const int64_t nb = std::min(m.sel_batch, T - t0);
                         const int32_t* steps0 = m.steps_dev + t0 * strata::kernels::kStepCount;
+                        // C-1: the grid reaches the batch's last query's n_bid (they rise with the position)
+                        const int64_t active = (int64_t) m.steps_host[(size_t) ((t0 + nb - 1) * strata::kernels::kStepCount +
+                                                                                strata::kernels::kStepNBid)] + 1;
                         strata::kernels::qsa_block_scores(st.idx_pooled, st.idx_dead, m.q_idx + t0 * 512, steps0, nb,
-                                                          m.max_blocks, s, m.sel_scores, m.cs);
+                                                          m.max_blocks, s, m.sel_scores, m.cs, active);
                         strata::kernels::qsa_block_topk(m.sel_scores, steps0, nb, m.max_blocks, m.cap, s,
                                                         m.sel_ids + t0 * m.cap, m.cs);
                     }
