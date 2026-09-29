@@ -73,6 +73,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <charconv>
 #include <cmath>
@@ -3121,19 +3122,35 @@ int main(int argc, char** argv) {
             return v;
         };
         // a checkpoint of the state after `cur[0, L)`; false only when the copy itself failed
-        auto checkpoint_at = [&](int64_t L) -> bool {
+        // A layer split's mid-prompt checkpoints: when the last stage reports a chunk, the earlier ones already read
+        // the next, so each stage saves its own part when IT reaches a checkpoint position (the same rule as below:
+        // every `prompt_cache_every` tokens from where the request resumed), and the last stage puts them together.
+        std::mutex part_mu;
+        std::map<int64_t, std::vector<ConvCheckpoint>> part_at;   // position -> one part per stage
+        std::vector<int64_t> part_next(stages.size() + 1, INT64_MAX);
+        // a checkpoint of the state after `cur[0, L)`; false only when the copy itself failed.  `parts`: the stages'
+        // states saved at L (a split's mid-prompt checkpoint); without, they are read now (everything is at L)
+        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr) -> bool {
             if (o.prompt_cache <= 0 || L < 1) return true;
             for (ConvCheckpoint& c : checks)
                 if ((int64_t) c.ids.size() == L) { c.used = ++check_clock; return true; }
             ConvCheckpoint c;
             c.ids.assign(cur.begin(), cur.begin() + L);
             c.imgs = imgs_below(req_imgs, L);
-            if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(c, ss, g)) return false;
-            for (auto& st : stages) {   // a layer split's later stages: their sessions' part
-                const strata::core::OnDevice on(st->dev);
-                ConvCheckpoint part;
-                if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(part, st->ss, g)) return false;
-                c.stage_parts.push_back(std::move(part));
+            if (parts != nullptr) {
+                if (parts->size() != stages.size() + 1) return false;
+                c.gdn = std::move((*parts)[0].gdn);
+                c.ple = std::move((*parts)[0].ple);
+                c.tails = std::move((*parts)[0].tails);
+                for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
+            } else {
+                if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(c, ss, g)) return false;
+                for (auto& st : stages) {   // a layer split's later stages: their sessions' part
+                    const strata::core::OnDevice on(st->dev);
+                    ConvCheckpoint part;
+                    if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(part, st->ss, g)) return false;
+                    c.stage_parts.push_back(std::move(part));
+                }
             }
             c.used = ++check_clock;
             checks.push_back(std::move(c));
@@ -3159,8 +3176,23 @@ int main(int argc, char** argv) {
             strata::core::progress_at("reading the prompt (batched), done up to token", done);
             strata::core::progress_beat();
             std::fflush(stdout);
-            if (o.prompt_cache_every > 0 && done >= pp_next_check && !multi_gpu) {   // split: stage 0 is ahead
-                if (!checkpoint_at(done)) { e = "saving a conversation checkpoint failed"; return false; }
+            if (o.prompt_cache_every > 0 && done >= pp_next_check) {
+                bool saved = false;
+                if (multi_gpu) {   // the stages' parts, saved when each of them read this chunk
+                    std::vector<ConvCheckpoint> parts;
+                    {
+                        std::lock_guard<std::mutex> lk(part_mu);
+                        auto it = part_at.find(done);
+                        if (it != part_at.end()) parts = std::move(it->second);
+                        part_at.erase(part_at.begin(), part_at.upper_bound(done));
+                    }
+                    bool complete = parts.size() == stages.size() + 1;
+                    for (const ConvCheckpoint& k : parts) complete = complete && !k.gdn.empty();
+                    saved = !complete || checkpoint_at(done, &parts);   // an incomplete set: no checkpoint here
+                } else {
+                    saved = checkpoint_at(done);
+                }
+                if (!saved) { e = "saving a conversation checkpoint failed"; return false; }
                 pp_next_check = done + o.prompt_cache_every;
             }
             return true;
@@ -3168,6 +3200,21 @@ int main(int argc, char** argv) {
         if (multi_gpu) {   // the batched prompt is reported by its last stage (the drafter's rows are there)
             stages.back()->sp.on_chunk = std::move(sp.on_chunk);
             sp.on_chunk = nullptr;
+            for (size_t i = 0; i <= stages.size(); ++i) {
+                strata::prefill::Prefill& stage_sp = i == 0 ? sp : stages[i - 1]->sp;
+                strata::core::SessionState& stage_ss = i == 0 ? ss : stages[i - 1]->ss;
+                stage_sp.on_stage_chunk = [&, i](int64_t done, std::string& e) -> bool {
+                    if (o.prompt_cache <= 0 || o.prompt_cache_every <= 0 || done < part_next[i]) return true;
+                    part_next[i] = done + o.prompt_cache_every;
+                    ConvCheckpoint part;   // this stage's state at `done` (its stream is synchronized)
+                    if (!checkpoint_save(part, stage_ss, g)) { e = "saving a checkpoint part failed"; return false; }
+                    std::lock_guard<std::mutex> lk(part_mu);
+                    auto& v = part_at[done];
+                    v.resize(stages.size() + 1);
+                    v[i] = std::move(part);
+                    return true;
+                };
+            }
         }
         drive.d.plan = ver.plan_sink();
         drive.d.pcie_num = std::max(0, std::min(256, (int) (o.pcie_frac * 256.0 + 0.5)));
@@ -3665,6 +3712,11 @@ int main(int argc, char** argv) {
             pp_from = read_from;
             pp_t0 = r0;
             pp_next_check = reread_to > 0 ? INT64_MAX : resume + o.prompt_cache_every;
+            {
+                std::lock_guard<std::mutex> lk(part_mu);
+                part_at.clear();
+                std::fill(part_next.begin(), part_next.end(), pp_next_check);
+            }
             std::printf("RESUME %lld\n", (long long) resume);   // before reading: this many prompt tokens are reused
             strata::core::progress_at("reading the prompt, from token", read_from);
             std::fflush(stdout);

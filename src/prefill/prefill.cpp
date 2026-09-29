@@ -1381,6 +1381,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 err = std::string("prefill: the layer split's hand-off: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
             }
+            // this stage's state is at the chunk's end now (synced) and moves on with the next chunk below
+            if (on_stage_chunk && !on_stage_chunk(p0 + T, err)) return false;
             if (next_run.valid() && !next_run.get()) { err = next_err; return false; }
             next_->hand_in_ = h;
             next_run = std::async(std::launch::async, [this, tokens, c0, T, p0, &next_err] {
@@ -1402,12 +1404,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 std::fclose(f);
             }
         }
-        if (on_chunk) {
+        if (on_chunk || on_stage_chunk) {
             if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
                 err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
                 return false;
             }
-            if (!on_chunk(m.R, T, p0, err)) return false;
+            if (on_stage_chunk && !on_stage_chunk(p0 + T, err)) return false;
+            if (on_chunk && !on_chunk(m.R, T, p0, err)) return false;
         }
     }
     if (next_run.valid() && !next_run.get()) { err = next_err; return false; }
