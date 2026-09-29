@@ -19,6 +19,24 @@ of a word): faster than you can read.
 
 ---
 
+
+> **Intel Arc port (this fork).** Strata's engine is CUDA. This fork adds a path for Intel Arc cards
+> that runs the same GGUF weights through llama.cpp's SYCL backend behind Strata's own server, web app
+> and APIs. It was developed and tested on this rig, so those are the numbers you will see quoted:
+>
+> | | |
+> |---|---|
+> | GPU | Intel Arc Pro B70, 32 GB (Battlemage G31, PCI `8086:e223`), `xe` kernel driver |
+> | CPU / RAM | AMD Ryzen 7 1700X (8 cores, AVX2, no AVX-512) / 23 GiB |
+> | OS | Ubuntu 24.04.5 LTS, kernel 7.0, Docker 29, Python 3.12 |
+> | Storage | 2 TB PCIe NVMe (the model's 28.8 GB lookup table is paged from it) |
+> | Engine | llama.cpp 0.4.1-dev (b29c606), community SYCL build for the B70, oneAPI 2026.1, `ghcr.io/snailium/llama.cpp-sycl-intel-b70` |
+> | Model | Qwen3.8-Flash-Next GSQ-RCO **Coder**, IQ1_M: all 29.6 GB of shard 1 on the card |
+> | Measured | 23-25 tok/s decode (GPU-bound), ~150 tok/s prompt reading, correct code; see [docs/INTEL.md](docs/INTEL.md) |
+>
+> No CUDA, no compiler: `./setup.sh` detects the Arc and does the rest. Not yet on this path: images
+> and MTP speculative decoding. Everything below this box is the original README for NVIDIA cards.
+
 ## How fast is it?
 
 Measured on an RTX 5070 (12 GB), a Ryzen 5 7600 and 64 GB of RAM:
