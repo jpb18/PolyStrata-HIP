@@ -13,7 +13,7 @@ What the first run does (each step is skipped when it is already done):
   1. checks your PC: NVIDIA GPU and driver, RAM, CPU, free disk space
   2. asks the questions
   3. installs the Python packages it needs into .venv (numpy, jinja2, ..., and NVIDIA's CUDA libraries)
-  4. gets the Strata engine: a ready-made build for RTX 30/40/50 cards (no compiler needed); if none fits your PC,
+  4. gets the Strata engine: a ready-made build for RTX 20/30/40/50 cards (no compiler needed); if none fits your PC,
      it installs the build tools (asks first) and compiles the engine for your GPU
   5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
@@ -1671,7 +1671,7 @@ def main() -> int:
             say("  (the AMD card: ./setup.sh --backend hip)")
     if hip:                                            # AMD (experimental): one card, compiled here
         if WIN:
-            fail("Strata's AMD backend runs on Linux only", "use an NVIDIA RTX 30 series or newer card on Windows")
+            fail("Strata's AMD backend runs on Linux only", "use an NVIDIA RTX 20 series or newer card on Windows")
         say("  Your AMD GPUs:" if amd else "  No AMD GPU found (the amdgpu driver's KFD topology is empty).")
         for g in amd:
             say(f"    GPU {g['index']}: {g['name']}, {g['vram_gb']:.0f} GB VRAM - " + (amd_problem(g) or "can be used"))
@@ -1882,6 +1882,12 @@ def main() -> int:
         if vision != "none" and not (eng / VEXE).exists():
             warn("the ready-made engine has no image encoder: compiling it")
             eng = None
+        elif vision == "gpu":                          # the encoder can cover fewer cards than the engine (RTX 20)
+            m = json.loads((eng / "BUILD.json").read_text())
+            va = [int(x) for x in m.get("vision_archs", m.get("archs", []))]
+            if va and int(gpu["arch"]) not in va and not (m.get("ptx") and int(gpu["arch"]) > max(va)):
+                warn(f"the ready-made image encoder has no code for your GPU (sm_{gpu['arch']}): compiling it")
+                eng = None
     if eng is None:
         eng = build_engine_hip(gpu, llama) if hip else build_engine(gpu, vision, a.yes, llama)
     meta = json.loads((eng / "BUILD.json").read_text())
