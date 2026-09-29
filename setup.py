@@ -345,9 +345,10 @@ def check_gpus(sel, found, what="") -> None:
         gpu_table(found)
         can = together_ok(found)
         single = [x for x in found if gpu_problem(x) is None]
-        hint = ("use them together with --gpus " + ",".join(str(x["index"]) for x in can) if can else
-                "use one GPU with --gpu " + str(single[0]["index"]) if single else
-                "Strata needs an NVIDIA RTX 30 series or newer card")
+        ones = " or ".join(f"--gpu {x['index']}" for x in single)
+        both = "--gpus " + ",".join(str(x["index"]) for x in can) if can else ""
+        hint = ((f"use these together: {both}" + (f" (or one card: {ones})" if not together else "")) if can else
+                f"use one card: {ones}" if single else "Strata needs an NVIDIA RTX 30 series or newer card")
         fail(f"GPU {i}{'' if g is None else ' (' + g['name'] + ')'} {what}cannot be used: {p}", hint)
 
 
