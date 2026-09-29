@@ -836,6 +836,7 @@ bool Verifier::capture(int T, std::string& err) {
         err = std::string("verify: end capture: ") + cudaGetErrorString(ce);
         return false;
     }
+#if !defined(STRATA_USE_HIP)   // a CUDA debug listing (node types, kernel names)
     if (std::getenv("STRATA_VERIFY_NODES") != nullptr) {   // what the window graph holds
         size_t nn = 0;
         cudaGraphGetNodes(graph, nullptr, &nn);
@@ -863,6 +864,7 @@ bool Verifier::capture(int T, std::string& err) {
         for (size_t i = 0; i < v.size() && i < 40; ++i) std::fprintf(stderr, " %d x %.60s;", v[i].first, v[i].second.c_str());
         std::fprintf(stderr, "\n");
     }
+#endif
     const cudaError_t ie = cudaGraphInstantiate(&exec_[T], graph, 0);
     cudaGraphDestroy(graph);
     if (ie != cudaSuccess) {

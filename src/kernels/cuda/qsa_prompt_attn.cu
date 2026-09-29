@@ -25,7 +25,9 @@ constexpr int QS = HD + 8;        // q row stride in halves (bank-conflict-free 
 
 // The MMA and cp.async below need sm_80. Builds for older cards (the experimental sm_75 one) compile them to a trap;
 // qsa_prompt_attn_batch refuses such a device at run time, so the old kernel runs there.
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+#if defined(__HIPCC__)          // AMD: no mma.sync / cp.async; the host keeps the old kernel (below)
+#define STRATA_PA_SM80 0
+#elif !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
 #define STRATA_PA_SM80 1
 #else
 #define STRATA_PA_SM80 0
@@ -689,6 +691,9 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         }
         if (cc_major[dev] < 8) return false;
     }
+#if defined(__HIPCC__)
+    return false;   // the tensor-core kernel is compiled out on AMD (its major version is not a CUDA sm)
+#endif
     if (pools.k_q4 != nullptr || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids ||
         !steps || !pools.page_table)
         return false;
