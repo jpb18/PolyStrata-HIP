@@ -2975,6 +2975,8 @@ int main(int argc, char** argv) {
         vh.d_res = thits.d_res;
         vh.cache_base = thits.cache_base;
         vh.blob = thits.blob;
+        vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
+        vh.n_slots = xcache.slots();
         // Layer split: `ver` runs layers [0, K1) and hands its residual to the next stage's verifier, and so on; the
         // last runs the head.  The hand-offs are mapped pinned memory, portable: a stage on another GPU reads it.
         // (--split-device 0: the second stage on this GPU, sharing its weights, session and cache - the A/B.)
@@ -3019,6 +3021,8 @@ int main(int argc, char** argv) {
                     vs.d_res = gs.d_res;
                     vs.cache_base = gs.cache.device_slot(0);
                     vs.blob = thits.blob;
+                    vs.slot_off = gs.cache.slot_offsets();
+                    vs.n_slots = gs.cache.slots();
                     ok_s = gs.ver.init(gs.wt, g, gs.ss, vs, gs.head.loaded() ? &gs.head : nullptr, o.spec, err);
                     split_drive.cache_base[st] = gs.cache.device_slot(0);
                     split_drive.cache_slot_off[st] = gs.cache.slot_offsets();
@@ -4395,6 +4399,8 @@ int main(int argc, char** argv) {
         vh.d_res = thits.d_res;
         vh.cache_base = thits.cache_base;
         vh.blob = thits.blob;
+        vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
+        vh.n_slots = xcache.slots();
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;

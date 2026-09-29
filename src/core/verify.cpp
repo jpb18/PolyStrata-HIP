@@ -274,6 +274,20 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         err = "verify: stream create failed";
         return false;
     }
+    // E-6: a layer whose routed experts are all resident is planned on the device (STRATA_VERIFY_DEVICE_PLAN=0: off)
+    {
+        const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
+        device_plan_ = v == nullptr || std::atoi(v) != 0;
+    }
+    if (device_plan_) {
+        bool ok2 = cudaMalloc((void**) &skip_, 64) == cudaSuccess && cudaMemset(skip_, 0, 64) == cudaSuccess;
+        if (ok2 && hits.slot_off != nullptr && hits.n_slots > 0) {
+            ok2 = cudaMalloc((void**) &slot_off_d_, (size_t) hits.n_slots * sizeof(unsigned long long)) == cudaSuccess &&
+                  cudaMemcpy(slot_off_d_, hits.slot_off, (size_t) hits.n_slots * sizeof(unsigned long long),
+                             cudaMemcpyHostToDevice) == cudaSuccess;
+        }
+        if (!ok2) { cudaGetLastError(); device_plan_ = false; }
+    }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
                  (double) count.used / 1048576.0);
     return true;
@@ -530,6 +544,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
             if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr)) return false;
         }
+        if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
+            resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
+                          hits_.cache_base, slot_off_d_, (long long) hits_.blob,
+                          plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
+                          (uint32_t) ((l - lb_) * G + grp + 1), cs);
         doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
                          m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
         {
@@ -564,10 +583,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     auto post = [&](int64_t l, int grp) -> bool {
         const int tb = tb_[grp], te = te_[grp], n = te - tb;
         const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
-        wait_flag_ge(m_flagA_, ring, cs);                      // the pool published this group's GPU plan
         const int64_t cap = (int64_t) n * K, capx = (int64_t) max_t_ * K;
         int32_t* pl = plan_ + (size_t) grp * (size_t) (plan_i32_ + 16);
-        copy_i32_from_mapped(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, cs);
+        if (device_plan_) {   // E-6: skipped when the device planned this group (all its experts resident)
+            wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
+            copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
+        } else {
+            wait_flag_ge(m_flagA_, ring, cs);                  // the pool published this group's GPU plan
+            copy_i32_from_mapped(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, cs);
+        }
         const int32_t* p_counts = pl;
         const int32_t* p_start = pl + 4;
         const int32_t* p_dst = p_start + capx + 1;
@@ -592,7 +616,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             }
         };
         grouped(p_ptr, p_start, p_counts);
-        wait_flag_ge(m_flagB_, ring, cs);                      // the PCIe share is in staging (DMA) or mapped
+        if (device_plan_) wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
+        else wait_flag_ge(m_flagB_, ring, cs);                 // the PCIe share is in staging (DMA) or mapped
         if (sink_.pcie_mode == 2) {                            // stage it with a copy kernel, then point at staging
             const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
             uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
@@ -600,8 +625,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
         }
         grouped(p_ptr2, p_start2, p_counts + 2);
-        wait_flag_ge(m_flag_, ring, cs);                       // the CPU's share is in the mapped rows
-        copy_from_mapped(parts_ + (size_t) tb * K * N, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
+        if (device_plan_) {   // no CPU share when the device planned the group: its rows are zeros
+            wait_flag_ge_or(m_flag_, ring, skip_ + grp, cs);
+            copy_or_zero_from_mapped(parts_ + (size_t) tb * K * N, m_ymiss_ + (size_t) tb * K * N, (long long) n * K * N,
+                                     skip_ + grp, ring, cs);
+        } else {
+            wait_flag_ge(m_flag_, ring, cs);                   // the CPU's share is in the mapped rows
+            copy_from_mapped(parts_ + (size_t) tb * K * N, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
+        }
         moe_hit_add(parts_ + (size_t) tb * K * N, hit_out, p_dst, p_counts + 1, cap, N, cs);
         for (int t = tb; t < te; ++t) {
             MoEBuffers mb = ss.moe;
