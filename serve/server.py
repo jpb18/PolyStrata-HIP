@@ -4,7 +4,7 @@
     python -m serve.server --engine strata --config strata.json --port 8080   (the real engine, resident)
 
 Endpoints: POST /v1/chat/completions (OpenAI, stream and non-stream), POST /v1/messages (Anthropic, stream and
-non-stream), GET /v1/models, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
+non-stream), GET /v1/models, GET /models, GET /props, GET /slots, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
 Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config) are offered only to requests that
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
@@ -38,6 +38,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterator, Protocol
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -150,6 +151,8 @@ class StrataEngine:
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None):
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
+        paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
+        self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
         self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
@@ -1196,9 +1199,24 @@ def make_handler(svc: Service):
                 for k in ("started", "first_token"):
                     s.pop(k, None)
                 self._json(200, s)
-            elif path == "/v1/models":
+            elif path in ("/v1/models", "/models"):
                 if self._authorized():
-                    self._json(200, {"object": "list", "data": [{"id": svc.model, "object": "model"}]})
+                    loaded = not hasattr(svc.engine, "alive") or svc.engine.alive()
+                    model = {"id": svc.model, "object": "model", "status": {"value": "loaded"},
+                             "meta": {"n_ctx": svc.engine.max_context},
+                             "architecture": {"input_modalities": ["text", "image"] if svc.vision is not None else ["text"],
+                                              "output_modalities": ["text"]}}
+                    self._json(200, {"object": "list", "data": [model] if loaded else []})
+            elif path == "/props":
+                if self._authorized():
+                    self._props()
+            elif path == "/slots":
+                if self._authorized():
+                    loaded = not hasattr(svc.engine, "alive") or svc.engine.alive()
+                    with svc.status_lock:
+                        busy = bool(svc.status.get("busy"))
+                    slot = {"id": 0, "n_ctx": svc.engine.max_context, "is_processing": busy}
+                    self._json(200, [slot] if loaded else [])
             else:
                 self._json(404, {"error": {"message": "not found"}})
 
@@ -1221,6 +1239,31 @@ def make_handler(svc: Service):
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
             except EngineDied as e:                          # before the answer started (not streamed)
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
+
+        def _props(self):
+            model = parse_qs(urlsplit(self.path).query).get("model", [svc.model])[0]
+            if model != svc.model:
+                self._json(404, {"error": {"message": "model not found"}})
+                return
+            if hasattr(svc.engine, "alive") and not svc.engine.alive():
+                self._json(503, {"error": {"message": "the engine is not running"}})
+                return
+            defaults = {**svc.sampling_defaults, **svc.shared}
+            names = {"repetition_penalty": "repeat_penalty", "penalty_last_n": "repeat_last_n"}
+            params = {names.get(k, k): v for k, v in defaults.items()
+                      if k in ("temperature", "top_p", "top_k", "min_p", "seed", "repetition_penalty",
+                               "presence_penalty", "frequency_penalty", "penalty_last_n")}
+            params["n_predict"] = svc.shared.get("max_tokens", -1)
+            props = {"default_generation_settings": {"n_ctx": svc.engine.max_context, "params": params},
+                     "total_slots": 1, "model_alias": svc.model, "chat_template": svc.template.source,
+                     "modalities": {"vision": svc.vision is not None}, "models_autoload": False,
+                     "is_sleeping": False}
+            if getattr(svc.engine, "model_path", None):
+                props["model_path"] = svc.engine.model_path
+            version = getattr(svc.engine, "info", {}).get("version")
+            if version:
+                props["build_info"] = "Strata " + str(version)
+            self._json(200, props)
 
         def _own_page(self, what) -> bool:
             """Only JSON (a form or a "simple" cross-site request can't send it without a CORS preflight, which this
