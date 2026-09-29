@@ -233,6 +233,67 @@ __global__ void __launch_bounds__(S * RG) gdn_rec_kernel(float* __restrict__ sta
     for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
 }
 
+// D-2: the recurrence with the value columns split over 4 blocks per head (4x the blocks of the kernel above, a
+// quarter of its threads per __syncthreads), and the output norm - the only step that couples the head's columns -
+// in its own kernel. Per column the same arithmetic in the same order (the 4 row-group partial sums added as
+// red[0] + red[1] + red[2] + red[3]; the norm's warp sums over the same 32-column warps): the same bits.
+constexpr int CB = 32, NCB = S / CB;
+__global__ void __launch_bounds__(CB * RG) gdn_rec_cols_kernel(float* __restrict__ state, const float* __restrict__ h,
+                                                                const float* __restrict__ gate,
+                                                                const float* __restrict__ beta,
+                                                                float* __restrict__ oc_out, int64_t T) {
+    __shared__ float sk[S], sq[S], red[RG][CB];
+    const int head = blockIdx.x / NCB, cb = blockIdx.x % NCB;
+    const int c = threadIdx.x, rg = threadIdx.y, tid = rg * CB + c, col = cb * CB + c;
+    const int qh = head % HK;
+    float s[RPG];
+    float* base = state + ((size_t) (rg * RPG) * HV + head) * S + col;
+    const size_t rs = (size_t) HV * S;
+#pragma unroll
+    for (int r = 0; r < RPG; ++r) s[r] = base[r * rs];
+    for (int64_t t = 0; t < T; ++t) {
+        const float* ht = h + t * C;
+        __syncthreads();
+        if (tid < S) { sq[tid] = ht[qh * S + tid]; sk[tid] = ht[HK * S + qh * S + tid]; }
+        __syncthreads();
+        const float g = __expf(gate[t * HV + head]);
+        float kv = 0.0f;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], sk[rg * RPG + r], kv);
+        red[rg][c] = kv;
+        __syncthreads();
+        const float kv_col = red[0][c] + red[1][c] + red[2][c] + red[3][c];
+        const float delta = (ht[2 * HK * S + head * S + col] - g * kv_col) * beta[t * HV + head];
+        float o = 0.0f;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) {
+            s[r] = fmaf(g, s[r], sk[rg * RPG + r] * delta);
+            o = fmaf(s[r], sq[rg * RPG + r], o);
+        }
+        __syncthreads();
+        red[rg][c] = o;
+        __syncthreads();
+        if (rg == 0) oc_out[t * HV * S + head * S + col] = (red[0][c] + red[1][c] + red[2][c] + red[3][c]) * rsqrtf((float) S);
+    }
+#pragma unroll
+    for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
+}
+__global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
+                                                         float eps, float* __restrict__ y, uint16_t* __restrict__ y16) {
+    __shared__ float wsum[4];
+    const int64_t t = blockIdx.x;
+    const int head = blockIdx.y, col = threadIdx.x;
+    const size_t at = (size_t) t * HV * S + (size_t) head * S + col;
+    const float oc = y[at];
+    float sp = warp_sum(oc * oc);
+    if ((col & 31) == 0) wsum[col >> 5] = sp;
+    __syncthreads();
+    const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
+    const float v = oc * rsqrtf(ss / (float) S + eps) * gamma[col] * sigm(z[t * HV * S + head * S + col]);
+    y[at] = v;
+    y16[at] = hf(v);
+}
+
 // ---------------------------------------------------------------- MoE
 template <int REG>
 __global__ void route_kernel(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ wout,
@@ -493,7 +554,13 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 }
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream) {
-    gdn_rec_kernel<<<HV, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, z, gamma, eps, y, y16, T);
+    static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
+    if (serial || T <= 0) {
+        gdn_rec_kernel<<<HV, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, z, gamma, eps, y, y16, T);
+    } else {
+        gdn_rec_cols_kernel<<<HV * NCB, dim3(CB, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+        gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, (cudaStream_t) stream>>>(z, gamma, eps, y, y16);
+    }
     check("gdn_recurrence");
 }
 void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream) {
