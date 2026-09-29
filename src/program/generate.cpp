@@ -1331,16 +1331,21 @@ int main(int argc, char** argv) {
         }
     }
     const bool native_pack = strata::kernels::cpu::expert_layout().native;
-    if (o.expert_cache_remote[0] > 0) {
+    // STRATA_EARLY_REMOTE_CONTEXTS=1: create EVERY secondary context here, like CUDA1's.  Under WSL2 the driver's
+    // pinned/mapped host budget (dxg gpadl, ~1 GiB) is spent by CUDA0's weights and MTP before the later loop runs,
+    // and a new context then fails with cudaErrorMemoryAllocation (CUDA2: "cudaSetDevice(2) failed: out of memory").
+    const char* early_env = std::getenv("STRATA_EARLY_REMOTE_CONTEXTS");
+    const bool early_remote = early_env && early_env[0] == '1';
+    for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0 && (r == 0 || early_remote)) {
         // Keep CUDA1's proven startup order: initialise its context before
         // allocating GPU0 weights or mapping the large host expert arena.
         double free_gib = 0;
-        if (!strata::core::RemoteExperts::preflight(remote_dev[0], free_gib, err)) {
+        if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
         std::fprintf(stderr, "strata generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
-                     remote_dev[0], free_gib);
+                     remote_dev[r], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
     // PR #44: a x8 link carries half of what the native default assumes - the GPU's SMs read that share over the
@@ -1743,7 +1748,7 @@ int main(int argc, char** argv) {
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
     // before the host arena maps its expert pages into their address spaces.
-    for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
+    for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0 && !early_remote) {
         double free_gib = 0;
         if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
