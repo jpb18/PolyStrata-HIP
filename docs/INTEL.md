@@ -92,7 +92,7 @@ of context with everything else unchanged).
 | 32,768 | 28.4 GB | 3.5 GB | measured, the default |
 | 65,536 | 29.0 GB | 2.9 GB | measured, loads |
 | 98,304 | 29.6 GB | 2.3 GB | measured, loads |
-| 131,072 | 30.3 GB | 1.6 GB | measured, loads: the practical ceiling |
+| 131,072 | 30.3 GB | 1.5 GB | **measured, the practical ceiling**: a 104,798-token prompt (79% of the window) read in 247 s at 424 tok/s, then answered |
 | 163,840 | ~31.0 GB | ~0.9 GB | not attempted: under the 1.2 GB safety margin |
 | 262,144 | ~32.6 GB | none | **does not fit - asking for it took the host down** |
 
@@ -100,7 +100,11 @@ of context with everything else unchanged).
 driver evicts buffers into host RAM, the kernel runs out of memory, and the machine livelocks until
 its hardware watchdog resets it. A 262K request did exactly that on 2026-09-29, and llama.cpp's own
 "failed to fit params" check fired too late to prevent it. Compute the KV size first and leave
-1.5 GB free. Measured ceilings are in the table at the end.
+1.5 GB free.
+
+Prompt reading gets faster with size, because the work batches better: ~150 tok/s on a 2.7k-token
+prompt, 424 tok/s on a 105k-token one. So a full 128k window costs about five minutes to read,
+not fifteen.
 
 ## Not done
 
@@ -116,5 +120,5 @@ its hardware watchdog resets it. A 262K request did exactly that on 2026-09-29, 
 | load | ~100 s |
 | VRAM | 28.4 of 32 GB |
 | decode | 23-25 tok/s; GPU 92% busy at 165 W, CPU idle |
-| prefill | 149 tok/s on a 2,701-token code prompt |
+| prefill | 149 tok/s on a 2,701-token prompt; 424 tok/s on a 104,798-token prompt at 131k context |
 | quality | correct code on every test; matches the NVIDIA path token for token in spirit, not measured |

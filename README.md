@@ -32,7 +32,7 @@ of a word): faster than you can read.
 > | Storage | 2 TB PCIe NVMe (the model's 28.8 GB lookup table is paged from it) |
 > | Engine | llama.cpp 0.4.1-dev (b29c606), community SYCL build for the B70, oneAPI 2026.1, `ghcr.io/snailium/llama.cpp-sycl-intel-b70` |
 > | Model | Qwen3.8-Flash-Next GSQ-RCO **Coder**, IQ1_M: all 29.6 GB of shard 1 on the card |
-> | Measured | 23-25 tok/s decode (GPU-bound), ~150 tok/s prompt reading, correct code; see [docs/INTEL.md](docs/INTEL.md) |
+> | Measured | 23-25 tok/s decode (GPU-bound); prompt reading 150 tok/s on short prompts, 424 tok/s at 105k tokens; 128k context fits on the card; correct code; see [docs/INTEL.md](docs/INTEL.md) |
 >
 > No CUDA, no compiler: `./setup.sh` detects the Arc and does the rest. Not yet on this path: images
 > and MTP speculative decoding. Everything below this box is the original README for NVIDIA cards.
