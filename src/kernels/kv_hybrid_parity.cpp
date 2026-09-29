@@ -329,8 +329,13 @@ int main() {
         float* d_at4 = dalloc<float>((size_t) QH * D);
         const bool took = k::qsa_prompt_attn_batch(d_q, pools, d_ids, d_step, cells, s, d_at4, 1, nullptr);
         if (!took) {
+#if defined(STRATA_USE_HIP)
+            // AMD: the tensor-core prompt path is CUDA-only, so it refuses every pool and the old kernel runs
+            std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on HIP - the old kernel runs)\n");
+#else
             std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
             g_fail = 1;
+#endif
         } else {
             k::fwht256_inplace_cuda(d_at4, QH, nullptr);
             ck(cudaDeviceSynchronize(), "at4 sync");
