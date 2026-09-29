@@ -12,7 +12,7 @@ New here? Start with the [README](../README.md) - it has everything you need to 
 
 ## Speed (measured)
 
-RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.14 with the settings setup writes
+RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.22 (prompts) / 0.1.14 (output) with the settings setup writes
 (`--prefill auto`, 8-bit KV above 4K, KV streaming from 64K). One code-agent prompt per length, 256 generated tokens,
 MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt). The IQ2_XS row was
 measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
@@ -21,11 +21,14 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 494 | 1,007 | 1,308 | 1,294 | 1,208 | 967 |
-| **IQ2_XS** | 461 | 811 | 1,238 | 1,136 | 1,071 | 886 |
-| **IQ3_XXS** | 415 | 770 | 1,108 | 1,065 | 1,015 | - |
-| **IQ3_S** | 396 | 737 | 1,070 | 1,070 | 931 | - |
-| **Coder** | 599 | 1,152 | 1,298 | 1,350 | 1,266 | 1,034 |
+| **Q2_0** | 519 | 1,226 | 1,844 | 1,836 | 1,682 | 1,304 |
+| **IQ2_XS** | 524 | 1,196 | 1,799 | 1,611 | 1,495 | 1,181* |
+| **IQ3_XXS** | 472 | 974 | 1,555 | 1,449 | 1,386 | - |
+| **IQ3_S** | 419 | 893 | 1,499 | 1,285 | 1,245 | - |
+| **Coder** | 660 | 1,522 | 1,871 | 1,938 | 1,779 | 1,034** |
+
+Engine 0.1.22 (the prompt path of 0.1.23 is the same); `bench/results/2026-09-29-speed-0122`. \* measured with
+images on (the image encoder's VRAM reserve leaves fewer experts cached). \*\* not measured again: 0.1.14.
 
 ### Output (tokens/s)
 
