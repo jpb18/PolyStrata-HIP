@@ -221,7 +221,7 @@ def cpu_info():
     name, avx2, avx512 = platform.processor() or "unknown CPU", False, False
     if WIN:
         pf = ctypes.windll.kernel32.IsProcessorFeaturePresent
-        avx2 = bool(pf(40))                       # PF_AVX2_INSTRUCTIONS_AVAILABLE
+        avx2 = bool(pf(40)) or _cpuid_avx2()      # PF_AVX2_INSTRUCTIONS_AVAILABLE, else the CPU itself (#159)
         n = out(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor).Name"]).strip()
         name = n or name
         avx512 = bool(pf(41)) and _cpuid_avx512_full()
@@ -255,6 +255,47 @@ def _cpuid_avx512_full() -> bool:
         need_ebx = (1 << 16) | (1 << 30) | (1 << 31)                   # F, BW, VL
         need_ecx = (1 << 1) | (1 << 11)                                # VBMI, VNNI
         return (ebx & need_ebx) == need_ebx and (ecx & need_ecx) == need_ecx
+    except Exception:
+        return False
+
+
+def _run_stub(code: bytes, *args) -> None:
+    """Runs a few bytes of x64 machine code (Windows calling convention: the arguments in rcx, rdx)."""
+    k32 = ctypes.windll.kernel32
+    k32.VirtualAlloc.restype = ctypes.c_void_p
+    k32.VirtualFree.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32)
+    buf = k32.VirtualAlloc(None, len(code), 0x3000, 0x40)
+    if not buf:
+        raise OSError("VirtualAlloc failed")
+    try:
+        ctypes.memmove(buf, code, len(code))
+        ctypes.CFUNCTYPE(None, *[ctypes.c_void_p] * len(args))(buf)(*args)
+    finally:
+        k32.VirtualFree(buf, 0, 0x8000)
+
+
+def _cpuid_avx2() -> bool:
+    """AVX2 asked from the CPU (CPUID leaf 7 EBX bit 5), with the OS saving the YMM registers (OSXSAVE + XCR0):
+    Windows' IsProcessorFeaturePresent(PF_AVX2) says no on some PCs whose CPU has it (a Ryzen 9 3950X, #159)."""
+    try:
+        def cpuid(leaf):
+            regs = (ctypes.c_uint32 * 4)()
+            _run_stub(bytes([0x53, 0x49, 0x89, 0xC8, 0x89, 0xD0, 0x31, 0xC9, 0x0F, 0xA2,      # push rbx; r8=rcx; eax=edx; ecx=0; cpuid
+                             0x41, 0x89, 0x00, 0x41, 0x89, 0x58, 0x04, 0x41, 0x89, 0x48, 0x08,  # [r8]=eax, [r8+4]=ebx, [r8+8]=ecx
+                             0x41, 0x89, 0x50, 0x0C, 0x5B, 0xC3]),                             # [r8+12]=edx; pop rbx
+                      ctypes.addressof(regs), leaf)
+            return list(regs)
+        if cpuid(0)[0] < 7:
+            return False
+        ecx1 = cpuid(1)[2]
+        if not (ecx1 >> 27) & 1 or not (ecx1 >> 28) & 1:             # OSXSAVE, AVX
+            return False
+        xcr0 = (ctypes.c_uint32 * 2)()
+        _run_stub(bytes([0x49, 0x89, 0xC8, 0x31, 0xC9, 0x0F, 0x01, 0xD0,                        # r8=rcx; ecx=0; xgetbv
+                         0x41, 0x89, 0x00, 0x41, 0x89, 0x50, 0x04, 0xC3]), ctypes.addressof(xcr0))
+        if xcr0[0] & 6 != 6:                                           # the OS saves XMM and YMM
+            return False
+        return bool((cpuid(7)[1] >> 5) & 1)
     except Exception:
         return False
 
@@ -773,7 +814,16 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
     if info.exists() and (eng / EXE).exists():
         meta = json.loads(info.read_text())
         ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
-        if meta.get("source") == "local" or ver >= MIN_ENGINE:
+        if meta.get("source") == "local":              # compiled here: build_engine checks its source and cards
+            return None
+        have = [int(a) for a in meta.get("archs", [])]
+        miss = [int(x) for x in gpu.get("archs", [gpu["arch"]])
+                if have and int(x) not in have and not (meta.get("ptx") and int(x) > max(have))]
+        if miss:                                       # a card it has no code for (#128): compiled here instead
+            warn(f"the installed engine is built for {', '.join(str(a) for a in have)}; your GPU is "
+                 f"{', '.join(str(x) for x in miss)}: compiling instead")
+            return None
+        if ver >= MIN_ENGINE:
             ok("ready-made engine already installed")
             return eng
         say(f"  Updating the ready-made engine ({meta.get('version')} -> {'.'.join(map(str, MIN_ENGINE))} or newer) ...")
@@ -1004,16 +1054,24 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     want_vision = vision != "none"
     local = meta.get("source") == "local"
     src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
-    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src
+    archs = sorted({int(x) for x in gpu.get("archs", [gpu["arch"]])})    # every card the model runs on
+    built = {int(x) for x in meta.get("archs", [])}
+    # a card the engine has no code for (a GPU added with --gpus, #128) needs a compile even when the source is the
+    # same; the compile keeps the generations it was built for
+    new_arch = local and not set(archs) <= built
+    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src and not new_arch
     vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
         return eng
-    nvcc, vcvars = install_build_tools(gpu, yes)
-    archs = sorted({int(x) for x in gpu.get("archs", [gpu["arch"]])})    # every card the model runs on
+    if local:
+        archs = sorted(built | set(archs))
+    nvcc, vcvars = install_build_tools({**gpu, "archs": archs}, yes)
     cuda_archs = ";".join(str(x) for x in archs)
     if not engine_ok:
-        say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
+        say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) + " (a card it had no code for; "
+            "10-20 minutes, once) ..." if new_arch else
+            "  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, ROOT / "build", "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
@@ -1398,11 +1456,13 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     elif isinstance(use, list):
         check_gpus(use, found, "(chosen for this model) ")
         byid = {g["index"]: g for g in found}
+        cfg = ensure_engine_for([byid[i] for i in use], cfg_path, cfg, yes)
         ok("GPUs: " + " + ".join(gpu_name(byid[i]) for i in use) + f" together (layers split {cfg.get('layer_split') or 'auto'})")
     elif found:
         g = next((x for x in found if x["index"] == use), None) if use is not None else max(
             found, key=lambda x: (round(x["vram_gb"]), -x["index"]))
         if g is not None:
+            cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
     if open_browser:
         cmd.append("--open")
@@ -1421,6 +1481,28 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     say("  Later, closing this window stops the model.")
     say("  " + "-" * 100)
     return subprocess.call(cmd)
+
+
+def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
+    """The installed engine must have code for every card the model starts on: a card added later (--gpus with an
+    older or newer generation, #128) or a new GPU in the PC otherwise stops the start with 'no kernel image'.  Such a
+    card gets the engine compiled for all of them, before the start."""
+    missing = [g for g in cards if not engine_runs_on(g)]
+    if not missing:
+        return cfg
+    info = ROOT / "engine" / "BUILD.json"
+    meta = json.loads(info.read_text())
+    say()
+    say("  The installed engine has no code for " + ", ".join(f"{g['name']} (sm_{g['arch']})" for g in missing) +
+        ": it is compiled for " + ("these cards" if len(cards) > 1 else "it") + " now.")
+    main = gpu_info(cards[0]["index"])
+    archs = sorted({int(x) for x in meta.get("archs", [])} | {int(g["arch"]) for g in cards})
+    vision = meta.get("vision") or ("gpu" if (ROOT / "engine" / VEXE).exists() else "none")
+    build_engine({**main, "archs": archs}, vision, yes, get_llama_cpp())
+    dirs = json.loads(info.read_text()).get("cuda_dirs") or []
+    cfg["lib_dirs"] = dirs + [d for d in cfg.get("lib_dirs") or [] if d not in dirs]
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    return cfg
 
 
 def write_run_script(model, cfg_path, port):
