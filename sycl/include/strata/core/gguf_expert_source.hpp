@@ -41,6 +41,19 @@ public:
     bool read_into(int64_t layer, int64_t expert, uint8_t* dst, size_t bytes) const;
     int64_t reads() const override { return reads_; }
 
+    /// SYCL port, plan item 2: the experts that did not fit the VRAM cache, read once into pinned host memory the
+    /// GPU can address (USM host). They are then `pinned()` with a `device_alias()`: the verify window reads them over
+    /// PCIe on the GPU (its "direct" mode) and the prompt path DMAs them, instead of an SSD read each time they are
+    /// routed - what made decode collapse to 4-5 tok/s at 256K (docs/INTEL.md). At most `cap` bytes; returns the
+    /// number mirrored. Threads read in parallel.
+    int64_t mirror(const std::vector<std::pair<int64_t, int64_t>>& pairs, uint64_t cap, int threads, std::string& err);
+    bool pinned(int64_t layer, int64_t expert) const override;
+    /// The mirrored blob's address, which the device can read. For a layer that has any mirrored expert, an
+    /// unmirrored one answers that layer's first mirrored blob: the verify plan asks `device_alias(layer, 0)` only as
+    /// "does this source have device-readable experts", and dereferences an alias only for `pinned()` experts.
+    const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
+    uint64_t mirrored_bytes() const { return mirror_bytes_; }
+
 private:
     int fd_of(int64_t layer, std::string& err);
 
@@ -56,6 +69,10 @@ private:
     std::mutex mu_;
     int64_t n_layers_ = 0, n_expert_ = 0;
     int64_t reads_ = 0;
+    uint8_t* mirror_ = nullptr;                    ///< USM host (pinned, device-readable)
+    uint64_t mirror_bytes_ = 0;
+    std::vector<int64_t> mirror_off_;              ///< per (layer, expert): offset in mirror_, -1 = not mirrored
+    std::vector<int64_t> layer_first_;             ///< per layer: offset of its first mirrored blob, -1 = none
 };
 
 }  // namespace strata::core

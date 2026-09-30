@@ -351,11 +351,19 @@ of drafts accepted), 30-39 tok/s on a chat answer with prose (55-72%); sampling 
 nothing measurable. The engine used to abort at exit in serve mode (a queue wait in a destructor after the
 runtime's teardown began); it now exits directly once its requests are done.
 
-**Planned (2026-09-30), in order.** Ranked by payoff on this card; the first three are in progress.
+**Planned (2026-09-30), in order.** Ranked by payoff on this card; the first three were taken first.
 
 1. Expert dot products on XMX in integer mode: a decode window (up to 6 tokens) fits one INT8 DPAS (1-8 rows), the
    i-quant grids decode to small integers, the activations are already INT8. Today: scalar dp4a, ALU-bound (77%).
+   **Parked**: three `joint_matrix` versions (opt-in `STRATA_EXPERT_XMX=1`, do not enable) were 1.4x and 2-3x slower
+   than dp4a, and the third (B filled in place with `joint_matrix_apply`) hung the GPU. At 1-6 rows the grid decode
+   and the packed-B layout cost more than the DPAS saves.
 2. Experts missing from VRAM read from pinned host memory over PCIe instead of the SSD (the 256K decode collapse).
+   **Done**: at start-up every expert without a VRAM slot is read into a pinned host mirror (`STRATA_MIRROR_MIB`, by
+   default free RAM less 4 GiB), and the device-built verify plan points the expert kernels straight at it. Before,
+   that plan dropped non-resident experts, so output with misses was wrong. Forced test (`--expert-cache 8000`,
+   1,879 experts / 3.6 GiB out of VRAM): decode 2.6 -> 40.9 tok/s (full cache 43.3), prompt 451 -> 640 tok/s
+   (776), output tokens identical to the full-cache run. About 3.6 GiB of VRAM can go to context for ~6% of decode.
 3. KV streaming (`--kv-resident`) from 64K up: only the attended window of the KV in VRAM. **Done**: 256K decodes at
    31 tok/s (from 4-5).
 4. QSA block selection on XMX: every query against every pooled block, a dense product that grows with the context.

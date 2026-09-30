@@ -8,6 +8,7 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/sycl_doorbell.hpp"
 #include "strata/kernels/verify_kernels.hpp"
+#include "strata/kernels/resident_plan_mirror.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -930,7 +931,8 @@ __dpct_inline__ void resident_plan_kernel(
     const int32_t *__restrict__ ids, int n, int k,
     const int32_t *__restrict__ res, int n_expert, const uint8_t *cache_base,
     const unsigned long long *slot_off, long long blob,
-    int32_t *__restrict__ pl, long long capx, uint32_t *skip, uint32_t ring) {
+    int32_t *__restrict__ pl, long long capx, uint32_t *skip, uint32_t ring,
+    const unsigned long long *__restrict__ mir) {
 #if STRATA_PLAN_LOCAL
     // SYCL port: the host's exact loop, but over a local copy of the ids and their slots. One thread reading global
     // memory for every compare (n^2 of them) took 87 us per layer on the B70 - 4% of a decode round; a work-group
@@ -939,15 +941,19 @@ __dpct_inline__ void resident_plan_kernel(
     auto &s_ids = *sycl::ext::oneapi::group_local_memory_for_overwrite<int32_t[64]>(item.get_group());
     auto &s_res = *sycl::ext::oneapi::group_local_memory_for_overwrite<int32_t[64]>(item.get_group());
     auto &s_bad = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(item.get_group());
+    auto &s_mir = *sycl::ext::oneapi::group_local_memory_for_overwrite<unsigned long long[64]>(item.get_group());
     const int tid = (int) item.get_local_id(2);
     if (tid == 0) s_bad = 0;
     item.barrier(sycl::access::fence_space::local_space);
     for (int i = tid; i < n && i < 64; i += 64) {
         const int32_t e = ids[i];
-        const bool ok = e >= 0 && e < n_expert && res[e] >= 0;
+        const bool valid = e >= 0 && e < n_expert;
+        const int32_t sl = valid ? res[e] : -1;
+        const unsigned long long ma = (valid && sl < 0 && mir != nullptr) ? mir[e] : 0ull;   // mirrored in host memory
         s_ids[i] = e;
-        s_res[i] = ok ? res[e] : -1;
-        if (!ok) s_bad = 1;
+        s_res[i] = sl;
+        s_mir[i] = ma;
+        if (!valid || (sl < 0 && ma == 0)) s_bad = 1;
     }
     item.barrier(sycl::access::fence_space::local_space);
     if (tid != 0) return;
@@ -980,7 +986,12 @@ __dpct_inline__ void resident_plan_kernel(
         }
         if (!first) continue;
         const int32_t slot = S_RES(i0);
+#if STRATA_PLAN_LOCAL
+        ptr[groups] = slot >= 0 ? (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob))
+                                : s_mir[i0];   // not in VRAM: its pinned host mirror, read by the expert kernels over PCIe
+#else
         ptr[groups] = (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob));
+#endif
         start[groups] = entries;
         for (int i = i0; i < n; ++i)
             if (s_ids[i] == s_ids[i0]) {
@@ -1054,9 +1065,20 @@ __dpct_inline__ void copy_or_zero_kernel(sycl::float4 *__restrict__ dst,
 }
 }  // namespace
 
+namespace {
+const int32_t* g_mirror_res = nullptr;
+const unsigned long long* g_mirror_table = nullptr;
+}
+void resident_plan_set_mirror(const int32_t* d_res, const unsigned long long* mirror_table) {
+    g_mirror_res = d_res;
+    g_mirror_table = mirror_table;
+}
 void resident_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_layer, int n_expert,
                    const uint8_t* cache_base, const unsigned long long* slot_off, long long blob, int32_t* plan,
                    long long capx, uint32_t* skip, uint32_t ring, void* stream) {
+    const unsigned long long* mir = nullptr;   // SYCL port: the layer's slice of the host-mirror table, if any
+    if (g_mirror_table != nullptr && g_mirror_res != nullptr && res_layer >= g_mirror_res)
+        mir = g_mirror_table + (res_layer - g_mirror_res);
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1067,7 +1089,7 @@ void resident_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_
                 exp_props, [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
                     resident_plan_kernel(ids, n_entries, k, res_layer, n_expert,
                                          cache_base, slot_off, blob, plan, capx,
-                                         skip, ring);
+                                         skip, ring, mir);
                 });
     }
     check("resident_plan");

@@ -21,6 +21,7 @@
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/gguf_expert_source.hpp"
+#include "strata/kernels/resident_plan_mirror.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/layer.hpp"
@@ -2443,6 +2444,58 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: pre-filled %lld of %lld slots from the profile; slot 0 verified\n",
                      (long long) prefilled, (long long) want);
     }
+    // SYCL port, plan item 2: the experts that did not fit VRAM, mirrored once in pinned host memory the GPU reads
+    // over PCIe (--stream-experts has no host copy otherwise: each routed miss was an SSD read). The share of misses
+    // the GPU takes is --pcie-frac; STRATA_MIRROR_MIB caps the mirror (default: MemAvailable less 4 GiB), 0 = off.
+    unsigned long long* mirror_table_d = nullptr;   // [n_layers][n_expert] device-readable mirror addresses (0 = none)
+    int64_t unmirrored_misses = 0;
+    if (o.stream_experts && srcp == &gguf_src && o.expert_cache > 0) {
+        std::vector<std::pair<int64_t, int64_t>> miss;
+        for (const auto& pr : profile)   // the profile's order: the most-routed misses first, if the cap is reached
+            if (xcache.slot_of(pr.first, pr.second) == strata::core::kNotResident) miss.push_back({pr.first, pr.second});
+        for (int64_t l = 0; l < g.n_layers; ++l)                     // pairs the profile does not list at all
+            for (int64_t e = 0; e < g.n_expert; ++e)
+                if (xcache.slot_of(l, e) == strata::core::kNotResident &&
+                    std::find(miss.begin(), miss.end(), std::pair<int64_t, int64_t>{l, e}) == miss.end())
+                    miss.push_back({l, e});
+        uint64_t avail = 0;
+        if (FILE* f = std::fopen("/proc/meminfo", "r")) {
+            char key[64]; unsigned long long kb = 0;
+            while (std::fscanf(f, "%63s %llu kB", key, &kb) == 2)
+                if (std::strcmp(key, "MemAvailable:") == 0) { avail = kb << 10; break; }
+            std::fclose(f);
+        }
+        const char* mv = std::getenv("STRATA_MIRROR_MIB");
+        const uint64_t cap = mv ? (uint64_t) std::atoll(mv) << 20 : (avail > (4ull << 30) ? avail - (4ull << 30) : 0);
+        if (!miss.empty() && cap > 0) {
+            const auto tm = Clock::now();
+            const int64_t got = gguf_src.mirror(miss, cap, 8, err);
+            if (got < 0) {
+                std::fprintf(stderr, "strata generate: mirroring the experts missing from VRAM: %s (they stay on the SSD)\n",
+                             err.c_str());
+                err.clear();
+            } else {
+                std::fprintf(stderr, "strata generate: %lld of %zu experts missing from VRAM mirrored in pinned host memory "
+                                     "(%.2f GiB, %.1f s); the GPU reads them over PCIe\n", (long long) got, miss.size(),
+                             (double) gguf_src.mirrored_bytes() / 1073741824.0,
+                             std::chrono::duration<double>(Clock::now() - tm).count());
+                // the device-built verify plan's view of it: each (layer, expert) -> its mirror address, 0 = none
+                std::vector<unsigned long long> tab((size_t) (g.n_layers * g.n_expert), 0ull);
+                for (int64_t l = 0; l < g.n_layers; ++l)
+                    for (int64_t e = 0; e < g.n_expert; ++e)
+                        if (gguf_src.pinned(l, e))
+                            tab[(size_t) (l * g.n_expert + e)] = (unsigned long long) gguf_src.device_alias(l, e);
+                mirror_table_d = sycl::malloc_device<unsigned long long>(tab.size(), dpct::get_in_order_queue());
+                dpct::get_in_order_queue().memcpy(mirror_table_d, tab.data(), tab.size() * sizeof(unsigned long long)).wait();
+            }
+        }
+        unmirrored_misses = (int64_t) miss.size() - (int64_t) (gguf_src.mirrored_bytes() ? std::count_if(miss.begin(), miss.end(),
+            [&](const std::pair<int64_t, int64_t>& pr) { return gguf_src.pinned(pr.first, pr.second); }) : 0);
+        if (unmirrored_misses > 0 && std::getenv("STRATA_VERIFY_NO_HOST") != nullptr)
+            std::fprintf(stderr, "strata generate: WARNING: %lld experts are neither in VRAM nor mirrored; with STRATA_VERIFY_NO_HOST "
+                                 "the device plan cannot run them and their layers' windows fall back slowly - raise "
+                                 "STRATA_MIRROR_MIB or the free RAM, or lower --max-context\n", (long long) unmirrored_misses);
+    }
 
     if (o.resident_cpu_experts) {
         if (!src.pin_cache_complement(xcache, err, /*pin=*/false)) {
@@ -3479,6 +3532,7 @@ int main(int argc, char** argv) {
         strata::core::Verifier ver;
         strata::core::VerifyHits vh;
         vh.d_res = thits.d_res;
+        if (mirror_table_d) strata::kernels::resident_plan_set_mirror(thits.d_res, mirror_table_d);
         vh.cache_base = thits.cache_base;
         vh.blob = thits.blob;
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
@@ -5229,6 +5283,7 @@ int main(int argc, char** argv) {
         strata::core::Verifier ver;
         strata::core::VerifyHits vh;
         vh.d_res = thits.d_res;
+        if (mirror_table_d) strata::kernels::resident_plan_set_mirror(thits.d_res, mirror_table_d);
         vh.cache_base = thits.cache_base;
         vh.blob = thits.blob;
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
