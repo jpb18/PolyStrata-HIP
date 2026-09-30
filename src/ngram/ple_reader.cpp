@@ -34,15 +34,17 @@ constexpr uint32_t EMPTY = 0xFFFFFFFFu;
 /// Set-associative row cache: 8 ways per set, round-robin replacement inside a set. Bounded by construction.
 struct RowCache {
     uint64_t sets = 0;
+    uint32_t rb = ROW_BYTES;        // bytes per row
     std::vector<uint32_t> keys;     // sets * WAYS
-    std::vector<uint8_t> data;      // sets * WAYS * ROW_BYTES
+    std::vector<uint8_t> data;      // sets * WAYS * rb
     std::vector<uint8_t> next;      // per-set replacement pointer
     uint64_t used = 0;
 
-    void init(uint64_t rows) {
+    void init(uint64_t rows, uint32_t row_bytes = ROW_BYTES) {
         sets = rows / WAYS;
+        rb = row_bytes;
         keys.assign(sets * WAYS, EMPTY);
-        data.assign(sets * WAYS * ROW_BYTES, 0);
+        data.assign(sets * WAYS * rb, 0);
         next.assign(sets, 0);
         used = 0;
     }
@@ -54,7 +56,7 @@ struct RowCache {
         if (sets == 0) return nullptr;
         const uint64_t s = mix(row) % sets;
         for (uint32_t w = 0; w < WAYS; ++w)
-            if (keys[s * WAYS + w] == row) return &data[(s * WAYS + w) * ROW_BYTES];
+            if (keys[s * WAYS + w] == row) return &data[(s * WAYS + w) * rb];
         return nullptr;
     }
     void insert(uint32_t row, const uint8_t* bytes) {
@@ -64,7 +66,7 @@ struct RowCache {
         next[s] = (uint8_t) ((w + 1) % WAYS);
         if (keys[s * WAYS + w] == EMPTY) ++used;
         keys[s * WAYS + w] = row;
-        std::memcpy(&data[(s * WAYS + w) * ROW_BYTES], bytes, ROW_BYTES);
+        std::memcpy(&data[(s * WAYS + w) * rb], bytes, rb);
     }
 };
 
@@ -97,6 +99,7 @@ struct PleReader::Impl {
     DirectFile file;
     uint64_t table_offset = 0;
     uint64_t n_rows = 0;
+    uint32_t row_bytes = ROW_BYTES;
     uint32_t max_inflight = 0;
     uint8_t* slab = nullptr;              // max_inflight slots of 2 pages
     std::vector<uint32_t> free_slots;
@@ -185,7 +188,7 @@ struct PleReader::Impl {
         rng ^= rng << 13;
         rng ^= rng >> 7;
         rng ^= rng << 17;
-        const uint64_t first = table_offset / PAGE, end = (table_offset + n_rows * (uint64_t) ROW_BYTES) / PAGE;
+        const uint64_t first = table_offset / PAGE, end = (table_offset + n_rows * (uint64_t) row_bytes) / PAGE;
         Job j;
         j.offset = (first + (end > first ? rng % (end - first) : 0)) * PAGE;
         j.length = PAGE;
@@ -225,7 +228,7 @@ struct PleReader::Impl {
         stats.bytes += c.bytes;
         const uint8_t* buf = slot_buf(s);
         for (const Use& u : j.uses) {
-            if (u.in_page + ROW_BYTES > c.bytes) {
+            if (u.in_page + row_bytes > c.bytes) {
                 error = "PleReader: short read inside the table";
                 cancel_queued();
                 j.uses.clear();
@@ -236,7 +239,7 @@ struct PleReader::Impl {
             }
         }
         for (const Use& u : j.uses) {
-            std::memcpy(u.dst, buf + u.in_page, ROW_BYTES);
+            std::memcpy(u.dst, buf + u.in_page, row_bytes);
             cache.insert(u.row, buf + u.in_page);
         }
         auto it = tickets.find(j.ticket);
@@ -330,11 +333,13 @@ PleReader::~PleReader() {
 }
 
 bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_rows, uint32_t max_inflight,
-                     uint64_t cache_rows, std::string& err, bool io_thread) {
+                     uint64_t cache_rows, std::string& err, bool io_thread, uint32_t row_bytes) {
     close();
     if (max_inflight == 0 || max_inflight > 1024) { err = "PleReader: max_inflight must be 1..1024"; return false; }
+    if (row_bytes == 0 || row_bytes > PAGE) { err = "PleReader: row_bytes must be 1..4096"; return false; }
     if (!impl_->file.open(path, err)) return false;
-    if (table_offset + n_rows * (uint64_t) ROW_BYTES > impl_->file.size()) {
+    impl_->row_bytes = row_bytes;
+    if (table_offset + n_rows * (uint64_t) row_bytes > impl_->file.size()) {
         err = "PleReader: the table extends past the end of " + path;
         close();
         return false;
@@ -347,7 +352,7 @@ bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_
     impl_->inflight.assign(max_inflight, Job{});
     impl_->free_slots.clear();
     for (uint32_t s = max_inflight; s-- > 0;) impl_->free_slots.push_back(s);
-    impl_->cache.init(cache_rows);
+    impl_->cache.init(cache_rows, row_bytes);
     impl_->error.clear();
     impl_->keep_us = 0;
     impl_->last_issue_us = impl_->last_read_us = 0;
@@ -411,6 +416,7 @@ void PleReader::close() {
 }
 
 bool PleReader::is_open() const { return impl_->file.is_open(); }
+uint32_t PleReader::row_bytes() const { return impl_->row_bytes; }
 
 PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_raw) {
     Impl& m = *impl_;
@@ -425,20 +431,21 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     std::unordered_map<uint64_t, size_t> by_page;     // aligned offset -> index in `jobs`
     std::vector<Job> jobs;
     for (size_t i = 0; i < n; ++i) {
-        uint8_t* dst = out_raw + i * ROW_BYTES;
+        const uint32_t rb = m.row_bytes;
+        uint8_t* dst = out_raw + i * rb;
         ++m.stats.requests;
         if (rows[i] >= m.n_rows) {
-            std::memset(dst, 0, ROW_BYTES);
+            std::memset(dst, 0, rb);
             continue;
         }
         if (const uint8_t* hit = m.cache.find(rows[i])) {
-            std::memcpy(dst, hit, ROW_BYTES);
+            std::memcpy(dst, hit, rb);
             ++m.stats.cache_hits;
             continue;
         }
-        const uint64_t at = m.table_offset + (uint64_t) rows[i] * ROW_BYTES;
+        const uint64_t at = m.table_offset + (uint64_t) rows[i] * rb;
         const uint64_t first = at / PAGE * PAGE;
-        const uint32_t length = (uint32_t) ((at + ROW_BYTES - 1) / PAGE * PAGE - first + PAGE);
+        const uint32_t length = (uint32_t) ((at + rb - 1) / PAGE * PAGE - first + PAGE);
         auto f = by_page.find(first);
         if (f != by_page.end()) {
             Job& j = jobs[f->second];
