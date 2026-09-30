@@ -1227,6 +1227,40 @@ def low_ram_fits(model, ram, vram_gb) -> bool:
     return ram - 6 + max(0.0, vram_gb - 5) >= arena
 
 
+def low_ram_one_gpu_why(model, ram, choice) -> list[str]:
+    """#250: why the low-RAM mode leaves the other GPUs out, with the RAM math that turned it on."""
+    arena, need = MODELS[model]["arena_gb"], MODELS[model]["arena_gb"] + LOW_RAM_HEADROOM_GB
+    if choice == "auto":
+        why = [f"Why: {model}'s experts are {arena:.0f} GB and must fit in RAM with ~{LOW_RAM_HEADROOM_GB} GB beside "
+               f"them for the OS and the rest: {arena:.0f} + {LOW_RAM_HEADROOM_GB} = {need:.0f} GB, and this PC has "
+               f"{ram:.0f} GB.",
+               "So setup uses the low-RAM mode: the experts come from the model's file (copied into RAM as far as "
+               "it fits), the GPU holds the most-used ones."]
+    else:
+        why = [f"Why: you chose the low-RAM mode (--low-ram {choice}); without it {model} needs {arena:.0f} + "
+               f"{LOW_RAM_HEADROOM_GB} = {need:.0f} GB of RAM, this PC has {ram:.0f} GB."]
+    return why + ["That mode runs on one GPU: the engine does not split its layers across GPUs in it (it refuses "
+                  "--resident-experts with a layer split).",
+                  f"To use all the GPUs: {need:.0f} GB of RAM or more, a smaller size, or --low-ram off (the experts "
+                  "then stay in RAM and the OS pages part of them to disk: much slower)."]
+
+
+def confirm_paging(model, ram, choice, yes):
+    """The model's experts do not fit this PC's RAM and the low-RAM mode is off.  #125: a warning and a question, not
+    a stop - the user may accept paging.  Asked "no" by default, so an unattended --yes install stops here, unless
+    the low-RAM mode was turned off explicitly (--low-ram off, #250): that is the choice already made."""
+    need_gb, arena = MODELS[model]["ram_gb"], MODELS[model]["arena_gb"]
+    warn(f"{model} needs about {need_gb} GB of RAM and this PC has {ram:.0f} GB: its experts alone are "
+         f"{arena:.0f} GB and must stay in RAM, so Windows/Linux will page part of them from disk. Expect it "
+         "to be much slower, and it may not start at all.")
+    say("       A smaller size (Q2_0 or IQ2_XS) fits; more RAM fixes it.")
+    explicit = choice == "off"
+    if ask("  Install it anyway?", ["y", "n"], "y" if explicit else "n", yes) != "y":
+        fail(f"{model} needs about {need_gb} GB of RAM; this PC has {ram:.0f} GB",
+             "choose Q2_0 or IQ2_XS, or add RAM" + ("" if explicit else "; or --low-ram off --yes to install it anyway"))
+    warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose" + (" (--low-ram off)" if explicit else ""))
+
+
 def settings_path() -> Path:
     if WIN:
         return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
@@ -1962,20 +1996,12 @@ def main() -> int:
     low_ram = a.low_ram in ("on", "resident", "mmap") or (a.low_ram == "auto" and low_ram_needed(model, ram))
     if low_ram and multi:
         warn("the low-RAM mode runs on one GPU: using " + gpu_name(gpu) + " only")
+        for line in low_ram_one_gpu_why(model, ram, a.low_ram):
+            say("       " + line)
         multi, sel, chosen = [], [gpu["index"]], [gpu]
     # (the low-RAM mode's variant is decided once the context is known, below)
     if not low_ram and ram < MODELS[model]["ram_gb"] - 4:
-        # #125: a warning and a question, not a stop: the user may accept paging (asked, "no" by default, so an
-        # unattended --yes install still stops here)
-        need_gb, arena = MODELS[model]["ram_gb"], MODELS[model]["arena_gb"]
-        warn(f"{model} needs about {need_gb} GB of RAM and this PC has {ram:.0f} GB: its experts alone are "
-             f"{arena:.0f} GB and must stay in RAM, so Windows/Linux will page part of them from disk. Expect it "
-             "to be much slower, and it may not start at all.")
-        say("       A smaller size (Q2_0 or IQ2_XS) fits; more RAM fixes it.")
-        if ask("  Install it anyway?", ["y", "n"], "n", a.yes) != "y":
-            fail(f"{model} needs about {need_gb} GB of RAM; this PC has {ram:.0f} GB",
-                 "choose Q2_0 or IQ2_XS, or add RAM")
-        warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
+        confirm_paging(model, ram, a.low_ram, a.yes)
     ok(f"size: {model}")
     tag = fam["tag"] + model                           # names of the pack, config and start script
     small = min(x["vram_gb"] for x in chosen)         # each card keeps its layers' KV of the whole context
