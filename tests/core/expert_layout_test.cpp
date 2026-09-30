@@ -256,6 +256,21 @@ void arena() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // `expert_layout_test --real PACK_DIR NATIVE_SHARD`: a real pack's native_experts.txt against its model's files
+    // (headers only - check_experts_gguf reads no expert byte)
+    if (argc == 4 && std::string(argv[1]) == "--real") {
+        std::string err;
+        if (!load(argv[2], 48, 512, err)) { std::printf("layout refused: %s\n", err.c_str()); return 1; }
+        const ExpertLayout& L = strata::kernels::cpu::expert_layout();
+        const bool ok = strata::core::check_experts_gguf(argv[3], L, err);
+        size_t split = 0;
+        for (int64_t l = 0; l < L.n_layers && !L.gguf_file.empty(); ++l)
+            split += L.gguf_file[(size_t) (3 * l)] != L.gguf_file[(size_t) (3 * l + 2)];
+        std::printf("%s: v%d, %lld layers x %lld experts, %.2f GiB, %zu layer(s) split per role: %s%s\n", argv[2],
+                    L.version, (long long) L.n_layers, (long long) L.n_expert, (double) L.total / (1u << 30), split,
+                    ok ? "every span is its tensor" : "REFUSED: ", ok ? "" : err.c_str());
+        return ok ? 0 : 1;
+    }
     std::printf("expert_layout_test\n");
     if (argc < 2) {
         std::printf("usage: expert_layout_test <tests/data/native_experts>\n");

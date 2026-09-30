@@ -79,7 +79,41 @@ std::string error_of(const std::vector<std::string>& paths) {
 }
 }  // namespace
 
-int main() {
+// `gguf_split_test --real SHARD`: the same view of a real model (headers only): its shards, the architecture
+// check on the metadata shard, and where the tensors the engine reads by name live.
+int real_model(const std::string& any) {
+    try {
+        const strata::GgufModel m = strata::GgufModel::open(any);
+        size_t tensors = 0;
+        for (size_t i = 0; i < m.size(); ++i) {
+            std::printf("  shard %zu: %s, %zu tensors, data at %llu\n", i + 1, m.shard(i).path().c_str(),
+                        m.shard(i).tensors().size(), (unsigned long long) m.shard(i).data_start());
+            tensors += m.shard(i).tensors().size();
+        }
+        const std::string arch = strata::check_architecture(m.meta());
+        std::printf("  %zu tensors; architecture check on the metadata shard: %s\n", tensors,
+                    arch.empty() ? "ok" : arch.c_str());
+        int bad = arch.empty() ? 0 : 1;
+        for (const char* name : {"output.weight", "token_embd.weight", "per_layer_token_embd.weight",
+                                 "blk.1.ple_key.weight", "blk.11.ffn_gate_exps.weight", "blk.11.ffn_up_exps.weight",
+                                 "blk.11.ffn_down_exps.weight"}) {
+            size_t s = 0;
+            const strata::TensorInfo* t = m.find(name, &s);
+            if (!t) { std::printf("  %-30s absent\n", name); continue; }
+            const bool ok = m.in_bounds(*t, s);
+            bad += !ok;
+            std::printf("  %-30s shard %zu, %s, %llu B, %s\n", name, s + 1, t->type_name(),
+                        (unsigned long long) strata::tensor_payload_bytes(*t), ok ? "in bounds" : "OUT OF BOUNDS");
+        }
+        return bad ? 1 : 0;
+    } catch (const std::exception& e) {
+        std::printf("  refused: %s\n", e.what());
+        return 1;
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--real") return real_model(argv[2]);
     std::printf("gguf_split_test\n");
     {
         TempDir d;
