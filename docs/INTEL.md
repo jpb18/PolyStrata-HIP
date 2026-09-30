@@ -275,11 +275,13 @@ attempt did not finish at all:
 - **Expert streaming decides the speed.** The reserve costs cache slots (10,348 of 12,288 at 3 GB), and the
   prompt path streams every non-resident expert from the GGUF *once per chunk*. 2,048-token chunks: 40 chunks,
   62,942 blob reads (~125 GB), 278 s = 288 tok/s, the GPU idle 75% of the time. 4,096-token chunks: 21 chunks,
-  37,678 reads, **77 s = 1,037 tok/s**, close to the 8k-token rate. The bigger chunk costs 0.5 GB more VRAM; the
-  host copy threads (`STRATA_STAGER_THREADS`, default 4) are being measured next.
-- **Compute at 80k** (of the 77 s): attention 14.0 s, QSA block selection 9.9 s (it was 0.2 s at 8k: it scans
-  every block of the context per query), GDN recurrence 6.1 s, the streaming's remaining wait 17 s + 5.6 s, the
-  per-layer grouping sync 4.9 s, GEMMs 4.6 s, dequant 1.4 s. The PLE rows are no longer a cost: 1.28 M row
+  37,678 reads, **77 s = 1,037 tok/s**, close to the 8k-token rate. The bigger chunk costs 0.5 GB more VRAM.
+  Twelve host copy threads instead of the default four (`STRATA_STAGER_THREADS`) take it to 75 s (1,065
+  tok/s): they empty the copy wait (5.6 s to 0.05 s) but the 52 s of host staging is the SSD delivering
+  ~70 GB of blobs, and 16 s of chunk setup remains where the GPU waits for each chunk's stream plan.
+- **Compute at 80k** (of the 75 s): attention 13.9 s, QSA block selection 9.9 s (it was 0.2 s at 8k: it scans
+  every block of the context per query), GDN recurrence 6.1 s, the chunk setup wait 16 s, the per-layer
+  grouping sync 4.6 s, GEMMs 4.6 s, dequant 1.4 s. The PLE rows are no longer a cost: 1.28 M row
   lookups with a 97.6% row-cache hit rate, 90 ms.
 
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
