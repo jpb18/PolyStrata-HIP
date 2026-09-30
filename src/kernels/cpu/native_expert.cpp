@@ -93,7 +93,7 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     // Unsloth UD-Q4_K_XL's Q4_K gate/up: the multi-token kernel is bit-exact against ggml's per-token dot, so it
     // runs for every group size (no #152 rule).  STRATA_NO_KQ256 falls back to ggml's vec_dot.
     static const bool kq = std::getenv("STRATA_NO_KQ256") == nullptr;
-    if (kq && f.gu_type == 12) {
+    if (kq && f.gu_type == 12 && nt >= 2) {   // one token: ggml's own dot below (the same bits, less overhead)
         kq256_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
         return;
     }
@@ -128,7 +128,7 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     static const bool iq4nl_mt = std::getenv("STRATA_NO_IQ4NL") == nullptr;
     static const int mt_min = [] { const char* e = std::getenv("STRATA_IQ_MT_MIN"); return e ? std::atoi(e) : 2; }();
     static const bool kq = std::getenv("STRATA_NO_KQ256") == nullptr;
-    if (kq && (f.d_type == 7 || f.d_type == 8)) {   // Q5_1 / Q8_0 down: bit-exact, every group size
+    if (kq && nt >= 2 && (f.d_type == 7 || f.d_type == 8)) {   // Q5_1 / Q8_0 down: bit-exact, any group size
         kq256_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }

@@ -996,9 +996,15 @@ bool FileExpertSource::pin_cache_complement(
                     const char* v = std::getenv("STRATA_PARTIAL_PIN");   // 0: the A/B arm without it
                     return v == nullptr || std::atoi(v) != 0;
                 }();
+                // at most STRATA_PARTIAL_PIN_GIB (default 24): registering 30 GiB of a 40 GiB arena left the driver
+                // unable to page-lock the prompt path's small buffers afterwards (RTX 5070, WDDM)
+                static const uint64_t pin_cap = [] {
+                    const char* v = std::getenv("STRATA_PARTIAL_PIN_GIB");
+                    return (uint64_t) ((v != nullptr && std::atof(v) > 0 ? std::atof(v) : 24.0) * 1073741824.0);
+                }();
                 if (budget_bytes > 0 && partial_on) {
                     const uint64_t step = 2ull << 30;
-                    for (uint64_t want = bytes; want >= step; want = want > step ? want - step : 0) {
+                    for (uint64_t want = std::min(bytes, pin_cap); want >= step; want = want > step ? want - step : 0) {
                         const uint64_t w = want - want % (64ull << 10);
                         if (cudaHostRegister(arena, (size_t) w, cudaHostRegisterMapped | cudaHostRegisterPortable) ==
                             cudaSuccess) {
