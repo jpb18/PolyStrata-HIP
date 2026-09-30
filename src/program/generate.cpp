@@ -4044,6 +4044,13 @@ int main(int argc, char** argv) {
                     if (!stop_req.load()) {
                         std::fprintf(stderr, "strata serve: %s\n", err.c_str());
                         std::printf("ERR %s\n", err.c_str());
+                        // #224: a CUDA fault (an illegal address) poisons the context for the whole process, and
+                        // unwinding the destructors on it could hang until the 60 s watchdog: leave at once
+                        if (cudaPeekAtLastError() != cudaSuccess) {
+                            std::fflush(stdout);
+                            std::fflush(stderr);
+                            std::_Exit(1);
+                        }
                         return 1;
                     }
                     cancelled = true;   // stopped while reading the prompt: refill the lent slots below, then DONE cancel
