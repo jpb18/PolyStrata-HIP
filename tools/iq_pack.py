@@ -6,9 +6,12 @@
 The i-quant experts cannot be re-expressed in the Q2_0 pack form, so this pack keeps every quantized tensor in
 its GGUF form:
 
-  experts.bin          per layer, 512 blobs of [gate rows | up rows | down rows], the raw GGUF slices.  Blob
-                       size is per layer (the files mix IQ1_M ... IQ3_S gate/up and Q2_0 / IQ4_NL down).
-  native_experts.txt   one line per layer: layer gu_type d_type offset blob_bytes
+  experts.bin          optional (--experts-bin): per layer, 512 blobs of [gate rows | up rows | down rows], the
+                       raw GGUF slices.  Blob size is per layer (the files mix IQ1_M ... IQ3_S gate/up and Q2_0 /
+                       IQ4_NL down).  experts.bin.src.json says which source it was cut from (the shards' names and
+                       sizes, the hash of native_experts.txt); an experts.bin is reused only when that matches.
+  native_experts.txt   one line per layer: layer gu_type d_type offset blob_bytes gate_off up_off down_off [shard];
+                       written last, so a pack without it is not finished
   index.txt            the table the engine loads.  Quantized dense tensors, token_embd and output are served
                        natively from the GGUF by the engine (--native): their rows carry shape only.
   dense.bin            standalone: the BF16/F16/F32 tensors exactly as the GGUF stores them (index kinds 4/5/2).
@@ -17,10 +20,14 @@ its GGUF form:
                        float here but quantized in the base pack (blk.1.ple_key).
   tokenizer/           exported from the GGUF (tools/strata_tokenizer.py), with the model's chat template.
 
-Split files: every shard of the model is read (<name>-0000N-of-0000M.gguf beside --gguf), so the layers may be
-split anyhow (Swift 1.5's GGUFs put layers 13-47 in shard 2 and the PLE table in shard 1).  A layer whose experts
-are not in shard 1 names its shard in native_experts.txt (v3).  Router tensors stored as F32 whose values are
-exactly BF16 (Swift 1.5) are written as BF16, the form the engine's router takes; anything else is refused.
+Split files: every shard of the model is read (<name>-0000N-of-0000M.gguf beside --gguf; a missing shard is an
+error), so the layers may be split anyhow (Swift 1.5's GGUFs put layers 13-47 in shard 2 and the PLE table in
+shard 1).  A layer whose experts are not in shard 1 names its shard in native_experts.txt (v3).  A shard boundary
+may even fall inside a layer (Unsloth's UD-Q4_K_XL: layer 11's down in shard 2, its gate and up in shard 3): that
+layer's shard column is per role, `gate,up,down` (an empty field = the --gguf shard), and only then is the file
+v4, so an older engine refuses it instead of misreading it.  Every other pack stays v3, byte for byte.  Router
+tensors stored as F32 whose values are exactly BF16 (Swift 1.5) are written as BF16, the form the engine's router
+takes; anything else is refused.
 
 For ordinary quants, --compat-bf16 dequantizes the small projections that the engine reads as BF16, using
 round-to-nearest-even. This introduces BF16 rounding; it does not reconstruct the original full-precision
@@ -29,6 +36,7 @@ weights. Experts, native attention projections, token embeddings and the disk-ba
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -93,9 +101,11 @@ class Model:
         if missing:
             raise FileNotFoundError("missing model shards (wait for the download): " + ", ".join(missing))
         self.paths = paths
+        self.files = [G.GGUFFile(p) for p in paths]
+        self.sizes = [p.stat().st_size for p in paths]
+        check_split(self.files)
         self.where = {}
-        for p in paths:
-            g = G.GGUFFile(p)
+        for p, g in zip(paths, self.files):
             mm = np.memmap(p, dtype=np.uint8, mode="r")
             for t in g.tensors:
                 size = t.expected_bytes()
@@ -108,6 +118,34 @@ class Model:
     def bytes(self, name) -> np.ndarray:
         g, t, mm, _ = self.where[name]
         return tensor_bytes(mm, g, t)
+
+
+def check_split(files) -> None:
+    """The split keys, as the engine checks them (strata::GgufModel): shard 1 carries the metadata, and every shard
+    declares split.count / split.no (and split.tensors.count) consistently - a shard of another model, or a shard
+    renamed into the family, is refused rather than mixed in."""
+    n = len(files)
+    meta0 = files[0].metadata
+    if n == 1:
+        if int(meta0.get("split.count", 1)) > 1:
+            raise ValueError(f"{files[0].path.name} is shard 1 of {meta0['split.count']}, but its name has no "
+                             "-00001-of-0000N.gguf to find the others by")
+        return
+    if "general.architecture" not in meta0:
+        raise ValueError(f"{files[0].path.name} has no general.architecture; the first shard of a split model "
+                         "carries the metadata")
+    total = meta0.get("split.tensors.count")
+    for i, g in enumerate(files):
+        md = g.metadata
+        if md.get("split.count") != n or md.get("split.no") != i or \
+                (total is not None and md.get("split.tensors.count") != total):
+            raise ValueError(f"{g.path.name} does not declare itself shard {i + 1} of {n} of this model "
+                             "(split.count / split.no / split.tensors.count)")
+    if total is not None and sum(len(g.tensors) for g in files) != total:
+        raise ValueError(f"the {n} shards hold {sum(len(g.tensors) for g in files)} tensors, but "
+                         f"split.tensors.count is {total}")
+
+
 ROLES = ("gate", "up", "down")
 N_EXPERT = 512
 ALIGN = 64
@@ -145,7 +183,7 @@ def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
     rows, at = [], 0
     served = 0
     converted = []
-    with open(out / "dense.bin", "wb") as fo:
+    with open(out / "dense.bin.tmp", "wb") as fo:
         for name, (g, t, mm, _) in model.where.items():
             if is_expert(t.name) or t.name in NOT_IN_PACK:
                 continue
@@ -179,7 +217,13 @@ def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
             else:
                 served += 1
                 rows.append([t.name, "0", "0", "0", "0", "0", "0", str(ne0), str(ne1), "8", "0", "32"] + ["0"] * 7)
-    write_index(out, rows, src, served, 0)
+    write_index(out, rows, src, served, 0, publish=False)
+    # published together, and the completion marker (native_experts.txt, written last by main) goes first: a stop
+    # from here on leaves a pack that setup and the engine see as unfinished, never a new dense.bin under an old
+    # index or the reverse
+    (out / "native_experts.txt").unlink(missing_ok=True)
+    (out / "dense.bin.tmp").replace(out / "dense.bin")
+    (out / "index.txt.tmp").replace(out / "index.txt")
     if compat_bf16:
         (out / "compat-bf16.json").write_text(json.dumps({
             "source": str(src), "rounding": "nearest-even", "tensors": converted,
@@ -189,16 +233,18 @@ def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
     return 0
 
 
-def write_index(out, rows, src, served, n_extra):
+def write_index(out, rows, src, served, n_extra, publish=True):
     at = 0
     for r in rows:
         r[5] = str(at)
         at += (int(r[6]) + ALIGN - 1) // ALIGN * ALIGN
-    with open(out / "index.txt", "w", encoding="utf-8", newline="\n") as fo:
+    with open(out / "index.txt.tmp", "w", encoding="utf-8", newline="\n") as fo:
         fo.write("# strata pack index v3 -- generated by tools/iq_pack.py (native experts) from %s\n" % src.name)
         fo.write("# align %d pool %d tensors %d\n" % (ALIGN, at, len(rows)))
         for r in rows:
             fo.write(" ".join(r) + "\n")
+    if publish:
+        (out / "index.txt.tmp").replace(out / "index.txt")
     print("index.txt: %d tensors, %d served natively, %d in extra.bin, arena %.2f GiB"
           % (len(rows), served, n_extra, at / 2**30))
 
@@ -253,6 +299,70 @@ def index_from_base(a, src, base, out, g, T, mm) -> int:
     return 0
 
 
+def expert_layout(model: Model, src: pathlib.Path):
+    """The pack's expert table: (layout rows, native_experts.txt text, n_expert, total bytes), or an error string.
+    Each role is resolved by name in whichever shard holds it, and its offset is absolute in THAT shard: two
+    shards do not start their data section at the same byte, so one role's data_start must not be used for
+    another's (per-role data_start as in #255, gopinath87607)."""
+    T = {n: w[1] for n, w in model.where.items()}
+    exps = [n for n in T if n.startswith("blk.") and n.endswith("_exps.weight")]
+    if not exps:
+        return "the model has no expert tensors (blk.N.ffn_{gate,up,down}_exps.weight)"
+    n_layers = 1 + max(int(n.split(".")[1]) for n in exps)
+    n_expert = int(T["blk.0.ffn_gate_inp.weight"].shape[1])   # router rows = experts kept (pruned models ship < 512)
+    if any(int(T["blk.%d.ffn_gate_inp.weight" % l].shape[1]) != n_expert for l in range(n_layers)):
+        return "the routers disagree on the expert count; a per-layer pruned model cannot be packed"
+    layout, lines, offset, n_split = [], [], 0, 0
+    for l in range(n_layers):
+        names = ["blk.%d.ffn_%s_exps.weight" % (l, r) for r in ROLES]
+        if any(n not in T for n in names):
+            return "layer %d: missing %s" % (l, ", ".join(n for n in names if n not in T))
+        ts = [T[n] for n in names]
+        if any(t.expected_bytes() is None or len(t.shape) != 3 or int(t.shape[2]) != n_expert for t in ts):
+            return "layer %d: an expert tensor is not [*, *, %d] of whole blocks" % (l, n_expert)
+        per = [t.expected_bytes() // n_expert for t in ts]
+        if per[0] != per[1] or ts[0].type_name != ts[1].type_name:
+            return "layer %d: gate and up differ in type" % l
+        blob = per[0] + per[1] + per[2]
+        layout.append((l, ts[0].type_id, ts[2].type_id, offset, blob, ts))
+        ws = [model.where[n] for n in names]
+        files = ["" if w[3] == src else w[3].name for w in ws]
+        column = files[0] if len(set(files)) == 1 else ",".join(files)
+        n_split += len(set(files)) != 1
+        line = "%d %d %d %d %d %d %d %d" % (l, ts[0].type_id, ts[2].type_id, offset, blob,
+                                            *[w[0].data_start + w[1].offset for w in ws])
+        lines.append(line + ("" if not column else " " + column))
+        offset += blob * n_expert
+    if n_split:
+        head = ("# strata native experts v4: layer gu_type d_type offset blob_bytes gate_off up_off down_off "
+                "[shard | gate,up,down] (n_expert %d, total %d; absolute offsets in %s, or in the named shard "
+                "beside it - per role where the column is gate,up,down)\n" % (n_expert, offset, src.name))
+        print("%d layer(s) have their gate/up/down in different shards: native_experts.txt v4, per-role shard "
+              "column for %s" % (n_split, ", ".join(str(l) for l, *_ in layout if "," in lines[l])))
+    else:
+        head = ("# strata native experts v3: layer gu_type d_type offset blob_bytes gate_off up_off down_off [shard] "
+                "(n_expert %d, total %d; absolute offsets in %s, or in the named shard beside it)\n"
+                % (n_expert, offset, src.name))
+    return layout, head + "".join(line + "\n" for line in lines), n_expert, offset
+
+
+def experts_source(model: Model, text: str, total: int) -> dict:
+    """What experts.bin is cut from: the shards (names and sizes) and the hash of native_experts.txt (every
+    per-role file and offset, the formats and the blob sizes).  A same-size experts.bin of another model or
+    another packing is not this one."""
+    return {"schema": 1,
+            "shards": [{"name": p.name, "size": s} for p, s in zip(model.paths, model.sizes)],
+            "native_experts_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "bytes": total}
+
+
+def read_json(path: pathlib.Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gguf", required=True, help="the model's shard 1")
@@ -267,7 +377,8 @@ def main() -> int:
     a = ap.parse_args()
     if a.compat_bf16 and a.base:
         ap.error("--compat-bf16 cannot reuse --base dense weights")
-    # HF snapshot files are symlinks to hash-named blobs. Keep the shard filename for discovery.
+    # HF snapshot files are symlinks to hash-named blobs. Keep the shard filename for discovery: .absolute(), not
+    # .resolve(), which would follow the link to the blob and lose the -0000N-of-0000M name.
     src = pathlib.Path(a.gguf).absolute()
     base = pathlib.Path(a.base).resolve() if a.base else None
     out = pathlib.Path(a.out)
@@ -276,13 +387,30 @@ def main() -> int:
     g = G.GGUFFile(src)
     mm = np.memmap(src, dtype=np.uint8, mode="r")
     model = Model(src)
-    T = {n: w[1] for n, w in model.where.items()}
     if len(model.paths) > 1:
         print("model shards: " + ", ".join(p.name for p in model.paths))
+    # ---- the expert table first: a model that cannot be packed is refused before any file of the pack changes
+    got = expert_layout(model, src)
+    if isinstance(got, str):
+        print(got)
+        return 1
+    layout, text, n_expert, offset = got
+    path = out / "experts.bin"
+    sidecar = out / "experts.bin.src.json"
+    want = experts_source(model, text, offset)
+    reuse = path.exists() and path.stat().st_size == offset and read_json(sidecar) == want
+    if path.exists() and not reuse and not a.experts_bin:
+        if sidecar.exists():
+            print("%s was cut from another source than this model (%s): the engine would read it instead of "
+                  "the GGUF.  Delete it, or rerun with --experts-bin to rewrite it." % (path, sidecar.name))
+            return 1
+        print("warning: %s has no %s, so nothing says it belongs to this model; the engine reads it instead of "
+              "the GGUF (rerun with --experts-bin to rewrite it)" % (path, sidecar.name))
     if a.base:
         if any(w[3] != src for w in model.where.values() if not w[1].name in NOT_IN_PACK):
             print("--base needs a model whose tensors are all in shard 1")
             return 1
+        (out / "native_experts.txt").unlink(missing_ok=True)
         rc = index_from_base(a, src, base, out, g, {t.name: t for t in g.tensors}, mm)
     else:
         rc = index_standalone(src, out, model, a.compat_bf16)
@@ -292,49 +420,25 @@ def main() -> int:
         subprocess.run([sys.executable, str(HERE / "strata_tokenizer.py"), "--gguf", str(src), "--out", str(out)],
                        check=True)   # writes <out>/tokenizer/
 
-    # ---- the experts
-    n_layers = 1 + max(int(n.split(".")[1]) for n in T if n.startswith("blk.") and n.endswith("_exps.weight"))
-    n_expert = int(T["blk.0.ffn_gate_inp.weight"].shape[1])   # router rows = experts kept (pruned models ship < 512)
-    if any(int(T["blk.%d.ffn_gate_inp.weight" % l].shape[1]) != n_expert for l in range(n_layers)):
-        print("the routers disagree on the expert count; a per-layer pruned model cannot be packed")
-        return 1
-    layout, offset = [], 0
-    for l in range(n_layers):
-        ts = [T["blk.%d.ffn_%s_exps.weight" % (l, r)] for r in ROLES]
-        per = [t.expected_bytes() // n_expert for t in ts]
-        if per[0] != per[1] or ts[0].type_name != ts[1].type_name:
-            print("layer %d: gate and up differ in type" % l)
-            return 1
-        blob = per[0] + per[1] + per[2]
-        layout.append((l, ts[0].type_id, ts[2].type_id, offset, blob, ts))
-        offset += blob * n_expert
-    # written to a temporary name and renamed only when every layer is in: a stop part-way (a layer split across
-    # shards, #171) left a partial native_experts.txt that the next setup run took as a finished pack (#172)
+    # ---- the experts.  native_experts.txt is written to a temporary name and renamed only when every layer is
+    # in: a stop part-way (a layer split across shards, #171) left a partial native_experts.txt that the next setup
+    # run took as a finished pack (#172).  It is the pack's completion marker, so it is published last.
     tmp = out / "native_experts.txt.tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fo:
-        fo.write("# strata native experts v3: layer gu_type d_type offset blob_bytes gate_off up_off down_off [shard] "
-                 "(n_expert %d, total %d; absolute offsets in %s, or in the named shard beside it)\n"
-                 % (n_expert, offset, src.name))
-        for l, gt, dt, off, blob, ts in layout:
-            ws = [model.where[t.name] for t in ts]
-            if len({w[3] for w in ws}) != 1:
-                print("layer %d: its gate/up/down tensors are in different shards" % l)
-                fo.close()
-                tmp.unlink()
-                return 1
-            gg, shard = ws[0][0], ws[0][3]
-            line = "%d %d %d %d %d %d %d %d" % (l, gt, dt, off, blob, *[gg.data_start + t.offset for t in ts])
-            fo.write(line + ("" if shard == src else " " + shard.name) + "\n")
+        fo.write(text)
     tmp.replace(out / "native_experts.txt")
     if a.skip_experts or not a.experts_bin:
-        if (out / "experts.bin").exists() and not a.experts_bin:
+        if path.exists() and not a.experts_bin:
             print("note: %s/experts.bin exists; the engine reads it instead of the GGUF" % out)
         return 0
-    path = out / "experts.bin"
-    if path.exists() and path.stat().st_size == offset:
-        print("experts.bin exists with the right size; not rewritten")
+    if reuse:
+        print("experts.bin was cut from this model's shards (%s); not rewritten" % sidecar.name)
         return 0
-    with open(path, "wb") as fo:
+    # written under a temporary name and renamed when complete, then the sidecar: an interrupted write leaves no
+    # experts.bin, and an experts.bin without its sidecar is never reused
+    sidecar.unlink(missing_ok=True)
+    part = out / "experts.bin.tmp"
+    with open(part, "wb") as fo:
         for l, gt, dt, off, blob, ts in layout:
             parts = [model.bytes(t.name).reshape(n_expert, -1) for t in ts]
             chunk = np.concatenate(parts, axis=1)          # (n_expert, blob): gate | up | down per expert
@@ -343,7 +447,11 @@ def main() -> int:
             if l % 8 == 0:
                 print("  layer %2d  %-8s/%-7s blob %8d  at %.2f GiB" % (l, ts[0].type_name, ts[2].type_name, blob,
                                                                         off / 2**30), flush=True)
-    print("experts.bin: %d layers, %.2f GiB" % (n_layers, offset / 2**30))
+    part.replace(path)
+    side_tmp = out / "experts.bin.src.json.tmp"
+    side_tmp.write_text(json.dumps(want, indent=2) + "\n", encoding="utf-8")
+    side_tmp.replace(sidecar)
+    print("experts.bin: %d layers, %.2f GiB" % (len(layout), offset / 2**30))
     return 0
 
 
