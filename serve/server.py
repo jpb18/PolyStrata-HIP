@@ -548,6 +548,9 @@ def engine_args(cfg: dict) -> list[str]:
     args = list(cfg["args"])
     if len(gpu_list(cfg)) > 1 and "--layer-split" not in args:
         args += ["--layer-split", str(cfg.get("layer_split") or "auto")]
+    # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
+    if len(gpu_list(cfg)) > 1 and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
+        args.append("--split-skip-if-fits")
     return args
 
 

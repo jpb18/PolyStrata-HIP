@@ -19,6 +19,7 @@
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/expert_source.hpp"
+#include "strata/core/pinned.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/layer.hpp"
@@ -95,6 +96,18 @@
 #include <vector>
 
 namespace {
+// Windows' WDDM driver model: native Windows, or WSL2 (its GPU goes through /dev/dxg to the Windows driver).  There,
+// pinning a large arena into two CUDA contexts leaves WDDM refusing every later allocation (the 5080 + 3090 rig);
+// a Linux driver has no such limit (#253: the 8 GiB cap cost a 4090 + 3060 split 3x of its prompt speed).
+bool under_wddm() {
+#ifdef _WIN32
+    return true;
+#else
+    static const bool dxg = std::filesystem::exists("/dev/dxg");
+    return dxg;
+#endif
+}
+
 // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
 bool refill_blocking() {
     static const bool v = std::getenv("STRATA_REFILL_BLOCKING") != nullptr;
@@ -345,6 +358,10 @@ struct Options {
     /// the later stages' devices "D1,D2,.." (default: the next visible GPUs; "0" with one K: both stages on this
     /// GPU, sharing everything - the bit-exact A/B of the hand-off)
     std::string split_device;
+    /// --split-skip-if-fits (opt-in; the server passes it for a config's "split_skip_if_fits"): with
+    /// --layer-split auto, run on CUDA0 alone when it holds every profiled expert pair plus the whole session (KV),
+    /// the drafter and the reserve - a split then only adds hand-offs (two RDNA4 cards: 1,384 vs 1,794 tok/s at 4K)
+    bool split_skip_if_fits = false;
     /// Plan v0.3 P8: stay resident and take requests on stdin (see the --serve block in main).
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
@@ -1086,6 +1103,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-split") o.spec_split = true;
         else if (a == "--layer-split") o.layer_split = next("--layer-split");
         else if (a == "--split-device") o.split_device = next("--split-device");
+        else if (a == "--split-skip-if-fits") o.split_skip_if_fits = true;
         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
         else if (a == "--serve") o.serve = true;
         else if (a == "--vision") o.vision = true;
@@ -1253,7 +1271,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    const bool multi_gpu = !split_devs.empty() && !split_same;
+    bool multi_gpu = !split_devs.empty() && !split_same;   // cleared by --split-skip-if-fits before any stage loads
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
         std::fprintf(stderr, "strata generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
         return 2;
@@ -1981,6 +1999,52 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // ---- --split-skip-if-fits: before any later stage loads, does CUDA0 alone hold every profiled pair?  What it
+    // still has to allocate on one GPU is the whole session (the KV of every layer), the drafter and the head
+    // (kDrafterMib below), the verify windows and the reserve; the prompt path borrows from the cache.  If the
+    // profile's pairs fit in what is left, a split would only add the hand-offs: run on CUDA0 alone.
+    if (multi_gpu && split_auto && o.split_skip_if_fits) {
+        std::vector<std::pair<int32_t, int32_t>> prof;
+        int64_t pslots = 0;
+        std::string perr;
+        const bool remote = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+        if (remote || o.expert_profile.empty() ||
+            !strata::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, prof, pslots, perr)) {
+            std::fprintf(stderr, "strata generate: --split-skip-if-fits: %s; the split stays\n",
+                         remote ? "remote expert caches are in use" : perr.empty() ? "no expert profile" : perr.c_str());
+        } else {
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            int64_t pairs_bytes = 0;
+            for (const auto& pr : prof)
+                pairs_bytes += native_pack ? ((int64_t) lay.blob_bytes(pr.first) + 255) / 256 * 256 : (int64_t) lay.max_blob;
+            size_t fb = 0, tb = 0;
+            cudaMemGetInfo(&fb, &tb);
+            const int64_t session = (int64_t) strata::core::session_bytes(g, o.max_context, K, 0, g.n_layers);
+            const int64_t held_back = session + (((int64_t) o.vram_reserve_mib + 1000 + 96) << 20);   // + drafter/head, windows
+            const int64_t room = (int64_t) fb - held_back;
+            cudaDeviceProp dp{};
+            cudaGetDeviceProperties(&dp, 0);
+            if (pairs_bytes <= room) {
+                std::fprintf(stderr, "strata generate: layer split skipped (--split-skip-if-fits): CUDA0 (%s) holds all "
+                                     "%zu profiled pairs (%.2f GiB) with the session (%.2f GiB, %lld-token context), "
+                                     "the drafter and the reserve: %.2f GiB free, %.2f GiB to spare - one GPU\n",
+                             dp.name, prof.size(), (double) pairs_bytes / 1073741824.0, (double) session / 1073741824.0,
+                             (long long) o.max_context, (double) fb / 1073741824.0,
+                             (double) (room - pairs_bytes) / 1073741824.0);
+                multi_gpu = false;
+                split_auto = false;
+                split_devs.clear();
+                split_at.clear();
+                o.layer_split.clear();
+            } else {
+                std::fprintf(stderr, "strata generate: --split-skip-if-fits: CUDA0 (%s) would hold only %.2f of the "
+                                     "profile's %.2f GiB (%.2f GiB free, %.2f GiB for the session, drafter and "
+                                     "reserve): the split stays\n", dp.name,
+                             (double) std::max<int64_t>(room, 0) / 1073741824.0, (double) pairs_bytes / 1073741824.0,
+                             (double) fb / 1073741824.0, (double) held_back / 1073741824.0);
+            }
+        }
+    }
     // ---- layer split across GPUs: each later stage's own copy of the dense weights, its session and (the last) the
     // head, made on its device before the host arena is mapped (as the drafter below, for the same WDDM reason)
     std::vector<std::unique_ptr<GpuStage>> stages;
@@ -2348,11 +2412,20 @@ int main(int argc, char** argv) {
         srcp = &src;
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
-        // On the multi-GPU Windows experiment, start with at most 8 GiB of mapped host pages.
-        // Unregistered layers remain in the resident arena and use the CPU expert path.
-        // (a layer split across GPUs too: pinning all of it into two contexts leaves WDDM refusing every later
-        // allocation - measured on the 5080 + 3090 rig: cudaMemGetInfo and the next cudaMalloc fail)
-        const uint64_t pin_limit = (o.expert_cache_remote[0] > 0 || multi_gpu) ? (8ull << 30) : 0;
+        // Under WDDM (Windows, WSL2), a multi-GPU run (a layer split, or remote experts) starts with at most 8 GiB of
+        // mapped host pages: pinning all of it into two contexts leaves WDDM refusing every later allocation -
+        // measured on the 5080 + 3090 rig: cudaMemGetInfo and the next cudaMalloc fail.  Unregistered layers remain
+        // in the resident arena; their streamed experts go through the pinned staging ring.  A Linux driver has no
+        // such limit, so there the whole arena is pinned (#253).  STRATA_ARENA_PIN_GIB overrides both ways.
+        const int pin_env = strata::core::arena_pin_cap_gib();   // -1 unset, -2 "auto" (#243, Windows sliced pin)
+        const bool pin_wddm_cap = pin_env < 0 && (o.expert_cache_remote[0] > 0 || multi_gpu) && under_wddm();
+        const uint64_t pin_limit = pin_env >= 0 ? (uint64_t) pin_env << 30 : pin_wddm_cap ? (8ull << 30) : 0;
+        if (pin_env >= 0)
+            std::fprintf(stderr, "strata generate: STRATA_ARENA_PIN_GIB=%d: %s\n", pin_env,
+                         pin_env == 0 ? "the whole expert arena is pinned" : "the expert arena's pinning is capped");
+        else if (pin_wddm_cap)
+            std::fprintf(stderr, "strata generate: multi-GPU under WDDM: at most 8 GiB of the expert arena is pinned "
+                                 "(STRATA_ARENA_PIN_GIB changes it)\n");
         if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, pin_limit,
                             o.shared_expert_arena)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
@@ -3630,26 +3703,104 @@ int main(int argc, char** argv) {
         } else {
             std::fprintf(stderr, "strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)\n");
         }
-        // layer split across GPUs: a prompt path per stage, each handing its chunk's rows to the next
-        for (size_t i = 0; i < stages.size(); ++i) {
-            GpuStage& st = *stages[i];
-            st.sp.set_stage(st.lb, i + 1 < stages.size() ? st.le : -1, i + 1 < stages.size() ? &stages[i + 1]->sp : nullptr);
-            const strata::core::OnDevice on(st.dev);
-            void* sb = nullptr;              // this stage's own loan, out of its own cache
-            uint64_t sbb = 0;
-            // `first < 0`: no loan was taken (nothing was lendable), so this stage allocates its own buffers
-            if (i + 1 < pf_parts.size() && pf_parts[i + 1].first >= 0) {
-                sb = st.cache.device_slot(pf_parts[i + 1].first);
-                sbb = part_bytes(pf_parts[i + 1], pf_parts[i + 1].first);
+        // layer split across GPUs: a prompt path per stage, each handing its chunk's rows to the next.
+        // THE CHUNK STEPS DOWN INSTEAD OF EXITING.  A split's stage caches are sized after the arena is registered, and
+        // the prompt path's own buffers (no loan) are not priced into them: with the whole arena pinned (#253) a
+        // `--prefill auto` split could stop at start with "device buffers for a chunk of 2048 tokens do not fit".  A
+        // chunk that does not fit is tried again one size smaller, down to 512 tokens (a smaller chunk only reads slower).
+        auto init_prompt_paths = [&]() -> int {   // 0: ready; 1: failed (err set); 2: failed with "do not fit"
+            for (size_t i = 0; i < stages.size(); ++i) {
+                GpuStage& st = *stages[i];
+                st.sp.set_stage(st.lb, i + 1 < stages.size() ? st.le : -1, i + 1 < stages.size() ? &stages[i + 1]->sp : nullptr);
+                const strata::core::OnDevice on(st.dev);
+                void* sb = nullptr;              // this stage's own loan, out of its own cache
+                uint64_t sbb = 0;
+                // `first < 0`: no loan was taken (nothing was lendable), so this stage allocates its own buffers
+                if (i + 1 < pf_parts.size() && pf_parts[i + 1].first >= 0) {
+                    sb = st.cache.device_slot(pf_parts[i + 1].first);
+                    sbb = part_bytes(pf_parts[i + 1], pf_parts[i + 1].first);
+                }
+                if (!st.sp.init(st.wt, g, st.ss, srcp, &st.cache, host_res.data(), o.prefill_chunk, (void*) st.stream,
+                                err, sb, sbb)) {
+                    err = "layer split, CUDA" + std::to_string(st.dev) + " prompt path: " + err;
+                    return err.find("do not fit") != std::string::npos ? 2 : 1;
+                }
             }
-            if (!st.sp.init(st.wt, g, st.ss, srcp, &st.cache, host_res.data(), o.prefill_chunk, (void*) st.stream, err,
-                            sb, sbb)) {
-                std::fprintf(stderr, "strata serve: layer split, CUDA%d prompt path: %s\n", st.dev, err.c_str());
-                return 1;
+            if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
+            if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes))
+                return err.find("do not fit") != std::string::npos ? 2 : 1;
+            return 0;
+        };
+        static constexpr int64_t kStepChunks[] = {6144, 4096, 3072, 2048, 1536, 1024, 512};
+        {
+            // First by arithmetic: a prompt path without a loan allocates its buffers, so the chunk must leave
+            // headroom on that device (a chunk that fits to the last MiB left hipBLAS nothing: its GEMMs then
+            // failed to launch on gfx1201 and the prompt hung).  `bytes_needed` is the same count `init` makes.
+            const int64_t kHeadroom = 512ll << 20;
+            auto own_fits = [&](int64_t c, int& dev_out, int64_t& need_out, int64_t& free_out) -> bool {
+                for (size_t i = 0; i <= stages.size(); ++i) {
+                    const bool loan = i == 0 ? borrow != nullptr : (i < pf_parts.size() && pf_parts[i].first >= 0);
+                    if (loan) continue;
+                    const int dev = i == 0 ? -1 : stages[i - 1]->dev;
+                    const strata::core::OnDevice on(dev);
+                    size_t fb = 0, tb = 0;
+                    cudaMemGetInfo(&fb, &tb);
+                    const int64_t need = (int64_t) strata::prefill::Prefill::bytes_needed(g, i == 0 ? ss : stages[i - 1]->ss, c);
+                    if (need + kHeadroom > (int64_t) fb) {
+                        dev_out = dev < 0 ? 0 : dev; need_out = need; free_out = (int64_t) fb;
+                        return false;
+                    }
+                }
+                return true;
+            };
+            int dev = 0;
+            int64_t need = 0, fb = 0;
+            if (!own_fits(o.prefill_chunk, dev, need, fb)) {
+                int64_t c = 0;
+                for (const int64_t s : kStepChunks) {
+                    int d2 = 0;
+                    int64_t n2 = 0, f2 = 0;
+                    if (s < o.prefill_chunk && own_fits(s, d2, n2, f2)) { c = s; break; }
+                }
+                if (c > 0) {
+                    std::fprintf(stderr, "strata serve: a %lld-token chunk's prompt buffers need %lld MiB on CUDA%d, "
+                                         "%lld MiB free: %lld-token chunks\n", (long long) o.prefill_chunk,
+                                 (long long) (need >> 20), dev, (long long) (fb >> 20), (long long) c);
+                    o.prefill_chunk = c;
+                }
             }
         }
-        if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
-        if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes)) {
+        for (;;) {
+            const int r = init_prompt_paths();
+            if (r == 0) break;
+            int64_t next = 0;
+            for (const int64_t c : kStepChunks)
+                if (c < o.prefill_chunk) { next = c; break; }
+            if (r == 2 && next > 0) {
+                std::fprintf(stderr, "strata serve: %s: trying a %lld-token chunk\n", err.c_str(), (long long) next);
+                // start the prompt paths over (a failed init may hold buffers), and consume the failed allocation's
+                // error: it is sticky, and the next launch check would report "out of memory" for a kernel
+                for (auto& stp : stages) {
+                    const strata::core::OnDevice on(stp->dev);
+                    stp->sp.reset();
+                    (void) cudaGetLastError();
+                }
+                sp.reset();
+                (void) cudaGetLastError();
+                o.prefill_chunk = next;
+                if (borrow != nullptr) {         // smaller loans for the smaller chunk
+                    for (PfPart& p : pf_parts)
+                        if (p.first >= 0) {
+                            p.first = (int32_t) (p.cache->slots() - part_slots(p, next));
+                            p.first_now = p.first;
+                        }
+                    lend_first = pf_parts[0].first;
+                    borrow = xcache.device_slot(lend_first);
+                    borrow_bytes = part_bytes(pf_parts[0], lend_first);
+                }
+                err.clear();
+                continue;
+            }
             std::fprintf(stderr, "strata serve: %s\n", err.c_str());
             if (err.find("fit") != std::string::npos)   // #85: say what frees VRAM
                 std::fprintf(stderr, "strata serve: the GPU has too little free VRAM for the prompt path: turn images "

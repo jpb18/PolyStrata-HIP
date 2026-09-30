@@ -309,7 +309,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
         // #243: STRATA_ARENA_PIN_GIB=N caps the registration from the start where the caller set no cap
         const int env_gib = arena_pin_cap_gib();
         uint64_t cap = max_pinned_bytes;
-        std::string cap_why = "for CUDA1";
+        std::string cap_why = "by the engine (multi-GPU under WDDM, or remote experts)";
         if (cap == 0 && env_gib > 0) {
             cap = (uint64_t) env_gib << 30;
             cap_why = "by STRATA_ARENA_PIN_GIB";
