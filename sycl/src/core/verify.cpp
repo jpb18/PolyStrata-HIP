@@ -128,7 +128,9 @@ void Verifier::diag(std::FILE* f) const {
                  rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
 }
 
-Verifier::~Verifier() {
+Verifier::~Verifier() try {
+    // SYCL port: at process exit the Level Zero context can already be gone (serve mode's end), and a destructor
+    // that throws aborts the process (exit 139); the waits and frees below are best-effort then.
     const Verifier* self = this;
     g_diag_verifier.compare_exchange_strong(self, nullptr);
     if (cs_) cs_->wait();
@@ -144,7 +146,9 @@ Verifier::~Verifier() {
                      h_flagA_, h_plan_, h_flagB_};
     for (void* h : hosts)
         if (h) sycl::free(h, dpct::get_in_order_queue());
+} catch (...) {
 }
+
 
 bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
                     SessionState &ss, const VerifyHits &hits,

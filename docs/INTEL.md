@@ -336,8 +336,18 @@ Measured through the OpenAI API with those sampling defaults: 36 tok/s decode on
 (which reuses the conversation's cached prompt), against 24-26 for llama.cpp on the same card. The reserve matters:
 with `--stream-experts` there is no host copy of the experts, so any expert left out of VRAM is read from the SSD
 and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
-5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free. `setup.py` still writes the llama.cpp config
-for Intel cards; generating this one is the next step.
+5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free.
+
+`setup.py` writes this config by itself on an Intel card once the SYCL engine is built (`build-sycl-aot/strata`
+and the `strata-sycl-dev` image): a native pack, the MTP draft layer (from an existing `mtp-q2_0.gguf` without the
+5 GB download), the container's paths, the reserve (1,024 MiB up to 32K, 2,048 with 4,096-token chunks above),
+Q4_0 KV above 64K, and the `sampling` block of an earlier config kept. `--intel-engine llama` keeps llama.cpp.
+
+**Speed depends on the text.** Decode with speculative decoding tracks how often the draft layer guesses right.
+The served engine at 32K context: 45-51 tok/s on the rig's test prompt (continuing a Fibonacci function, 77-85%
+of drafts accepted), 30-39 tok/s on a chat answer with prose (55-72%); sampling and the repetition penalty cost
+nothing measurable. The engine used to abort at exit in serve mode (a queue wait in a destructor after the
+runtime's teardown began); it now exits directly once its requests are done.
 
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for

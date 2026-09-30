@@ -360,6 +360,44 @@ def intel_gpus():
     return found
 
 
+SYCL_WRAPPER = ROOT / "sycl" / "serve" / "strata-sycl.sh"
+SYCL_IMAGE = "strata-sycl-dev"
+
+
+def sycl_engine():
+    """Strata's own engine for an Intel Arc (the SYCL port): (binary, why-not). The binary runs inside the oneAPI
+    runtime image through sycl/serve/strata-sycl.sh; building both is described in docs/INTEL.md."""
+    if WIN:
+        return None, "the SYCL port runs on Linux only"
+    if not SYCL_WRAPPER.exists():
+        return None, "sycl/serve/strata-sycl.sh is missing"
+    exe = next((b for b in (ROOT / "build-sycl-aot" / "strata", ROOT / "build-sycl" / "strata") if b.exists()), None)
+    if exe is None:
+        return None, "it is not built (sycl/tools/build.sh; docs/INTEL.md)"
+    if not shutil.which("docker"):
+        return None, "docker is not installed (the engine runs in the oneAPI image)"
+    r = subprocess.run(["docker", "image", "inspect", SYCL_IMAGE], capture_output=True)
+    if r.returncode != 0:
+        return None, f"the runtime image {SYCL_IMAGE} is missing (sycl/tools/Dockerfile)"
+    return exe, None
+
+
+def sycl_path(path) -> str:
+    """A host path as the SYCL engine's container sees it: the folder above the Strata checkout is mounted at /work."""
+    p, root = Path(path).resolve(), ROOT.parent.resolve()
+    try:
+        return "/work/" + p.relative_to(root).as_posix()
+    except ValueError:
+        fail(f"{p} is outside {root}, which the SYCL engine's container mounts",
+             f"keep the models and the data folder under {root} (--models-dir / --data-dir), or use --intel-engine llama")
+
+
+def sycl_host_path(cfg: dict, path: str) -> str:
+    """The reverse of sycl_path for a config's argument (start's check that the model files exist)."""
+    root = cfg.get("sycl_root")
+    return str(Path(root) / path[len("/work/"):]) if root and path.startswith("/work/") else path
+
+
 def llama_block(kind, server, gguf, context, port):
     """The config's "llama" block: how serve/engine_llama.py gets its llama-server.
 
@@ -1509,6 +1547,8 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     """Configs written before v0.1.13 read prompts in fixed 2048-token chunks; the engine now picks the chunk
     itself (`--prefill auto`: up to 8192, as the free VRAM allows - about 2x faster on long prompts).  Under WSL,
     KV streaming is dropped: its RAM copy must be pinned, and the driver pins only about 1 GB there."""
+    if cfg.get("backend") == "sycl":                   # the SYCL port's config: nothing here applies to it
+        return cfg
     a = cfg.get("args", [])
     changed = False
     ver = engine_version(cfg["exe"]) if "--prefill" in a else (0, 0, 0)
@@ -1534,7 +1574,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
           layer_split=None, keep=None) -> int:
     """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab)."""
     cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
-    missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
+    missing = [p for p in [cfg["exe"], *[sycl_host_path(cfg, a) for a in cfg["args"] if a.endswith(".gguf")]]
+               if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
@@ -1678,6 +1719,8 @@ def main() -> int:
     ap.add_argument("--kv", choices=["int8", "q4_0", "k8v4"],
                     help="KV cache precision above 8K context: int8 (default), q4_0 (half the memory, a little less "
                          "precise) or k8v4 (hybrid: INT8 K + 4-bit V, 816 B/cell)")
+    ap.add_argument("--intel-engine", choices=["auto", "strata", "llama"], default="auto",
+                    help="Intel Arc only: Strata's own engine built for the card (the SYCL port in sycl/, faster: docs/INTEL.md) or llama.cpp's SYCL backend; auto = Strata's when it is built, else llama.cpp")
     ap.add_argument("--llama-server", metavar="PATH|IMAGE",
                     help="Intel Arc only: the llama-server to run the model with (a binary built with -DGGML_SYCL=ON, "
                          "or a container image); default: one on PATH, else the B70 image via docker")
@@ -1799,11 +1842,19 @@ def main() -> int:
     hip = a.backend == "hip" or (a.backend is None and not nv_ok and bool(amd_ok))
     intel = [] if found or a.backend == "hip" or WIN else intel_gpus()   # no NVIDIA card: an Intel Arc runs llama.cpp
     if intel:
-        backend = "llama"
         g = max(intel, key=lambda x: x["vram_gb"])
-        ok(f"Intel {g['name']} ({g['vram_gb']:.0f} GB): using llama.cpp's SYCL backend instead of the CUDA engine")
+        sycl_exe, sycl_why = sycl_engine() if a.intel_engine != "llama" else (None, "--intel-engine llama")
+        if sycl_exe is not None:
+            backend = "sycl"
+            ok(f"Intel {g['name']} ({g['vram_gb']:.0f} GB): Strata's own engine, built for the card ({sycl_exe})")
+        else:
+            if a.intel_engine == "strata":
+                fail(f"Strata's SYCL engine cannot be used: {sycl_why}", "build it (docs/INTEL.md) or use --intel-engine llama")
+            backend = "llama"
+            ok(f"Intel {g['name']} ({g['vram_gb']:.0f} GB): using llama.cpp's SYCL backend instead of the CUDA engine"
+               + ("" if a.intel_engine == "llama" else f" (Strata's SYCL engine: {sycl_why})"))
         if a.vision not in (None, "no", "none"):
-            warn("images are not wired on the llama.cpp engine yet: continuing without vision")
+            warn("images are not wired on the Intel engines yet: continuing without vision")
         a.vision = "none"
         found = intel
     if a.backend is None and nv_ok and amd_ok:
@@ -1838,7 +1889,7 @@ def main() -> int:
         sel, multi, chosen = [gpu["index"]], [], [gpu]
         a.gpu = gpu["index"] if len(amd) > 1 else a.gpu
         ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, {gpu['arch']} (AMD, experimental: docs/AMD_HIP.md)")
-    elif backend == "llama":
+    elif backend in ("llama", "sycl"):
         sel, multi = [found[0]["index"]], []
         a.gpu = sel[0]
         GPU_PICK = a.gpu
@@ -1860,8 +1911,9 @@ def main() -> int:
         gpu["archs"] = sorted({x["arch"] for x in chosen})  # the engine needs code for every one of them
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
-    if backend == "llama":
-        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, {gpu['driver']} driver, SYCL via llama.cpp")
+    if backend in ("llama", "sycl"):
+        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, {gpu['driver']} driver, SYCL "
+           + ("(Strata's engine)" if backend == "sycl" else "via llama.cpp"))
     elif not hip:
         ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
         if driver_major(gpu) < MIN_DRIVER:
@@ -1872,7 +1924,7 @@ def main() -> int:
     ram = ram_gb()
     cpu, avx2, avx512 = cpu_info()
     need = min(d["ram_gb"] for d in MODELS.values())
-    if backend == "llama":
+    if backend in ("llama", "sycl"):
         # The CUDA engine keeps every expert in RAM. llama.cpp puts the whole first shard on the card and only
         # the second shard's lookup table (28.8 GB, read by row) in host memory as page cache, so the fit is a
         # VRAM question: shard 1 = the download minus that table. Below that, experts spill to RAM (slower).
@@ -1885,7 +1937,7 @@ def main() -> int:
         else:
             warn(f"VRAM: {gpu['vram_gb']:.0f} GB is less than any shard 1 (" +
                  ", ".join(f"{m} {g} GB" for m, g in fit.items()) + "): experts will spill to RAM and it will be slow")
-    low_ok = backend != "llama" and low_ram_fits("IQ1_M", ram, gpu["vram_gb"]) and a.low_ram != "off"   # the smallest model, mapped
+    low_ok = backend not in ("llama", "sycl") and low_ram_fits("IQ1_M", ram, gpu["vram_gb"]) and a.low_ram != "off"   # the smallest model, mapped
     if ram < need - 4 and not a.check and not low_ok:
         # every model keeps ALL its experts in RAM (23+ GB); VRAM only holds a copy of the most-used ones, so a
         # bigger GPU does not lower this
@@ -1933,13 +1985,13 @@ def main() -> int:
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
     for i, m in enumerate(names, 1):
         d = MODELS[m]
-        fit = "" if ram >= d["ram_gb"] or backend == "llama" else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
-        if backend != "llama" and low_ram_needed(m, ram) and low_ram_fits(m, ram, gpu["vram_gb"]) and a.low_ram != "off":
+        fit = "" if ram >= d["ram_gb"] or backend in ("llama", "sycl") else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
+        if backend not in ("llama", "sycl") and low_ram_needed(m, ram) and low_ram_fits(m, ram, gpu["vram_gb"]) and a.low_ram != "off":
             fit = f"   <- fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, gpu['vram_gb']):.0f}%)"
         say(f"  {i}) {m:8s} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
     rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 and "IQ3_XXS" in names else "1"
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
-    low_ram = backend != "llama" and (a.low_ram == "on" or (a.low_ram == "auto" and low_ram_needed(model, ram)))
+    low_ram = backend not in ("llama", "sycl") and (a.low_ram == "on" or (a.low_ram == "auto" and low_ram_needed(model, ram)))
     if low_ram and multi:
         warn("the low-RAM mode runs on one GPU: using " + gpu_name(gpu) + " only")
         multi, sel, chosen = [], [gpu["index"]], [gpu]
@@ -1950,7 +2002,7 @@ def main() -> int:
         if share < 0.6:
             warn("most of the experts are read from the SSD while it answers: expect it to be much slower than with "
                  "enough RAM (a faster SSD and a smaller size help)")
-    elif backend != "llama" and ram < MODELS[model]["ram_gb"] - 4:   # the CUDA engine's experts-in-RAM rule; on llama.cpp the fit is VRAM (step 1)
+    elif backend not in ("llama", "sycl") and ram < MODELS[model]["ram_gb"] - 4:   # the CUDA engine's experts-in-RAM rule; on llama.cpp the fit is VRAM (step 1)
         # #125: a warning and a question, not a stop: the user may accept paging (asked, "no" by default, so an
         # unattended --yes install still stops here)
         need_gb, arena = MODELS[model]["ram_gb"], MODELS[model]["arena_gb"]
@@ -1986,14 +2038,15 @@ def main() -> int:
         ctx = 131072
     ok(f"context: {ctx} tokens")
     # the KV cache (the model's memory of the conversation): 8-bit, or 4-bit after a Hadamard rotation (PR #21)
-    kv = "fp16" if ctx <= 8192 else (a.kv or "int8")
+    kv = "fp16" if ctx <= 8192 else (a.kv or ("q4_0" if backend == "sycl" and ctx > 65536 else "int8"))
+    # (the B70 at 128K: only 4-bit KV leaves every expert in VRAM - decode 33 vs 8.5 tok/s with INT8, docs/INTEL.md)
     if ctx > 8192 and not a.kv and not a.yes:
         say()
         say("  KV cache precision (the model's memory of the conversation):")
         say("  1) 8-bit   (recommended: what every published number was measured with)")
         say("  2) 4-bit   half the memory (about 4% faster at 128K), but measurably less precise on long")
         say("             documents; long-context lookups (needle tests) still pass")
-        kv = ["int8", "q4_0"][int(ask("KV cache?", ["1", "2"], "1", a.yes)) - 1]
+        kv = ["int8", "q4_0"][int(ask("KV cache?", ["1", "2"], "2" if kv == "q4_0" else "1", a.yes)) - 1]
     if ctx > 8192:
         ok(f"KV cache: {'8-bit' if kv == 'int8' else '4-bit (Hadamard-rotated)'}")
     if hip:
@@ -2062,6 +2115,10 @@ def main() -> int:
                  f"or install docker so the image {LLAMA_IMAGE} can run it")
         ok(f"engine: llama-server ({'container ' if kind == 'image' else ''}{server})")
         eng, lib_dirs = None, []
+    elif backend == "sycl":                          # Strata's SYCL build, run in its image (sycl/serve/strata-sycl.sh)
+        kind = server = None
+        eng, lib_dirs = None, []
+        ok(f"engine: {sycl_exe} (in the {SYCL_IMAGE} image)")
     else:
         kind = server = None
         eng = None if a.build or hip else get_prebuilt(a.prebuilt, gpu, vision)
@@ -2076,7 +2133,7 @@ def main() -> int:
             if va and int(gpu["arch"]) not in va and not (m.get("ptx") and int(gpu["arch"]) > max(va)):
                 warn(f"the ready-made image encoder has no code for your GPU (sm_{gpu['arch']}): compiling it")
                 eng = None
-    if backend != "llama":
+    if backend not in ("llama", "sycl"):
         if eng is None:
             eng = build_engine_hip(gpu, llama) if hip else build_engine(gpu, vision, a.yes, llama)
         meta = json.loads((eng / "BUILD.json").read_text())
@@ -2146,11 +2203,12 @@ def main() -> int:
         mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
         rt = mtp / "rt"
         if not (rt / "experts.bin").exists():
-            say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
-            say("  only its ~5 GB of MTP tensors are downloaded.")
-            run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)], env=env)
-            run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
-                 "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
+            if not (mtp / "mtp-q2_0.gguf").exists():     # packed earlier: only the run-time files are missing
+                say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
+                say("  only its ~5 GB of MTP tensors are downloaded.")
+                run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)], env=env)
+                run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
+                     "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
             run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
                 env=env)
         refresh_draft_vocab(rt, a.draft_vocab or "cjk")
@@ -2193,7 +2251,26 @@ def main() -> int:
             # the package's profile, with llama.cpp's flags (the engine takes the same ones)
             args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
                      "--cvec-mode", "project", "--cvec-dir", "per-layer"]
-    if backend == "llama":
+    if backend == "sycl":
+        # the container's paths, experts read from the GGUF (no host copy: every expert must fit VRAM, so the reserve
+        # is the smallest that leaves the KV and the prompt buffers room - docs/INTEL.md), no KV streaming (untested)
+        if "--kv-resident" in args:
+            i = args.index("--kv-resident")
+            del args[i:i + 2]
+        for flag in ("--pack", "--native", "--ple-gguf", "--expert-profile", "--mtp"):
+            if flag in args:
+                args[args.index(flag) + 1] = sycl_path(args[args.index(flag) + 1])
+        args += ["--stream-experts", "--vram-reserve-mib", "1024" if ctx <= 32768 else "2048"]
+        if ctx > 32768:
+            args += ["--prefill", "4096"] if "--prefill" not in args else []
+            args[args.index("--prefill") + 1] = "4096"   # long contexts: 4096-token chunks keep the borrowed slots small
+        cfg = {"engine": "strata", "backend": "sycl", "exe": str(SYCL_WRAPPER), "args": args, "cwd": str(ROOT),
+               "sycl_root": str(ROOT.parent), "tokenizer": str(pack / "tokenizer"),
+               "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+               "port": port}
+        if sycl_exe != ROOT / "build-sycl-aot" / "strata":
+            cfg["env"] = {"STRATA_SYCL_BIN": str(sycl_exe.relative_to(ROOT))}
+    elif backend == "llama":
         cfg = {"engine": "llama", "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
                "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
                "port": port, "llama": llama_block(kind, server, shards[0], a.context or 32768, port + 1)}
@@ -2227,7 +2304,14 @@ def main() -> int:
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
-    cal = None if backend == "llama" or hip else saved_calibration(cfg)   # tools/calibrate.py is NVIDIA-only for now
+    try:                                               # the sampling defaults set by hand in an earlier config are kept
+        old = json.loads(cfg_path.read_text(encoding="utf-8-sig")) if cfg_path.exists() else {}
+        if old.get("sampling") and "sampling" not in cfg:
+            cfg["sampling"] = old["sampling"]
+            ok("kept the sampling defaults of the earlier config: " + ", ".join(f"{k}={v}" for k, v in old["sampling"].items()))
+    except (OSError, ValueError):
+        pass
+    cal = None if backend in ("llama", "sycl") or hip else saved_calibration(cfg)   # tools/calibrate.py is NVIDIA-only for now
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))
         import calibrate as CAL
@@ -2236,7 +2320,7 @@ def main() -> int:
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     script = write_run_script(tag, cfg_path, port, engine="llama" if backend == "llama" else "strata")
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
-    if cal is None and backend != "llama" and not hip and not a.no_start and not a.yes and ask(
+    if cal is None and backend not in ("llama", "sycl") and not hip and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 5-10 minutes; the PC is busy "
             "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
         calibrate_config(cfg_path)

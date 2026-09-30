@@ -4822,7 +4822,12 @@ int main(int argc, char** argv) {
                              (double) (remote_experts[(size_t) r].full_row_bytes() - full_before[(size_t) r]) / 1048576.0,
                              remote_experts[(size_t) r].ms_begin(), remote_experts[(size_t) r].ms_wait());
         }
-        return 0;
+        // SYCL port: the requests are done and their output written; leave without unwinding the GPU objects (the OS
+        // reclaims them). Their destructors ran against a runtime already shutting down and aborted (exit 139).
+        try { dpct::get_current_device().queues_wait_and_throw(); } catch (...) {}
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(0);
     }
 
     // ---- plan v0.3 P5: the prompt's conditioning positions [0, n_prompt - 1) in batched chunks.  The token loop
