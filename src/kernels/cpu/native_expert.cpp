@@ -84,10 +84,11 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     // both set (and on a CPU without AVX-512, STRATA_NO_IQ512 changes nothing).
     static const bool avx512 = cpu_avx512_ok() && std::getenv("STRATA_NO_IQ512") == nullptr;
     static const bool avx2 = std::getenv("STRATA_NO_IQ256") == nullptr;
-    // #152: the multi-token kernels from ONE token on (they were used from two, ggml's vec_dot for one): a token's
-    // expert rows then round the same whatever the verify window grouped with it, so the output no longer depends
-    // on how many drafts a window held.  STRATA_IQ_MT_MIN=2 restores the old rule (A/B).
-    static const int mt_min = [] { const char* e = std::getenv("STRATA_IQ_MT_MIN"); return e ? std::atoi(e) : 1; }();
+    // #152: from how many tokens the multi-token kernels run (ggml's vec_dot below that).  The default 2 is the
+    // measured-fastest rule, but a token's expert rows then round differently alone than in a group, so greedy output
+    // can depend on how many drafts a verify window held.  STRATA_IQ_MT_MIN=1 (opt-in, 0.1.30) uses the multi-token
+    // kernels for every group: output independent of the drafting, at a measured -1..-3% decode on IQ3_S (AVX-512).
+    static const int mt_min = [] { const char* e = std::getenv("STRATA_IQ_MT_MIN"); return e ? std::atoi(e) : 2; }();
     if (nt >= mt_min && iq512_supported(f.gu_type)) {
         if (avx512) {
             iq512_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
@@ -117,8 +118,8 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     // IQ4_NL down rows: the AVX-2 multi-token kernel decodes the nibbles and absolutises the weights once per
     // block instead of once per token; ggml-cpu's dot is single-token.  STRATA_NO_IQ4NL falls back to it.
     static const bool iq4nl_mt = std::getenv("STRATA_NO_IQ4NL") == nullptr;
-    static const int mt_min = [] { const char* e = std::getenv("STRATA_IQ_MT_MIN"); return e ? std::atoi(e) : 1; }();
-    if (nt >= mt_min && f.d_type == 20 && iq4nl_mt) {   // #152: from one token on, as the gate/up rows
+    static const int mt_min = [] { const char* e = std::getenv("STRATA_IQ_MT_MIN"); return e ? std::atoi(e) : 2; }();
+    if (nt >= mt_min && f.d_type == 20 && iq4nl_mt) {   // #152: the same rule as the gate/up rows
         iq4nl256_down_rows(blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }

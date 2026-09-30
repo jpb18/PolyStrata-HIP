@@ -38,6 +38,14 @@ static double rel(const std::vector<float>& a, const std::vector<float>& b) {
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep the trail on a crash
     if (argc < 2) { std::fprintf(stderr, "usage: native_expert_parity <shard1.gguf> [layer ...]\n"); return 2; }
+    // #152's width check tests the opt-in rule (the multi-token kernels from one token on)
+    if (std::getenv("STRATA_IQ_MT_MIN") == nullptr) {
+#ifdef _WIN32
+        _putenv_s("STRATA_IQ_MT_MIN", "1");
+#else
+        setenv("STRATA_IQ_MT_MIN", "1", 1);
+#endif
+    }
     strata::GgufFile gguf(argv[1]);
     std::vector<int> layers;
     for (int i = 2; i < argc; ++i) layers.push_back(std::atoi(argv[i]));

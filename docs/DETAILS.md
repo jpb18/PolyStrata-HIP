@@ -70,6 +70,14 @@ VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the
 slower. It does not stream its KV cache (KV streaming is on by default from 64K), so it pays off mostly on large
 cards at long contexts.
 
+**Reproducible greedy output (0.1.30, opt-in, `STRATA_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
+expert for one token with ggml's dot product and for several tokens with Strata's multi-token kernels, which round
+slightly differently. How many tokens share an expert depends on the drafts in a verify window, so the same prompt
+at temperature 0 can end in a different (equally good) answer when the drafting, the cache state or a resumed
+conversation differ (issue #152). `STRATA_IQ_MT_MIN=1` (in the config's `env`) uses the multi-token kernels for
+every group: the answer then no longer depends on the drafting. Measured on a Ryzen 7600 (AVX-512): IQ3_S decode
+-1..-3%, the other models the same; the default stays the fastest rule.
+
 **The draft layer's tokens (0.1.27, `--draft-vocab`):** the MTP draft layer can only propose tokens from a subset
 of the vocabulary (`mtp/rt/draft_vocab.bin`). Since 0.1.27 the subset includes every Chinese, Japanese and Korean
 token (106,299 ids), so answers in those languages are 15-38% faster (Q2_0, RTX 5070). Its head takes ~180 MiB of
