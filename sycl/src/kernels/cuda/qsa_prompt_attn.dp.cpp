@@ -5,11 +5,13 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/kv_q4.hpp"
+
+#include <cmath>
 
 #include <cstdio>
 #include <cstdlib>
 #include <type_traits>
-#include <cmath>
 
 namespace strata::kernels {
 namespace {
@@ -25,7 +27,9 @@ constexpr int QS = HD + 8;        // q row stride in halves (bank-conflict-free 
 
 // The MMA and cp.async below need sm_80. Builds for older cards (the experimental sm_75 one) compile them to a trap;
 // qsa_prompt_attn_batch refuses such a device at run time, so the old kernel runs there.
-#if 0   // SYCL: inline PTX (mma/ldmatrix/cp.async) - the XMX port is pending; see tools/fixups.py
+#if defined(__HIPCC__)          // AMD: no mma.sync / cp.async; the host keeps the old kernel (below)
+#define STRATA_PA_SM80 0
+#elif 0   // SYCL: inline PTX (mma/ldmatrix/cp.async) - the XMX port is pending; see tools/fixups.py
 #define STRATA_PA_SM80 1
 #else
 #define STRATA_PA_SM80 0
@@ -77,15 +81,20 @@ __dpct_inline__ uint32_t pack_h2(float lo_k,
 }
 
 // KV_MODE 1: int8 codes + fp16 scale per 64 values. KV_MODE 0: fp16 values (scales 1).
+// KV_MODE 3 (hybrid K8V4): K as mode 1, V as mode 0 - the row's q4_0 blocks are dequantized to fp16 at
+// gather, so everything downstream of the load is the mode-0 V path; the caller un-rotates the output.
 template <int KV_MODE>
 struct Smem {
-    using Elem =
+    using KElem =
+        typename std::conditional<KV_MODE == 0, sycl::half, int8_t>::type;
+    using VElem =
         typename std::conditional<KV_MODE == 1, int8_t, sycl::half>::type;
-    static constexpr int ROW = KV_MODE == 1 ? HD + 16 : HD + 8;   // elements; 16-byte aligned rows, banks spread
+    static constexpr int KROW = KV_MODE == 0 ? HD + 8 : HD + 16;   // elements; 16-byte aligned rows, banks spread
+    static constexpr int VROW = KV_MODE == 1 ? HD + 16 : HD + 8;
     sycl::half qh[16][QS];
     sycl::half ql[16][QS];
-    Elem k[CH][ROW];
-    Elem v[CH][ROW];
+    KElem k[CH][KROW];
+    VElem v[CH][VROW];
     float ks[CH][4];
     float vs[CH][4];
     float s[16][CH + 1];
@@ -98,7 +107,7 @@ struct Smem {
 
 template <int KV_MODE>
 /*
-DPCT1110:134: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 prompt_attn_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -118,7 +127,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
     attn += (size_t) qi * n_head * HD + (size_t) kvh * G * HD;
     ids += (size_t) qi * cap;
     /*
-    DPCT1098:727: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -134,7 +143,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
         qm = sycl::fmax(qm, sycl::fabs(q[i]));
 #pragma unroll
     /*
-    DPCT1108:135: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -144,7 +153,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                 qm, o));
     if (lane == 0) S.qmax[warp] = qm;
     /*
-    DPCT1065:733: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -153,7 +162,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                     sycl::fmax(S.qmax[2], S.qmax[3]));
     int qe = 0;
     /*
-    DPCT1017:728: The sycl::frexp call is used instead of the frexpf call. These
+    DPCT1017: The sycl::frexp call is used instead of the frexpf call. These
     two calls do not provide exactly the same functionality. Check the potential
     precision and/or performance issues for the generated code.
     */
@@ -176,9 +185,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                         .convert<float, sycl::rounding_mode::automatic>()[0])
                 .convert<sycl::half, sycl::rounding_mode::rte>()[0];
     }
-    if (t < 16) {
-        S.mrow[t] = -sycl::bit_cast<float, int>(0x7f800000U); S.lsum[t] = 0.0f;
-    }
+    if (t < 16) { S.mrow[t] = -INFINITY; S.lsum[t] = 0.0f; }
 
     float acc[8][4];
 #pragma unroll
@@ -196,46 +203,28 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
             S.row[t] = r;
         }
         /*
-        DPCT1118:136: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:735: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier(); // rows ready; the previous chunk's p.v is done with
                             // k, v, s
-        // gather the chunk's K and V rows (16-byte pieces) and their scales
+        // gather the chunk's K and V rows (16-byte pieces; K8V4's V as q4_0 blocks dequantized to fp16)
+        // and their scales
         {
-            constexpr int PIECES = HD * (int) sizeof(typename Smem<KV_MODE>::Elem) / 16;   // per row
-            for (int i = t; i < CH * PIECES; i += THREADS) {
-                const int c = i / PIECES, pc = i % PIECES;
+            constexpr int KPIECES = HD * (int) sizeof(typename Smem<KV_MODE>::KElem) / 16;   // per K row
+            for (int i = t; i < CH * KPIECES; i += THREADS) {
+                const int c = i / KPIECES, pc = i % KPIECES;
                 const long long r = S.row[c];
-                sycl::uint4 kx = sycl::uint4(0, 0, 0, 0), vx = kx;
+                sycl::uint4 kx = sycl::uint4(0, 0, 0, 0);
                 if (r >= 0) {
-                    if constexpr (KV_MODE == 1) {
+                    if constexpr (KV_MODE == 0)
                         /*
-                        DPCT1098:729: The '*' expression is used instead of the
-                        __ldg call. These two expressions do not provide the
-                        exact same functionality. Check the generated code for
-                        potential precision and/or performance issues.
-                        */
-                        kx = *(reinterpret_cast<const sycl::uint4 *>(p.k_q +
-                                                                     r * HD) +
-                               pc);
-                        /*
-                        DPCT1098:730: The '*' expression is used instead of the
-                        __ldg call. These two expressions do not provide the
-                        exact same functionality. Check the generated code for
-                        potential precision and/or performance issues.
-                        */
-                        vx = *(reinterpret_cast<const sycl::uint4 *>(p.v_q +
-                                                                     r * HD) +
-                               pc);
-                    } else {
-                        /*
-                        DPCT1098:731: The '*' expression is used instead of the
+                        DPCT1098: The '*' expression is used instead of the
                         __ldg call. These two expressions do not provide the
                         exact same functionality. Check the generated code for
                         potential precision and/or performance issues.
@@ -243,23 +232,87 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                         kx = *(reinterpret_cast<const sycl::uint4 *>(p.k_pool +
                                                                      r * HD) +
                                pc);
+                    else   // modes 1 and 3: the K side is INT8
                         /*
-                        DPCT1098:732: The '*' expression is used instead of the
+                        DPCT1098: The '*' expression is used instead of the
                         __ldg call. These two expressions do not provide the
                         exact same functionality. Check the generated code for
                         potential precision and/or performance issues.
                         */
-                        vx = *(reinterpret_cast<const sycl::uint4 *>(p.v_pool +
+                        kx = *(reinterpret_cast<const sycl::uint4 *>(p.k_q +
                                                                      r * HD) +
                                pc);
-                    }
                 }
                 *reinterpret_cast<sycl::uint4 *>(
                     reinterpret_cast<unsigned char *>(&S.k[c][0]) + pc * 16) =
                     kx;
-                *reinterpret_cast<sycl::uint4 *>(
-                    reinterpret_cast<unsigned char *>(&S.v[c][0]) + pc * 16) =
-                    vx;
+            }
+            if constexpr (KV_MODE == 3) {   // V: dequantize the row's q4_0 blocks straight into the fp16 V row
+                constexpr int BLKS = HD / QK4_0;
+                constexpr int BYTES = BLKS * (int) sizeof(block_q4_0);
+                for (int i = t; i < CH * BLKS; i += THREADS) {
+                    const int c = i / BLKS, b = i % BLKS;
+                    const long long r = S.row[c];
+#pragma unroll
+                    for (int j = 0; j < QK4_0; ++j)
+                        S.v[c][b * QK4_0 + j] = sycl::half(0);
+                    if (r >= 0) {
+                        const block_q4_0* blk = reinterpret_cast<const block_q4_0*>(p.v_q4 + r * BYTES) + b;
+                        const float d =
+                            sycl::vec<sycl::half, 1>(
+                                sycl::bit_cast<sycl::half, unsigned short>(
+                                    blk->d))
+                                .convert<float,
+                                         sycl::rounding_mode::automatic>()[0];
+#pragma unroll
+                        for (int j = 0; j < QK4_0 / 2; ++j) {
+                            S.v[c][b * QK4_0 + j] =
+                                sycl::vec<float, 1>(
+                                    (float)((int)(blk->qs[j] & 0x0F) - 8) * d)
+                                    .convert<sycl::half,
+                                             sycl::rounding_mode::rte>()[0];
+                            S.v[c][b * QK4_0 + j + QK4_0 / 2] =
+                                sycl::vec<float, 1>(
+                                    (float)((int)(blk->qs[j] >> 4) - 8) * d)
+                                    .convert<sycl::half,
+                                             sycl::rounding_mode::rte>()[0];
+                        }
+                    }
+                }
+            } else {
+                constexpr int VPIECES = HD * (int) sizeof(typename Smem<KV_MODE>::VElem) / 16;   // per V row
+                for (int i = t; i < CH * VPIECES; i += THREADS) {
+                    const int c = i / VPIECES, pc = i % VPIECES;
+                    const long long r = S.row[c];
+                    sycl::uint4 vx = sycl::uint4(0, 0, 0, 0);
+                    if (r >= 0) {
+                        if constexpr (KV_MODE == 1)
+                            /*
+                            DPCT1098: The '*' expression is used instead of
+                            the __ldg call. These two expressions do not provide
+                            the exact same functionality. Check the generated
+                            code for potential precision and/or performance
+                            issues.
+                            */
+                            vx = *(reinterpret_cast<const sycl::uint4 *>(
+                                       p.v_q + r * HD) +
+                                   pc);
+                        else
+                            /*
+                            DPCT1098: The '*' expression is used instead of
+                            the __ldg call. These two expressions do not provide
+                            the exact same functionality. Check the generated
+                            code for potential precision and/or performance
+                            issues.
+                            */
+                            vx = *(reinterpret_cast<const sycl::uint4 *>(
+                                       p.v_pool + r * HD) +
+                                   pc);
+                    }
+                    *reinterpret_cast<sycl::uint4 *>(
+                        reinterpret_cast<unsigned char *>(&S.v[c][0]) +
+                        pc * 16) = vx;
+                }
             }
             for (int i = t; i < CH * 4; i += THREADS) {
                 const int c = i / 4, g = i % 4;
@@ -277,6 +330,13 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                                     p.v_scale[r * (HD / KV_Q8_GROUP) + g]))
                                 .convert<float,
                                          sycl::rounding_mode::automatic>()[0];
+                    } else if constexpr (KV_MODE == 3) {   // K as int8, V dequantized to fp16 (scale 1)
+                        a = sycl::vec<sycl::half, 1>(
+                                sycl::bit_cast<sycl::half, unsigned short>(
+                                    p.k_scale[r * (HD / KV_Q8_GROUP) + g]))
+                                .convert<float,
+                                         sycl::rounding_mode::automatic>()[0];
+                        b = 1.0f;
                     } else {
                         a = b = 1.0f;
                     }
@@ -286,11 +346,11 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
             }
         }
         /*
-        DPCT1118:137: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:736: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -315,7 +375,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                     al[1] = *reinterpret_cast<const uint32_t*>(&S.ql[gid + 8][k0 + 2 * tig]);
                     al[2] = *reinterpret_cast<const uint32_t*>(&S.ql[gid][k0 + 2 * tig + 8]);
                     al[3] = *reinterpret_cast<const uint32_t*>(&S.ql[gid + 8][k0 + 2 * tig + 8]);
-                    if constexpr (KV_MODE == 1) {
+                    if constexpr (KV_MODE != 0) {   // modes 1 and 3: the K side is INT8 codes
                         b[0] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(&S.k[cb + gid][k0 + 2 * tig]));
                         b[1] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(&S.k[cb + gid][k0 + 2 * tig + 8]));
                     } else {
@@ -334,23 +394,17 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                 sc[3] = sycl::fma(tg[3], (float)s1, sc[3]);
             }
             const int c = cb + 2 * tig;
-            S.s[gid][c] = c < nh ? sc[0] * qdown
-                                 : -sycl::bit_cast<float, int>(0x7f800000U);
-            S.s[gid][c + 1] = c + 1 < nh
-                                  ? sc[1] * qdown
-                                  : -sycl::bit_cast<float, int>(0x7f800000U);
-            S.s[gid + 8][c] = c < nh ? sc[2] * qdown
-                                     : -sycl::bit_cast<float, int>(0x7f800000U);
-            S.s[gid + 8][c + 1] =
-                c + 1 < nh ? sc[3] * qdown
-                           : -sycl::bit_cast<float, int>(0x7f800000U);
+            S.s[gid][c] = c < nh ? sc[0] * qdown : -INFINITY;
+            S.s[gid][c + 1] = c + 1 < nh ? sc[1] * qdown : -INFINITY;
+            S.s[gid + 8][c] = c < nh ? sc[2] * qdown : -INFINITY;
+            S.s[gid + 8][c + 1] = c + 1 < nh ? sc[3] * qdown : -INFINITY;
         }
         /*
-        DPCT1118:138: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:737: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -359,14 +413,14 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
         {
             constexpr int PER = CH / 8;
             const int r = t >> 3, sub = t & 7;
-            float x[PER], mx = -sycl::bit_cast<float, int>(0x7f800000U);
+            float x[PER], mx = -INFINITY;
 #pragma unroll
             for (int j = 0; j < PER; ++j) {
                 x[j] = S.s[r][sub * PER + j]; mx = sycl::fmax(mx, x[j]);
             }
 #pragma unroll
             /*
-            DPCT1108:140: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -380,15 +434,14 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
             float sum = 0.0f;
 #pragma unroll
             for (int j = 0; j < PER; ++j) {
-                const float e = x[j] == -sycl::bit_cast<float, int>(0x7f800000U)
-                                    ? 0.0f
-                                    : sycl::exp2(x[j] - m_new);
+                const float e =
+                    x[j] == -INFINITY ? 0.0f : sycl::exp2(x[j] - m_new);
                 S.s[r][sub * PER + j] = e;
                 sum += e;
             }
 #pragma unroll
             /*
-            DPCT1108:141: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -400,20 +453,18 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                 sycl::ext::oneapi::this_work_item::get_sub_group());
             if (sub == 0) {
                 const float a =
-                    m_old == -sycl::bit_cast<float, int>(0x7f800000U)
-                        ? 0.0f
-                        : sycl::exp2(m_old - m_new);
+                    m_old == -INFINITY ? 0.0f : sycl::exp2(m_old - m_new);
                 S.alpha[r] = a;
                 S.lsum[r] = sycl::fma(S.lsum[r], (float)a, sum);
                 S.mrow[r] = m_new;
             }
         }
         /*
-        DPCT1118:139: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:738: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -428,7 +479,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                 vmax = sycl::fmax(vmax, S.vs[c][warp]);
 #pragma unroll
             /*
-            DPCT1108:142: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -506,7 +557,7 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
         }
     }
     /*
-    DPCT1065:734: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -552,7 +603,7 @@ __dpct_inline__ void cp_async16(void *smem, const void *gmem, bool valid) {
 #else
     auto sa = smem;
     /*
-    DPCT1053:143: Migration of device assembly code is not supported.
+    DPCT1053: Migration of device assembly code is not supported.
     */
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(sa),
                  "l"(gmem), "r"(valid ? 16 : 0));
@@ -578,7 +629,7 @@ __dpct_inline__ void cp_async_wait1() {
 }
 
 /*
-DPCT1110:146: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 prompt_attn_i8_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -598,7 +649,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
     attn += (size_t) qi * n_head * HD + (size_t) kvh * G * HD;
     ids += (size_t) qi * cap;
     /*
-    DPCT1098:741: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -614,7 +665,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
         qm = sycl::fmax(qm, sycl::fabs(q[i]));
 #pragma unroll
     /*
-    DPCT1108:147: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -623,11 +674,9 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
                 0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 qm, o));
     if (lane == 0) S.qmax[warp] = qm;
-    if (t < 16) {
-        S.mrow[t] = -sycl::bit_cast<float, int>(0x7f800000U); S.lsum[t] = 0.0f;
-    }
+    if (t < 16) { S.mrow[t] = -INFINITY; S.lsum[t] = 0.0f; }
     /*
-    DPCT1065:739: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -636,7 +685,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
                     sycl::fmax(S.qmax[2], S.qmax[3]));
     int qe = 0;
     /*
-    DPCT1017:742: The sycl::frexp call is used instead of the frexpf call. These
+    DPCT1017: The sycl::frexp call is used instead of the frexpf call. These
     two calls do not provide exactly the same functionality. Check the potential
     precision and/or performance issues for the generated code.
     */
@@ -672,7 +721,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
     // the chunk pipeline: cells two chunks ahead, their pool rows one chunk ahead, the data (cp.async) one ahead
     const int n_chunks = (n + CH2 - 1) / CH2;
     /*
-    DPCT1098:743: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -682,7 +731,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
     auto row_of = [&](int cell) -> long long {
         if (cell < 0) return -1;
         /*
-        DPCT1098:744: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -694,12 +743,12 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
         for (int j = 0; j < 4; ++j) {
             const int idx = lane + 32 * j, cell = idx >> 2, pc = idx & 3;
             /*
-            DPCT1108:148: '__shfl_sync' was migrated with the experimental
+            DPCT1108: '__shfl_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
             /*
-            DPCT1121:149: Make sure that the "r" which is used in the SYCL group
+            DPCT1121: Make sure that the "r" which is used in the SYCL group
             function/algorithm is initialized.
             */
             const long long rr = dpct::experimental::select_from_sub_group(
@@ -711,7 +760,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
             cp_async16(&S.kv[st][warp][1][0][0] + swz(cell, pc * 16), p.v_q + off, ok);
         }
         /*
-        DPCT1098:745: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -721,7 +770,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
                            .convert<float, sycl::rounding_mode::automatic>()[0]
                      : 0.0f;
         /*
-        DPCT1098:746: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -775,11 +824,11 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
             S.part[warp][gid + 8][c + 1] = tg[3] * s1;
         }
         /*
-        DPCT1118:150: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:747: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -787,20 +836,17 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
         // online softmax over the four groups' sum (fixed order): row t/8, 4 cells per thread
         {
             const int r = t >> 3, sub = t & 7;
-            float x[4], mx = -sycl::bit_cast<float, int>(0x7f800000U);
+            float x[4], mx = -INFINITY;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 const int c = sub * 4 + j;
-                x[j] = c0 + c < n ? (((S.part[0][r][c] + S.part[1][r][c]) +
-                                      S.part[2][r][c]) +
-                                     S.part[3][r][c]) *
-                                        qdown
-                                  : -sycl::bit_cast<float, int>(0x7f800000U);
+                x[j] = c0 + c < n ? (((S.part[0][r][c] + S.part[1][r][c]) + S.part[2][r][c]) + S.part[3][r][c]) * qdown
+                                  : -INFINITY;
                 mx = sycl::fmax(mx, x[j]);
             }
 #pragma unroll
             /*
-            DPCT1108:152: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -814,15 +860,14 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
             float sum = 0.0f;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                const float e = x[j] == -sycl::bit_cast<float, int>(0x7f800000U)
-                                    ? 0.0f
-                                    : sycl::exp2(x[j] - m_new);
+                const float e =
+                    x[j] == -INFINITY ? 0.0f : sycl::exp2(x[j] - m_new);
                 S.p[r][sub * 4 + j] = e;
                 sum += e;
             }
 #pragma unroll
             /*
-            DPCT1108:153: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -834,20 +879,18 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
                 sycl::ext::oneapi::this_work_item::get_sub_group());
             if (sub == 0) {
                 const float a =
-                    m_old == -sycl::bit_cast<float, int>(0x7f800000U)
-                        ? 0.0f
-                        : sycl::exp2(m_old - m_new);
+                    m_old == -INFINITY ? 0.0f : sycl::exp2(m_old - m_new);
                 S.alpha[r] = a;
                 S.lsum[r] = sycl::fma(S.lsum[r], (float)a, sum);
                 S.mrow[r] = m_new;
             }
         }
         /*
-        DPCT1118:151: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:748: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -857,7 +900,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
             float vmax = S.sc[st][warp][1][lane];
 #pragma unroll
             /*
-            DPCT1108:154: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -929,7 +972,7 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
         sycl::group_barrier(sycl::ext::oneapi::this_work_item::get_sub_group());
     }
     /*
-    DPCT1065:740: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -955,7 +998,7 @@ bool launch_i8(const float *q, const QsaAttnPools &pools, const int32_t *ids,
     int dev = 0;
     dev = dpct::get_current_device_id();
     /*
-    DPCT1083:155: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -963,12 +1006,12 @@ bool launch_i8(const float *q, const QsaAttnPools &pools, const int32_t *ids,
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev]) {
         /*
-        DPCT1027:749: The call to cudaFuncSetAttribute was replaced with 0
+        DPCT1027: The call to cudaFuncSetAttribute was replaced with 0
         because SYCL currently does not support corresponding setting.
         */
         if (0 != 0) {
             /*
-            DPCT1026:750: The call to cudaGetLastError was removed because this
+            DPCT1026: The call to cudaGetLastError was removed because this
             functionality is redundant in SYCL.
             */
             return false;
@@ -994,7 +1037,7 @@ bool launch_i8(const float *q, const QsaAttnPools &pools, const int32_t *ids,
                 auto attn_q0_s_n_head_HD_ct7 = attn + q0 * s.n_head * HD;
 
                 cgh.parallel_for<
-                    dpct_kernel_name<class prompt_attn_i8_kernel_4540c2>>(
+                    dpct_kernel_name<class prompt_attn_i8_kernel_c3d463>>(
                     sycl::nd_range<3>(
                         sycl::range(1, (unsigned)s.n_head_kv, (unsigned)nb) *
                             sycl::range(1, 1, THREADS),
@@ -1015,7 +1058,7 @@ bool launch_i8(const float *q, const QsaAttnPools &pools, const int32_t *ids,
         }
     }
     /*
-    DPCT1010:751: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -1037,7 +1080,7 @@ bool launch(const float *q, const QsaAttnPools &pools, const int32_t *ids,
     int dev = 0;
     dev = dpct::get_current_device_id();
     /*
-    DPCT1083:156: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -1045,12 +1088,12 @@ bool launch(const float *q, const QsaAttnPools &pools, const int32_t *ids,
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev]) {
         /*
-        DPCT1027:756: The call to cudaFuncSetAttribute was replaced with 0
+        DPCT1027: The call to cudaFuncSetAttribute was replaced with 0
         because SYCL currently does not support corresponding setting.
         */
         if (0 != 0) {
             /*
-            DPCT1026:753: The call to cudaGetLastError was removed because this
+            DPCT1026: The call to cudaGetLastError was removed because this
             functionality is redundant in SYCL.
             */
             return false;
@@ -1076,7 +1119,7 @@ bool launch(const float *q, const QsaAttnPools &pools, const int32_t *ids,
                 auto attn_q0_s_n_head_HD_ct7 = attn + q0 * s.n_head * HD;
 
                 cgh.parallel_for<
-                    dpct_kernel_name<class prompt_attn_kernel_410441,
+                    dpct_kernel_name<class prompt_attn_kernel_e09b15,
                                      dpct_kernel_scalar<KV_MODE>>>(
                     sycl::nd_range<3>(
                         sycl::range(1, (unsigned)s.n_head_kv, (unsigned)nb) *
@@ -1098,7 +1141,7 @@ bool launch(const float *q, const QsaAttnPools &pools, const int32_t *ids,
         }
     }
     /*
-    DPCT1010:754: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -1123,7 +1166,7 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
         static int cc_major[64] = {};
         int dev = 0;
         /*
-        DPCT1026:757: The call to cudaGetLastError was removed because this
+        DPCT1026: The call to cudaGetLastError was removed because this
         functionality is redundant in SYCL.
         */
         if (DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) != 0 ||
@@ -1135,7 +1178,7 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
             if (DPCT_CHECK_ERROR(
                     major = dpct::get_device(dev).get_major_version()) != 0) {
                 /*
-                DPCT1026:758: The call to cudaGetLastError was removed because
+                DPCT1026: The call to cudaGetLastError was removed because
                 this functionality is redundant in SYCL.
                 */
                 return false;
@@ -1145,10 +1188,17 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
         (void) cc_major[dev];
         return false;   // SYCL: the tensor-core kernel is not ported yet; the caller takes the older kernel
     }
+#if defined(__HIPCC__)
+    return false;   // the tensor-core kernel is compiled out on AMD (its major version is not a CUDA sm)
+#endif
     if (pools.k_q4 != nullptr || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids ||
         !steps || !pools.page_table)
         return false;
     dpct::queue_ptr st = strata::q_of(stream);
+    if (pools.k_q != nullptr && pools.v_q4 != nullptr) {   // hybrid K8V4: int8 K + dequantized-q4 V
+        if (!pools.k_scale) return false;
+        return launch<3>(q, pools, ids, steps, cap, s, attn, n_q, st);
+    }
     if (pools.k_q != nullptr) {
         if (!pools.v_q || !pools.k_scale || !pools.v_scale) return false;
         // STRATA_PROMPT_ATTN_V1=1 (debug): the first version, same accuracy, another summation order - the control

@@ -84,7 +84,7 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
                                (size_t)n, dpct::get_in_order_queue())),
           "malloc back");
     /*
-    DPCT1114:1053: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
     in the original code the source host memory is pageable memory. If the
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -216,7 +216,7 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
                                (size_t)n, dpct::get_in_order_queue())),
           "malloc back");
     /*
-    DPCT1114:1054: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
     in the original code the source host memory is pageable memory. If the
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.

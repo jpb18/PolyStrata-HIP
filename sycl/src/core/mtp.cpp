@@ -57,7 +57,7 @@ struct Bump {
 
 bool mapped(size_t bytes, void **h, void **d) try {
     /*
-    DPCT1048:0: The original value cudaHostAllocMapped is not meaningful in the
+    DPCT1048: The original value cudaHostAllocMapped is not meaningful in the
     migrated code and was removed or replaced with 0. You may need to check the
     migrated code.
     */
@@ -177,13 +177,13 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
             DPCT_CHECK_ERROR(dense_ = (uint8_t *)sycl::malloc_device(
                                  blob.size(), dpct::get_in_order_queue()));
         /*
-        DPCT1000:10: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (alloc != 0) {
             size_t free_bytes = 0, total_bytes = 0;
             /*
-            DPCT1106:12: 'cudaMemGetInfo' was migrated with the Intel extensions
+            DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
             for device information which may not be supported by all compilers
             or runtimes. You may need to adjust the code.
             */
@@ -191,12 +191,12 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
                 DPCT_CHECK_ERROR(dpct::get_current_device().get_memory_info(
                     free_bytes, total_bytes));
             /*
-            DPCT1009:13: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:9: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = "mtp: dense weights allocation failed (" +
                   std::string(dpct::get_error_string_dummy(alloc)) +
@@ -207,7 +207,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
             return false;
         }
         /*
-        DPCT1114:11: cudaMemcpy is migrated to asynchronization memcpy, assuming
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
         in the original code the source host memory is pageable memory. If the
         memory is not pageable, call wait() on event return by memcpy API to
         ensure synchronization behavior.
@@ -253,6 +253,12 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
     // window (plus the cells a round writes ahead of its queries) over a host copy, refilled on a resume. The host copy
     // is pinned after the expert arena has pinned what it could: if it does not fit, the K/V stays whole in VRAM.
     int64_t ring = (window > 0 && window < max_cells) ? window + 4 * (int64_t) max_t + 64 : 0;
+    // K8V4 never applies to the drafter: its own attention paths (below, and verify.cpp) handle whole formats
+    // only, whatever ring shape it takes (0, a window, or the -1 fully-resident fallback).
+    const bool kv_hybrid_was = qsa_kv_hybrid();
+    const bool kv_int8_was = qsa_kv_int8();
+    qsa_set_kv_hybrid(false);
+    if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
     uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
     if (DPCT_CHECK_ERROR(state_arena_ = (void *)sycl::malloc_device(
                              sb, dpct::get_in_order_queue())) != 0) {
@@ -262,7 +268,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         if (st_.kv_mode == 0) { err = "mtp: state init failed"; return false; }
         std::fprintf(stderr, "strata mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
         /*
-        DPCT1026:14: The call to cudaGetLastError was removed because this
+        DPCT1026: The call to cudaGetLastError was removed because this
         functionality is redundant in SYCL.
         */
         sycl::free(state_arena_, dpct::get_in_order_queue());
@@ -275,6 +281,8 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         }
         if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[0], ring) == 0) { err = "mtp: state init failed"; return false; }
     }
+    qsa_set_kv_int8(kv_int8_was);
+    qsa_set_kv_hybrid(kv_hybrid_was);
     qsa_state_zero(st_, g, nullptr);
     dpct::get_current_device().queues_wait_and_throw();
     vram_ += sb;
@@ -337,7 +345,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         for (uint64_t t = 0; t < T; ++t)
             for (int64_t i = 0; i < cap_; ++i) id[(size_t) (t * (uint64_t) cap_ + (uint64_t) i)] = (int32_t) i;
         /*
-        DPCT1114:15: cudaMemcpy is migrated to asynchronization memcpy, assuming
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
         in the original code the source host memory is pageable memory. If the
         memory is not pageable, call wait() on event return by memcpy API to
         ensure synchronization behavior.
@@ -345,7 +353,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         dpct::get_in_order_queue().memcpy(ident_, id.data(), id.size() * 4).wait();
     }
     /*
-    DPCT1025:16: The SYCL queue is created ignoring the flag and priority
+    DPCT1025: The SYCL queue is created ignoring the flag and priority
     options.
     */
     if (DPCT_CHECK_ERROR(cs_ = dpct::get_current_device().create_queue(true)) !=
@@ -496,7 +504,7 @@ bool MtpDrafter::record_forward(int T, int step_row0, dpct::queue_ptr cs,
         for (int t = 0; t < T; ++t) {
             float* qc = qcur_ + t * NH * HD;
             /*
-            DPCT1124:17: cudaMemcpy2DAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpy2DAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -603,7 +611,7 @@ bool finish_capture(dpct::queue_ptr cs, bool ok,
                 graph->finalize())) != 0) {
         if (graph) delete (graph);
         /*
-        DPCT1009:19: SYCL reports errors using exceptions and does not use error
+        DPCT1009: SYCL reports errors using exceptions and does not use error
         codes. Please replace the "get_error_string_dummy(...)" with a real
         error-handling function.
         */
@@ -614,7 +622,7 @@ bool finish_capture(dpct::queue_ptr cs, bool ok,
     delete (graph);
     // an explicit upload: the first launch's implicit one blocked behind a device-side spin (verify.cpp)
     /*
-    DPCT1007:18: Migration of cudaGraphUpload is not supported.
+    DPCT1007: Migration of cudaGraphUpload is not supported.
     */
     // no cudaGraphUpload on SYCL: a finalized command_graph is already resident
     cs->wait();
@@ -764,7 +772,7 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
             for (int64_t h = 0; h < NHp; ++h) ps[i * NHp + h] = (int32_t) cell;
         }
         /*
-        DPCT1124:20: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -782,7 +790,7 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
             if (cell0 + c + T <= first_needed) continue;
             if (!capture_prefill_dev(T, err)) return false;
             /*
-            DPCT1124:21: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
             While the origin API might be synchronous, it depends on the type of
             operand memory, so you may need to call wait() on event return by
             memcpy API to ensure synchronization behavior.
@@ -790,7 +798,7 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
             if (DPCT_CHECK_ERROR(cs_->memcpy(tok_, d_tk + c, (size_t)T * 4)) !=
                     0 ||
                 /*
-                DPCT1124:22: cudaMemcpyAsync is migrated to asynchronous memcpy
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
                 API. While the origin API might be synchronous, it depends on
                 the type of operand memory, so you may need to call wait() on
                 event return by memcpy API to ensure synchronization behavior.
@@ -798,7 +806,7 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
                 DPCT_CHECK_ERROR(
                     cs_->memcpy(step_, d_stp + c * 4, (size_t)T * 16)) != 0 ||
                 /*
-                DPCT1124:23: cudaMemcpyAsync is migrated to asynchronous memcpy
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
                 API. While the origin API might be synchronous, it depends on
                 the type of operand memory, so you may need to call wait() on
                 event return by memcpy API to ensure synchronization behavior.
@@ -806,7 +814,7 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
                 DPCT_CHECK_ERROR(cs_->memcpy(pos_, d_ps + c * NHp,
                                              (size_t)(T * NHp) * 4)) != 0 ||
                 /*
-                DPCT1124:24: cudaMemcpyAsync is migrated to asynchronous memcpy
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
                 API. While the origin API might be synchronous, it depends on
                 the type of operand memory, so you may need to call wait() on
                 event return by memcpy API to ensure synchronization behavior.
@@ -817,13 +825,13 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
                 DPCT_CHECK_ERROR(
                     (cs_)->ext_oneapi_graph(*prefill_dev_exec_[T])) != 0) {
                 /*
-                DPCT1009:25: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1010:26: SYCL uses exceptions to report errors and does not
+                DPCT1010: SYCL uses exceptions to report errors and does not
                 use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
@@ -834,12 +842,12 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
         }
         if (DPCT_CHECK_ERROR(cs_->wait()) != 0) {
             /*
-            DPCT1009:27: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1010:28: SYCL uses exceptions to report errors and does not use
+            DPCT1010: SYCL uses exceptions to report errors and does not use
             the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
@@ -864,7 +872,7 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
             for (int64_t h = 0; h < g_->n_head; ++h) h_pos_[t * g_->n_head + h] = (int32_t) cell;
         }
         /*
-        DPCT1124:29: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -875,12 +883,12 @@ bool MtpDrafter::prefill(const float *R_rows, const int32_t *next_tokens,
             DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*prefill_exec_[T])) != 0 ||
             DPCT_CHECK_ERROR(cs_->wait()) != 0) {
             /*
-            DPCT1009:30: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1010:31: SYCL uses exceptions to report errors and does not use
+            DPCT1010: SYCL uses exceptions to report errors and does not use
             the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
@@ -923,12 +931,12 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     if (DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*round_exec_[T])) != 0 ||
         DPCT_CHECK_ERROR(cs_->wait()) != 0) {
         /*
-        DPCT1009:32: SYCL reports errors using exceptions and does not use error
+        DPCT1009: SYCL reports errors using exceptions and does not use error
         codes. Please replace the "get_error_string_dummy(...)" with a real
         error-handling function.
         */
         /*
-        DPCT1010:33: SYCL uses exceptions to report errors and does not use the
+        DPCT1010: SYCL uses exceptions to report errors and does not use the
         error codes. The cudaGetLastError function call was replaced with 0. You
         need to rewrite this code.
         */
@@ -947,12 +955,12 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         if (DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*step_exec_[j])) != 0 ||
             DPCT_CHECK_ERROR(cs_->wait()) != 0) {
             /*
-            DPCT1009:34: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1010:35: SYCL uses exceptions to report errors and does not use
+            DPCT1010: SYCL uses exceptions to report errors and does not use
             the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */

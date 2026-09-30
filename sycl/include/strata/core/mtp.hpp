@@ -73,6 +73,26 @@ public:
     double ms_draft = 0, ms_prefill = 0;
     int64_t rounds = 0;
 
+    /// E-9: the prompt path computes this layer's prompt K/V in batches (Prefill::draft_kv): its tensors, its K/V
+    /// state, the first cell a round can still read, its device, and a wait for its own stream.
+    const float* tensor_f32(const char* name) const { return f32(name); }
+    const uint16_t* tensor_bf16(const char* name) const { return bf16(name); }
+    const void* tensor_q8(const char* name) const { return q8(name); }
+    QsaState& kv_state_rw() { return st_; }
+    int64_t first_needed() const { return (window_ > 0 && prompt_len_ > 0) ? prompt_len_ - window_ - 64 : 0; }
+    int device() const { return device_; }
+    bool idle(std::string &err) try {
+        if (cs_ && DPCT_CHECK_ERROR(cs_->wait()) != 0) {
+            err = "mtp: its stream failed"; return false;
+        }
+        return true;
+    }
+    catch (sycl::exception const &exc) {
+      std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+                << ", line:" << __LINE__ << std::endl;
+      std::exit(1);
+    }
+
 private:
     bool record_forward(int T, int step_row0, dpct::queue_ptr cs,
                         std::string &err);

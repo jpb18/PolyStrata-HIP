@@ -82,7 +82,7 @@ __dpct_inline__ float silu_f(float x) {
 /// fires.
 inline double block_sum(double v, double *scratch) {
     /*
-    DPCT1065:1040: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -91,12 +91,12 @@ inline double block_sum(double v, double *scratch) {
     const int lane = item_ct1.get_local_id(2) & 31,
               warp = item_ct1.get_local_id(2) >> 5;
     /*
-DPCT1108:271: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
     /*
-DPCT1121:272: Make sure that the "v" which is used in the SYCL group
+DPCT1121: Make sure that the "v" which is used in the SYCL group
 function/algorithm is initialized.
 */
 #pragma unroll
@@ -106,7 +106,7 @@ function/algorithm is initialized.
             off);
     if (lane == 0) scratch[warp] = v;
     /*
-    DPCT1065:1041: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -116,12 +116,12 @@ function/algorithm is initialized.
                                         : 0.0;
     if (warp == 0)
         /*
-DPCT1108:273: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
         /*
-DPCT1121:274: Make sure that the "v" which is used in the SYCL group
+DPCT1121: Make sure that the "v" which is used in the SYCL group
 function/algorithm is initialized.
 */
 #pragma unroll
@@ -131,7 +131,7 @@ function/algorithm is initialized.
                 v, off);
     if (item_ct1.get_local_id(2) == 0) scratch[0] = v;
     /*
-    DPCT1065:1042: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -306,7 +306,7 @@ void ple_history_advance(float* hist, const float* normalized, void* stream) {
                 });
     }
     /*
-    DPCT1010:1044: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -336,8 +336,9 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
                PleOut& out, void* scratch, void* stream) {
     const bool native_key = w.key_native_data != nullptr && w.key_bf16 == nullptr;
     if (native_key && (!emb || !hidden || !hist_rows || !out.result || !scratch || !stream ||
-                       !w.key_native_q8_1 || w.key_native_type != 42))
-        throw std::invalid_argument("ple_block: native key requires Q2_0 weights, input/output, private scratch and explicit stream");
+                       !w.key_native_q8_1 ||
+                       (w.key_native_type != 42 && w.key_native_type != 18 && w.key_native_type != 23)))
+        throw std::invalid_argument("ple_block: native key requires Q2_0, IQ3_XXS or IQ4_XS weights, input/output, private scratch and explicit stream");
     if (emb == nullptr || hidden == nullptr || hist_rows == nullptr || out.result == nullptr) return;
     const int n_embd = NG_N_EMBD, hc = NG_HC, hc_dim = NG_HC_DIM;
     static_assert(NG_N_EMBD == 2560 && NG_HC_DIM == 10240, "native PLE key geometry changed");
@@ -429,7 +430,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             st->submit([&](sycl::handler &cgh) {
                 auto NG_RMS_EPS_ct4 = NG_RMS_EPS;
 
-                cgh.parallel_for<dpct_kernel_name<class gnorm_kernel_cf1ead>>(
+                cgh.parallel_for<dpct_kernel_name<class gnorm_kernel_2584bb>>(
                     sycl::nd_range<3>(sycl::range(1, 1, hc) *
                                           sycl::range(1, 1, THREADS),
                                       sycl::range(1, 1, THREADS)),
@@ -450,7 +451,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             st->submit([&](sycl::handler &cgh) {
                 auto NG_RMS_EPS_ct4 = NG_RMS_EPS;
 
-                cgh.parallel_for<dpct_kernel_name<class gnorm_kernel_2584bb>>(
+                cgh.parallel_for<dpct_kernel_name<class gnorm_kernel_e3be1c>>(
                     sycl::nd_range<3>(sycl::range(1, 1, hc) *
                                           sycl::range(1, 1, THREADS),
                                       sycl::range(1, 1, THREADS)),
@@ -472,7 +473,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            st->parallel_for<dpct_kernel_name<class to_bf16_kernel_e8b7a8>>(
+            st->parallel_for<dpct_kernel_name<class to_bf16_kernel_ab93ff>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, (n_embd + THREADS - 1) / THREADS) *
                         sycl::range(1, 1, THREADS),
@@ -487,7 +488,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             dpct::has_capability_or_fail(st->get_device(),
                                          {sycl::aspect::fp64});
 
-            st->parallel_for<dpct_kernel_name<class bf16_gemv_kernel_ab93ff>>(
+            st->parallel_for<dpct_kernel_name<class bf16_gemv_kernel_47d04d>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, (n_embd + THREADS - 1) / THREADS) *
                         sycl::range(1, 1, THREADS),
@@ -516,7 +517,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             st->submit([&](sycl::handler &cgh) {
                 auto sqrtf_float_n_embd_ct4 = 1.0f / sqrtf((float)n_embd);
 
-                cgh.parallel_for<dpct_kernel_name<class gate_kernel_2da4a8>>(
+                cgh.parallel_for<dpct_kernel_name<class gate_kernel_ce83eb>>(
                     sycl::nd_range<3>(sycl::range(1, 1, hc) *
                                           sycl::range(1, 1, THREADS),
                                       sycl::range(1, 1, THREADS)),
@@ -532,7 +533,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            st->parallel_for<dpct_kernel_name<class bcast_kernel_ce83eb>>(
+            st->parallel_for<dpct_kernel_name<class bcast_kernel_79d1c2>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, (hc_dim + THREADS - 1) / THREADS) *
                         sycl::range(1, 1, THREADS),
@@ -550,7 +551,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             st->submit([&](sycl::handler &cgh) {
                 auto NG_RMS_EPS_ct4 = NG_RMS_EPS;
 
-                cgh.parallel_for<dpct_kernel_name<class gnorm_kernel_79d1c2>>(
+                cgh.parallel_for<dpct_kernel_name<class gnorm_kernel_cb94da>>(
                     sycl::nd_range<3>(sycl::range(1, 1, hc) *
                                           sycl::range(1, 1, THREADS),
                                       sycl::range(1, 1, THREADS)),
@@ -571,7 +572,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
                 auto NGRAM_SIZE_ct6 = NGRAM_SIZE;
                 auto NG_HIST_ct7 = NG_HIST;
 
-                cgh.parallel_for<dpct_kernel_name<class conv_kernel_cb94da>>(
+                cgh.parallel_for<dpct_kernel_name<class conv_kernel_f83a85>>(
                     sycl::nd_range<3>(
                         sycl::range(1, 1, (hc_dim + THREADS - 1) / THREADS) *
                             sycl::range(1, 1, THREADS),
@@ -587,7 +588,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            st->parallel_for<dpct_kernel_name<class add3_kernel_ba9359>>(
+            st->parallel_for<dpct_kernel_name<class add3_kernel_26c4c6>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, (hc_dim + THREADS - 1) / THREADS) *
                         sycl::range(1, 1, THREADS),
@@ -602,7 +603,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
     //      `cb(key, ...)` capture is after `gnorm`; `value` is the projection before the gate.  Each stage the
     //      oracle records is reproduced here so a mismatch can be attributed instead of guessed at.
     /*
-    DPCT1124:1045: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.
@@ -612,7 +613,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
                     "key");
     if (out.value)
         /*
-        DPCT1124:1046: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -621,7 +622,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
                st->memcpy(out.value, d_value, n_embd * sizeof(float))),
            "value");
     /*
-    DPCT1124:1047: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.
@@ -631,7 +632,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
            "gate");
     if (out.gated)
         /*
-        DPCT1124:1048: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -641,7 +642,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
            "gated");
     if (out.normalized)
         /*
-        DPCT1124:1049: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -651,7 +652,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
            "norm");
     if (out.conv)
         /*
-        DPCT1124:1050: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -661,7 +662,7 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
            "conv");
 
     /*
-    DPCT1010:1051: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

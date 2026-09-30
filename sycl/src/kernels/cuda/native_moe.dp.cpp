@@ -94,21 +94,21 @@ void native_moe_combine(const float* parts, const float* weights, const float* s
                 });
     }
     /*
-    DPCT1010:597: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:598: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:595: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:596: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=
@@ -133,21 +133,21 @@ void native_moe_combine_multi(const float* parts, const float* weights, const fl
                 });
     }
     /*
-    DPCT1010:601: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:602: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:599: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:600: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=

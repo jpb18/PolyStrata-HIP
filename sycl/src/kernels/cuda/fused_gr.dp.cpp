@@ -26,7 +26,7 @@ constexpr int UP_BLOCKS = N / UP_COLS;           // 80
 __dpct_inline__ float warp_sum(float v) {
 #pragma unroll
     /*
-    DPCT1108:88: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -55,7 +55,7 @@ __dpct_inline__ float dot8(const sycl::uint4 w, const float *x) {
 }
 
 /*
-DPCT1110:89: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gr_down_kernel exceeds 128 bytes and may cause high register pressure. Consult
 with your hardware vendor to find the total register size available and adjust
 the code, or use smaller sub-group size to avoid high register pressure.
@@ -102,7 +102,7 @@ auto &xn = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[D]>(
         if (lane == 0) part[warp][c] = v;
     }
     /*
-    DPCT1065:457: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -115,7 +115,7 @@ auto &xn = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[D]>(
         if (item_ct1.get_group(2) == 0) a.rs[t] = s_rs[t];
     }
     /*
-    DPCT1065:458: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -123,7 +123,7 @@ auto &xn = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[D]>(
 #pragma unroll
     for (int i = t; i < D; i += THREADS) xn[i] *= s_rs[i / N];
     /*
-    DPCT1065:459: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -137,7 +137,7 @@ auto &xn = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[D]>(
     float acc = 0.0f;
 #pragma unroll 4
     /*
-    DPCT1098:460: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -164,7 +164,7 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[LR]>(
 #pragma unroll
     for (int k = t; k < LR; k += THREADS) lo[k] = a.lo[k];
     /*
-    DPCT1065:461: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -175,13 +175,13 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[LR]>(
         const sycl::uint4 *w4 =
             reinterpret_cast<const sycl::uint4 *>(a.w_up + (size_t)i * LR);
         /*
-        DPCT1098:463: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
         float acc = dot8(*(w4 + lane), lo + lane * 8);
         /*
-        DPCT1098:464: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -200,7 +200,7 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[LR]>(
         }
     }
     /*
-    DPCT1065:462: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -222,7 +222,7 @@ struct GrMulti {
 
 // Step 1 of `gr_down_kernel`, one block per token, same threads and reduction order: rs[t] and xn[t] to global.
 /*
-DPCT1110:90: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gr_norm_multi_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -268,7 +268,7 @@ auto &part =
         if (lane == 0) part[warp][c] = v;
     }
     /*
-    DPCT1065:465: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -281,7 +281,7 @@ auto &part =
         a.rs[t] = s_rs[t];
     }
     /*
-    DPCT1065:466: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -290,14 +290,18 @@ auto &part =
     for (int i = t; i < D; i += THREADS) xn[i] *= s_rs[i / N];
 }
 
+#if defined(__HIPCC__)
+constexpr int TILE = 1280;             // eight-token tile fits gfx1100's 64 KiB LDS limit
+#else
 constexpr int TILE = 2560;             // xn floats per token staged at a time: 320 chunks of 8, 10 per lane
+#endif
 constexpr int TQ = TILE / 8 / 32;      // uint4 weight chunks per lane per tile
 
 // Step 2 of `gr_down_kernel` for T tokens.  One warp per row (so each lane accumulates the same chunks in the
 // same order as the single-token kernel); per tile the lane's 10 weight chunks are loaded BEFORE the activation
 // tile is staged, so the DRAM and L2 traffic are in flight together.
 /*
-DPCT1110:91: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gr_down_multi_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -320,7 +324,7 @@ __dpct_inline__ void gr_down_multi_kernel(GrMulti m, uint8_t *dpct_local) {
         if (active) {
 #pragma unroll
             /*
-            DPCT1098:469: The '*' expression is used instead of the __ldg call.
+            DPCT1098: The '*' expression is used instead of the __ldg call.
             These two expressions do not provide the exact same functionality.
             Check the generated code for potential precision and/or performance
             issues.
@@ -329,11 +333,11 @@ __dpct_inline__ void gr_down_multi_kernel(GrMulti m, uint8_t *dpct_local) {
                 wv[q] = *(w4 + base / 8 + lane + 32 * q);
         }
         /*
-        DPCT1118:92: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:467: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -345,11 +349,11 @@ __dpct_inline__ void gr_down_multi_kernel(GrMulti m, uint8_t *dpct_local) {
             tile4[i] = src4[((size_t) k * D + base) / 4 + off];
         }
         /*
-        DPCT1118:93: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:468: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -386,7 +390,7 @@ constexpr int UPM_BLOCKS = N / UPM_COLS;          // 160
 // `gr_up_kernel` for T tokens: each row of w_up read once; the T dots reduced by xor so every lane holds every
 // sum, and lane k runs token k's epilogue - the T epilogues in parallel instead of one after another.
 /*
-DPCT1110:94: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gr_up_multi_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -406,7 +410,7 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
     for (int i = t; i < T * LR; i += THREADS)
         lo[i / LR][i % LR] = m.a[i / LR].lo[i % LR];
     /*
-    DPCT1065:470: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -416,13 +420,13 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
         const sycl::uint4 *w4 =
             reinterpret_cast<const sycl::uint4 *>(m.a[0].w_up + (size_t)i * LR);
         /*
-        DPCT1098:472: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
         const sycl::uint4 wa = *(w4 + lane);
         /*
-        DPCT1098:473: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -458,7 +462,7 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
         }
     }
     /*
-    DPCT1065:471: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -498,7 +502,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class gr_norm_multi_kernel_bf1e13>>(
+        st->parallel_for<dpct_kernel_name<class gr_norm_multi_kernel_2f4d92>>(
             sycl::nd_range<3>(sycl::range(1, 1, n_tok) *
                                   sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -511,13 +515,14 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     // the shared-memory opt-in is a per-DEVICE setting: once per device, not once per process (a layer split
     // runs this kernel on two cards)
     static bool attr[64] = {};
+    static int chunk[64] = {};   // Turing port: tokens the down kernel may carry in one launch on this card
     int dev = 0;
     dev = dpct::get_current_device_id();
-    if (dev < 0 || dev >= 64 || !attr[dev]) {
+    if (dev >= 0 && dev < 64 && !attr[dev]) {
         // at most what the card allows (Turing: 64 KB - enough for windows of up to 6 tokens)
         int optin = 0;
         /*
-        DPCT1019:474: local_mem_size in SYCL is not a complete equivalent of
+        DPCT1019: local_mem_size in SYCL is not a complete equivalent of
         cudaDevAttrMaxSharedMemoryPerBlockOptin in CUDA. You may need to adjust
         the code.
         */
@@ -525,30 +530,40 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         int want = (int) (kFusedGrMaxT * TILE * sizeof(float));
         if (optin > 0 && want > optin) want = optin;
         /*
-        DPCT1026:475: The call to cudaFuncSetAttribute was removed because SYCL
+        DPCT1026: The call to cudaFuncSetAttribute was removed because SYCL
         currently does not support corresponding setting.
         */
         /*
-        DPCT1026:476: The call to cudaGetLastError was removed because this
+        DPCT1026: The call to cudaGetLastError was removed because this
         functionality is redundant in SYCL.
         */
-        if (dev >= 0 && dev < 64) attr[dev] = true;
+; // drop any error the attempt left behind
+        // Turing port: the down kernel stages n_tok*TILE floats of dynamic shared memory - 80 KB at the full
+        // 8 tokens.  A card whose opt-in is below that (Turing: 64 KB, so 7+ tokens fail to launch as
+        // "invalid argument") processes the tokens in slices that fit; a card that reports no opt-in gets what
+        // fits the 48 KB default (4 tokens of the CUDA tile; all 8 of HIP's smaller tile).  The down kernel's
+        // outputs (lo, inject_out) are strictly per-token, so the chunk boundaries are safe, and the up kernel
+        // below still sees every token of the batch in one launch.
+        const int capacity = (optin > 0 ? optin : 48 * 1024) / (int) (TILE * sizeof(float));
+        chunk[dev] = capacity < 1 ? 1 : (capacity > kFusedGrMaxT ? kFusedGrMaxT : capacity);
+        attr[dev] = true;
     }
-    {
+    const int chunk_tok = (dev >= 0 && dev < 64 && chunk[dev]) ? chunk[dev] : kFusedGrMaxT;
+    if (chunk_tok >= n_tok) {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
         st->submit([&](sycl::handler &cgh) {
             /*
-            DPCT1083:1166: The size of local memory in the migrated code may be
-            different from the original code. Check that the allocated memory
-            size in the migrated code is correct.
+            DPCT1083: The size of local memory in the migrated code may
+            be different from the original code. Check that the allocated
+            memory size in the migrated code is correct.
             */
             sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(
                 sycl::range((size_t)n_tok * TILE * sizeof(float)), cgh);
 
             cgh.parallel_for<
-                dpct_kernel_name<class gr_down_multi_kernel_e2a6b0>>(
+                dpct_kernel_name<class gr_down_multi_kernel_7f5820>>(
                 sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
                                       sycl::range(1, 1, THREADS),
                                   sycl::range(1, 1, THREADS)),
@@ -561,13 +576,50 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
                                    .get());
                     });
         });
+    } else {
+        for (int c0 = 0; c0 < n_tok; c0 += chunk_tok) {
+            const int ct = n_tok - c0 < chunk_tok ? n_tok - c0 : chunk_tok;
+            GrMulti c{};
+            c.xn = xn_scratch + (size_t) c0 * D;
+            c.T = ct;
+            for (int k = 0; k < ct; ++k) c.a[k] = a[c0 + k];
+            {
+                auto exp_props = sycl::ext::oneapi::experimental::properties{
+                    sycl::ext::oneapi::experimental::use_root_sync};
+
+                st->submit([&](sycl::handler &cgh) {
+                    /*
+                    DPCT1083: The size of local memory in the migrated code
+                    may be different from the original code. Check that the
+                    allocated memory size in the migrated code is correct.
+                    */
+                    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(
+                        sycl::range((size_t)ct * TILE * sizeof(float)), cgh);
+
+                    cgh.parallel_for<
+                        dpct_kernel_name<class gr_down_multi_kernel_88cb86>>(
+                        sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
+                                              sycl::range(1, 1, THREADS),
+                                          sycl::range(1, 1, THREADS)),
+                        exp_props,
+                        [=](sycl::nd_item<3> item_ct1)
+                            [[sycl::reqd_sub_group_size(32)]] {
+                                gr_down_multi_kernel(
+                                    c, dpct_local_acc_ct1
+                                           .get_multi_ptr<
+                                               sycl::access::decorated::no>()
+                                           .get());
+                            });
+                });
+            }
+        }
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, stream);
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class gr_up_multi_kernel_e2528e>>(
+        st->parallel_for<dpct_kernel_name<class gr_up_multi_kernel_1a727f>>(
             sycl::nd_range<3>(sycl::range(1, 1, UPM_BLOCKS) *
                                   sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -577,7 +629,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             });
     }
     /*
-    DPCT1010:477: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -600,7 +652,7 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class gr_down_kernel_5d714c>>(
+        st->parallel_for<dpct_kernel_name<class gr_down_kernel_a5fa71>>(
             sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
                                   sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -613,7 +665,7 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class gr_up_kernel_86511f>>(
+        st->parallel_for<dpct_kernel_name<class gr_up_kernel_fe3258>>(
             sycl::nd_range<3>(sycl::range(1, 1, UP_BLOCKS) *
                                   sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -623,7 +675,7 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
             });
     }
     /*
-    DPCT1010:479: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

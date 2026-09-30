@@ -202,14 +202,14 @@ bool WeightTable::load(const std::string &pack_dir, void *arena_base,
     void* stage_in = nullptr;
     void* stage_out = nullptr;
     /*
-    DPCT1048:17: The original value cudaHostAllocDefault is not meaningful in
+    DPCT1048: The original value cudaHostAllocDefault is not meaningful in
     the migrated code and was removed or replaced with 0. You may need to check
     the migrated code.
     */
     if (DPCT_CHECK_ERROR(stage_in = (void *)sycl::malloc_host(
                              CHUNK, dpct::get_in_order_queue())) != 0 ||
         /*
-        DPCT1048:18: The original value cudaHostAllocDefault is not meaningful
+        DPCT1048: The original value cudaHostAllocDefault is not meaningful
         in the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -431,7 +431,7 @@ bool WeightTable::load(const std::string &pack_dir, void *arena_base,
 
                 const double u0 = now_ms();
                 /*
-                DPCT1114:1055: cudaMemcpy is migrated to asynchronization
+                DPCT1114: cudaMemcpy is migrated to asynchronization
                 memcpy, assuming in the original code the source host memory is
                 pageable memory. If the memory is not pageable, call wait() on
                 event return by memcpy API to ensure synchronization behavior.

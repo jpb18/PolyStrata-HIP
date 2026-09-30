@@ -24,15 +24,20 @@ set(STRATA_SYCL_AOT "" CACHE STRING "AOT device for the GPU code, e.g. bmg-g31 (
 set(_sycl_flags -fsycl)
 if(STRATA_SYCL_AOT)
   list(APPEND _sycl_flags -fsycl-targets=spir64_gen)
-  set(_sycl_link -fsycl -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen "-device ${STRATA_SYCL_AOT}")
+  # the divide/sqrt rounding option (below) must reach ocloc here: an AOT build has no spir64 backend to take it
+  set(_sycl_link -fsycl -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen
+      "-device ${STRATA_SYCL_AOT} -options -cl-fp32-correctly-rounded-divide-sqrt")
 else()
   set(_sycl_link -fsycl)
 endif()
 # The Intel GPU's fp32 divide is not correctly rounded by default (OpenCL allows 2.5 ulp). Strata's quantizers
 # are byte-exact against ggml through `amax / 127`, so the device compiler is told to round divides and sqrt
 # properly; measured: quantize_act_parity goes from 303k mismatches to byte-exact. (Same as
-# SYCL_PROGRAM_COMPILE_OPTIONS=-cl-fp32-correctly-rounded-divide-sqrt at run time.)
-list(APPEND _sycl_link "-Xsycl-target-backend=spir64" "-cl-fp32-correctly-rounded-divide-sqrt")
+# SYCL_PROGRAM_COMPILE_OPTIONS=-cl-fp32-correctly-rounded-divide-sqrt at run time.) The AOT build passes it to
+# ocloc above; without that the 303k mismatches came back on 2026-09-30, unnoticed since the AOT switch.
+if(NOT STRATA_SYCL_AOT)
+  list(APPEND _sycl_link "-Xsycl-target-backend=spir64" "-cl-fp32-correctly-rounded-divide-sqrt")
+endif()
 # Every translation unit gets -fsycl: the migrated host files construct queues and USM, not only the kernels.
 # icpx defaults to a fast floating-point model (reciprocal approximations, reassociation); the kernels are
 # compared byte-for-byte against ggml's, which nvcc built value-safe, so ask for the same here.
@@ -175,6 +180,12 @@ if(STRATA_SYCL_PARITY)
   strata_resolve(_src src/kernels/qsa_prompt_attn_parity.cpp)
   add_executable(qsa_prompt_attn_parity ${_src})
   target_link_libraries(qsa_prompt_attn_parity PRIVATE strata_kernels)
+  # the hybrid K8V4 KV test (upstream 0.1.27) passes its appends, gathers and attention here and fails only its
+  # last step, the same tensor-core prompt kernel. Built, not registered, until that kernel is ported.
+  strata_resolve(_src src/kernels/kv_hybrid_parity.cpp)
+  add_executable(kv_hybrid_parity ${_src})
+  target_include_directories(kv_hybrid_parity PRIVATE ${STRATA_ROOT}/src/kernels)
+  target_link_libraries(kv_hybrid_parity PRIVATE strata_kernels)
   add_executable(mmvq_bench ${CMAKE_CURRENT_SOURCE_DIR}/src/kernels/mmvq_bench.cpp)   # dense mmvq timing
   target_link_libraries(mmvq_bench PRIVATE strata_kernels)
   # one native expert three ways on real GGUF rows (ggml reference, CPU path, GPU native_expert_grouped):

@@ -55,7 +55,7 @@ __dpct_inline__ void copy1_kernel(const uint8_t *__restrict__ a, int64_t na,
 // [2560][10] f16 (the layout of prefill/kernels.cu's blob_dequant_kernel).  A GGUF Q2_0 block is {f16 d; 16 code
 // bytes} with the same 2-bit codes in the same order, so a block is a scale and a 16-byte run of codes.
 /*
-DPCT1110:182: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 strata_q2_kernel exceeds 128 bytes and may cause high register pressure. Consult
 with your hardware vendor to find the total register size available and adjust
 the code, or use smaller sub-group size to avoid high register pressure.
@@ -145,7 +145,7 @@ void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols,
     quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
                            (cudaStream_t) stream);
     /*
-    DPCT1010:865: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -184,7 +184,7 @@ void Context::run(const Product& p, void* stream) {
             std::exit(1);
     }
     /*
-    DPCT1010:866: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -231,7 +231,7 @@ void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const
         }
     }
     /*
-    DPCT1010:867: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -255,7 +255,7 @@ void gather_strata_q2(const uint8_t* blob, void* gu_dst, void* d_dst, void* stre
                 });
     }
     /*
-    DPCT1010:868: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -278,7 +278,7 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
                 });
     }
     /*
-    DPCT1010:869: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -301,7 +301,7 @@ void iota(int32_t* dst, int64_t n, void* stream) {
                 });
     }
     /*
-    DPCT1010:870: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
                                pos.size(), dpct::get_in_order_queue())),
           "malloc pos");
     /*
-    DPCT1114:309: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
               d_x, x.data(), x.size() * sizeof(float)).wait()),
           "copy x");
     /*
-    DPCT1114:310: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
               d_cos, hcos.data(), hcos.size() * sizeof(float)).wait()),
           "copy cos");
     /*
-    DPCT1114:311: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
               d_sin, hsin.data(), hsin.size() * sizeof(float)).wait()),
           "copy sin");
     /*
-    DPCT1114:312: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
         e[0] = 1.0f;
         std::vector<float> o((size_t) head_dim, 0.0f);
         /*
-        DPCT1114:313: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.

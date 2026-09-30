@@ -37,7 +37,7 @@ std::atomic<bool> enabled{false};
 __dpct_inline__ float warp_sum(float value) {
 #pragma unroll
     /*
-    DPCT1108:177: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -50,7 +50,7 @@ __dpct_inline__ float warp_sum(float value) {
 __dpct_inline__ float warp_max(float value) {
 #pragma unroll
     /*
-    DPCT1108:178: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -62,7 +62,7 @@ __dpct_inline__ float warp_max(float value) {
     return value;
 }
 /*
-DPCT1110:179: The total declared local variable size in device function route
+DPCT1110: The total declared local variable size in device function route
 exceeds 128 bytes and may cause high register pressure. Consult with your
 hardware vendor to find the total register size available and adjust the code,
 or use smaller sub-group size to avoid high register pressure.
@@ -110,7 +110,7 @@ __dpct_inline__ void route(const float *__restrict__ logits,
 #pragma unroll
         for (int mask = 16; mask; mask >>= 1) {
             /*
-            DPCT1108:180: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -118,7 +118,7 @@ __dpct_inline__ void route(const float *__restrict__ logits,
                 0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 best, mask);
             /*
-            DPCT1108:181: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -170,21 +170,21 @@ void native_router_top10(const float* logits, int32_t* ids, float* weights, void
                     });
     }
     /*
-    DPCT1010:858: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:859: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:856: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:857: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=
@@ -210,21 +210,21 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
                     });
     }
     /*
-    DPCT1010:862: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:863: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:860: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:861: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=

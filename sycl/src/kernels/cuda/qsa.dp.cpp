@@ -69,7 +69,7 @@ void fail(const char* what) {
 
 void check_launch(const char* what) {
     /*
-    DPCT1010:806: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -130,7 +130,7 @@ kv_append_kernel(uint16_t *__restrict__ k_pool, uint16_t *__restrict__ v_pool,
                  const float *__restrict__ kcur, const float *__restrict__ vcur,
                  int kv_heads, int head_dim, int page_size, KvHostPools host) {
     /*
-    DPCT1098:809: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -177,7 +177,7 @@ __dpct_inline__ void indexer_key_append_kernel(
     auto s_mean = (double *)dpct_local; // idx_dim doubles
     const int d = item_ct1.get_local_id(2);
     /*
-    DPCT1098:813: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -204,7 +204,7 @@ __dpct_inline__ void indexer_key_append_kernel(
         for (int i = 0; i < idx_dim; ++i) {
             const double v = (double) raw[i];
             /*
-            DPCT1013:814: The rounding mode could not be specified and the
+            DPCT1013: The rounding mode could not be specified and the
             generated code may have different accuracy than the original code.
             Verify the correctness. SYCL math built-in function rounding mode is
             aligned with OpenCL C 1.2 standard.
@@ -212,7 +212,7 @@ __dpct_inline__ void indexer_key_append_kernel(
             ss = ss + v * v;
         }
         /*
-        DPCT1013:815: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -226,7 +226,7 @@ __dpct_inline__ void indexer_key_append_kernel(
 
     if (slot != r - 1) return;
     /*
-    DPCT1065:810: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -238,7 +238,7 @@ __dpct_inline__ void indexer_key_append_kernel(
     // but the order of the SUM OF SQUARES below can, and it is fixed to d ascending on both sides.
     double m = 0.0;
     /*
-DPCT1013:816: The rounding mode could not be specified and the generated code
+DPCT1013: The rounding mode could not be specified and the generated code
 may have different accuracy than the original code. Verify the correctness. SYCL
 math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
 */
@@ -246,7 +246,7 @@ math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
     for (int j = 0; j < r - 1; ++j)
         m = m + (double)tail[(size_t)j * idx_dim + d];
     /*
-    DPCT1013:817: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -255,7 +255,7 @@ math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
     m = m / (double) r;
     s_mean[d] = m;
     /*
-    DPCT1065:811: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -263,14 +263,14 @@ math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
 
     double ss = 0.0;
     /*
-DPCT1013:818: The rounding mode could not be specified and the generated code
+DPCT1013: The rounding mode could not be specified and the generated code
 may have different accuracy than the original code. Verify the correctness. SYCL
 math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
 */
 #pragma unroll
     for (int i = 0; i < idx_dim; ++i) ss = ss + s_mean[i] * s_mean[i];
     /*
-    DPCT1013:819: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -285,7 +285,7 @@ math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
     // block's first cell's POSITION, `pos_base + b*r`, and NOT the cell index `b*r`.
     if (d == 0) *block_pos = (int32_t) (pos_base + b * r);
     /*
-    DPCT1065:812: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -320,14 +320,14 @@ __dpct_inline__ void qsa_index_kernel(const float *__restrict__ pooled,
                                       const int32_t *__restrict__ step,
                                       float *__restrict__ cell_scores) {
     /*
-    DPCT1098:820: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const long long n_bid = (long long)*(step + kStepNBid);
     /*
-    DPCT1098:821: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -351,7 +351,7 @@ __dpct_inline__ void qsa_index_kernel(const float *__restrict__ pooled,
 #pragma unroll
     for (int d = lane; d < idx_dim; d += 32)
         /*
-        DPCT1013:822: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -359,12 +359,12 @@ __dpct_inline__ void qsa_index_kernel(const float *__restrict__ pooled,
         acc = acc + (double)pooled[(size_t)b * idx_dim + d] *
                         (double)q_idx[(size_t)wid * idx_dim + d];
     /*
-DPCT1108:158: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
     /*
-DPCT1013:823: The rounding mode could not be specified and the generated code
+DPCT1013: The rounding mode could not be specified and the generated code
 may have different accuracy than the original code. Verify the correctness. SYCL
 math built-in function rounding mode is aligned with OpenCL C 1.2 standard.
 */
@@ -412,7 +412,7 @@ __dpct_inline__ uint32_t order_key(float s) {
 constexpr int TOPK_THREADS = 256;
 
 /*
-DPCT1110:159: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 topk_kernel exceeds 128 bytes and may cause high register pressure. Consult with
 your hardware vendor to find the total register size available and adjust the
 code, or use smaller sub-group size to avoid high register pressure.
@@ -421,14 +421,14 @@ __dpct_inline__ void topk_kernel(const float *__restrict__ scores,
                                  const int32_t *__restrict__ step,
                                  int *__restrict__ out_ids) {
     /*
-    DPCT1098:824: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const long long n_kv = (long long)*(step + kStepNKv);
     /*
-    DPCT1098:825: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -459,7 +459,7 @@ __dpct_inline__ void topk_kernel(const float *__restrict__ scores,
              ++j) if (order_key(scores[j]) >= cand)++ c;
         s_a[t] = c;
         /*
-        DPCT1118:160: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -467,7 +467,7 @@ __dpct_inline__ void topk_kernel(const float *__restrict__ scores,
         for (int s = TOPK_THREADS / 2; s > 0; s >>= 1) {
             if (t < s) s_a[t] += s_a[t + s];
             /*
-            DPCT1118:162: SYCL group functions and algorithms must be
+            DPCT1118: SYCL group functions and algorithms must be
             encountered in converged control flow. You may need to adjust the
             code.
             */
@@ -475,7 +475,7 @@ __dpct_inline__ void topk_kernel(const float *__restrict__ scores,
         }
         const int tot = s_a[0];
         /*
-        DPCT1118:161: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(
@@ -558,7 +558,7 @@ __dpct_inline__ void kv_gather_kernel(
     const int32_t *__restrict__ step, int kv_heads, int head_dim, int page_size,
     uint16_t *__restrict__ k_scratch, uint16_t *__restrict__ v_scratch) {
     /*
-    DPCT1098:826: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -587,7 +587,7 @@ __dpct_inline__ void kv_gather_kernel(
 
 __dpct_inline__ float warp_max(float v) {
     /*
-DPCT1108:163: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -601,7 +601,7 @@ runtimes. You may need to adjust the code.
 
 __dpct_inline__ float warp_sum(float v) {
     /*
-DPCT1108:164: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -615,7 +615,7 @@ runtimes. You may need to adjust the code.
 
 /// One block per query head.  `s` holds the scores, which are then overwritten with the softmax weights.
 /*
-DPCT1110:165: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 qsa_attend_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -626,7 +626,7 @@ __dpct_inline__ void qsa_attend_kernel(
     int n_head, int n_head_kv, int head_dim, float *__restrict__ attn,
     float *__restrict__ weights, uint8_t *dpct_local) {
     /*
-    DPCT1098:834: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -663,7 +663,7 @@ __dpct_inline__ void qsa_attend_kernel(
         w[j] = acc * scale;
     }
     /*
-    DPCT1065:827: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -676,7 +676,7 @@ __dpct_inline__ void qsa_attend_kernel(
     mx = warp_max(mx);
     if (lane == 0) red[wid] = mx;
     /*
-    DPCT1065:828: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -687,14 +687,14 @@ __dpct_inline__ void qsa_attend_kernel(
         if (lane == 0) red[0] = mx;
     }
     /*
-    DPCT1065:829: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
     item_ct1.barrier();
     mx = red[0];
     /*
-    DPCT1065:830: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -709,7 +709,7 @@ __dpct_inline__ void qsa_attend_kernel(
     sum = warp_sum(sum);
     if (lane == 0) red[wid] = sum;
     /*
-    DPCT1065:831: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -720,14 +720,14 @@ __dpct_inline__ void qsa_attend_kernel(
         if (lane == 0) red[0] = 1.0f / sum;
     }
     /*
-    DPCT1065:832: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
     item_ct1.barrier();
     const float inv = red[0];
     /*
-    DPCT1065:833: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -799,7 +799,7 @@ catch (sycl::exception const &exc) {
 void step_upload_raw(const int32_t *h_step) try {
     int32_t* d = step_scratch();
     /*
-    DPCT1114:835: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -894,7 +894,7 @@ void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, 
     // `b > n_bid`, so the surplus blocks cost a launch and nothing else.
     const int threads = 32 * (int) s.idx_n_head;
     /*
-    DPCT1049:166: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -992,7 +992,7 @@ void qsa_attend_step(const float *q, const uint16_t *k_scratch,
     // then index past it at token 500.  The kernel reads the real count from `step`, so a larger allocation is
     // exactly what it wants.  The opt-in therefore happens once, for the capacity.
     /*
-    DPCT1083:168: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -1006,7 +1006,7 @@ void qsa_attend_step(const float *q, const uint16_t *k_scratch,
         int dev = 0, max_shared = 0;
         dev = dpct::get_current_device_id();
         /*
-        DPCT1019:836: local_mem_size in SYCL is not a complete equivalent of
+        DPCT1019: local_mem_size in SYCL is not a complete equivalent of
         cudaDevAttrMaxSharedMemoryPerBlockOptin in CUDA. You may need to adjust
         the code.
         */
@@ -1018,7 +1018,7 @@ void qsa_attend_step(const float *q, const uint16_t *k_scratch,
         }
         const dpct::err0 e =
             /*
-            DPCT1027:837: The call to cudaFuncSetAttribute was replaced with 0
+            DPCT1027: The call to cudaFuncSetAttribute was replaced with 0
             because SYCL currently does not support corresponding setting.
             */
             0;
@@ -1026,7 +1026,7 @@ void qsa_attend_step(const float *q, const uint16_t *k_scratch,
         s_configured = smem;
     }
     /*
-    DPCT1049:167: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -1100,7 +1100,7 @@ void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_ba
         fail("indexer_key_append: the indexer buffers are not all set (tail/dead/pooled/block_pos)");
     const int threads = (int) s.idx_dim;
     /*
-    DPCT1083:170: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -1109,7 +1109,7 @@ void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_ba
     // arguments here are identical for every token, which is the property a CUDA graph needs: this function can
     // be captured and replayed, and the position arrives through `pos_dev` like every other kernel's data.
     /*
-    DPCT1049:169: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */

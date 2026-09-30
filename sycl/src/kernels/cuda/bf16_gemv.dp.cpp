@@ -53,7 +53,7 @@ __dpct_inline__ void bf16_gemv_warp_kernel(const uint16_t *__restrict__ x,
     for (long long i = lane; i < n_in; i += 32)
         acc += f32_from_bf16(x[i]) * f32_from_bf16(row[i]);
     /*
-DPCT1108:171: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -89,7 +89,7 @@ __dpct_inline__ void bf16_gemv_split_kernel(const uint16_t *__restrict__ x,
     for (int off = tpr >> 1; off > 0; off >>= 1) {
         if (t < off) scratch[t] += scratch[t + off];
         /*
-        DPCT1118:172: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -99,7 +99,7 @@ __dpct_inline__ void bf16_gemv_split_kernel(const uint16_t *__restrict__ x,
 
 inline void finish(void *stream, const char *what) try {
     /*
-    DPCT1010:839: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -213,7 +213,7 @@ void bf16_gemv_split(const uint16_t* x, const uint16_t* w, float* y, int64_t n_i
     }
     const unsigned grid = (unsigned) n_out;
     /*
-    DPCT1049:173: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -224,7 +224,7 @@ void bf16_gemv_split(const uint16_t* x, const uint16_t* w, float* y, int64_t n_i
         strata::q_of(stream)
             ->submit([&](sycl::handler &cgh) {
                 /*
-                DPCT1083:1164: The size of local memory in the migrated code may
+                DPCT1083: The size of local memory in the migrated code may
                 be different from the original code. Check that the allocated
                 memory size in the migrated code is correct.
                 */

@@ -27,7 +27,7 @@ namespace k = strata::kernels;
 namespace {
 void ck(dpct::err0 e, const char *w) {
     /*
-    DPCT1009:788: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -39,7 +39,7 @@ template <typename T> T* up(const std::vector<T>& h) {
                                         dpct::get_in_order_queue())),
        "malloc");
     /*
-    DPCT1114:789: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.

@@ -13,17 +13,17 @@ namespace {
 
 void check(dpct::err0 e, const char *what) {
     /*
-    DPCT1000:1125: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (e != 0) {
         /*
-        DPCT1009:1126: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:1124: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         throw CudaError(
             std::string(what) + ": " + dpct::get_error_string_dummy(e), (int)e);
@@ -47,7 +47,11 @@ DeviceInfo device_info(int ordinal) {
     int count = 0;
     check(DPCT_CHECK_ERROR(count = dpct::device_count()), "cudaGetDeviceCount");
     if (count == 0) {
-        throw CudaError("no CUDA device is present; Strata needs an NVIDIA GPU of compute capability 8.0 or newer", -1);
+#if defined(STRATA_USE_HIP)
+        throw CudaError("no HIP device is present; this backend targets gfx1100 wave32", -1);
+#else
+        throw CudaError("no CUDA device is present; Strata needs an NVIDIA GPU (RTX 20 series or newer)", -1);
+#endif
     }
     if (ordinal < 0 || ordinal >= count) {
         throw CudaError("device ordinal " + std::to_string(ordinal) + " is out of range (have " +
@@ -57,7 +61,7 @@ DeviceInfo device_info(int ordinal) {
     DeviceInfo d;
     d.ordinal = ordinal;
     /*
-    DPCT1093:1127: The "ordinal" device may be not the one intended for use.
+    DPCT1093: The "ordinal" device may be not the one intended for use.
     Adjust the selected device if needed.
     */
     check(DPCT_CHECK_ERROR(dpct::select_device(ordinal)), "cudaSetDevice");
@@ -67,12 +71,12 @@ DeviceInfo device_info(int ordinal) {
           "cudaGetDeviceProperties");
     d.name = p.get_name();
     /*
-    DPCT1005:1128: The SYCL device version is different from CUDA Compute
+    DPCT1005: The SYCL device version is different from CUDA Compute
     Compatibility. You may need to rewrite this code.
     */
     d.cc_major = p.get_major_version();
     /*
-    DPCT1005:1129: The SYCL device version is different from CUDA Compute
+    DPCT1005: The SYCL device version is different from CUDA Compute
     Compatibility. You may need to rewrite this code.
     */
     d.cc_minor = p.get_minor_version();
@@ -80,7 +84,7 @@ DeviceInfo device_info(int ordinal) {
 
     size_t free_b = 0, total_b = 0;
     /*
-    DPCT1106:1130: 'cudaMemGetInfo' was migrated with the Intel extensions for
+    DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions for
     device information which may not be supported by all compilers or runtimes.
     You may need to adjust the code.
     */
@@ -91,30 +95,37 @@ DeviceInfo device_info(int ordinal) {
     d.total_bytes = total_b;
 
     /*
-    DPCT1043:1131: The version-related API is different in SYCL. An initial code
+    DPCT1043: The version-related API is different in SYCL. An initial code
     was generated, but you need to adjust it.
     */
     check(DPCT_CHECK_ERROR(d.driver_version = dpct::get_major_version(
                                dpct::get_current_device())),
           "cudaDriverGetVersion");
     /*
-    DPCT1043:1132: The version-related API is different in SYCL. An initial code
+    DPCT1043: The version-related API is different in SYCL. An initial code
     was generated, but you need to adjust it.
     */
     check(DPCT_CHECK_ERROR(d.runtime_version = dpct::get_major_version(
                                dpct::get_current_device())),
           "cudaRuntimeGetVersion");
 
-    // The kernels need sm_80 or newer (tf32 mma in the attention scorer, bf16 math) - the same floor the
-    // arch guard in CMakeLists enforces at build time (RTX 30 / 40 / 50).  Anything older is caught here,
-    // because a binary can be carried to a machine with an older card and would otherwise silently take
-    // whatever path the driver chose.  Pre-Blackwell is untested by the author; trust, then verify.
-    if (d.cc_major < 8) {
+    // The engine supports compute capability 7.5 and newer (Turing: the QSA scorer's tf32 mma has a portable
+    // fp32-FMA fallback below sm_80, the tensor-core prompt kernels refuse and fall back).  Compiling for a
+    // supported arch is enforced by CMake; RUNNING on an older card is caught here, because a binary can be carried
+    // to a machine with an older card and would otherwise silently take whatever path the driver chose.  The HIP
+    // backend is validated on gfx1100 (wave32) only.
+#if defined(STRATA_USE_HIP)
+    if (std::strncmp(p.gcnArchName, "gfx1100", 7) != 0 || p.warpSize != 32) {
+        throw CudaError("HIP backend requires validated gfx1100 wave32 hardware", -1);
+    }
+#else
+    if (d.cc_major * 10 + d.cc_minor < 75) {
         throw CudaError("device " + d.name + " reports compute capability " + std::to_string(d.cc_major) +
                             "." + std::to_string(d.cc_minor) +
-                            "; Strata needs an NVIDIA GPU of compute capability 8.0 or newer (RTX 30 / 40 / 50)",
+                            "; Strata needs compute capability 7.5 or newer (RTX 20 / 30 / 40 / 50 series)",
                         -1);
     }
+#endif
     return d;
 }
 
@@ -122,7 +133,7 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
     : capacity_(bytes), ordinal_(ordinal), poison_(poison) {
     if (bytes == 0) throw CudaError("DeviceArena of 0 bytes", -1);
     /*
-    DPCT1093:1133: The "ordinal" device may be not the one intended for use.
+    DPCT1093: The "ordinal" device may be not the one intended for use.
     Adjust the selected device if needed.
     */
     check(DPCT_CHECK_ERROR(dpct::select_device(ordinal)), "cudaSetDevice");
@@ -150,7 +161,7 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
                     auto n_b_threads_ct1 = n - b * threads;
 
                     cgh.parallel_for<
-                        dpct_kernel_name<class poison_kernel_cca729>>(
+                        dpct_kernel_name<class poison_kernel_58fc0a>>(
                         sycl::nd_range<3>(sycl::range(1, 1, (unsigned)chunk) *
                                               sycl::range(1, 1, threads),
                                           sycl::range(1, 1, threads)),
@@ -161,7 +172,7 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
                 });
             }
             /*
-            DPCT1010:1134: SYCL uses exceptions to report errors and does not
+            DPCT1010: SYCL uses exceptions to report errors and does not
             use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */

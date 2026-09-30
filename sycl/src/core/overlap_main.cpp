@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
     std::vector<uint16_t> hx((size_t) n_in, 0x3C00);
     std::vector<float> hs((size_t) n_out * (size_t) (n_in / 64), 0.001f);
     /*
-    DPCT1114:657: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
               d_x, hx.data(), hx.size() * sizeof(uint16_t)).wait()),
           "copy x");
     /*
-    DPCT1114:658: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < experts; ++i) {
         /*
-        DPCT1124:659: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
         check(DPCT_CHECK_ERROR(ev[b] = new sycl::event()), "event");
     t0 = std::chrono::steady_clock::now();
     /*
-    DPCT1124:660: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.
@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
         DPCT_CHECK_ERROR(s_copy->memcpy(d_codes[0], arena.data(), role_codes)),
         "prologue");
     /*
-    DPCT1024:661: The original code returned the error code that was further
+    DPCT1024: The original code returned the error code that was further
     consumed by the program logic. This original code was replaced with 0. You
     may need to rewrite the program logic consuming the error code.
     */
@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
         const int cur = i & 1, nxt = (i + 1) & 1;
         if (i + 1 < experts) {
             /*
-            DPCT1124:662: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -197,7 +197,7 @@ int main(int argc, char** argv) {
                     role_codes)),
                 "overlap copy");
             /*
-            DPCT1024:663: The original code returned the error code that was
+            DPCT1024: The original code returned the error code that was
             further consumed by the program logic. This original code was
             replaced with 0. You may need to rewrite the program logic consuming
             the error code.

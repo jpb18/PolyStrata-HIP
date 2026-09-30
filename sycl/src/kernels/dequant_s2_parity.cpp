@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
                                cpu.size(), dpct::get_in_order_queue())),
           "cudaMalloc out");
     /*
-    DPCT1114:370: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
               d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
-    DPCT1114:371: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.

@@ -35,6 +35,7 @@ constexpr int D=128, HEADS=4, R=4, ROWS=32, WARPS=2, STRIDE=36, COMBINE=68;
 struct TileA { uint32_t x[4]; };
 struct TileB { uint32_t x[2]; };
 struct TileC { float x[4]={0.0f,0.0f,0.0f,0.0f}; };
+#if !defined(__HIPCC__)
 #if 0   // SYCL: inline PTX (mma/ldmatrix/cp.async) - the XMX port is pending; see tools/fixups.py
 __dpct_inline__ void load_a(TileA &a, const float *p) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
@@ -64,7 +65,7 @@ __dpct_inline__ void load_b(TileB &b, const float *p) {
 __dpct_inline__ void mma(TileC &c, const TileA &a, const TileB &b) {
     // Deliberately no cvt.rn.tf32: pinned mma.cuh passes raw F32 bits directly.
     /*
-    DPCT1053:75: Migration of device assembly code is not supported.
+    DPCT1053: Migration of device assembly code is not supported.
     */
     asm("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, "
         "{%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
@@ -74,7 +75,7 @@ __dpct_inline__ void mma(TileC &c, const TileA &a, const TileB &b) {
 }
 #endif
 /*
-DPCT1110:76: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 score_kernel exceeds 128 bytes and may cause high register pressure. Consult
 with your hardware vendor to find the total register size available and adjust
 the code, or use smaller sub-group size to avoid high register pressure.
@@ -143,7 +144,7 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
         }
     }
     /*
-    DPCT1065:405: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -158,7 +159,7 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
         }
     }
     /*
-    DPCT1065:406: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -172,14 +173,14 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
 #pragma unroll
         for(int j=0;j<HEADS;++j){
             /*
-            DPCT1013:407: The rounding mode could not be specified and the
+            DPCT1013: The rounding mode could not be specified and the
             generated code may have different accuracy than the original code.
             Verify the correctness. SYCL math built-in function rounding mode is
             aligned with OpenCL C 1.2 standard.
             */
             float v = 0.0f + shared[j * COMBINE + lane];
             /*
-            DPCT1013:408: The rounding mode could not be specified and the
+            DPCT1013: The rounding mode could not be specified and the
             generated code may have different accuracy than the original code.
             Verify the correctness. SYCL math built-in function rounding mode is
             aligned with OpenCL C 1.2 standard.
@@ -188,21 +189,21 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
             h[j] = sycl::fmax(v, 0.0f);
         }
         /*
-        DPCT1013:409: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         float sum = h[0] + h[1] + h[2] + h[3];
         /*
-        DPCT1013:410: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         if (bias) sum = sum + bias[row];
         /*
-        DPCT1013:411: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -210,7 +211,7 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
         sum = sum + row == full && n % R ? 1e9f : 0.0f;
         // The live causal mask is +0. Invalid/padded cells are never exported.
         /*
-        DPCT1013:412: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -221,6 +222,42 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
     }
 #endif
 }
+#else
+// gfx1100 has no CUDA ldmatrix/mma instruction sequence. Keep the same entry point and
+// score contract with an ordered scalar F32 dot for each indexer head. The four heads
+// run independently; their ReLU'd scores are then added in the documented head order.
+// This path favors a well-defined fallback over pretending the CUDA PTX is portable.
+__global__ void scalar_score_kernel(
+        const float* __restrict__ pooled,const float* __restrict__ query,
+        const float* __restrict__ bias,const int32_t* __restrict__ step,
+        int max_cells,float* __restrict__ cells) {
+    const int n=step[kStepNKv],full=step[kStepNBid];
+    if(n<1||n>max_cells||step[kStepPos]!=n-1||full!=n/R||
+       step[kStepWidth]!=(n<2051?n:2051))return;
+    const int row=blockIdx.x;
+    if(row>full)return;
+    __shared__ float head_score[HEADS];
+    const int head=threadIdx.x;
+    if(head<HEADS){
+        float dot=0.0f;
+#pragma unroll
+        for(int d=0;d<D;++d)
+            dot=__fmaf_rn(pooled[size_t(row)*D+d],query[size_t(head)*D+d],dot);
+        head_score[head]=dot>0.0f?dot:0.0f;
+    }
+    __syncthreads();
+    if(head==0){
+        float sum=(0.0f + head_score[0]);
+        sum=(sum + head_score[1]);
+        sum=(sum + head_score[2]);
+        sum=(sum + head_score[3]);
+        if(bias)sum=(sum + bias[row]);
+        sum=(sum + row==full&&n%R?1e9f:0.0f);
+        sum=(sum + 0.0f);
+        for(int i=row*R;i<n&&i<(row+1)*R;++i)cells[i]=sum;
+    }
+}
+#endif
 struct Span{const void* p;size_t n;};
 void validate(Span s){
     const auto p=reinterpret_cast<uintptr_t>(s.p);
@@ -245,12 +282,16 @@ void native_qsa_score(const float* pooled,const float* query,const float* bias,
     for(int i=0;i<count;++i)validate(spans[i]);
     for(int i=0;i<count;++i)for(int j=i+1;j<count;++j)
         if(overlaps(spans[i],spans[j]))throw std::invalid_argument("native QSA score spans overlap");
+#if defined(__HIPCC__)
+    scalar_score_kernel<<<unsigned(max_blocks),128,0,static_cast<cudaStream_t>(stream)>>>(
+        pooled,query,bias,step,int(max_cells),cells);
+#else
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
         ((sycl::queue *)(strata::q_of(stream)))
-            ->parallel_for<dpct_kernel_name<class score_kernel_8b4dbe>>(
+            ->parallel_for<dpct_kernel_name<class score_kernel_59cd1b>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1,
                                 unsigned((max_blocks + ROWS - 1) / ROWS)) *
@@ -263,22 +304,23 @@ void native_qsa_score(const float* pooled,const float* query,const float* bias,
                                      cells);
                     });
     }
+#endif
     /*
-    DPCT1010:415: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:416: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:413: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:414: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=

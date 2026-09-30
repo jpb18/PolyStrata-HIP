@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
         dq = (float *)sycl::malloc_device(ref.size() * 4,
                                           dpct::get_in_order_queue());
         /*
-        DPCT1114:365: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
         dy = (float *)sycl::malloc_device((size_t)2 * rows * 4,
                                           dpct::get_in_order_queue());
         /*
-        DPCT1114:366: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.

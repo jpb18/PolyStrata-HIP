@@ -4,6 +4,7 @@
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/prefill/prefill.hpp"
+#include "strata/core/mtp.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/core/on_device.hpp"
 
@@ -88,6 +89,12 @@ inline int ring_slots(size_t T) {
 }
 constexpr int DQ = 2;              // dequantized-expert ring (FP16 gate/up + down)
 
+// F-1: STRATA_GR_UNFUSED=1 keeps the FP32 copy of the normalized rows (gr_norm + gr_mix), the A/B arm
+inline bool gr_unfused() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_GR_UNFUSED"); return e && e[0] == '1'; }();
+    return v;
+}
+
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 // Either cudaMalloc (owned, freed with the object) or a bump allocation from a borrowed region; with no base and
@@ -160,7 +167,7 @@ struct Stager {
         pageable.resize(kRing);
         for (int i = 0; i < kRing; ++i) {
             /*
-            DPCT1048:14: The original value cudaHostAllocDefault is not
+            DPCT1048: The original value cudaHostAllocDefault is not
             meaningful in the migrated code and was removed or replaced with 0.
             You may need to check the migrated code.
             */
@@ -169,7 +176,7 @@ struct Stager {
                                 blob_bytes, dpct::get_in_order_queue())) == 0;
             if (!pinned[i]) {
                 /*
-                DPCT1026:1009: The call to cudaGetLastError was removed because
+                DPCT1026: The call to cudaGetLastError was removed because
                 this functionality is redundant in SYCL.
                 */
                 pageable[(size_t)i].resize(blob_bytes);
@@ -195,7 +202,7 @@ struct Stager {
     }
     void work() {
         /*
-        DPCT1093:1010: The "device" device may be not the one intended for use.
+        DPCT1093: The "device" device may be not the one intended for use.
         Adjust the selected device if needed.
         */
         dpct::select_device(device);
@@ -279,6 +286,7 @@ struct Prefill::Impl {
     std::vector<void*> owned;
     // chunk buffers
     float *emb = nullptr, *R = nullptr, *xn = nullptr, *lo = nullptr, *gated = nullptr, *inj = nullptr;
+    float* grs = nullptr;                    // F-1: the hyper-connection read's row scales (T x 4)
     uint16_t *xn16 = nullptr, *lo16 = nullptr;
     float* mixed = nullptr;
     uint16_t *mixed_bf = nullptr, *mixed_h = nullptr;
@@ -310,6 +318,13 @@ struct Prefill::Impl {
     std::vector<int32_t> bounds_host;
     std::unique_ptr<mmq::Context> mmq_ctx;
     std::vector<int32_t> ids_host, slot_host, src_host, cnt, off;
+    // The grouping tables in mapped pinned memory, [ids | slot | src] of T_max * K each, then the MMQ bounds: kernels
+    // read and write them in place.  A cudaMemcpyAsync of them queues behind the expert blobs the copy stream already
+    // holds (up to `ring` of them, ~70 us each), and the GPU idles meanwhile - measured 4.2 s of a 128K prompt's
+    // 70 s at the default ring, 0.7 s with a 16-slot one.  STRATA_GROUP_COPY=1: the copies (the A/B arm).
+    int32_t* grp_host = nullptr;
+    int32_t* grp_dev = nullptr;          // its device alias
+    size_t grp_n = 0, grp_tk = 0;        // int32s allocated; T_max * K (the offset of slot, and of src past it)
     uint16_t* dq_gu[DQ] = {};
     uint16_t* dq_d[DQ] = {};
     uint8_t* stage_dev[RING_MAX] = {};
@@ -380,6 +395,7 @@ Prefill::Prefill() : impl_(new Impl) {}
 Prefill::~Prefill() {
     if (!impl_) return;
     if (impl_->cs) impl_->cs->wait();
+    if (impl_->copy) impl_->copy->wait();
     for (int i = 0; i < RING_MAX; ++i) {
         if (impl_->copied[i]) dpct::destroy_event(impl_->copied[i]);
         if (impl_->used[i]) dpct::destroy_event(impl_->used[i]);
@@ -392,6 +408,8 @@ Prefill::~Prefill() {
             sycl::free(impl_->ple_emb_host[b], dpct::get_in_order_queue());
     }
     if (impl_->copy) dpct::get_current_device().destroy_queue(impl_->copy);
+    if (impl_->grp_host)
+        sycl::free(impl_->grp_host, dpct::get_in_order_queue());
     for (void *p : impl_->owned)
         DPCT_CHECK_ERROR(sycl::free(p, dpct::get_in_order_queue()));
 }
@@ -493,7 +511,7 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
     }
     for (int b = 0; next_ != nullptr && b < 2; ++b)
         /*
-        DPCT1048:15: The original value cudaHostAllocPortable is not meaningful
+        DPCT1048: The original value cudaHostAllocPortable is not meaningful
         in the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -515,7 +533,7 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
         m.tok_host.resize((size_t) chunk);
     }
     /*
-    DPCT1025:1011: The SYCL queue is created ignoring the flag and priority
+    DPCT1025: The SYCL queue is created ignoring the flag and priority
     options.
     */
     if (DPCT_CHECK_ERROR(
@@ -540,10 +558,40 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
     }
     m.steps_host.resize(T * strata::kernels::kStepCount);
     m.ids_host.resize(T * K); m.slot_host.resize(T * K); m.src_host.resize(T * K); m.cnt.resize(m.g->n_expert); m.off.resize(m.g->n_expert + 1);
+    {
+        const size_t need = 3 * T * K + (size_t) (2 * (m.g->n_expert + m.g->n_expert / MMQ_GROUP + 2));
+        const char* gc = std::getenv("STRATA_GROUP_COPY");
+        if (m.grp_n < need && !(gc && gc[0] == '1')) {
+            if (m.grp_host) sycl::free(m.grp_host, dpct::get_in_order_queue());
+            m.grp_host = m.grp_dev = nullptr;
+            m.grp_n = m.grp_tk = 0;
+            void *h = nullptr, *d = nullptr;
+            /*
+            DPCT1048: The original value cudaHostAllocMapped is not
+            meaningful in the migrated code and was removed or replaced with 0.
+            You may need to check the migrated code.
+            */
+            if (DPCT_CHECK_ERROR(h = (void *)sycl::malloc_host(
+                                     need * 4, dpct::get_in_order_queue())) ==
+                    0 &&
+                DPCT_CHECK_ERROR(d = (void *)h) == 0) {
+                m.grp_host = (int32_t*) h;
+                m.grp_dev = (int32_t*) d;
+                m.grp_n = need;
+                m.grp_tk = T * K;
+            } else {                              // the copies, as before
+                if (h) sycl::free(h, dpct::get_in_order_queue());
+                /*
+                DPCT1026: The call to cudaGetLastError was removed because
+                this functionality is redundant in SYCL.
+                */
+            }
+        }
+    }
     for (int b = 0; b < 2; ++b) {
         if (!m.ple_emb_host[b] &&
             /*
-            DPCT1048:16: The original value cudaHostAllocDefault is not
+            DPCT1048: The original value cudaHostAllocDefault is not
             meaningful in the migrated code and was removed or replaced with 0.
             You may need to check the migrated code.
             */
@@ -551,7 +599,7 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
                 m.ple_emb_host[b] = (float *)sycl::malloc_host(
                     (size_t)T * N * 4, dpct::get_in_order_queue())) != 0) {
             /*
-            DPCT1026:1012: The call to cudaGetLastError was removed because this
+            DPCT1026: The call to cudaGetLastError was removed because this
             functionality is redundant in SYCL.
             */
             m.ple_pageable[b].resize(
@@ -571,7 +619,7 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
                 m.ident_table = (int32_t *)sycl::malloc_device(
                     ident.size() * 4, dpct::get_in_order_queue())) != 0 ||
             /*
-            DPCT1114:1013: cudaMemcpy is migrated to asynchronization memcpy,
+            DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
             assuming in the original code the source host memory is pageable
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
@@ -613,7 +661,9 @@ bool Prefill::carve(size_t T, void* alloc) {
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
     bool ok = true;
-    m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok); m.xn = o.take<float>(T * D, ok);
+    m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok);
+    m.xn = gr_unfused() ? o.take<float>(T * D, ok) : nullptr;   // F-1: not needed (gr_mix_r reads R)
+    m.grs = o.take<float>(T * HC, ok);
     m.xn16 = o.take<uint16_t>(T * D, ok); m.lo = o.take<float>(T * LR, ok); m.lo16 = o.take<uint16_t>(T * LR, ok);
     m.gated = o.take<float>(T * D, ok); m.inj = o.take<float>(T * HC, ok);
     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
@@ -718,6 +768,181 @@ catch (sycl::exception const &exc) {
 }
 
 int64_t Prefill::chunk() const { return impl_->T; }
+
+bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
+                       std::string& err) {
+    Impl& m = *impl_;
+    static const bool off = [] { const char* v = std::getenv("STRATA_MTP_BATCH"); return v != nullptr && v[0] == '0'; }();
+    core::QsaState& st = mtp.kv_state_rw();
+    if (off || n <= 0 || m.g == nullptr || m.region == nullptr || st.kv_mode != 0 || st.kv_hybrid ||
+        mtp.device() != m.device)
+        return false;
+    const auto t0 = Clock::now();
+    const core::ModelGeometry& g = *m.g;
+    const int64_t Nn = g.n_embd, HCN = g.hc * g.n_embd, KV = g.n_head_kv * g.head_dim;
+    constexpr int kQ8_0 = 8;   // GGML_TYPE_Q8_0
+    const float* w_ne = mtp.tensor_f32("pre_fc_norm_embedding.weight");
+    const void* w_fe = mtp.tensor_q8("fc_embedding.weight");
+    const float* w_nh = mtp.tensor_f32("pre_fc_norm_hidden.weight");
+    const void* w_fh = mtp.tensor_q8("fc_hidden.weight");
+    const float* w_hn = mtp.tensor_f32("attn_hyper_connection.hc_norm.weight");
+    const uint16_t* w_dn = mtp.tensor_bf16("attn_hyper_connection.input_mix_weight_down.weight");
+    const uint16_t* w_up = mtp.tensor_bf16("attn_hyper_connection.input_mix_weight_up.weight");
+    const void* w_k = mtp.tensor_q8("self_attn.k_proj.weight");
+    const void* w_v = mtp.tensor_q8("self_attn.v_proj.weight");
+    const float* w_kn = mtp.tensor_f32("self_attn.k_norm.weight");
+    if (!w_ne || !w_fe || !w_nh || !w_fh || !w_hn || !w_dn || !w_up || !w_k || !w_v || !w_kn) return false;
+    const core::NativeEmbed* nemb = core::native_embed();
+    const core::WeightRef* wemb = nemb ? nullptr : m.wt->find("token_embd.weight");
+    if (!nemb && (wemb == nullptr || wemb->codebook_iq4nl || wemb->ne0 != g.n_embd || wemb->group_elems <= 0 ||
+                  (wemb->code_bits != 2 && wemb->code_bits != 4 && wemb->code_bits != 8)))
+        return false;
+    // the cells the drafter's window can still reach
+    const int64_t r0 = std::max<int64_t>(0, mtp.first_needed() - cell0);
+    if (r0 >= n) return true;
+    // per row: emb/e2 (N), en16 (N half), hn/h2/Rm/gated (HCN), hn16/xn16 (HCN half), lo (LR) + lo16, grs, mixed (N) +
+    // mixed_h, K and V (KV each), the token id
+    // E-9: the drafter's Q8_0 matrices through Q8_1 x Q8_0 MMQ - its own pass's integer dot products (mmvq), so
+    // its K/V stay close to what the drafter computes itself; STRATA_MTP_BATCH_F16=1: FP16 GEMMs (the A/B)
+    static const bool f16_only = [] { const char* v = std::getenv("STRATA_MTP_BATCH_F16"); return v && v[0] == '1'; }();
+    const bool q8 = !f16_only && mmq::built() && mmq::supported(kQ8_0);
+    const uint64_t per_row = 4 * (2 * Nn + 4 * HCN + LR + HC + Nn + 2 * KV + 1) + 2 * (Nn + 2 * HCN + LR + Nn) + 64 +
+                             (q8 ? (uint64_t) mmq::q8_bytes(g.hc, Nn) + 4 * g.hc : 0);
+    const int64_t B = std::min<int64_t>(n - r0, (int64_t) (m.region_bytes / per_row) & ~(int64_t) 63);
+    if (B < 64) return false;
+    uint8_t* q = m.region;
+    auto carve = [&](size_t bytes) { void* p = q; q += (bytes + 255) & ~(size_t) 255; return p; };
+    float* emb = (float*) carve((size_t) B * Nn * 4);
+    float* e2 = (float*) carve((size_t) B * Nn * 4);
+    uint16_t* en16 = (uint16_t*) carve((size_t) B * Nn * 2);
+    float* hn = (float*) carve((size_t) B * HCN * 4);
+    float* h2 = (float*) carve((size_t) B * HCN * 4);
+    float* Rm = (float*) carve((size_t) B * HCN * 4);
+    float* gated = (float*) carve((size_t) B * HCN * 4);
+    uint16_t* hn16 = (uint16_t*) carve((size_t) B * HCN * 2);
+    uint16_t* xn16 = (uint16_t*) carve((size_t) B * HCN * 2);
+    float* lo = (float*) carve((size_t) B * LR * 4);
+    uint16_t* lo16 = (uint16_t*) carve((size_t) B * LR * 2);
+    float* grs = (float*) carve((size_t) B * HC * 4);
+    float* mixed = (float*) carve((size_t) B * Nn * 4);
+    uint16_t* mixed_h = (uint16_t*) carve((size_t) B * Nn * 2);
+    float* Kc = (float*) carve((size_t) B * KV * 4);
+    float* Vc = (float*) carve((size_t) B * KV * 4);
+    int32_t* tok = (int32_t*) carve((size_t) B * 4);
+    void* xq = q8 ? carve(mmq::q8_bytes(B * g.hc, Nn)) : nullptr;
+    int32_t* ident = q8 ? (int32_t*) carve((size_t) B * g.hc * 4) : nullptr;
+    int32_t* bnd = q8 ? (int32_t*) carve(16) : nullptr;
+    if ((uint64_t) (q - m.region) > m.region_bytes) return false;
+    if (!mtp.idle(err)) return false;   // the drafter's own stream (its graph uploads) before this writes its K/V
+    strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
+    s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
+    s.idx_dim = g.idx_key_dim;
+    std::vector<int32_t> tk((size_t) B);
+    if (q8) {
+        if (!m.mmq_ctx) m.mmq_ctx = std::make_unique<mmq::Context>();
+        mmq::iota(ident, B * g.hc, m.cs);
+    }
+    // y[rows, n_out] = x[rows, k] . w^T for a Q8_0 matrix: MMQ from the FP32 rows (bounds slot 0: rows, 1: rows*hc)
+    auto proj = [&](const float* x, const uint16_t* x16, const void* w, float* y, int64_t rows, int64_t n_out,
+                    int64_t k, int slot) {
+        if (!q8) { m.gemm.native(x16, kQ8_0, w, y, rows, n_out, k); return; }
+        mmq::quantize(x, nullptr, xq, kQ8_0, k, k, rows, m.cs);
+        mmq::Product p;
+        p.w = w; p.type = kQ8_0; p.w_rows = n_out; p.w_cols = k; p.expert_bytes = mmq::matrix_bytes(kQ8_0, n_out, k);
+        p.n = 1; p.xq = xq; p.bounds = bnd + 2 * slot; p.ids = ident; p.total_rows = rows; p.max_rows = rows;
+        p.dst = y; p.ld_dst = n_out;
+        m.mmq_ctx->run(p, m.cs);
+    };
+    for (int64_t b0 = r0; b0 < n; b0 += B) {
+        const int64_t nb = std::min(B, n - b0), c0 = cell0 + b0;
+        for (int64_t i = 0; i < nb; ++i) tk[(size_t) i] = next_tokens[b0 + i];
+        const int32_t bh[4] = {0, (int32_t) nb, 0, (int32_t) (nb * g.hc)};
+        /*
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        While the origin API might be synchronous, it depends on the type of
+        operand memory, so you may need to call wait() on event return by memcpy
+        API to ensure synchronization behavior.
+        */
+        if (q8 && DPCT_CHECK_ERROR(m.cs->memcpy(bnd, bh, sizeof bh)) != 0) {
+            err = "prefill: the draft bounds' upload failed";
+            return false;
+        }
+        /*
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        While the origin API might be synchronous, it depends on the type of
+        operand memory, so you may need to call wait() on event return by memcpy
+        API to ensure synchronization behavior.
+        */
+        if (DPCT_CHECK_ERROR(m.cs->memcpy(tok, tk.data(), (size_t)nb * 4)) !=
+            0) {
+            err = "prefill: the draft tokens' upload failed";
+            return false;
+        }
+        // the input branches: the next token's embedding, and this cell's final residual rows
+        if (nemb) {
+            nemb->gather_dev(tok, nb, emb, m.cs);
+        } else {
+            const auto* codes = (const uint8_t*) wemb->data;
+            const auto* scales = (const float*) (codes + wemb->codes_bytes);
+            const auto* offsets = wemb->has_offset ? (const float*) (codes + wemb->codes_bytes + wemb->scales_bytes)
+                                                   : nullptr;
+            strata::kernels::embedding_gather_dev(codes, scales, offsets, tok, (int) nb, wemb->ne0, wemb->code_bits,
+                                                  wemb->code_bias, wemb->group_elems,
+                                                  (uint64_t) (wemb->ne0 / (8 / wemb->code_bits)),
+                                                  (uint64_t) (wemb->ne0 / wemb->group_elems), emb, m.cs);
+        }
+        rms_rows(emb, w_ne, nb, Nn, Nn, EPS, m.cs);
+        if (!q8) to_f16(emb, en16, nb * Nn, m.cs);
+        proj(emb, en16, w_fe, e2, nb, Nn, Nn, 0);
+        /*
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        While the origin API might be synchronous, it depends on the type of
+        operand memory, so you may need to call wait() on event return by memcpy
+        API to ensure synchronization behavior.
+        */
+        m.cs->memcpy(hn, R_rows + (size_t)b0 * HCN, (size_t)nb * HCN * 4);
+        rms_rows(hn, w_nh, nb, HCN, HCN, EPS, m.cs);
+        if (!q8) to_f16(hn, hn16, nb * HCN, m.cs);
+        proj(hn, hn16, w_fh, h2, nb * g.hc, Nn, Nn, 1);   // every stream through fc_hidden
+        strata::kernels::add_streams_broadcast(h2, e2, Rm, Nn, (int) g.hc, (int) nb, m.cs);
+        // the attention hyper-connection's read (its mixed input only: this pass writes nothing back)
+        gr_norm_rs(Rm, w_hn, EPS, grs, xn16, nb, m.cs);
+        m.gemm.bf16(xn16, w_dn, lo, nb, LR, HCN);
+        gr_silu(lo, lo16, nb, m.cs);
+        m.gemm.bf16(lo16, w_up, gated, nb, HCN, LR);
+        gr_mix_r(Rm, grs, w_hn, gated, mixed, nullptr, nb, m.cs, mixed_h);
+        // K and V into the drafter's cache, as the prompt path's QSA layers append theirs
+        proj(mixed, mixed_h, w_k, Kc, nb, KV, Nn, 0);
+        proj(mixed, mixed_h, w_v, Vc, nb, KV, Nn, 0);
+        rms_rows(Kc, w_kn, nb * g.n_head_kv, g.head_dim, g.head_dim, EPS, m.cs);
+        rope(Kc, nb, g.n_head_kv, g.head_dim, KV, c0, (float) strata::kernels::qsa_freq_base(), m.cs);
+        if (st.kv_q4) {
+            strata::kernels::fwht256_inplace_cuda(Kc, nb * g.n_head_kv, m.cs);
+            strata::kernels::fwht256_inplace_cuda(Vc, nb * g.n_head_kv, m.cs);
+            strata::kernels::kv_append_q4(st.k_q4, st.v_q4, st.page_table, c0, nb, Kc, Vc, s, m.cs, &st.host);
+        } else {
+            kv_append(Kc, Vc, nb, c0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
+                      st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, m.cs, &st.host);
+        }
+    }
+    if (DPCT_CHECK_ERROR(m.cs->wait()) != 0) {
+        /*
+        DPCT1009: SYCL reports errors using exceptions and does not use
+        error codes. Please replace the "get_error_string_dummy(...)" with a
+        real error-handling function.
+        */
+        /*
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
+        */
+        err = std::string("prefill: the draft layer's K/V: ") +
+              dpct::get_error_string_dummy(0);
+        return false;
+    }
+    mtp.ms_prefill += ms_since(t0);
+    return true;
+}
 void Prefill::set_pinned_share(double share) { g_pinned_share = share; }
 double Prefill::pinned_share() { return g_pinned_share; }
 
@@ -837,7 +1062,8 @@ struct PfTimer {
 };
 }  // namespace
 
-bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
+bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
+                  std::string &err) try {
     Impl& m = *impl_;
     const core::OnDevice on_device(m.device);
     const core::ModelGeometry& g = *m.g;
@@ -903,7 +1129,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         // previous stage handed on
         if (hand_in_ != nullptr) {
             /*
-            DPCT1124:1015: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -930,7 +1156,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         }
         if (batched) {
             /*
-            DPCT1124:1016: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -958,7 +1184,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             const float* row = embd_rows ? embd_rows[p0 + t] : nullptr;
             if (row) {
                 /*
-                DPCT1124:1017: cudaMemcpyAsync is migrated to asynchronous
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                 memcpy API. While the origin API might be synchronous, it
                 depends on the type of operand memory, so you may need to call
                 wait() on event return by memcpy API to ensure synchronization
@@ -984,7 +1210,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 return false;
             }
             /*
-            DPCT1124:1018: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -1006,7 +1232,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         // ---- the QSA step records of every position in the chunk
         for (int64_t t = 0; t < T; ++t) strata::kernels::qsa_step_fill(m.steps_host.data() + t * strata::kernels::kStepCount, p0 + t, s);
         /*
-        DPCT1124:1014: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -1061,7 +1287,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     {*m.used[sl]});
                 if (en.job < 0) {
                     /*
-                    DPCT1124:1019: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
@@ -1072,7 +1298,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 } else {
                     const uint8_t* hb = m.stager->wait(en.job);
                     /*
-                    DPCT1124:1020: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
@@ -1129,7 +1355,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         {*m.used[sl]});
                     if (en.job < 0) {
                         /*
-                        DPCT1124:1021: cudaMemcpyAsync is migrated to
+                        DPCT1124: cudaMemcpyAsync is migrated to
                         asynchronous memcpy API. While the origin API might be
                         synchronous, it depends on the type of operand memory,
                         so you may need to call wait() on event return by memcpy
@@ -1140,7 +1366,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     } else {
                         const uint8_t* hb = m.stager->wait(en.job);
                         /*
-                        DPCT1124:1022: cudaMemcpyAsync is migrated to
+                        DPCT1124: cudaMemcpyAsync is migrated to
                         asynchronous memcpy API. While the origin API might be
                         synchronous, it depends on the type of operand memory,
                         so you may need to call wait() on event return by memcpy
@@ -1169,6 +1395,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             else issue_until(upto + (size_t) m.ring);
         };
         host_setup_ms += ms_since(tsetup);
+        bool normed = false;   // F-2: the previous half's write already normed R for this half (grs, xn16)
         for (int64_t l = LB; l < LE; ++l) {
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             const core::LayerView v(*m.wt, l);
@@ -1233,12 +1460,15 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                       *wu = need(v, su.c_str(), err), *wi = need(v, si.c_str(), err);
                 if (!wn || !wd || !wu || !wi) return false;
                 pt.mark(kPfHc, cs);
-                gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs);
+                if (gr_unfused()) gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs);
+                else if (!normed) gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs);
+                normed = false;
                 if (!bf16_proj(m.gemm, wd, m.xn16, m.lo, T, sd, err)) return false;
                 gr_silu(m.lo, m.lo16, T, m.cs);
                 if (!bf16_proj(m.gemm, wu, m.lo16, m.gated, T, su, err)) return false;
                 if (!bf16_proj(m.gemm, wi, m.xn16, m.inj, T, si, err)) return false;
-                gr_mix(m.xn, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h);
+                if (gr_unfused()) gr_mix(m.xn, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h);
+                else gr_mix_r(m.R, m.grs, (const float*) wn->data, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h);
 
                 if (half == 0 && !core::is_qsa_layer(g, l)) {
                     // ======================= GDN =======================
@@ -1292,7 +1522,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                                             (p0 + s.page_size - 1) / s.page_size, s, m.cs);
                         pt.mark(kPfQsa, cs);
                     }
-                    if (st.kv_q4) {   // Q4_0 KV (kv_q4.hpp): rotated K and V, the queries below too, the output back
+                    if (st.kv_hybrid) {   // K8V4: K INT8 unrotated, V rotated Q4_0 (only V and the output rotate)
+                        strata::kernels::fwht256_inplace_cuda(m.Vc, T * 2, m.cs);
+                        kv_append(m.Kc, m.Kc, T, p0, st.page_table, s.page_size, nullptr, nullptr,
+                                  st.k_q, st.k_q, st.k_scale, st.k_scale, m.cs, nullptr,   // mode 0: no host mirror
+                                  staged ? &m.stage : nullptr);
+                        strata::kernels::kv_append_q4(st.v_q4, st.v_q4, st.page_table, p0, T, m.Vc, m.Vc, s, m.cs,
+                                                      nullptr, staged ? &m.stage : nullptr);
+                    } else if (st.kv_q4) {   // Q4_0 KV (kv_q4.hpp): rotated K and V, the queries below too, the output back
                         strata::kernels::fwht256_inplace_cuda(m.Kc, T * 2, m.cs);
                         strata::kernels::fwht256_inplace_cuda(m.Vc, T * 2, m.cs);
                         strata::kernels::kv_append_q4(st.k_q4, st.v_q4, st.page_table, p0, T, m.Kc, m.Vc, s, m.cs,
@@ -1350,7 +1587,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     if (static const bool ovl = std::getenv("STRATA_SEL_OVERLAP") != nullptr; ovl && qsa_index == 0) {
                         std::vector<int32_t> ids((size_t) (T * m.cap));
                         /*
-                        DPCT1124:1023: cudaMemcpyAsync is migrated to
+                        DPCT1124: cudaMemcpyAsync is migrated to
                         asynchronous memcpy API. While the origin API might be
                         synchronous, it depends on the type of operand memory,
                         so you may need to call wait() on event return by memcpy
@@ -1410,7 +1647,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         }
                         std::vector<int32_t> a((size_t) (T * m.cap)), b((size_t) (T * m.cap));
                         /*
-                        DPCT1124:1024: cudaMemcpyAsync is migrated to
+                        DPCT1124: cudaMemcpyAsync is migrated to
                         asynchronous memcpy API. While the origin API might be
                         synchronous, it depends on the type of operand memory,
                         so you may need to call wait() on event return by memcpy
@@ -1418,7 +1655,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         */
                         m.cs->memcpy(a.data(), m.sel_ids, a.size() * 4);
                         /*
-                        DPCT1124:1025: cudaMemcpyAsync is migrated to
+                        DPCT1124: cudaMemcpyAsync is migrated to
                         asynchronous memcpy API. While the origin API might be
                         synchronous, it depends on the type of operand memory,
                         so you may need to call wait() on event return by memcpy
@@ -1451,7 +1688,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         if (p0 + T > pos0 + n - last) {
                             std::vector<int32_t> h((size_t) (T * m.cap));
                             /*
-                            DPCT1124:1026: cudaMemcpyAsync is migrated to
+                            DPCT1124: cudaMemcpyAsync is migrated to
                             asynchronous memcpy API. While the origin API might
                             be synchronous, it depends on the type of operand
                             memory, so you may need to call wait() on event
@@ -1473,7 +1710,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     pt.mark(kPfQsaAttn, cs);
                     // perf-review D-1: the whole chunk on tensor cores, one block per (query, KV head), FP32-level
                     // accuracy but not bitwise (qsa_prompt_attn.hpp). Q4_0 KV, or STRATA_PROMPT_ATTN_OLD=1: the
-                    // decode kernel, 32 queries at a time
+                    // decode kernel, 32 queries at a time (K8V4 runs the tensor kernel's mode 3: INT8 K,
+                    // V dequantized from its q4_0 blocks to fp16 at gather)
                     static const bool old_attn = std::getenv("STRATA_PROMPT_ATTN_OLD") != nullptr;
                     if (old_attn || !strata::kernels::qsa_prompt_attn_batch(m.q, pools, m.sel_ids, m.steps_dev, m.cap, s,
                                                                             m.attn, T, m.cs))
@@ -1483,7 +1721,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                                                    m.steps_dev + t0 * strata::kernels::kStepCount, m.cap,
                                                                    s, m.attn_scratch, m.attn + t0 * ZV, nb, m.cs);
                         }
-                    if (st.kv_q4) strata::kernels::fwht256_inplace_cuda(m.attn, T * 24, m.cs);
+                    if (st.kv_q4 || st.kv_hybrid) strata::kernels::fwht256_inplace_cuda(m.attn, T * 24, m.cs);
                     pt.mark(kPfQsa, cs);
                     gate_attn(m.attn, m.Qf, m.attn_h, T, m.cs);
                     if (!native_proj(m.gemm, wo, m.attn_h, m.bo, T, v.name("attn_output.weight"), err)) return false;
@@ -1508,19 +1746,27 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     m.gemm.bf16(m.mixed_bf, (const uint16_t*) wgi->data, m.sg, T, 1, N);
                     // group the (token, k) pairs by expert on the host
                     pt.mark(kPfHostGroup, cs);
+                    // (the sync below also orders this layer's writes of slot/src/bounds after the previous
+                    // layer's kernels that read them)
+                    const bool grp_mapped = m.grp_host != nullptr;
+                    int32_t* ids_h = grp_mapped ? m.grp_host : m.ids_host.data();
+                    int32_t* slot_h = grp_mapped ? m.grp_host + m.grp_tk : m.slot_host.data();
+                    int32_t* src_h = grp_mapped ? m.grp_host + 2 * m.grp_tk : m.src_host.data();
+                    if (grp_mapped) copy_i32(m.grp_dev, m.ids, T * K, m.cs);
                     /*
-                    DPCT1124:1027: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
                     synchronization behavior.
                     */
-                    m.cs->memcpy(m.ids_host.data(), m.ids, (size_t)T * K * 4);
+                    else m.cs->memcpy(m.ids_host.data(), m.ids,
+                                      (size_t)T * K * 4);
                     m.cs->wait();
                     pt.fold();
                     std::fill(m.cnt.begin(), m.cnt.end(), 0);
                     for (int64_t i = 0; i < T * K; ++i) {
-                        const int32_t e = m.ids_host[(size_t) i];
+                        const int32_t e = ids_h[(size_t) i];
                         if (e < 0 || e >= m.g->n_expert) { err = "prefill: routed id out of range"; return false; }
                         ++m.cnt[(size_t) e];
                     }
@@ -1528,29 +1774,34 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     for (int64_t e = 0; e < m.g->n_expert; ++e) m.off[(size_t) e + 1] = m.off[(size_t) e] + m.cnt[(size_t) e];
                     std::vector<int32_t> fill(m.off.begin(), m.off.end() - 1);
                     for (int64_t i = 0; i < T * K; ++i) {
-                        const int32_t e = m.ids_host[(size_t) i];
+                        const int32_t e = ids_h[(size_t) i];
                         const int32_t p = fill[(size_t) e]++;
-                        m.slot_host[(size_t) i] = p;
-                        m.src_host[(size_t) p] = (int32_t) (i / K);
+                        slot_h[(size_t) i] = p;
+                        src_h[(size_t) p] = (int32_t) (i / K);
                     }
-                    /*
-                    DPCT1124:1028: cudaMemcpyAsync is migrated to asynchronous
-                    memcpy API. While the origin API might be synchronous, it
-                    depends on the type of operand memory, so you may need to
-                    call wait() on event return by memcpy API to ensure
-                    synchronization behavior.
-                    */
-                    m.cs->memcpy(m.slot_dev, m.slot_host.data(),
-                                 (size_t)T * K * 4);
-                    /*
-                    DPCT1124:1029: cudaMemcpyAsync is migrated to asynchronous
-                    memcpy API. While the origin API might be synchronous, it
-                    depends on the type of operand memory, so you may need to
-                    call wait() on event return by memcpy API to ensure
-                    synchronization behavior.
-                    */
-                    m.cs->memcpy(m.src_dev, m.src_host.data(),
-                                 (size_t)T * K * 4);
+                    if (grp_mapped) {
+                        copy_i32(m.slot_dev, m.grp_dev + m.grp_tk, T * K, m.cs);
+                        copy_i32(m.src_dev, m.grp_dev + 2 * m.grp_tk, T * K, m.cs);
+                    } else {
+                        /*
+                        DPCT1124: cudaMemcpyAsync is migrated to
+                        asynchronous memcpy API. While the origin API might be
+                        synchronous, it depends on the type of operand memory,
+                        so you may need to call wait() on event return by memcpy
+                        API to ensure synchronization behavior.
+                        */
+                        m.cs->memcpy(m.slot_dev, m.slot_host.data(),
+                                     (size_t)T * K * 4);
+                        /*
+                        DPCT1124: cudaMemcpyAsync is migrated to
+                        asynchronous memcpy API. While the origin API might be
+                        synchronous, it depends on the type of operand memory,
+                        so you may need to call wait() on event return by memcpy
+                        API to ensure synchronization behavior.
+                        */
+                        m.cs->memcpy(m.src_dev, m.src_host.data(),
+                                     (size_t)T * K * 4);
+                    }
                     // the experts, in id order: resident ones from VRAM, the others through the staging ring
                     std::vector<int32_t> order;
                     for (int32_t e = 0; e < m.g->n_expert; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
@@ -1574,15 +1825,22 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             for (size_t i = 0; i <= MMQ_GROUP; ++i)
                                 m.bounds_host[n + 1 + g * (MMQ_GROUP + 1) + i] =
                                     m.bounds_host[std::min(n, g * MMQ_GROUP + i)] - m.bounds_host[g * MMQ_GROUP];
-                        /*
-                        DPCT1124:1030: cudaMemcpyAsync is migrated to
-                        asynchronous memcpy API. While the origin API might be
-                        synchronous, it depends on the type of operand memory,
-                        so you may need to call wait() on event return by memcpy
-                        API to ensure synchronization behavior.
-                        */
-                        m.cs->memcpy(m.bounds_dev, m.bounds_host.data(),
-                                     m.bounds_host.size() * 4);
+                        if (grp_mapped) {
+                            int32_t* bh = m.grp_host + 3 * m.grp_tk;
+                            std::memcpy(bh, m.bounds_host.data(), m.bounds_host.size() * 4);
+                            copy_i32(m.bounds_dev, m.grp_dev + 3 * m.grp_tk, (int64_t) m.bounds_host.size(), m.cs);
+                        } else {
+                            /*
+                            DPCT1124: cudaMemcpyAsync is migrated to
+                            asynchronous memcpy API. While the origin API might
+                            be synchronous, it depends on the type of operand
+                            memory, so you may need to call wait() on event
+                            return by memcpy API to ensure synchronization
+                            behavior.
+                            */
+                            m.cs->memcpy(m.bounds_dev, m.bounds_host.data(),
+                                         m.bounds_host.size() * 4);
+                        }
                     } else {
                         gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
                     }
@@ -1620,7 +1878,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             if (m.stage_live[sl])(m.copy)
                                 ->ext_oneapi_submit_barrier({*m.used[sl]});
                             /*
-                            DPCT1124:1031: cudaMemcpyAsync is migrated to
+                            DPCT1124: cudaMemcpyAsync is migrated to
                             asynchronous memcpy API. While the origin API might
                             be synchronous, it depends on the type of operand
                             memory, so you may need to call wait() on event
@@ -1636,7 +1894,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             if (m.stage_live[sl])(m.copy)
                                 ->ext_oneapi_submit_barrier({*m.used[sl]});
                             /*
-                            DPCT1124:1032: cudaMemcpyAsync is migrated to
+                            DPCT1124: cudaMemcpyAsync is migrated to
                             asynchronous memcpy API. While the origin API might
                             be synchronous, it depends on the type of operand
                             memory, so you may need to call wait() on event
@@ -1828,8 +2086,24 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         }
                     }
                 }
-                // ---- the hyper-connection write of this half
-                gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
+                // ---- the hyper-connection write of this half; F-2: fused with the next half's norm when nothing else
+                // touches R in between (not the stage's last half, not before the PLE block of layer 1, not under a
+                // control vector)
+                const int64_t nl = half == 0 ? l : l + 1;
+                const bool fuse = !gr_unfused() && nl < LE && !(half == 1 && nl == 1 && ple_on) &&
+                                  !(half == 1 && strata::kernels::cvec().covers(l));
+                const core::WeightRef* wnn = nullptr;
+                if (fuse) {
+                    const core::LayerView vn(*m.wt, nl);
+                    wnn = need(vn, half == 0 ? "hc_ffn_norm.weight" : "hc_attn_norm.weight", err);
+                    if (!wnn) return false;
+                }
+                if (wnn) {
+                    gr_write_norm_rs(m.R, m.bo, m.inj, HC, (const float*) wnn->data, EPS, m.grs, m.xn16, T, m.cs);
+                    normed = true;
+                } else {
+                    gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
+                }
                 if (half == 1 && strata::kernels::cvec().covers(l))   // --control-vector-scaled
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
@@ -1846,7 +2120,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             // the rows to the host buffer the next stage read two chunks ago (it has finished: waited below)
             float* h = m.hand[hand_buf];
             /*
-            DPCT1124:1033: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -1855,13 +2129,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     0 ||
                 DPCT_CHECK_ERROR(m.cs->wait()) != 0) {
                 /*
-                DPCT1009:1034: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1010:1035: SYCL uses exceptions to report errors and does
+                DPCT1010: SYCL uses exceptions to report errors and does
                 not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
@@ -1898,13 +2172,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             const auto toc = Clock::now();
             if (DPCT_CHECK_ERROR(m.cs->wait()) != 0) {
                 /*
-                DPCT1009:1036: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1010:1037: SYCL uses exceptions to report errors and does
+                DPCT1010: SYCL uses exceptions to report errors and does
                 not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
@@ -1951,16 +2225,34 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     }
     if (DPCT_CHECK_ERROR(m.cs->wait()) != 0) {
         /*
-        DPCT1009:1038: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1010:1039: SYCL uses exceptions to report errors and does not use
+        DPCT1010: SYCL uses exceptions to report errors and does not use
         the error codes. The cudaGetLastError function call was replaced with 0.
         You need to rewrite this code.
         */
         err = std::string("prefill: ") + dpct::get_error_string_dummy(0);
+        return false;
+    }
+    // (PR #121) an expert copy that failed on the copy stream surfaces here, not in the next request
+    /*
+    DPCT1000: Error handling if-stmt was detected but could not be
+    rewritten.
+    */
+    if (const dpct::err0 cst = DPCT_CHECK_ERROR(m.copy->wait()); cst != 0) {
+        /*
+        DPCT1009: SYCL reports errors using exceptions and does not use
+        error codes. Please replace the "get_error_string_dummy(...)" with a
+        real error-handling function.
+        */
+        /*
+        DPCT1001: The statement could not be removed.
+        */
+        err = std::string("prefill: expert copy stream: ") +
+              dpct::get_error_string_dummy(cst);
         return false;
     }
     stats_.ms_total += ms_since(t_start);
@@ -1999,6 +2291,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         std::fprintf(stderr, "strata prefill: GDN_HASH %s\n", line.c_str());
     }
     return true;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
 }
 
 }  // namespace strata::prefill

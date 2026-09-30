@@ -73,7 +73,7 @@ catch (sycl::exception const &exc) {
 // configurations and the bench can measure them against each other with nothing else changed.
 template <bool STAGE_X>
 /*
-DPCT1110:224: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 s2_gemv_fast_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -98,7 +98,7 @@ __dpct_inline__ void s2_gemv_fast_kernel(
 #pragma unroll
         for (long long i = tid; i < n_in; i += threads_per_row) sx[i] = xh[i];
         /*
-        DPCT1118:225: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -142,7 +142,7 @@ __dpct_inline__ void s2_gemv_fast_kernel(
     for (int step = threads_per_row / 2; step > 0; step >>= 1) {
         if (tid < step) partial[tid] += partial[tid + step];
         /*
-        DPCT1118:226: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -167,7 +167,7 @@ void s2_gemv_fast(const uint16_t *x, const uint8_t *codes, const float *scales,
         std::exit(1);
     }
     /*
-    DPCT1083:228: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -175,7 +175,7 @@ void s2_gemv_fast(const uint16_t *x, const uint8_t *codes, const float *scales,
                         (size_t)threads_per_row * sizeof(float);
     if (stage_x) {
         /*
-        DPCT1049:227: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -207,7 +207,7 @@ void s2_gemv_fast(const uint16_t *x, const uint8_t *codes, const float *scales,
         });
     } else {
         /*
-        DPCT1049:229: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */

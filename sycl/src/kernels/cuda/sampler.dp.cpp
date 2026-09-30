@@ -126,7 +126,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
         for (int w = item_ct1.get_local_id(2); w < bits_words;
              w += item_ct1.get_local_range(2)) penal_bits[w] = 0u;
         /*
-        DPCT1118:57: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -138,7 +138,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
                     sycl::access::address_space::generic_space>(
                     &penal_bits[hrow[i] >> 5], 1u << (hrow[i] & 31));
         /*
-        DPCT1118:58: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -159,7 +159,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
     }
     for (int off = 16; off > 0; off >>= 1) {
         /*
-        DPCT1108:59: '__shfl_down_sync' was migrated with the experimental
+        DPCT1108: '__shfl_down_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -167,7 +167,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
             0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(), bv,
             off);
         /*
-        DPCT1108:60: '__shfl_down_sync' was migrated with the experimental
+        DPCT1108: '__shfl_down_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -191,7 +191,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
         int wi = lane < nw ? si[lane] : n_vocab;
         for (int off = 16; off > 0; off >>= 1) {
             /*
-            DPCT1108:61: '__shfl_down_sync' was migrated with the experimental
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -199,7 +199,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
                 0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 wv, off);
             /*
-            DPCT1108:62: '__shfl_down_sync' was migrated with the experimental
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -227,7 +227,7 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
 /// order - is unchanged; `top_p`'s cut reads that order in double arithmetic as before; temperature and the
 /// Philox draw apply after the cut.  `sampler_parity` pins all of it against the host reference.
 /*
-DPCT1110:63: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 sampler_kernel exceeds 128 bytes and may cause high register pressure. Consult
 with your hardware vendor to find the total register size available and adjust
 the code, or use smaller sub-group size to avoid high register pressure.
@@ -268,7 +268,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
         for (int w = item_ct1.get_local_id(2); w < bits_words;
              w += item_ct1.get_local_range(2)) penal_bits[w] = 0u;
         /*
-        DPCT1118:64: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -280,7 +280,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
                     sycl::access::address_space::generic_space>(
                     &penal_bits[hrow[i] >> 5], 1u << (hrow[i] & 31));
         /*
-        DPCT1118:65: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -327,7 +327,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
         }
         for (int off = 16; off > 0; off >>= 1) {
             /*
-            DPCT1108:68: '__shfl_down_sync' was migrated with the experimental
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -335,7 +335,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
                 0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 bv, off);
             /*
-            DPCT1108:69: '__shfl_down_sync' was migrated with the experimental
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -348,7 +348,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
                   lane = (int)(item_ct1.get_local_id(2) & 31);
         if (lane == 0) { sv[warp] = bv; si[warp] = best; }
         /*
-        DPCT1118:66: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -359,7 +359,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
             int wi = lane < nw ? si[lane] : n_vocab;
             for (int off = 16; off > 0; off >>= 1) {
                 /*
-                DPCT1108:70: '__shfl_down_sync' was migrated with the
+                DPCT1108: '__shfl_down_sync' was migrated with the
                 experimental feature masked sub_group function which may not be
                 supported by all compilers or runtimes. You may need to adjust
                 the code.
@@ -369,7 +369,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
                     sycl::ext::oneapi::this_work_item::get_sub_group(), wv,
                     off);
                 /*
-                DPCT1108:71: '__shfl_down_sync' was migrated with the
+                DPCT1108: '__shfl_down_sync' was migrated with the
                 experimental feature masked sub_group function which may not be
                 supported by all compilers or runtimes. You may need to adjust
                 the code.
@@ -383,7 +383,7 @@ __dpct_inline__ void sampler_kernel(const float *__restrict__ logits,
             if (lane == 0) { sel_ids[i] = (wi < n_vocab) ? wi : 0; sel_logit[i] = wv; }
         }
         /*
-        DPCT1118:67: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -454,7 +454,7 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
         std::exit(1);
     }
     /*
-    DPCT1083:73: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -467,7 +467,7 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
         // One block per token, 1,024 threads over the vocabulary.  See `sampler_greedy_kernel`.
         const int gthreads = 1024;
         /*
-        DPCT1049:72: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -503,7 +503,7 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
         // The same block-per-token shape: the selection's k argmax rounds reduce inside the block.  See
         // `sampler_kernel`'s header for what the old one-thread-per-token launch cost.
         /*
-        DPCT1049:74: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -535,7 +535,7 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
             });
     }
     /*
-    DPCT1010:403: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

@@ -18,9 +18,9 @@ namespace {
 bool eligible(const strata::TensorInfo& tensor, bool include_ple_key) {
     const auto& name = tensor.name;
     if (name.rfind("blk.", 0) != 0) return false;
-    // The native PLE kernel accepts Q2_0. Other quantized keys can be converted to BF16 by iq_pack;
-    // keep their packed bytes resident instead of overriding them with an unsupported native key.
-    if (name == "blk.1.ple_key.weight") return include_ple_key && tensor.type == 42;   // 42 = Q2_0
+    // Match the native PLE kernel: Q2_0, IQ3_XXS and IQ4_XS. Other keys retain the packed BF16 fallback.
+    if (name == "blk.1.ple_key.weight")
+        return include_ple_key && (tensor.type == 42 || tensor.type == 18 || tensor.type == 23);
     static const char* suffixes[] = {".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight",
         ".attn_q.weight", ".attn_k.weight", ".attn_v.weight", ".attn_output.weight",
         ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight", ".ffn_down_shexp.weight"};
@@ -165,18 +165,18 @@ bool NativeDense::load(const std::vector<std::string> &shards,
                             .memcpy(data.get(), gguf.tensor_data(tensor), bytes)
                             .wait());
                 /*
-                DPCT1000:420: Error handling if-stmt was detected but could not
+                DPCT1000: Error handling if-stmt was detected but could not
                 be rewritten.
                 */
                 if (status != 0) {
                     /*
-                    DPCT1009:421: SYCL reports errors using exceptions and does
+                    DPCT1009: SYCL reports errors using exceptions and does
                     not use error codes. Please replace the
                     "get_error_string_dummy(...)" with a real error-handling
                     function.
                     */
                     /*
-                    DPCT1001:419: The statement could not be removed.
+                    DPCT1001: The statement could not be removed.
                     */
                     err = "native dense upload " + tensor.name + ": " +
                           dpct::get_error_string_dummy(status);
@@ -195,15 +195,15 @@ bool NativeDense::load(const std::vector<std::string> &shards,
                                  dpct::get_in_order_queue()));
         DevicePtr scratch(allocation);
         /*
-        DPCT1009:422: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:417: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         /*
-        DPCT1000:418: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (status != 0) {

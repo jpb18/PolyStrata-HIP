@@ -80,9 +80,11 @@
 #include <mutex>
 #include <charconv>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -183,6 +185,7 @@ struct Options {
     /// is reserved for a host thread that has nothing to do while the drain runs.
     bool no_host_worker = false;
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
+    bool resident_cpu_experts = false; ///< mmap-backed static-cache misses copied into ordinary RAM
     bool stream_experts = false;  ///< SYCL port: no host arena; blobs read from the GGUF on demand (all experts in VRAM)
     /// R4: slots of VRAM-resident experts.  **0 = off, and off is the default.**
     /// **THE COMMENT THAT USED TO BE HERE WAS FALSE AND ROUND 328 MEASURED IT.**  It said "the cache has no
@@ -330,6 +333,8 @@ void usage() {
                  "                       VRAM; default fp16 until gate G-C accepts int8\n"
                  "  --kv q4_0            4-bit K/V after a Hadamard rotation (PR #21): half of int8's memory,\n"
                  "                       slightly lower precision (see bench/results/2026-09-27-kv-q4)\n"
+                 "  --kv k8v4            hybrid: INT8 K (exact attention scores) + rotated Q4_0 V, 816 B/cell\n"
+                 "                       (vs int8's 1,056); not with --kv-resident\n"
                  "  --kv-resident N      KV streaming: keep N cells of each QSA layer in VRAM (min 20480) and the\n"
                  "                       whole K/V in pinned RAM; the freed VRAM goes to expert slots. 0 (default):\n"
                  "                       all of it in VRAM. A context of N cells or fewer is not streamed\n"
@@ -435,7 +440,9 @@ void usage() {
                  "  --stream-experts     no host arena: experts read from the GGUF on demand (needs a native pack and\n"
                  "                       a VRAM cache that holds every expert; for machines with less RAM than experts)\n"
                  "                       The A/B arm: the mmap's rate depends on the OS page cache holding\n"
-                 "                       34 GB, and measured 71.97 vs 34.78 ms/token cold vs warm.\n");
+                 "                       34 GB, and measured 71.97 vs 34.78 ms/token cold vs warm.\n"
+                 "  --resident-cpu-experts  with mmap and a static profile, keep CPU misses resident in ordinary RAM.\n"
+                 "                       Borrowed GPU-cache entries may read from mmap during prompt prefill.\n");
 }
 
 /// All shards of a split GGUF, from shard 1's path ("...-00001-of-00002.gguf"); just the path when it is not split.
@@ -684,7 +691,7 @@ void mem_mark(const char* where) {
     if (!on) return;
     size_t free_b = 0, total_b = 0;
     /*
-    DPCT1106:666: 'cudaMemGetInfo' was migrated with the Intel extensions for
+    DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions for
     device information which may not be supported by all compilers or runtimes.
     You may need to adjust the code.
     */
@@ -780,7 +787,7 @@ bool checkpoint_restore(const ConvCheckpoint &c, strata::core::SessionState &ss,
     const ConvStateSizes z = conv_state_sizes(g);
     if (c.gdn.size() != z.gdn || c.tails.size() != z.tail * (size_t) g.n_qsa_layers()) return false;
     /*
-    DPCT1114:667: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -788,7 +795,7 @@ bool checkpoint_restore(const ConvCheckpoint &c, strata::core::SessionState &ss,
     if (DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
             ss.gdn_state, c.gdn.data(), z.gdn).wait()) != 0) return false;
     /*
-    DPCT1114:668: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -798,7 +805,7 @@ bool checkpoint_restore(const ConvCheckpoint &c, strata::core::SessionState &ss,
         return false;
     for (int64_t i = 0; i < g.n_qsa_layers(); ++i)
         /*
-        DPCT1114:669: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -914,7 +921,7 @@ double probe_pcie_h2d_gbps() try {
     }
     std::memset(h, 0, kBytes);   // fault the pages in before timing
     /*
-    DPCT1124:670: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.
@@ -923,7 +930,7 @@ double probe_pcie_h2d_gbps() try {
         d, h, kBytes).wait(); // warmup: context up, copy engine primed
     dpct::sync_barrier(ev0);
     /*
-    DPCT1124:671: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.
@@ -1144,6 +1151,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-profile") o.expert_profile = next("--expert-profile");
         else if (a == "--gpu-stages") o.gpu_stages = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
+        else if (a == "--resident-cpu-experts") o.resident_cpu_experts = true;
         else if (a == "--stream-experts") o.stream_experts = true;
         else if (a == "--stats") o.stats = true;
         else if (a == "--shared-late") o.shared_late = true;
@@ -1175,7 +1183,7 @@ int main(int argc, char** argv) {
         if (DPCT_CHECK_ERROR(n_dev = dpct::device_count()) != 0 || n_dev < 1)
             n_dev = 1;
         /*
-        DPCT1026:672: The call to cudaGetLastError was removed because this
+        DPCT1026: The call to cudaGetLastError was removed because this
         functionality is redundant in SYCL.
         */
         auto ints = [](const std::string &str, auto &out) -> bool {
@@ -1217,6 +1225,16 @@ int main(int argc, char** argv) {
         }
     }
     const bool multi_gpu = !split_devs.empty() && !split_same;
+    if (o.resident_cpu_experts && (!o.mmap_experts || o.expert_profile.empty() || o.adapt_every != 0)) {
+        std::fprintf(stderr, "strata generate: --resident-cpu-experts requires --mmap-experts, a static --expert-profile and --adapt-every 0\n");
+        return 2;
+    }
+    if (o.resident_cpu_experts &&
+        (!o.layer_split.empty() || o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
+         o.expert_cache_remote[2] > 0)) {
+        std::fprintf(stderr, "strata generate: --resident-cpu-experts does not support layer splits or remote expert caches\n");
+        return 2;
+    }
     // the helper-GPU expert caches (--expert-cache-remote, docs/SECOND_GPU.md): CUDA1..3 on one GPU; with a layer
     // split, the visible GPUs no stage runs on, in order
     int remote_dev[3] = {1, 2, 3};
@@ -1230,7 +1248,7 @@ int main(int argc, char** argv) {
         if (DPCT_CHECK_ERROR(n_vis = dpct::device_count()) != 0 || n_vis < 1)
             n_vis = 1;
         /*
-        DPCT1026:673: The call to cudaGetLastError was removed because this
+        DPCT1026: The call to cudaGetLastError was removed because this
         functionality is redundant in SYCL.
         */
         int next_free = 1;
@@ -1273,14 +1291,19 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (o.kv == "q4") o.kv = "q4_0";
-    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0") {
-        std::fprintf(stderr, "strata generate: --kv must be fp16, int8 or q4_0\n");
+    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4") {
+        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0 or k8v4\n");
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
     strata::core::qsa_set_kv_q4(o.kv == "q4_0");   // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp)
+    strata::core::qsa_set_kv_hybrid(o.kv == "k8v4");   // K8V4: INT8 K + rotated Q4_0 V, 816 B/cell
     if (o.kv_resident < 0) {
         std::fprintf(stderr, "strata generate: --kv-resident must be >= 0\n");
+        return 2;
+    }
+    if (o.kv == "k8v4" && o.kv_resident > 0) {
+        std::fprintf(stderr, "strata generate: --kv k8v4 does not support --kv-resident streaming (yet)\n");
         return 2;
     }
     strata::core::qsa_set_kv_resident(o.kv_resident);
@@ -1526,7 +1549,7 @@ int main(int argc, char** argv) {
                 d_mrope = sycl::malloc_device<int32_t>(
                     mrope_host.size(), dpct::get_in_order_queue())) != 0 ||
             /*
-            DPCT1114:674: cudaMemcpy is migrated to asynchronization memcpy,
+            DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
             assuming in the original code the source host memory is pageable
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
@@ -1587,7 +1610,7 @@ int main(int argc, char** argv) {
     // 0.805 us inside a graph.  **That is an ~8x penalty on every launch in the engine.**
     dpct::queue_ptr main_stream = &dpct::get_in_order_queue();
     /*
-    DPCT1025:675: The SYCL queue is created ignoring the flag and priority
+    DPCT1025: The SYCL queue is created ignoring the flag and priority
     options.
     */
     if (DPCT_CHECK_ERROR(
@@ -1623,7 +1646,7 @@ int main(int argc, char** argv) {
         }
         const size_t n = (size_t) g.n_layers * (size_t) half_stride;
         /*
-        DPCT1048:2: The original value cudaHostAllocDefault is not meaningful in
+        DPCT1048: The original value cudaHostAllocDefault is not meaningful in
         the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -1683,7 +1706,7 @@ int main(int argc, char** argv) {
             ss.ple.w.key_scales = (const float*) ((const uint8_t*) wk->data + wk->codes_bytes);
         }
         if (o.native_ple_key && wk->quantized()) {
-            if (!wk->native_data || wk->native_type != 42 || !wk->native_q8_1) {
+            if (!wk->native_data || (wk->native_type != 42 && wk->native_type != 18 && wk->native_type != 23) || !wk->native_q8_1) {
                 std::fprintf(stderr, "strata generate: native PLE key is absent or incompatible\n");
                 return 1;
             }
@@ -1774,14 +1797,14 @@ int main(int argc, char** argv) {
             strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss) ==
                 0 ||
             /*
-            DPCT1025:677: The SYCL queue is created ignoring the flag and
+            DPCT1025: The SYCL queue is created ignoring the flag and
             priority options.
             */
             DPCT_CHECK_ERROR(
                 st.stream = dpct::get_current_device().create_queue(true)) !=
                 0 ||
             /*
-            DPCT1025:678: The SYCL queue is created ignoring the flag and
+            DPCT1025: The SYCL queue is created ignoring the flag and
             priority options.
             */
             DPCT_CHECK_ERROR(
@@ -1810,7 +1833,7 @@ int main(int argc, char** argv) {
                     st.mrope = sycl::malloc_device<int32_t>(
                         mrope_host.size(), dpct::get_in_order_queue())) != 0 ||
                 /*
-                DPCT1114:679: cudaMemcpy is migrated to asynchronization memcpy,
+                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
                 assuming in the original code the source host memory is pageable
                 memory. If the memory is not pageable, call wait() on event
                 return by memcpy API to ensure synchronization behavior.
@@ -1833,7 +1856,7 @@ int main(int argc, char** argv) {
         }
         size_t fb = 0, tb = 0;
         /*
-        DPCT1106:676: 'cudaMemGetInfo' was migrated with the Intel extensions
+        DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
         for device information which may not be supported by all compilers or
         runtimes. You may need to adjust the code.
         */
@@ -1896,9 +1919,14 @@ int main(int argc, char** argv) {
     strata::core::GgufExpertSource gguf_src;
     strata::core::ExpertSource* srcp = nullptr;
     if (o.mmap_experts) {
-        if (native_pack) {   // FileExpertSource maps the canonical pack's experts.bin; a native pack has none
-            std::fprintf(stderr, "strata generate: --mmap-experts needs a canonical pack (experts.bin); %s is a native "
-                                 "(IQ) pack, whose experts are loaded into the arena\n", o.pack.c_str());
+        // FileExpertSource maps the pack's experts.bin: a canonical pack has it; a native (IQ) pack has it when
+        // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
+        // mode: the experts come from the file through the OS cache instead of a pinned copy in RAM, for a PC whose
+        // GPU holds most of them but whose RAM cannot hold them all.
+        if (native_pack && !std::filesystem::exists(std::filesystem::path(o.pack) / "experts.bin")) {
+            std::fprintf(stderr, "strata generate: --mmap-experts needs the pack's experts.bin; %s is a native (IQ) pack "
+                                 "built without it: python tools/iq_pack.py --gguf <shard 1> --out %s --experts-bin\n",
+                         o.pack.c_str(), o.pack.c_str());
             return 2;
         }
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
@@ -1994,7 +2022,7 @@ int main(int argc, char** argv) {
     const strata::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
         /*
-        DPCT1106:680: 'cudaMemGetInfo' was migrated with the Intel extensions
+        DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
         for device information which may not be supported by all compilers or
         runtimes. You may need to adjust the code.
         */
@@ -2023,7 +2051,7 @@ int main(int argc, char** argv) {
                     0 ||
                 khz <= 0) khz = 1800000;
             /*
-            DPCT1026:682: The call to cudaGetLastError was removed because this
+            DPCT1026: The call to cudaGetLastError was removed because this
             functionality is redundant in SYCL.
             */
             const double speed =
@@ -2149,7 +2177,7 @@ int main(int argc, char** argv) {
     if (o.expert_cache < 0) {
         size_t free_b = 0, total_b = 0;
         /*
-        DPCT1106:683: 'cudaMemGetInfo' was migrated with the Intel extensions
+        DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
         for device information which may not be supported by all compilers or
         runtimes. You may need to adjust the code.
         */
@@ -2170,7 +2198,7 @@ int main(int argc, char** argv) {
         // for them and the reserve, or the first prompt fails with "device buffers ... do not fit"
         size_t free_b = 0, total_b = 0;
         /*
-        DPCT1106:684: 'cudaMemGetInfo' was migrated with the Intel extensions
+        DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
         for device information which may not be supported by all compilers or
         runtimes. You may need to adjust the code.
         */
@@ -2191,7 +2219,7 @@ int main(int argc, char** argv) {
     if (native_pack && o.expert_cache > 0 && !profile.empty()) {
         size_t free_b = 0, total_b = 0;
         /*
-        DPCT1106:685: 'cudaMemGetInfo' was migrated with the Intel extensions
+        DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
         for device information which may not be supported by all compilers or
         runtimes. You may need to adjust the code.
         */
@@ -2283,7 +2311,7 @@ int main(int argc, char** argv) {
             dpct::get_current_device().queues_wait_and_throw();
             size_t free_b = 0, total_b = 0;
             /*
-            DPCT1106:686: 'cudaMemGetInfo' was migrated with the Intel
+            DPCT1106: 'cudaMemGetInfo' was migrated with the Intel
             extensions for device information which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -2361,6 +2389,14 @@ int main(int argc, char** argv) {
         mem_mark("the profile fill");
         std::fprintf(stderr, "strata generate: pre-filled %lld of %lld slots from the profile; slot 0 verified\n",
                      (long long) prefilled, (long long) want);
+    }
+
+    if (o.resident_cpu_experts) {
+        if (!src.pin_cache_complement(xcache, err, /*pin=*/false)) {
+            std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "strata generate: steady-state CPU cache misses are resident in ordinary RAM; borrowed cache entries may use mmap during prompt prefill\n");
     }
 
     for (auto& stp : stages) {
@@ -2721,7 +2757,7 @@ int main(int argc, char** argv) {
         } else {
             for (int64_t c = 0; c < g.hc; ++c)
                 /*
-                DPCT1124:687: cudaMemcpyAsync is migrated to asynchronous memcpy
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
                 API. While the origin API might be synchronous, it depends on
                 the type of operand memory, so you may need to call wait() on
                 event return by memcpy API to ensure synchronization behavior.
@@ -2803,7 +2839,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         /*
-        DPCT1048:3: The original value cudaHostAllocDefault is not meaningful in
+        DPCT1048: The original value cudaHostAllocDefault is not meaningful in
         the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -3011,12 +3047,12 @@ int main(int argc, char** argv) {
         if (DPCT_CHECK_ERROR(
                 dpct::get_current_device().queues_wait_and_throw()) != 0) {
             /*
-            DPCT1009:688: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1010:689: SYCL uses exceptions to report errors and does not use
+            DPCT1010: SYCL uses exceptions to report errors and does not use
             the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
@@ -3058,13 +3094,13 @@ int main(int argc, char** argv) {
                     stderr,
                     "strata generate: gpu-only-full layers faulted: %s\n",
                     /*
-                    DPCT1009:690: SYCL reports errors using exceptions and does
+                    DPCT1009: SYCL reports errors using exceptions and does
                     not use error codes. Please replace the
                     "get_error_string_dummy(...)" with a real error-handling
                     function.
                     */
                     /*
-                    DPCT1010:691: SYCL uses exceptions to report errors and does
+                    DPCT1010: SYCL uses exceptions to report errors and does
                     not use the error codes. The cudaGetLastError function call
                     was replaced with 0. You need to rewrite this code.
                     */
@@ -3080,13 +3116,13 @@ int main(int argc, char** argv) {
                 std::fprintf(
                     stderr, "strata generate: gpu-only-full head faulted: %s\n",
                     /*
-                    DPCT1009:692: SYCL reports errors using exceptions and does
+                    DPCT1009: SYCL reports errors using exceptions and does
                     not use error codes. Please replace the
                     "get_error_string_dummy(...)" with a real error-handling
                     function.
                     */
                     /*
-                    DPCT1010:693: SYCL uses exceptions to report errors and does
+                    DPCT1010: SYCL uses exceptions to report errors and does
                     not use the error codes. The cudaGetLastError function call
                     was replaced with 0. You need to rewrite this code.
                     */
@@ -3157,7 +3193,7 @@ int main(int argc, char** argv) {
             DPCT_CHECK_ERROR(d_hit_count = sycl::malloc_device<int32_t>(
                                  1, dpct::get_in_order_queue())) != 0 ||
             /*
-            DPCT1114:694: cudaMemcpy is migrated to asynchronization memcpy,
+            DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
             assuming in the original code the source host memory is pageable
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
@@ -3176,7 +3212,7 @@ int main(int argc, char** argv) {
                     st->d_res = sycl::malloc_device<int32_t>(
                         host_res.size(), dpct::get_in_order_queue())) != 0 ||
                 /*
-                DPCT1114:695: cudaMemcpy is migrated to asynchronization memcpy,
+                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
                 assuming in the original code the source host memory is pageable
                 memory. If the memory is not pageable, call wait() on event
                 return by memcpy API to ensure synchronization behavior.
@@ -3273,6 +3309,13 @@ int main(int argc, char** argv) {
         return xcache.slot_offsets() ? (uint64_t) (xcache.bytes() - (int64_t) xcache.slot_offsets()[first])
                                      : (uint64_t) (xcache.slots() - first) *
                                            (uint64_t) strata::kernels::cpu::expert_layout().max_blob;
+    };
+    auto request_chunk = [](int64_t tokens, int64_t max_chunk) -> int64_t {
+        if (tokens <= 0 || max_chunk <= 0) return 0;
+        const int64_t rounded = tokens > std::numeric_limits<int64_t>::max() - 255
+                                    ? tokens
+                                    : ((tokens + 255) / 256) * 256;
+        return std::min(max_chunk, rounded);
     };
     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
     // or with --prefill auto the largest of kAutoChunks whose buffers take at most kAutoLendPct % of the slots (a
@@ -3404,12 +3447,12 @@ int main(int argc, char** argv) {
             for (float*& h : hand) {
                 float* hh = nullptr;
                 /*
-                DPCT1048:4: The original value cudaHostAllocMapped is not
+                DPCT1048: The original value cudaHostAllocMapped is not
                 meaningful in the migrated code and was removed or replaced with
                 0. You may need to check the migrated code.
                 */
                 /*
-                DPCT1048:5: The original value cudaHostAllocPortable is not
+                DPCT1048: The original value cudaHostAllocPortable is not
                 meaningful in the migrated code and was removed or replaced with
                 0. You may need to check the migrated code.
                 */
@@ -3564,7 +3607,9 @@ int main(int argc, char** argv) {
         sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
             std::vector<int32_t> nxt((size_t) T);
             for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) cur[(size_t) (p0 + t + 1)];
-            if (!mtp.prefill(R_rows, nxt.data(), T, p0, e)) return false;
+            // E-9: batched through the prompt path when it can (one GPU: a layer split's drafter is on the last stage)
+            const bool batched = !multi_gpu && sp.draft_kv(mtp, R_rows, nxt.data(), T, p0, e);
+            if (!e.empty() || (!batched && !mtp.prefill(R_rows, nxt.data(), T, p0, e))) return false;
             // progress for the server window: PP <position reached> <prompt tokens> <ms> <fresh tokens/s>
             const int64_t done = p0 + T;
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
@@ -3618,7 +3663,7 @@ int main(int argc, char** argv) {
         if (o.adapt_every > 0 && o.adapt_swaps > 0) drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         dpct::queue_ptr adapt_stream = &dpct::get_in_order_queue();
         /*
-        DPCT1025:696: The SYCL queue is created ignoring the flag and priority
+        DPCT1025: The SYCL queue is created ignoring the flag and priority
         options.
         */
         if (DPCT_CHECK_ERROR(
@@ -3636,7 +3681,7 @@ int main(int argc, char** argv) {
             try {
         if (d_res != nullptr)
                 /*
-                DPCT1114:697: cudaMemcpy is migrated to asynchronization memcpy,
+                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
                 assuming in the original code the source host memory is pageable
                 memory. If the memory is not pageable, call wait() on event
                 return by memcpy API to ensure synchronization behavior.
@@ -3720,7 +3765,7 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(gs ? gs->dev : -1);
                 if (slot < 0 || b == nullptr ||
                     /*
-                    DPCT1124:698: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
@@ -3817,7 +3862,7 @@ int main(int argc, char** argv) {
             // and a page-in while the verify graph spins on a host flag stalls the request for good
             size_t free_b = 0, total_b = 0;
             /*
-            DPCT1106:699: 'cudaMemGetInfo' was migrated with the Intel
+            DPCT1106: 'cudaMemGetInfo' was migrated with the Intel
             extensions for device information which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -3837,7 +3882,7 @@ int main(int argc, char** argv) {
         {
             size_t free_b = 0, total_b = 0;
             /*
-            DPCT1106:700: 'cudaMemGetInfo' was migrated with the Intel
+            DPCT1106: 'cudaMemGetInfo' was migrated with the Intel
             extensions for device information which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -4273,12 +4318,21 @@ int main(int argc, char** argv) {
             auto lend = [&](int64_t tokens, std::string &e) -> bool {
                 try {
             if (lend_first < 0) return true; // its own buffers: nothing to lend
-                const int64_t want = std::min<int64_t>(o.prefill_chunk, (tokens + 255) / 256 * 256);
+                const int64_t want = request_chunk(tokens, o.prefill_chunk);
+                if (want <= 0) {
+                    e = "prefill: cannot lend buffers for an empty request segment";
+                    return false;
+                }
                 if (!lent_now.empty()) {
                     if (want <= lent_chunk) return true;
                     if (!refill(e)) return false;
                 }
-                const int32_t first = std::max<int32_t>(lend_first, (int32_t) (xcache.slots() - lend_slots(want)));
+                const int64_t slots = lend_slots(want);
+                if (slots <= 0 || slots > xcache.slots() - lend_first) {
+                    e = "prefill: request-sized buffers exceed the configured lend region";
+                    return false;
+                }
+                const int32_t first = std::max<int32_t>(lend_first, (int32_t) (xcache.slots() - slots));
                 if (want != sp.chunk() || first != lend_first_now) {
                     if (!sp.relayout(want, xcache.device_slot(first), lend_bytes(first), e)) return false;
                     lend_first_now = first;
@@ -4608,6 +4662,10 @@ int main(int argc, char** argv) {
                     if (st.kv_q4) {
                         const int64_t q4b = (int64_t) strata::kernels::kv_q4_bytes_per_head((int) qs.head_dim);
                         a = {{h ? st.host.k_q4 : st.k_q4, q4b}, {h ? st.host.v_q4 : st.v_q4, q4b}};
+                    } else if (st.kv_hybrid) {
+                        const int64_t q4b = (int64_t) strata::kernels::kv_q4_bytes_per_head((int) qs.head_dim);
+                        a = {{h ? st.host.k_q : st.k_q, kvb}, {h ? st.host.v_q4 : st.v_q4, q4b},
+                             {h ? st.host.k_scale : st.k_scale, scb}};
                     } else {
                         a = {{h ? st.host.k_q : st.k_q, kvb}, {h ? st.host.v_q : st.v_q, kvb},
                              {h ? st.host.k_scale : st.k_scale, scb}, {h ? st.host.v_scale : st.v_scale, scb}};
@@ -4707,19 +4765,22 @@ int main(int argc, char** argv) {
     std::FILE* final_r = o.dump_final_r.empty() ? nullptr : std::fopen(o.dump_final_r.c_str(), "wb");
     std::vector<float> final_r_host(final_r ? (size_t) (g.hc * g.n_embd) : 0);
     std::vector<std::pair<int32_t, int32_t>> lent;     // (residency index, slot) lent to the prompt path
+    const int64_t n_batched = (o.prefill_until > 0 && o.prefill_until < n_prompt - 1) ? o.prefill_until : n_prompt - 1;
     if (o.prefill_chunk > 0 && n_prompt > 1) {
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
         if (!o.no_prefill_borrow && !host_res.empty() && d_res != nullptr) {
             int64_t chunk = o.prefill_chunk;
             int64_t k = plan_lend(chunk);             // auto: the largest chunk that fits; fixed: halved to fit
-            if (k > 0 && chunk > (n_prompt - 1 + 255) / 256 * 256) {   // no bigger than the prompt needs
-                chunk = std::max<int64_t>(256, (n_prompt - 1 + 255) / 256 * 256);
+            const int64_t request_sized = request_chunk(n_batched, chunk);
+            if (k > 0 && request_sized < chunk) {                     // no bigger than this prompt segment needs
+                chunk = request_sized;
                 k = lend_slots(chunk);
+                if (k + 128 > xcache.slots()) k = 0;
                 if (!o.prefill_auto) o.prefill_chunk = chunk;
             }
             if (o.prefill_auto) {
-                o.prefill_chunk = k > 0 ? chunk : 1024;
+                o.prefill_chunk = k > 0 ? chunk : request_chunk(n_batched, 1024);
                 std::fprintf(stderr, "strata generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
             } else if (chunk != o.prefill_chunk) {
                 k = 0;                                 // a fixed chunk that does not fit: its own buffers, as before
@@ -4760,11 +4821,11 @@ int main(int argc, char** argv) {
                 // cell i pairs R_i with the token at i + 1 (every such token is in the prompt)
                 std::vector<int32_t> nxt((size_t) T);
                 for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) o.tokens[(size_t) (p0 + t + 1)];
-                return mtp.prefill(R_rows, nxt.data(), T, p0, e);
+                if (prefill.draft_kv(mtp, R_rows, nxt.data(), T, p0, e)) return true;   // E-9
+                return e.empty() && mtp.prefill(R_rows, nxt.data(), T, p0, e);
             };
         }
         const Clock::time_point tp0 = Clock::now();
-        const int64_t n_batched = (o.prefill_until > 0 && o.prefill_until < n_prompt - 1) ? o.prefill_until : n_prompt - 1;
         if (!prefill.run(o.tokens.data(), n_batched, 0, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -4930,13 +4991,13 @@ int main(int argc, char** argv) {
                 "strata generate: the device faulted in lm_head at position "
                 "%lld: %s\n",
                 /*
-                DPCT1009:701: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1010:702: SYCL uses exceptions to report errors and does not
+                DPCT1010: SYCL uses exceptions to report errors and does not
                 use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
@@ -4952,7 +5013,7 @@ int main(int argc, char** argv) {
             strata::program::logits_selection::selected(pos, dump_positions, o.logits_stride);
         const bool read_logits = !o.stream_token || o.check_logits || emit_logits;
         /*
-        DPCT1124:703: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -4994,7 +5055,7 @@ int main(int argc, char** argv) {
         sp.counter = (uint64_t) pos;
         strata::kernels::sample_tokens(d_logits, 1, (int) n_vocab, nullptr, 0, sp, d_next, token_stream);
         /*
-        DPCT1124:704: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -5006,13 +5067,13 @@ int main(int argc, char** argv) {
                 stderr,
                 "strata generate: reading the sampled token back failed: %s\n",
                 /*
-                DPCT1009:705: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1010:706: SYCL uses exceptions to report errors and does not
+                DPCT1010: SYCL uses exceptions to report errors and does not
                 use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
@@ -5125,7 +5186,7 @@ int main(int argc, char** argv) {
         double ms_adapt = 0;
         dpct::queue_ptr adapt_stream = &dpct::get_in_order_queue();
         /*
-        DPCT1025:707: The SYCL queue is created ignoring the flag and priority
+        DPCT1025: The SYCL queue is created ignoring the flag and priority
         options.
         */
         if (!drive.d.usage.empty() &&
@@ -5150,7 +5211,7 @@ int main(int argc, char** argv) {
             pending.clear();
             if (d_res != nullptr)
                 /*
-                DPCT1114:708: cudaMemcpy is migrated to asynchronization memcpy,
+                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
                 assuming in the original code the source host memory is pageable
                 memory. If the memory is not pageable, call wait() on event
                 return by memcpy API to ensure synchronization behavior.
@@ -5201,7 +5262,7 @@ int main(int argc, char** argv) {
                 // asynchronous: the copies run while the MTP drafts; the next window waits for them
                 if (slot < 0 || b == nullptr ||
                     /*
-                    DPCT1124:709: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure

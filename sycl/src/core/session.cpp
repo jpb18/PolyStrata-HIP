@@ -116,7 +116,7 @@ void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, 
     if (R_init != nullptr) {
         for (int64_t c = 0; c < g.hc; ++c)
             /*
-            DPCT1124:538: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -234,17 +234,17 @@ bool session_capture(const WeightTable& tables, const ModelGeometry& g, SessionS
                 DPCT_CHECK_ERROR(dpct::experimental::end_recording(cs, &graph));
             dpct::get_current_device().destroy_queue(cs);
             /*
-            DPCT1000:540: Error handling if-stmt was detected but could not be
+            DPCT1000: Error handling if-stmt was detected but could not be
             rewritten.
             */
             if (ce != 0) {
                 /*
-                DPCT1001:539: The statement could not be removed.
+                DPCT1001: The statement could not be removed.
                 */
                 err = "session_capture: " + std::string(what) + " layer " +
                       std::to_string(l) + ": " +
                       /*
-                      DPCT1009:541: SYCL reports errors using exceptions and
+                      DPCT1009: SYCL reports errors using exceptions and
                       does not use error codes. Please replace the
                       "get_error_string_dummy(...)" with a real error-handling
                       function.
@@ -301,17 +301,17 @@ bool session_replay(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         const dpct::err0 e =
             DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.execs[l]));
         /*
-        DPCT1000:543: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (e != 0) {
             /*
-            DPCT1009:544: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:542: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = "session_replay: layer " + std::to_string(l) + ": " +
                   dpct::get_error_string_dummy(e);
@@ -340,17 +340,17 @@ bool session_replay_full(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         // `post[l]` reads what `pre[l]` wrote, so they cannot be reordered or run concurrently.
         dpct::err0 e = DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.execs[l]));
         /*
-        DPCT1000:546: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (e != 0) {
             /*
-            DPCT1009:549: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:545: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = "session_replay_full: pre[" + std::to_string(l) +
                   "]: " + dpct::get_error_string_dummy(e);
@@ -358,17 +358,17 @@ bool session_replay_full(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         }
         e = DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.posts[l]));
         /*
-        DPCT1000:548: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (e != 0) {
             /*
-            DPCT1009:550: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:547: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = "session_replay_full: post[" + std::to_string(l) +
                   "]: " + dpct::get_error_string_dummy(e);
@@ -491,17 +491,17 @@ bool session_replay_stage_sweep(const ModelGeometry &g, int64_t pos,
         const dpct::err0 e =
             DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.preP[k - 1][l]));
         /*
-        DPCT1000:552: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (e != 0) {
             /*
-            DPCT1001:551: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             dpct::destroy_event(a);
             dpct::destroy_event(b);
             /*
-            DPCT1009:553: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
@@ -578,7 +578,7 @@ bool session_replay_stage_prefixes(const ModelGeometry &g, int64_t pos,
     for (int64_t l = 0; l < n; ++l) {
         // The residual as this layer receives it, before any prefix has advanced it.
         /*
-        DPCT1124:554: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -586,7 +586,7 @@ bool session_replay_stage_prefixes(const ModelGeometry &g, int64_t pos,
         cs->memcpy(saved, s.block.R, r_floats * sizeof(float));
         for (int k = 1; k <= 5; ++k) {
             /*
-            DPCT1124:557: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -597,18 +597,18 @@ bool session_replay_stage_prefixes(const ModelGeometry &g, int64_t pos,
                 (k == 5) ? gr.execs[l] : gr.preP[k - 1][l];
             const dpct::err0 e = DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*ge));
             /*
-            DPCT1000:556: Error handling if-stmt was detected but could not be
+            DPCT1000: Error handling if-stmt was detected but could not be
             rewritten.
             */
             if (e != 0) {
                 /*
-                DPCT1001:555: The statement could not be removed.
+                DPCT1001: The statement could not be removed.
                 */
                 err = std::string(
                           "session_replay_stage_prefixes: launch prefix ") +
                       std::to_string(k) + ": " +
                       /*
-                      DPCT1009:558: SYCL reports errors using exceptions and
+                      DPCT1009: SYCL reports errors using exceptions and
                       does not use error codes. Please replace the
                       "get_error_string_dummy(...)" with a real error-handling
                       function.
@@ -723,12 +723,12 @@ bool SessionLoopScratch::init(size_t parts_bytes_in, std::string &err) try {
     parts_bytes = parts_bytes_in;
     // MAPPED as well as pinned: the token graph's handoff kernel reads it through its device pointer.
     /*
-    DPCT1048:0: The original value cudaHostAllocMapped is not meaningful in the
+    DPCT1048: The original value cudaHostAllocMapped is not meaningful in the
     migrated code and was removed or replaced with 0. You may need to check the
     migrated code.
     */
     /*
-    DPCT1048:1: The original value cudaHostAllocPortable is not meaningful in
+    DPCT1048: The original value cudaHostAllocPortable is not meaningful in
     the migrated code and was removed or replaced with 0. You may need to check
     the migrated code.
     */
@@ -844,7 +844,7 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
     // the first layer has no previous layer's experts: `y_miss` starts at zero, which is what "hits are empty
     // in this phase" means once every miss has been computed
     /*
-    DPCT1124:559: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.
@@ -862,7 +862,7 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
     if (dump_layers != nullptr) {
         const size_t n = (size_t) g.hc * (size_t) g.n_embd;
         /*
-        DPCT1124:562: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -870,17 +870,17 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         const dpct::err0 de =
             DPCT_CHECK_ERROR(cs->memcpy(dump_layers, s.R, n * sizeof(float)));
         /*
-        DPCT1000:561: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (de != 0) {
             /*
-            DPCT1009:563: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:560: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = "session_loop: dump the input residual: " +
                   std::string(dpct::get_error_string_dummy(de));
@@ -892,17 +892,17 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         const dpct::err0 le =
             DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.execs[0]));
         /*
-        DPCT1000:565: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (le != 0) {
             /*
-            DPCT1009:566: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:564: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = "session_loop: launch pre[0]: " +
                   std::string(dpct::get_error_string_dummy(le));
@@ -940,7 +940,7 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
             if (q == 0) break; // the graph has ended
             if (q != 1) {
                 /*
-                DPCT1009:568: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
@@ -980,7 +980,7 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         // the weights were current.  It produced finite, fluent, deterministic tokens that were not the
         // model's, and no timing test could see it.
         /*
-        DPCT1124:567: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -994,18 +994,18 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
             const dpct::err0 pe =
                 DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.posts[l]));
             /*
-            DPCT1000:570: Error handling if-stmt was detected but could not be
+            DPCT1000: Error handling if-stmt was detected but could not be
             rewritten.
             */
             if (pe != 0) {
                 /*
-                DPCT1009:571: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1001:569: The statement could not be removed.
+                DPCT1001: The statement could not be removed.
                 */
                 err = "session_loop: launch post[" + std::to_string(l) +
                       "]: " + dpct::get_error_string_dummy(pe);
@@ -1019,7 +1019,7 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
         if (dump_layers != nullptr) {
             const size_t n = (size_t) g.hc * (size_t) g.n_embd;
             /*
-            DPCT1124:574: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -1027,18 +1027,18 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
             const dpct::err0 de = DPCT_CHECK_ERROR(cs->memcpy(
                 dump_layers + (size_t)(l + 1) * n, s.R, n * sizeof(float)));
             /*
-            DPCT1000:573: Error handling if-stmt was detected but could not be
+            DPCT1000: Error handling if-stmt was detected but could not be
             rewritten.
             */
             if (de != 0) {
                 /*
-                DPCT1009:575: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1001:572: The statement could not be removed.
+                DPCT1001: The statement could not be removed.
                 */
                 err = "session_loop: dump layer " + std::to_string(l) + ": " +
                       dpct::get_error_string_dummy(de);
@@ -1060,18 +1060,18 @@ bool session_loop(const ModelGeometry &g, int64_t pos, int32_t pos_base,
             const dpct::err0 ne =
                 DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*gr.execs[l + 1]));
             /*
-            DPCT1000:577: Error handling if-stmt was detected but could not be
+            DPCT1000: Error handling if-stmt was detected but could not be
             rewritten.
             */
             if (ne != 0) {
                 /*
-                DPCT1009:578: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1001:576: The statement could not be removed.
+                DPCT1001: The statement could not be removed.
                 */
                 err = "session_loop: launch pre[" + std::to_string(l + 1) +
                       "]: " + dpct::get_error_string_dummy(ne);
@@ -1138,18 +1138,18 @@ bool session_token(const WeightTable &tables, const ModelGeometry &g,
             // IT, instead of a wrong number 40 layers later or at the end of the token.
             const dpct::err0 e = DPCT_CHECK_ERROR(cs->wait());
             /*
-            DPCT1000:580: Error handling if-stmt was detected but could not be
+            DPCT1000: Error handling if-stmt was detected but could not be
             rewritten.
             */
             if (e != 0) {
                 /*
-                DPCT1009:581: SYCL reports errors using exceptions and does not
+                DPCT1009: SYCL reports errors using exceptions and does not
                 use error codes. Please replace the
                 "get_error_string_dummy(...)" with a real error-handling
                 function.
                 */
                 /*
-                DPCT1001:579: The statement could not be removed.
+                DPCT1001: The statement could not be removed.
                 */
                 err = "layer " + std::to_string(l) + ": " +
                       dpct::get_error_string_dummy(e);
@@ -1235,17 +1235,17 @@ bool session_capture_token(const WeightTable &tables, const ModelGeometry &g,
     dpct::get_current_device().destroy_queue(cs);
     if (!ok) { if (graph) delete (graph); return false; }
     /*
-    DPCT1000:583: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (ce != 0) {
         /*
-        DPCT1009:586: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:582: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         err = std::string("session_capture_token: end capture: ") +
               dpct::get_error_string_dummy(ce);
@@ -1257,17 +1257,17 @@ bool session_capture_token(const WeightTable &tables, const ModelGeometry &g,
             graph->finalize()));
     delete (graph);
     /*
-    DPCT1000:585: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (ie != 0) {
         /*
-        DPCT1009:587: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:584: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         err = std::string("session_capture_token: instantiate: ") +
               dpct::get_error_string_dummy(ie);
@@ -1296,15 +1296,15 @@ bool session_run_token(const ModelGeometry &g, int64_t pos, int32_t pos_base,
     doorbell_reset(*s.db);
     const dpct::err0 le = DPCT_CHECK_ERROR(cs->ext_oneapi_graph(*tg.exec));
     /*
-    DPCT1009:592: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:588: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:589: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (le != 0) {
@@ -1340,7 +1340,7 @@ bool session_run_token(const ModelGeometry &g, int64_t pos, int32_t pos_base,
                     err = "session_run_token: layer " + std::to_string(l) +
                           " never rang (" +
                           /*
-                          DPCT1009:593: SYCL reports errors using exceptions and
+                          DPCT1009: SYCL reports errors using exceptions and
                           does not use error codes. Please replace the
                           "get_error_string_dummy(...)" with a real
                           error-handling function.
@@ -1370,15 +1370,15 @@ bool session_run_token(const ModelGeometry &g, int64_t pos, int32_t pos_base,
     progress_at("token: waiting for the GPU to finish the token");
     const dpct::err0 se = DPCT_CHECK_ERROR(cs->wait());
     /*
-    DPCT1009:594: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:590: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:591: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (se != 0) {

@@ -17,7 +17,7 @@ namespace {
 /// site is the least useful error this API can produce and the easiest to avoid.
 bool fail(std::string &err, const char *what, dpct::err0 e) {
     /*
-    DPCT1009:68: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -58,10 +58,10 @@ bool CapturedGraph::begin(void *stream, std::string &err) try {
     const dpct::err0 e = DPCT_CHECK_ERROR(
         dpct::experimental::begin_recording(strata::q_of(stream)));
     /*
-    DPCT1001:69: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:70: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) return fail(err, "cudaStreamBeginCapture", e);
     return true;
@@ -76,10 +76,10 @@ bool CapturedGraph::end(void *stream, std::string &err) try {
     dpct::err0 e = DPCT_CHECK_ERROR(
         dpct::experimental::end_recording(strata::q_of(stream), &graph_));
     /*
-    DPCT1001:71: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:72: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) {
         graph_ = nullptr; return fail(err, "cudaStreamEndCapture", e);
@@ -89,10 +89,10 @@ bool CapturedGraph::end(void *stream, std::string &err) try {
     e = DPCT_CHECK_ERROR(
         dpct::experimental::get_nodes(graph_, nullptr, &nodes_));
     /*
-    DPCT1001:73: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:74: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) return fail(err, "cudaGraphGetNodes", e);
     // A capture that recorded NOTHING is a wiring mistake, and a graph that replays nothing produces no error
@@ -104,10 +104,10 @@ bool CapturedGraph::end(void *stream, std::string &err) try {
             sycl::ext::oneapi::experimental::graph_state::executable>(
             (graph_)->finalize()));
     /*
-    DPCT1001:75: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:76: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) return fail(err, "cudaGraphInstantiate", e);
 
@@ -115,10 +115,10 @@ bool CapturedGraph::end(void *stream, std::string &err) try {
     // what makes `wait_ms` a query rather than a sync.
     e = DPCT_CHECK_ERROR(done_ = new sycl::event());
     /*
-    DPCT1001:77: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:78: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) return fail(err, "cudaEventCreateWithFlags", e);
     return true;
@@ -134,19 +134,19 @@ bool CapturedGraph::launch(void *stream, std::string &err) const try {
     dpct::err0 e =
         DPCT_CHECK_ERROR(strata::q_of(stream)->ext_oneapi_graph(*exec_));
     /*
-    DPCT1001:79: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:80: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) return fail(err, "cudaGraphLaunch", e);
     /*
-    DPCT1012:83: Detected kernel execution time measurement pattern and
+    DPCT1012: Detected kernel execution time measurement pattern and
     generated an initial code for time measurements in SYCL. You can change the
     way time is measured depending on your goals.
     */
     /*
-    DPCT1024:84: The original code returned the error code that was further
+    DPCT1024: The original code returned the error code that was further
     consumed by the program logic. This original code was replaced with 0. You
     may need to rewrite the program logic consuming the error code.
     */
@@ -154,10 +154,10 @@ bool CapturedGraph::launch(void *stream, std::string &err) const try {
     e = DPCT_CHECK_ERROR(*done_ = strata::q_of(stream)
                                       ->ext_oneapi_submit_barrier());
     /*
-    DPCT1001:81: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:82: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (e != 0) return fail(err, "cudaEventRecord", e);
     return true;
@@ -203,19 +203,19 @@ bool GraphRegistry::record(LayerType type, int n_tokens, const std::function<voi
     // The body must not have failed silently.  An error state left on the stream would make EndCapture
     // succeed with a broken graph, so it is checked and cleared first.
     /*
-    DPCT1010:87: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 body_err = 0;
     /*
-    DPCT1000:86: Error handling if-stmt was detected but could not be rewritten.
+    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
     */
     if (body_err != 0) {
         // Abandon the capture without instantiating anything.
         dpct::experimental::command_graph_ptr junk = nullptr;
         /*
-        DPCT1001:85: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         dpct::experimental::end_recording(strata::q_of(stream_), &junk);
         if (junk) delete (junk);

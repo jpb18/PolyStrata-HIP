@@ -21,7 +21,7 @@ constexpr int S = 128, HK = 16, HV = 48, C = 10240;
 __dpct_inline__ float warp_sum(float v) {
 #pragma unroll
     /*
-    DPCT1108:247: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -34,7 +34,7 @@ __dpct_inline__ float warp_sum(float v) {
 __dpct_inline__ float warp_max(float v) {
 #pragma unroll
     /*
-    DPCT1108:248: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -64,14 +64,14 @@ inline float block_sum(float v, float *sh) {
               w = item_ct1.get_local_id(2) >> 5;
     v = warp_sum(v);
     /*
-    DPCT1065:986: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
     item_ct1.barrier();
     if (lane == 0) sh[w] = v;
     /*
-    DPCT1065:987: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -82,7 +82,7 @@ inline float block_sum(float v, float *sh) {
     if (w == 0) t = warp_sum(t);
     if (item_ct1.get_local_id(2) == 0) sh[0] = t;
     /*
-    DPCT1065:988: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -91,13 +91,13 @@ inline float block_sum(float v, float *sh) {
 }
 void check(const char* what) {
     /*
-    DPCT1010:989: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 e = 0;
     /*
-    DPCT1009:990: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -126,6 +126,85 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
         xn[row * N + d] = v;
         xn16[row * N + d] = bf(v);
     }
+}
+// F-1: the row scale only (and the BF16 image); gr_mix_r_kernel recomputes r * rs * w itself, in the same order,
+// so the FP32 copy of the normalized rows (T x 10240 floats) is neither written nor read
+__dpct_inline__ void gr_norm_rs_kernel(const float *__restrict__ R,
+                                       const float *__restrict__ w, float eps,
+                                       float *__restrict__ rs_out,
+                                       uint16_t *__restrict__ xn16) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
+    sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    const int64_t row = item_ct1.get_group(2); // t * 4 + c
+    const int c = (int) (row % HC);
+    const float* r = R + row * N;
+    float ss = 0.0f;
+#pragma unroll
+    for (int d = item_ct1.get_local_id(2); d < N;
+         d += item_ct1.get_local_range(2)) ss += r[d] * r[d];
+    const float rs = sycl::rsqrt(block_sum(ss, sh) / (float)N + eps);
+    if (item_ct1.get_local_id(2) == 0) rs_out[row] = rs;
+#pragma unroll
+    for (int d = item_ct1.get_local_id(2); d < N;
+         d += item_ct1.get_local_range(2))
+        xn16[row * N + d] = bf(r[d] * rs * w[c * N + d]);
+}
+__dpct_inline__ void
+gr_mix_r_kernel(const float *__restrict__ R, const float *__restrict__ rs,
+                const float *__restrict__ w, const float *__restrict__ g,
+                float *__restrict__ mixed, uint16_t *__restrict__ mixed16,
+                int64_t T, uint16_t *__restrict__ mixed_h) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int64_t i =
+        (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
+        item_ct1.get_local_id(2);
+    if (i >= T * N) return;
+    const int64_t t = i / N, d = i % N;
+    float s = 0.0f;
+#pragma unroll
+    for (int c = 0; c < HC; ++c) {
+        const int64_t j = t * D + c * N + d;
+        const float x = R[j] * rs[t * HC + c] * w[c * N + d];   // gr_norm_kernel's value, bit for bit
+        s = sycl::fma((float)x, sigm(g[j]), s);
+    }
+    s /= (float) HC;
+    mixed[i] = s;
+    if (mixed16) mixed16[i] = bf(s);
+    if (mixed_h) mixed_h[i] = hf(s);
+}
+// F-2: gr_write_kernel for one row (t, c), then gr_norm_rs_kernel's reduction over it with the next half's norm
+// weights - the same thread-to-element mapping (256 threads, stride 256) and block_sum, so rs and the BF16 image are
+// the same bits, and R is not read back
+constexpr int GRW_PER = (N + 255) / 256;
+__dpct_inline__ void gr_write_norm_rs_kernel(
+    float *__restrict__ R, const float *__restrict__ bo,
+    const float *__restrict__ inj, int64_t inj_ld, const float *__restrict__ w,
+    float eps, float *__restrict__ rs_out, uint16_t *__restrict__ xn16) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
+    sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    const int64_t row = item_ct1.get_group(2); // t * 4 + c
+    const int64_t t = row / HC;
+    const int c = (int) (row % HC);
+    float* r = R + row * N;
+    const float sc = 2.0f * sigm(inj[t * inj_ld + c] / (float) HC);
+    float v[GRW_PER];
+    float ss = 0.0f;
+    int k = 0;
+#pragma unroll
+    for (int d = item_ct1.get_local_id(2); d < N; d += 256, ++k) {
+        const float x = sycl::fma((float)(bo[t * N + d]), (float)sc, r[d]);
+        r[d] = x;
+        v[k] = x;
+        ss += x * x;
+    }
+    const float rs = sycl::rsqrt(block_sum(ss, sh) / (float)N + eps);
+    if (item_ct1.get_local_id(2) == 0) rs_out[row] = rs;
+    k = 0;
+#pragma unroll
+    for (int d = item_ct1.get_local_id(2); d < N; d += 256, ++k)
+        xn16[row * N + d] = bf(v[k] * rs * w[c * N + d]);
 }
 __dpct_inline__ void gr_silu_kernel(const float *__restrict__ lo,
                                     uint16_t *__restrict__ lo16, int64_t n) {
@@ -271,7 +350,7 @@ __dpct_inline__ void gdn_l2_kernel(float *__restrict__ h, float eps) {
     if ((item_ct1.get_local_id(2) & 31) == 0)
         part[item_ct1.get_local_id(2) >> 5] = sq;
     /*
-    DPCT1065:991: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -281,7 +360,7 @@ __dpct_inline__ void gdn_l2_kernel(float *__restrict__ h, float eps) {
 }
 constexpr int RG = 4, RPG = S / RG;
 /*
-DPCT1110:249: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gdn_rec_kernel exceeds 128 bytes and may cause high register pressure. Consult
 with your hardware vendor to find the total register size available and adjust
 the code, or use smaller sub-group size to avoid high register pressure.
@@ -315,22 +394,22 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
     for (int64_t t = 0; t < T; ++t) {
         const float* ht = h + t * C;
         /*
-        DPCT1118:250: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:992: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier();
         if (tid < S) { sq[tid] = ht[qh * S + tid]; sk[tid] = ht[HK * S + qh * S + tid]; }
         /*
-        DPCT1118:251: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:993: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -342,11 +421,11 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
             kv = sycl::fma(s[r], sk[rg * RPG + r], kv);
         red[rg][col] = kv;
         /*
-        DPCT1118:252: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:994: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -360,22 +439,22 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
             o = sycl::fma(s[r], sq[rg * RPG + r], o);
         }
         /*
-        DPCT1118:253: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:995: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier();
         red[rg][col] = o;
         /*
-        DPCT1118:254: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:996: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -389,11 +468,11 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
         sp = warp_sum(sp);
         if ((tid & 31) == 0) wsum[tid >> 5] = sp;
         /*
-        DPCT1118:255: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:997: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -416,7 +495,7 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
 // red[0] + red[1] + red[2] + red[3]; the norm's warp sums over the same 32-column warps): the same bits.
 constexpr int CB = 32, NCB = S / CB;
 /*
-DPCT1110:256: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gdn_rec_cols_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -448,22 +527,22 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
     for (int64_t t = 0; t < T; ++t) {
         const float* ht = h + t * C;
         /*
-        DPCT1118:257: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:998: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier();
         if (tid < S) { sq[tid] = ht[qh * S + tid]; sk[tid] = ht[HK * S + qh * S + tid]; }
         /*
-        DPCT1118:258: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:999: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -475,11 +554,11 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
             kv = sycl::fma(s[r], sk[rg * RPG + r], kv);
         red[rg][c] = kv;
         /*
-        DPCT1118:259: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:1000: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -493,22 +572,22 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
             o = sycl::fma(s[r], sq[rg * RPG + r], o);
         }
         /*
-        DPCT1118:260: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:1001: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier();
         red[rg][c] = o;
         /*
-        DPCT1118:261: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:1002: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -534,7 +613,7 @@ auto &wsum = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[4]>(
     float sp = warp_sum(oc * oc);
     if ((col & 31) == 0) wsum[col >> 5] = sp;
     /*
-    DPCT1065:1003: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -549,7 +628,7 @@ auto &wsum = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[4]>(
 // ---------------------------------------------------------------- MoE
 template <int REG>
 /*
-DPCT1110:264: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 route_kernel exceeds 128 bytes and may cause high register pressure. Consult
 with your hardware vendor to find the total register size available and adjust
 the code, or use smaller sub-group size to avoid high register pressure.
@@ -590,7 +669,7 @@ __dpct_inline__ void route_kernel(const float *__restrict__ logits,
 #pragma unroll
         for (int m = 16; m; m >>= 1) {
             /*
-            DPCT1108:262: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -598,7 +677,7 @@ __dpct_inline__ void route_kernel(const float *__restrict__ logits,
                 0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 best, m);
             /*
-            DPCT1108:263: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -617,7 +696,7 @@ __dpct_inline__ void route_kernel(const float *__restrict__ logits,
 // Strata blob: gate/up codes [1280][640 B], down codes [2560][160 B], gate/up scales [1280][40] f16, down scales [2560][10] f16
 template <bool HALF>
 /*
-DPCT1110:265: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 blob_dequant_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -727,7 +806,7 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
          c += item_ct1.get_local_range(2)) ss += r[c] * r[c];
     const float s = sycl::rsqrt(block_sum(ss, sh) / (float)cols + eps);
     /*
-    DPCT1065:1004: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -805,7 +884,7 @@ kv_append_kernel(const float *__restrict__ K, const float *__restrict__ V,
     }
     float a = sycl::fabs(x);
     /*
-DPCT1108:266: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -819,7 +898,7 @@ runtimes. You may need to adjust the code.
     if ((item_ct1.get_local_id(2) & 31) == 0)
         wm[item_ct1.get_local_id(2) >> 5] = a;
     /*
-    DPCT1065:1005: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -908,7 +987,7 @@ void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in
                         stage ? *stage : strata::kernels::KvHostPools{};
 
                 cgh.parallel_for<
-                    dpct_kernel_name<class kv_append_kernel_7ad9e6>>(
+                    dpct_kernel_name<class kv_append_kernel_c8a7c1>>(
                     sycl::nd_range<3>(sycl::range(8, 2, (unsigned)T) *
                                           sycl::range(1, 1, 64),
                                       sycl::range(1, 1, 64)),
@@ -932,7 +1011,7 @@ void to_f16(const float* x, uint16_t* y, int64_t n, void* stream) {
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class to_f16_kernel_a5739f>>(
+            ->parallel_for<dpct_kernel_name<class to_f16_kernel_286314>>(
                 sycl::nd_range<3>(sycl::range(1, 1,
                                               (unsigned)((n + 255) / 256 < 4096
                                                              ? (n + 255) / 256
@@ -952,7 +1031,7 @@ void round_f16(const float* x, float* y, int64_t n, void* stream) {
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class round_f16_kernel_52fbb2>>(
+            ->parallel_for<dpct_kernel_name<class round_f16_kernel_3fea66>>(
                 sycl::nd_range<3>(sycl::range(1, 1,
                                               (unsigned)((n + 255) / 256 < 4096
                                                              ? (n + 255) / 256
@@ -972,7 +1051,7 @@ void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream) {
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class to_bf16_kernel_265df0>>(
+            ->parallel_for<dpct_kernel_name<class to_bf16_kernel_b87029>>(
                 sycl::nd_range<3>(sycl::range(1, 1,
                                               (unsigned)((n + 255) / 256 < 4096
                                                              ? (n + 255) / 256
@@ -992,7 +1071,7 @@ void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gr_norm_kernel_f823fa>>(
+            ->parallel_for<dpct_kernel_name<class gr_norm_kernel_7ac11f>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)(T * HC)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1004,6 +1083,63 @@ void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t
     }
     check("gr_norm");
 }
+void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream) {
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->parallel_for<dpct_kernel_name<class gr_norm_rs_kernel_44cb02>>(
+                sycl::nd_range<3>(sycl::range(1, 1, (unsigned)(T * HC)) *
+                                      sycl::range(1, 1, 256),
+                                  sycl::range(1, 1, 256)),
+                exp_props,
+                [=](sycl::nd_item<3> item_ct1)
+                    [[sycl::reqd_sub_group_size(32)]] {
+                        gr_norm_rs_kernel(R, w_norm, eps, rs, xn16);
+                    });
+    }
+    check("gr_norm_rs");
+}
+void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
+              int64_t T, void* stream, uint16_t* mixed_h) {
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->parallel_for<dpct_kernel_name<class gr_mix_r_kernel_c2a1de>>(
+                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * N)) *
+                                      sycl::range(1, 1, 256),
+                                  sycl::range(1, 1, 256)),
+                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                    gr_mix_r_kernel(R, rs, w_norm, gated, mixed, mixed16, T,
+                                    mixed_h);
+                });
+    }
+    check("gr_mix_r");
+}
+void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
+                      float* rs, uint16_t* xn16, int64_t T, void* stream) {
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->parallel_for<
+                dpct_kernel_name<class gr_write_norm_rs_kernel_d03793>>(
+                sycl::nd_range<3>(sycl::range(1, 1, (unsigned)(T * HC)) *
+                                      sycl::range(1, 1, 256),
+                                  sycl::range(1, 1, 256)),
+                exp_props,
+                [=](sycl::nd_item<3> item_ct1)
+                    [[sycl::reqd_sub_group_size(32)]] {
+                        gr_write_norm_rs_kernel(R, bo, inj, inj_ld, w_norm_next,
+                                                eps, rs, xn16);
+                    });
+    }
+    check("gr_write_norm_rs");
+}
 void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
@@ -1013,7 +1149,7 @@ void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream) {
             ->submit([&](sycl::handler &cgh) {
                 auto T_LR_ct2 = T * LR;
 
-                cgh.parallel_for<dpct_kernel_name<class gr_silu_kernel_73e336>>(
+                cgh.parallel_for<dpct_kernel_name<class gr_silu_kernel_61274c>>(
                     sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * LR)) *
                                           sycl::range(1, 1, 256),
                                       sycl::range(1, 1, 256)),
@@ -1031,7 +1167,7 @@ void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gr_mix_kernel_97138e>>(
+            ->parallel_for<dpct_kernel_name<class gr_mix_kernel_9ba6d6>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * N)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1047,7 +1183,7 @@ void gr_write(float* R, const float* bo, const float* inj, int64_t inj_ld, int64
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gr_write_kernel_b029eb>>(
+            ->parallel_for<dpct_kernel_name<class gr_write_kernel_24cfed>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * D)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1063,7 +1199,7 @@ void gr_broadcast(const float* e, float* R, int64_t T, void* stream) {
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gr_broadcast_kernel_a3b6f7>>(
+            ->parallel_for<dpct_kernel_name<class gr_broadcast_kernel_73ae1d>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * D)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1079,7 +1215,7 @@ void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gdn_gates_kernel_7a43f1>>(
+            ->parallel_for<dpct_kernel_name<class gdn_gates_kernel_850222>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * HV)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1096,7 +1232,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gdn_conv_kernel_2ae161>>(
+            ->parallel_for<dpct_kernel_name<class gdn_conv_kernel_8fa65c>>(
                 sycl::nd_range<3>(sycl::range(1, 1, C / 128) *
                                       sycl::range(1, 1, 128),
                                   sycl::range(1, 1, 128)),
@@ -1110,7 +1246,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 
             strata::q_of(stream)
                 ->parallel_for<
-                    dpct_kernel_name<class gdn_conv_tiled_kernel_f8dcbd>>(
+                    dpct_kernel_name<class gdn_conv_tiled_kernel_915839>>(
                     sycl::nd_range<3>(
                         sycl::range(1,
                                     (unsigned)((T + CONV_TILE - 1) / CONV_TILE),
@@ -1127,7 +1263,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 
             strata::q_of(stream)
                 ->parallel_for<
-                    dpct_kernel_name<class gdn_conv_hist_kernel_e10b4d>>(
+                    dpct_kernel_name<class gdn_conv_hist_kernel_1d17e3>>(
                     sycl::nd_range<3>(sycl::range(1, 1, C / 128) *
                                           sycl::range(1, 1, 128),
                                       sycl::range(1, 1, 128)),
@@ -1141,7 +1277,7 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gdn_l2_kernel_502355>>(
+            ->parallel_for<dpct_kernel_name<class gdn_l2_kernel_877aa1>>(
                 sycl::nd_range<3>(sycl::range(1, (unsigned)T, 2 * HK) *
                                       sycl::range(1, 1, S),
                                   sycl::range(1, 1, S)),
@@ -1158,7 +1294,7 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
     static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
     if (serial || T <= 0) {
         /*
-        DPCT1049:267: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1166,7 +1302,7 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gdn_rec_kernel_8121c8>>(
+            ->parallel_for<dpct_kernel_name<class gdn_rec_kernel_6a2bf0>>(
                 sycl::nd_range<3>(sycl::range(1, 1, HV) * sycl::range(1, RG, S),
                                   sycl::range(1, RG, S)),
                 exp_props,
@@ -1182,7 +1318,7 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
 
             strata::q_of(stream)
                 ->parallel_for<
-                    dpct_kernel_name<class gdn_rec_cols_kernel_fedac7>>(
+                    dpct_kernel_name<class gdn_rec_cols_kernel_64239d>>(
                     sycl::nd_range<3>(sycl::range(1, 1, HV * NCB) *
                                           sycl::range(1, RG, CB),
                                       sycl::range(1, RG, CB)),
@@ -1196,7 +1332,7 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
 
             strata::q_of(stream)
                 ->parallel_for<
-                    dpct_kernel_name<class gdn_out_norm_kernel_f960df>>(
+                    dpct_kernel_name<class gdn_out_norm_kernel_237731>>(
                     sycl::nd_range<3>(sycl::range(1, HV, (unsigned)T) *
                                           sycl::range(1, 1, S),
                                       sycl::range(1, 1, S)),
@@ -1216,7 +1352,7 @@ void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class route_kernel_f2ae57,
+            ->parallel_for<dpct_kernel_name<class route_kernel_a33365,
                                             dpct_kernel_scalar<16>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)((T + 7) / 8)) *
                                       sycl::range(1, 1, 256),
@@ -1232,7 +1368,7 @@ void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class route_kernel_687f3a,
+            ->parallel_for<dpct_kernel_name<class route_kernel_f9493d,
                                             dpct_kernel_scalar<8>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)((T + 7) / 8)) *
                                       sycl::range(1, 1, 256),
@@ -1252,7 +1388,7 @@ void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* s
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class blob_dequant_kernel_b87029,
+            ->parallel_for<dpct_kernel_name<class blob_dequant_kernel_1db2df,
                                             dpct_kernel_scalar<false>>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, blocks_for(1280LL * 640 + 2560LL * 160)) *
@@ -1270,7 +1406,7 @@ void blob_dequant_f16(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, voi
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class blob_dequant_kernel_3b1437,
+            ->parallel_for<dpct_kernel_name<class blob_dequant_kernel_ee9bfb,
                                             dpct_kernel_scalar<true>>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, blocks_for(1280LL * 640 + 2560LL * 160)) *
@@ -1289,7 +1425,7 @@ void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream)
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class swiglu_il_kernel_44cb02>>(
+            ->parallel_for<dpct_kernel_name<class swiglu_il_kernel_458d6e>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(n * 640)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1305,7 +1441,7 @@ void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void*
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class swiglu_pair_kernel_f34a2f>>(
+            ->parallel_for<dpct_kernel_name<class swiglu_pair_kernel_ddbac5>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(n * 640)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1315,6 +1451,39 @@ void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void*
     }
     check("swiglu_pair");
 }
+namespace {
+__dpct_inline__ void copy_i32_kernel(int32_t *__restrict__ dst,
+                                     const int32_t *__restrict__ src,
+                                     int64_t n) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+#pragma unroll
+    for (int64_t i =
+             (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
+             item_ct1.get_local_id(2);
+         i < n; i += (int64_t)item_ct1.get_group_range(2) *
+                     item_ct1.get_local_range(2))
+        dst[i] = src[i];
+}
+}  // namespace
+void copy_i32(int32_t* dst, const int32_t* src, int64_t n, void* stream) {
+    if (n <= 0) return;
+    const int64_t b = (n + 255) / 256;
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->parallel_for<dpct_kernel_name<class copy_i32_kernel_7676d1>>(
+                sycl::nd_range<3>(
+                    sycl::range(1, 1, (unsigned)(b < 256 ? b : 256)) *
+                        sycl::range(1, 1, 256),
+                    sycl::range(1, 1, 256)),
+                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                    copy_i32_kernel(dst, src, n);
+                });
+    }
+    check("copy_i32");
+}
 void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int64_t n, int64_t width, void* stream) {
     if (n <= 0) return;
     {
@@ -1322,7 +1491,7 @@ void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gather_rows16_kernel_db6b85>>(
+            ->parallel_for<dpct_kernel_name<class gather_rows16_kernel_225b7e>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, blocks_for(n * (width / 8))) *
                         sycl::range(1, 1, 256),
@@ -1340,7 +1509,7 @@ void moe_combine(const float* Dm, const int32_t* slot, const float* w, const flo
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class moe_combine_kernel_b1df11>>(
+            ->parallel_for<dpct_kernel_name<class moe_combine_kernel_d82250>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * N)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1357,7 +1526,7 @@ void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, 
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class rms_rows_kernel_38561f>>(
+            ->parallel_for<dpct_kernel_name<class rms_rows_kernel_c94646>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)rows) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1380,7 +1549,7 @@ void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t p
                 auto strata_kernels_mrope_table_ct6 =
                     strata::kernels::mrope_table();
 
-                cgh.parallel_for<dpct_kernel_name<class rope_kernel_fa611b>>(
+                cgh.parallel_for<dpct_kernel_name<class rope_kernel_dccc17>>(
                     sycl::nd_range<3>(sycl::range(1, 1, (unsigned)(T * heads)) *
                                           sycl::range(1, 1, 32),
                                       sycl::range(1, 1, 32)),
@@ -1398,7 +1567,7 @@ void split_q(const float* q_full, float* q, int64_t T, void* stream) {
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class split_q_kernel_fdb2a0>>(
+            ->parallel_for<dpct_kernel_name<class split_q_kernel_d499e3>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * 24 * 256)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
@@ -1414,7 +1583,7 @@ void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t 
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class gate_attn_kernel_ee0b52>>(
+            ->parallel_for<dpct_kernel_name<class gate_attn_kernel_f391fd>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * 24 * 256)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),

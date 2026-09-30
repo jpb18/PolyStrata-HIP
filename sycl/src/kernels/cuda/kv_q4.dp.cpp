@@ -16,7 +16,7 @@ namespace {
 
 void check(const char* what) {
     /*
-    DPCT1010:430: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -54,7 +54,7 @@ __dpct_inline__ void fwht256_kernel(const float *__restrict__ src,
         for (int j = 0; j < el_w; ++j) {
             const float val = reg[j];
             /*
-            DPCT1108:77: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -92,7 +92,7 @@ __dpct_inline__ uint16_t q4_group(float x, int lane, uint8_t &byte) {
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) {
         /*
-        DPCT1108:78: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -100,7 +100,7 @@ __dpct_inline__ uint16_t q4_group(float x, int lane, uint8_t &byte) {
             0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
             amax, o);
         /*
-        DPCT1108:79: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -115,7 +115,7 @@ __dpct_inline__ uint16_t q4_group(float x, int lane, uint8_t &byte) {
                 .convert<int, sycl::rounding_mode::rtz>()[0];
     const uint8_t qc = (uint8_t) (q < 0 ? 0 : (q > 15 ? 15 : q));
     /*
-    DPCT1108:80: '__shfl_down_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -142,7 +142,7 @@ __dpct_inline__ void kv_append_q4_kernel(
     const float *__restrict__ kcur, const float *__restrict__ vcur,
     int kv_heads, int head_dim, int page_size, KvHostPools host) {
     /*
-    DPCT1098:432: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -191,7 +191,7 @@ __dpct_inline__ void kv_gather_q4_kernel(
     const int32_t *__restrict__ step, int kv_heads, int head_dim, int page_size,
     uint16_t *__restrict__ k_scratch, uint16_t *__restrict__ v_scratch) {
     /*
-    DPCT1098:433: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */

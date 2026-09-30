@@ -22,13 +22,13 @@ constexpr int RPG = S / RG;
 
 void check(const char* what) {
     /*
-    DPCT1010:871: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 e = 0;
     /*
-    DPCT1009:872: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -59,7 +59,7 @@ auto &part =
     if ((int)item_ct1.get_group(2) < qk_heads) {
         float sq = y * y;
         /*
-DPCT1108:184: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -71,7 +71,7 @@ runtimes. You may need to adjust the code.
         if ((item_ct1.get_local_id(2) & 31) == 0)
             part[item_ct1.get_local_id(2) >> 5] = sq;
         /*
-        DPCT1118:183: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -102,7 +102,7 @@ gdn_conv_commit_kernel(float *__restrict__ hist, const float *__restrict__ qkv,
 }
 
 /*
-DPCT1110:185: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gdn_ab_multi_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -125,7 +125,7 @@ __dpct_inline__ void gdn_ab_multi_kernel(
     for (int t = 0; t < kVerifyMaxT; ++t) acc[t] = 0.0f;
     for (int j = lane; j < n / 8; j += 32) {
         /*
-        DPCT1098:873: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -163,7 +163,7 @@ __dpct_inline__ void gdn_ab_multi_kernel(
         if (t >= T) break;
         float a = acc[t];
         /*
-DPCT1108:186: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -184,7 +184,7 @@ runtimes. You may need to adjust the code.
 }
 
 /*
-DPCT1110:187: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gdn_step_norm_multi_kernel exceeds 128 bytes and may cause high register
 pressure. Consult with your hardware vendor to find the total register size
 available and adjust the code, or use smaller sub-group size to avoid high
@@ -223,22 +223,22 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
     for (int t = 0; t < n; ++t) {
         const float* ht = hbuf + (size_t) t * C;
         /*
-        DPCT1118:188: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:874: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier(); // the previous token is done with sk/sq/red/wsum
         if (tid < S) { sk[tid] = ht[qk + qh * S + tid]; sq[tid] = ht[qh * S + tid]; }
         /*
-        DPCT1118:189: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:875: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -250,11 +250,11 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
             kv = sycl::fma(s[r], sk[rg * RPG + r], kv);
         red[rg][col] = kv;
         /*
-        DPCT1118:190: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:876: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -268,22 +268,22 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
             o = sycl::fma(s[r], sq[rg * RPG + r], o);
         }
         /*
-        DPCT1118:191: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:877: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier();
         red[rg][col] = o;
         /*
-        DPCT1118:192: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:878: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -296,7 +296,7 @@ auto &sk = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[S]>(
         }
         if (t < t_out_begin) continue;   // a replayed token: its state update is needed, its output is not
         /*
-DPCT1108:194: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -307,11 +307,11 @@ runtimes. You may need to adjust the code.
                 sq_part, o2);
         if ((tid & 31) == 0) wsum[tid >> 5] = sq_part;
         /*
-        DPCT1118:193: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:879: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -352,14 +352,14 @@ __dpct_inline__ void embedding_gather_dev_kernel(
     const int code = (c[i / per_byte] >> ((i % per_byte) * code_bits)) & mask;
     const int64_t group = i / group_elems;
     /*
-    DPCT1013:880: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
     */
     const float product = (float)(code + code_bias) * sc[group];
     /*
-    DPCT1013:881: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -484,7 +484,7 @@ auto &part = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     for (int i = item_ct1.get_local_id(2); i < n_vocab;
          i += item_ct1.get_local_range(2)) s += sycl::native::exp(l[i] - m);
     /*
-DPCT1108:195: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -607,7 +607,7 @@ void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_e
 void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream) {
     if (n < 1 || n > 1024) { std::fprintf(stderr, "ident_hits: n out of range\n"); std::exit(1); }
     /*
-    DPCT1049:196: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -716,7 +716,7 @@ void map_ids(int32_t* ids, const int32_t* table, int n, void* stream) {
 
 void row_top_prob(const float* logits, int n_rows, int n_vocab, const int32_t* ids, float* probs, void* stream) {
     /*
-    DPCT1049:197: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -754,7 +754,7 @@ __dpct_inline__ void window_ids_kernel(int32_t *steps, int window, int32_t *ids,
          j += item_ct1.get_group_range(2) * item_ct1.get_local_range(2))
         ids[q * stride + j] = start + j;
     /*
-    DPCT1065:882: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -879,7 +879,7 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         std::exit(1);
     }
     /*
-    DPCT1049:198: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -908,13 +908,13 @@ namespace {
 __dpct_inline__ void wait_flag_ge_kernel(const volatile uint32_t *flag,
                                          uint32_t value) {
     /*
-    DPCT1008:883: __nanosleep function is not defined in SYCL. This is a
+    DPCT1008: __nanosleep function is not defined in SYCL. This is a
     hardware-specific feature. Consult with your hardware vendor to find a
     replacement.
     */
     for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}
     /*
-    DPCT1078:199: Consider replacing memory_order::acq_rel with
+    DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
     are needed.
     */
@@ -967,7 +967,7 @@ __dpct_inline__ void resident_plan_kernel(
     counts[1] = entries;
     counts[2] = 0;
     /*
-    DPCT1078:200: Consider replacing memory_order::acq_rel with
+    DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
     are needed.
     */
@@ -979,13 +979,13 @@ __dpct_inline__ void wait_flag_ge_or_kernel(const volatile uint32_t *flag,
                                             const volatile uint32_t *skip) {
     if (strata::sys_load(skip) == value) return;
     /*
-    DPCT1008:884: __nanosleep function is not defined in SYCL. This is a
+    DPCT1008: __nanosleep function is not defined in SYCL. This is a
     hardware-specific feature. Consult with your hardware vendor to find a
     replacement.
     */
     for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}
     /*
-    DPCT1078:201: Consider replacing memory_order::acq_rel with
+    DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
     are needed.
     */
@@ -1002,7 +1002,7 @@ __dpct_inline__ void copy_i32_unless_kernel(int32_t *__restrict__ dst,
          i += item_ct1.get_local_range(2)) dst[i] = src[i];
 }
 /*
-DPCT1052:885: SYCL does not support the member access for a volatile qualified
+DPCT1052: SYCL does not support the member access for a volatile qualified
 vector type. The volatile qualifier was removed. You may need to rewrite the
 code.
 */
@@ -1177,10 +1177,14 @@ void copy_indexed(float* dst, const float* src, int64_t stride, const int32_t* i
 namespace {
     __dpct_inline__ void gpu_stamp_kernel(unsigned long long *buf, int i) {
     unsigned long long t;
+#if defined(__HIPCC__)
+    t = wall_clock64() * 10ull;   // gfx11: a constant 100 MHz counter, in ns
+#else
     /*
-    DPCT1053:202: Migration of device assembly code is not supported.
+    DPCT1053: Migration of device assembly code is not supported.
     */
     t = 0;   // SYCL: no %globaltimer equivalent; the stage profiler is inert on this backend
+#endif
     buf[i] = t;
 } }
 void gpu_stamp(unsigned long long* buf, int i, void* stream) {
@@ -1188,7 +1192,7 @@ void gpu_stamp(unsigned long long* buf, int i, void* stream) {
         sycl::ext::oneapi::experimental::use_root_sync};
 
     strata::q_of(stream)
-        ->parallel_for<dpct_kernel_name<class gpu_stamp_kernel_596fa5>>(
+        ->parallel_for<dpct_kernel_name<class gpu_stamp_kernel_76ad79>>(
             sycl::nd_range<3>(sycl::range(1, 1, 1), sycl::range(1, 1, 1)),
             exp_props, [=](sycl::nd_item<3> item_ct1) {
                 gpu_stamp_kernel(buf, i);

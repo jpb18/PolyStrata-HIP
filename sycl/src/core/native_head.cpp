@@ -61,19 +61,19 @@ bool NativeHead::load(const std::string &path, int64_t n_in, int64_t n_out,
                     .memcpy(weights, gguf.tensor_data(*tensor), bytes)
                     .wait());
         /*
-        DPCT1000:1107: Error handling if-stmt was detected but could not be
+        DPCT1000: Error handling if-stmt was detected but could not be
         rewritten.
         */
         if (status != 0) {
             if (scratch) sycl::free(scratch, dpct::get_in_order_queue());
             if (weights) sycl::free(weights, dpct::get_in_order_queue());
             /*
-            DPCT1009:1108: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
             /*
-            DPCT1001:1106: The statement could not be removed.
+            DPCT1001: The statement could not be removed.
             */
             err = std::string("native head upload: ") +
                   dpct::get_error_string_dummy(status);
@@ -115,23 +115,23 @@ bool NativeHead::run(const float *mixed, float *logits, void *stream,
         return false;
     }
     /*
-    DPCT1010:1111: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaPeekAtLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 status = 0;
     /*
-    DPCT1000:1110: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (status != 0) {
         /*
-        DPCT1009:1112: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:1109: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         err = std::string("native head launch: ") +
               dpct::get_error_string_dummy(status);
@@ -173,12 +173,12 @@ bool NativeEmbed::load(const std::string &path, int64_t n_embd, int64_t n_vocab,
         row_ = strata::kernels::iq_row_bytes((int) t->type, n_embd);
         bytes_ = (uint64_t) row_ * (uint64_t) n_vocab;
         /*
-        DPCT1048:19: The original value cudaHostAllocMapped is not meaningful in
+        DPCT1048: The original value cudaHostAllocMapped is not meaningful in
         the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
         /*
-        DPCT1048:20: The original value cudaHostAllocPortable is not meaningful
+        DPCT1048: The original value cudaHostAllocPortable is not meaningful
         in the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */

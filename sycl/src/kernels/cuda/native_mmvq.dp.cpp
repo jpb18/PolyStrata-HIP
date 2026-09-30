@@ -131,7 +131,7 @@ __dpct_inline__ float warp_sum(float x) {
 #pragma unroll
     for (int offset = WARP / 2; offset > 0; offset >>= 1) {
         /*
-        DPCT1108:203: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -146,7 +146,7 @@ __dpct_inline__ float warp_max(float x) {
 #pragma unroll
     for (int offset = WARP / 2; offset > 0; offset >>= 1) {
         /*
-        DPCT1108:204: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -204,7 +204,7 @@ q5_q8_dot_impl(const int *__restrict__ vl, const int *__restrict__ vh,
 }
 
 /*
-DPCT1110:205: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 q5_q8_dot exceeds 128 bytes and may cause high register pressure. Consult with
 your hardware vendor to find the total register size available and adjust the
 code, or use smaller sub-group size to avoid high register pressure.
@@ -286,7 +286,7 @@ __dpct_inline__ void native_q5_k_mmvq_kernel(const Q5KBlock *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:896: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -365,7 +365,7 @@ __dpct_inline__ void native_q2_0_mmvq_kernel(const Q20Block *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:897: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -467,7 +467,7 @@ __dpct_inline__ void native_q3_k_mmvq_kernel(const Q3KBlock *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:898: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -568,7 +568,7 @@ native_iq4_xs_mmvq_kernel(const IQ4XSBlock *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:899: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -681,7 +681,7 @@ __dpct_inline__ void native_q4_k_mmvq_kernel(const Q4KBlock *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:900: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -768,7 +768,7 @@ __dpct_inline__ void native_q6_k_mmvq_kernel(const Q6KBlock *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:901: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -905,7 +905,7 @@ __dpct_inline__ void native_small_mmvq_kernel(const Weight *__restrict__ w,
                 tmp[i];
     }
     /*
-    DPCT1065:902: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -1183,7 +1183,7 @@ bool g_multi_exact = true;   // until the upstream layout is timed on an idle GP
 
 template <typename F, int NCOLS, int NW, int ROWS>
 /*
-DPCT1110:206: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 native_mmvq_multi_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -1210,7 +1210,7 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
             if (row0 + i < n_out) {
                 const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
                 /*
-                DPCT1084:299: The function call "Q5KTraits::load" has multiple
+                DPCT1084: The function call "Q5KTraits::load" has multiple
                 migration results in different template instantiations that
                 could not be unified. You may need to adjust the code.
                 */
@@ -1219,7 +1219,7 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
 #pragma unroll
                 for (int j = 0; j < NCOLS; ++j)                         // then per column
                     /*
-                    DPCT1084:300: The function call "Q5KTraits::apply" has
+                    DPCT1084: The function call "Q5KTraits::apply" has
                     multiple migration results in different template
                     instantiations that could not be unified. You may need to
                     adjust the code.
@@ -1241,7 +1241,7 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
                        [item_ct1.get_local_id(2)] = tmp[j][i];
     }
     /*
-    DPCT1065:903: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -1424,7 +1424,7 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
         constexpr int ROWS = 1;   // SYCL port: one row per work-group (more groups: the kernel is latency-bound here)
         const unsigned blocks = unsigned((std::size_t(n_out) + ROWS - 1) / ROWS);
         /*
-        DPCT1049:207: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1453,7 +1453,7 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
     if (n_in / F::DIV < F::BPI) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:208: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1476,7 +1476,7 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
         }
     } else {
         /*
-        DPCT1049:209: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1529,23 +1529,23 @@ void validate_stream(void* stream) {
 }
 void launch_check() {
     /*
-    DPCT1010:906: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1000:905: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error != 0) {
         /*
-        DPCT1009:907: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:904: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         throw std::runtime_error(std::string("native MMVQ launch: ") +
                                  dpct::get_error_string_dummy(error));
@@ -1573,7 +1573,7 @@ void small_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / 32 < 2 * WARPS * WARP / Qi) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:210: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1601,7 +1601,7 @@ void small_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:211: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1703,7 +1703,7 @@ void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / QK < VDR * WARPS * WARP / QI) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:212: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1724,7 +1724,7 @@ void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:213: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1778,7 +1778,7 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / 64 < WARPS * WARP / 2) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:214: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1798,7 +1798,7 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:215: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1850,7 +1850,7 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / 256 < WARPS * WARP / 16) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:216: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1870,7 +1870,7 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:217: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1922,7 +1922,7 @@ void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / 256 < 4 * WARPS * WARP / 32) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:218: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1950,7 +1950,7 @@ void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:219: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -2011,7 +2011,7 @@ void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / 256 < WARPS * WARP / 16) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:220: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -2032,7 +2032,7 @@ void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:221: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -2105,7 +2105,7 @@ void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     if (n_in / 256 < WARPS * WARP / 32) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         /*
-        DPCT1049:222: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -2125,7 +2125,7 @@ void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
         }
     } else {
         /*
-        DPCT1049:223: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */

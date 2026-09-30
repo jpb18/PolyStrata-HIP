@@ -76,12 +76,12 @@ __dpct_inline__ float sigmoid_f(float x) {
 
 __dpct_inline__ double warp_sum(double v) {
     /*
-DPCT1108:37: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
     /*
-DPCT1121:38: Make sure that the "v" which is used in the SYCL group
+DPCT1121: Make sure that the "v" which is used in the SYCL group
 function/algorithm is initialized.
 */
 #pragma unroll
@@ -90,12 +90,12 @@ function/algorithm is initialized.
             0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(), v,
             off);
     /*
-    DPCT1108:39: '__shfl_sync' was migrated with the experimental feature masked
+    DPCT1108: '__shfl_sync' was migrated with the experimental feature masked
     sub_group function which may not be supported by all compilers or runtimes.
     You may need to adjust the code.
     */
     /*
-    DPCT1121:40: Make sure that the "v" which is used in the SYCL group
+    DPCT1121: Make sure that the "v" which is used in the SYCL group
     function/algorithm is initialized.
     */
     return dpct::experimental::select_from_sub_group(
@@ -104,12 +104,12 @@ function/algorithm is initialized.
 
 __dpct_inline__ float warp_sumf(float v) {
     /*
-DPCT1108:41: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
     /*
-DPCT1121:42: Make sure that the "v" which is used in the SYCL group
+DPCT1121: Make sure that the "v" which is used in the SYCL group
 function/algorithm is initialized.
 */
 #pragma unroll
@@ -118,12 +118,12 @@ function/algorithm is initialized.
             0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(), v,
             off);
     /*
-    DPCT1108:43: '__shfl_sync' was migrated with the experimental feature masked
+    DPCT1108: '__shfl_sync' was migrated with the experimental feature masked
     sub_group function which may not be supported by all compilers or runtimes.
     You may need to adjust the code.
     */
     /*
-    DPCT1121:44: Make sure that the "v" which is used in the SYCL group
+    DPCT1121: Make sure that the "v" which is used in the SYCL group
     function/algorithm is initialized.
     */
     return dpct::experimental::select_from_sub_group(
@@ -143,7 +143,7 @@ inline float block_sumf(float v, double *scratch_raw) {
     // of `scratch[0]` by every thread and a later call reuses the array, so without it a fast thread can
     // overwrite `scratch[0]` before a slow one has read the previous result.
     /*
-    DPCT1065:355: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -153,7 +153,7 @@ inline float block_sumf(float v, double *scratch_raw) {
     v = warp_sumf(v);
     if (lane == 0) scratch[warp] = v;
     /*
-    DPCT1065:356: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -164,7 +164,7 @@ inline float block_sumf(float v, double *scratch_raw) {
     if (warp == 0) v = warp_sumf(v);
     if (item_ct1.get_local_id(2) == 0) scratch[0] = v;
     /*
-    DPCT1065:357: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -183,7 +183,7 @@ inline float block_sumf(float v, double *scratch_raw) {
 /// `scratch[0]` before a slow one has read the previous result - a race that is invisible in most runs.
 double block_sum(double v, double* scratch) {
     /*
-    DPCT1065:358: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -194,7 +194,7 @@ double block_sum(double v, double* scratch) {
     v = warp_sum(v);
     if (lane == 0) scratch[warp] = v;
     /*
-    DPCT1065:359: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -205,7 +205,7 @@ double block_sum(double v, double* scratch) {
     if (warp == 0) v = warp_sum(v);
     if (item_ct1.get_local_id(2) == 0) scratch[0] = v;
     /*
-    DPCT1065:360: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -624,7 +624,7 @@ void gr_read(const float *R, const float *w_norm, const uint16_t *w_down,
             bf16_gemv_fp32_mmvf(ws.xn, w_inject, inject, hc_dim, hc, stream);
         else if (use_fp32)
             /*
-            DPCT1049:45: The work-group size passed to the SYCL kernel may
+            DPCT1049: The work-group size passed to the SYCL kernel may
             exceed the limit. To get the device limit, query
             info::device::max_work_group_size. Adjust the work-group size if
             needed.
@@ -645,7 +645,7 @@ void gr_read(const float *R, const float *w_norm, const uint16_t *w_down,
                     });
         } else
         /*
-        DPCT1049:46: The work-group size passed to the SYCL kernel may
+        DPCT1049: The work-group size passed to the SYCL kernel may
         exceed the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if
         needed.
@@ -668,7 +668,7 @@ void gr_read(const float *R, const float *w_norm, const uint16_t *w_down,
     }
 
     /*
-    DPCT1010:361: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -699,7 +699,7 @@ void gr_write(const float *R, const float *block_out, const float *inject,
         strata::q_of(stream)
             ->submit([&](sycl::handler &cgh) {
                 /*
-                DPCT1083:1165: The size of local memory in the migrated code may
+                DPCT1083: The size of local memory in the migrated code may
                 be different from the original code. Check that the allocated
                 memory size in the migrated code is correct.
                 */

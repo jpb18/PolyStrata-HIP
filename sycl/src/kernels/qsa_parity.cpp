@@ -92,7 +92,7 @@ struct Dev {
     void put(const std::vector<T>& v) {
         if (!p) alloc(v.size());
         /*
-        DPCT1114:1008: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.

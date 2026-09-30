@@ -17,7 +17,7 @@ namespace {
 
 void check(const char* what) {
     /*
-    DPCT1010:314: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -66,7 +66,7 @@ inline int block_scan(int v, int *warp_sums, int &total) {
     int x = v;
     for (int o = 1; o < 32; o <<= 1) {
         /*
-        DPCT1108:29: '__shfl_up_sync' was migrated with the experimental feature
+        DPCT1108: '__shfl_up_sync' was migrated with the experimental feature
         masked sub_group function which may not be supported by all compilers or
         runtimes. You may need to adjust the code.
         */
@@ -77,7 +77,7 @@ inline int block_scan(int v, int *warp_sums, int &total) {
     }
     if (lane == 31) warp_sums[w] = x;
     /*
-    DPCT1065:316: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -86,7 +86,7 @@ inline int block_scan(int v, int *warp_sums, int &total) {
         int t = warp_sums[lane];
         for (int o = 1; o < 32; o <<= 1) {
             /*
-            DPCT1108:30: '__shfl_up_sync' was migrated with the experimental
+            DPCT1108: '__shfl_up_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -98,7 +98,7 @@ inline int block_scan(int v, int *warp_sums, int &total) {
         warp_sums[lane] = t;
     }
     /*
-    DPCT1065:317: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -106,7 +106,7 @@ inline int block_scan(int v, int *warp_sums, int &total) {
     total = warp_sums[31];
     const int excl = x - v + (w > 0 ? warp_sums[w - 1] : 0);
     /*
-    DPCT1065:318: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -131,7 +131,7 @@ auto &s_nmiss = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(
     const int epoch = m.ctl[0] + 1;
     if (item_ct1.get_local_id(2) == 0) { s_nmiss = 0; s_lookups = 0; }
     /*
-    DPCT1065:319: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -162,7 +162,7 @@ auto &s_nmiss = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(
     dpct::atomic_fetch_add<sycl::access::address_space::generic_space>(
         &s_lookups, lookups);
     /*
-    DPCT1065:320: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -180,11 +180,11 @@ auto &s_nmiss = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(
         const int want = need - got;
         if (item_ct1.get_local_id(2) == 0) s_cut = RT;
         /*
-        DPCT1118:31: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:321: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -193,11 +193,11 @@ auto &s_nmiss = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(
             item_ct1.get_local_id(2) +
             1; // the hand stops just past the last slot taken
         /*
-        DPCT1118:32: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:322: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -212,11 +212,11 @@ auto &s_nmiss = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(
         got += total < want ? total : want;
         hand = (int) (((long long) hand + cut) % n);
         /*
-        DPCT1118:33: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:323: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -331,7 +331,7 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
         std::exit(1);
     }
     /*
-    DPCT1049:34: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -396,7 +396,7 @@ void kv_ring_restore(const QsaAttnPools &slots, const KvHostPools &host,
         const int64_t sl = b % n_slots, run = std::min<int64_t>(b1 - b, n_slots - sl);   // up to the ring's end
         for (int a = 0; a < r.n; ++a)
             /*
-            DPCT1124:324: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
@@ -421,7 +421,7 @@ void kv_stage_from_host(const QsaAttnPools &stage, const KvHostPools &host,
     const Runs r = runs_of(stage, host, fmt, s);
     for (int a = 0; a < r.n; ++a)
         /*
-        DPCT1124:325: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.

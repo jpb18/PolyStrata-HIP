@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
                                    n * 4, dpct::get_in_order_queue())),
               "g");
         /*
-        DPCT1114:712: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
                   dpct::get_in_order_queue().memcpy(d_a, alpha.data(), n * 4).wait()),
               "ca");
         /*
-        DPCT1114:713: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
                   dpct::get_in_order_queue().memcpy(d_dt, dt.data(), n * 4).wait()),
               "cd");
         /*
-        DPCT1114:714: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
                                    n * 4, dpct::get_in_order_queue())),
               "sx");
         /*
-        DPCT1114:715: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
                                    n * 2, dpct::get_in_order_queue())),
               "eh");
         /*
-        DPCT1114:716: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -338,7 +338,7 @@ int main(int argc, char** argv) {
                                    w.size() * 4, dpct::get_in_order_queue())),
               "m rmsw");
         /*
-        DPCT1114:717: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
                                                                  x.size() * 4).wait()),
               "c rmsx");
         /*
-        DPCT1114:718: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -386,7 +386,7 @@ int main(int argc, char** argv) {
         // sides were never looking at the same input.
         const std::vector<float> want_null = ref(false, false);
         /*
-        DPCT1114:719: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -414,7 +414,7 @@ int main(int argc, char** argv) {
     {
         dpct::queue_ptr stream;
         /*
-        DPCT1025:720: The SYCL queue is created ignoring the flag and priority
+        DPCT1025: The SYCL queue is created ignoring the flag and priority
         options.
         */
         check(DPCT_CHECK_ERROR(
@@ -463,7 +463,7 @@ int main(int argc, char** argv) {
                                   ((size_t)n + 2), dpct::get_in_order_queue())),
                           "embedding output");
                     /*
-                    DPCT1124:721: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
@@ -473,7 +473,7 @@ int main(int argc, char** argv) {
                               stream->memcpy(dc, codes.data(), codes.size())),
                           "embedding codes upload");
                     /*
-                    DPCT1124:722: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
@@ -484,7 +484,7 @@ int main(int argc, char** argv) {
                             ds, scales.data(), scales.size() * sizeof(float))),
                         "embedding scales upload");
                     /*
-                    DPCT1124:723: cudaMemcpyAsync is migrated to asynchronous
+                    DPCT1124: cudaMemcpyAsync is migrated to asynchronous
                     memcpy API. While the origin API might be synchronous, it
                     depends on the type of operand memory, so you may need to
                     call wait() on event return by memcpy API to ensure
@@ -510,7 +510,7 @@ int main(int argc, char** argv) {
                                 if (std::memcmp(&fused, &want[(size_t) i], sizeof(float)) != 0) ++fma_diff;
                             }
                             /*
-                            DPCT1124:724: cudaMemcpyAsync is migrated to
+                            DPCT1124: cudaMemcpyAsync is migrated to
                             asynchronous memcpy API. While the origin API might
                             be synchronous, it depends on the type of operand
                             memory, so you may need to call wait() on event
@@ -526,7 +526,7 @@ int main(int argc, char** argv) {
                                 with_offset ? dof + (size_t) row * row_groups : nullptr,
                                 n, bits, bias, group, out + 1, stream);
                             /*
-                            DPCT1124:725: cudaMemcpyAsync is migrated to
+                            DPCT1124: cudaMemcpyAsync is migrated to
                             asynchronous memcpy API. While the origin API might
                             be synchronous, it depends on the type of operand
                             memory, so you may need to call wait() on event
@@ -576,7 +576,7 @@ int main(int argc, char** argv) {
                                           stream->ext_oneapi_graph(*exec)),
                                       "embedding replay");
                                 /*
-                                DPCT1124:726: cudaMemcpyAsync is migrated to
+                                DPCT1124: cudaMemcpyAsync is migrated to
                                 asynchronous memcpy API. While the origin API
                                 might be synchronous, it depends on the type of
                                 operand memory, so you may need to call wait()

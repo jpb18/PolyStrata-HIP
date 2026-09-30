@@ -112,7 +112,7 @@ void rope_neox_apply(const float* x, float* out, int64_t rows, int head_dim, int
             });
     }
     /*
-    DPCT1010:455: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

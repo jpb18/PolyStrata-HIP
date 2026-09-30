@@ -73,7 +73,7 @@ __dpct_inline__ void s2_gemv_quads_kernel(const uint16_t *__restrict__ x,
     for (int step = threads_per_row / 2; step > 0; step >>= 1) {
         if (tid < step) partial[tid] += partial[tid + step];
         /*
-        DPCT1118:268: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -92,13 +92,13 @@ void s2_gemv_quads(const uint16_t *x, const uint8_t *codes, const float *scales,
         std::exit(1);
     }
     /*
-    DPCT1083:270: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
     const size_t smem = (size_t)threads_per_row * sizeof(float);
     /*
-    DPCT1049:269: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */

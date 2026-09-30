@@ -44,7 +44,7 @@ bool upload_here(std::string &err) try {
         DPCT_CHECK_ERROR(t.on = sycl::malloc_device<int>(
                              1, dpct::get_in_order_queue())) != 0 ||
         /*
-        DPCT1114:507: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -53,7 +53,7 @@ bool upload_here(std::string &err) try {
             t.dir, g_dir_host.data(), g_dir_host.size() * sizeof(float)).wait()) !=
             0 ||
         /*
-        DPCT1114:508: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -82,7 +82,7 @@ __dpct_inline__ float sigmoidf_(float x) {
 
 // one block per (stream, token): the pending write, then h . v over the stream, then the update
 /*
-DPCT1110:95: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 cvec_kernel exceeds 128 bytes and may cause high register pressure. Consult with
 your hardware vendor to find the total register size available and adjust the
 code, or use smaller sub-group size to avoid high register pressure.
@@ -121,7 +121,7 @@ cvec_kernel(float *__restrict__ R, const float *__restrict__ dir,
             sycl::ext::oneapi::this_work_item::get_work_group<3>());
 #pragma unroll
         /*
-        DPCT1108:98: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -132,11 +132,11 @@ cvec_kernel(float *__restrict__ R, const float *__restrict__ dir,
         if ((item_ct1.get_local_id(2) & 31) == 0)
             part[item_ct1.get_local_id(2) >> 5] = dot;
         /*
-        DPCT1118:96: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:509: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -147,7 +147,7 @@ cvec_kernel(float *__restrict__ R, const float *__restrict__ dir,
                           : 0.0f;
 #pragma unroll
             /*
-            DPCT1108:99: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -158,11 +158,11 @@ cvec_kernel(float *__restrict__ R, const float *__restrict__ dir,
             if (item_ct1.get_local_id(2) == 0) part[0] = p;
         }
         /*
-        DPCT1118:97: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:510: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -194,7 +194,7 @@ bool cvec_upload(const std::vector<float>& dir, const std::vector<float>& s, int
     for (int d = 0; d < kDevices; ++d) {
         if (g_dev[d].dir == nullptr) continue;
         /*
-        DPCT1093:512: The "d" device may be not the one intended for use. Adjust
+        DPCT1093: The "d" device may be not the one intended for use. Adjust
         the selected device if needed.
         */
         dpct::select_device(d);
@@ -205,7 +205,7 @@ bool cvec_upload(const std::vector<float>& dir, const std::vector<float>& s, int
         g_dev[d] = DevTables{};
     }
     /*
-    DPCT1093:511: The "prev" device may be not the one intended for use. Adjust
+    DPCT1093: The "prev" device may be not the one intended for use. Adjust
     the selected device if needed.
     */
     dpct::select_device(prev);
@@ -237,7 +237,7 @@ void cvec_set_enabled(bool on) {
     for (int d = 0; d < kDevices; ++d) {
         if (g_dev[d].on == nullptr) continue;
         /*
-        DPCT1093:514: The "d" device may be not the one intended for use. Adjust
+        DPCT1093: The "d" device may be not the one intended for use. Adjust
         the selected device if needed.
         */
         dpct::select_device(d);
@@ -247,7 +247,7 @@ void cvec_set_enabled(bool on) {
         dpct::get_in_order_queue().memcpy(g_dev[d].on, &v, sizeof(int)).wait();
     }
     /*
-    DPCT1093:513: The "prev" device may be not the one intended for use. Adjust
+    DPCT1093: The "prev" device may be not the one intended for use. Adjust
     the selected device if needed.
     */
     dpct::select_device(prev);
@@ -287,7 +287,7 @@ void cvec_apply(float *R, int64_t layer, int64_t T, int64_t r_ld,
             });
     }
     /*
-    DPCT1010:515: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaPeekAtLastError function call was replaced with 0. You
     need to rewrite this code.
     */

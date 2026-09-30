@@ -37,7 +37,7 @@ template <int Width> __dpct_inline__ float warp_sum(float x) {
 #pragma unroll
     for (int offset = Width / 2; offset; offset >>= 1)
         /*
-        DPCT1108:81: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -50,7 +50,7 @@ __dpct_inline__ float warp_max(float x) {
 #pragma unroll
     for (int offset = 16; offset; offset >>= 1)
         /*
-        DPCT1108:82: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -66,7 +66,7 @@ __dpct_inline__ float warp_max(float x) {
 // four values (float2) per load, four V columns per iteration. Padded length256
 // gives ntiles_KV=ceil(256/D)=1, so the pinned launcher selects grid.y=1.
 /*
-DPCT1110:83: The total declared local variable size in device function attend
+DPCT1110: The total declared local variable size in device function attend
 exceeds 128 bytes and may cause high register pressure. Consult with your
 hardware vendor to find the total register size available and adjust the code,
 or use smaller sub-group size to avoid high register pressure.
@@ -156,7 +156,7 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
 #pragma unroll
         for (int offset = 8; offset < 32; offset <<= 1)
             /*
-            DPCT1108:84: '__shfl_xor_sync' was migrated with the experimental
+            DPCT1108: '__shfl_xor_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -202,7 +202,7 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
                     // that order despite this adapter's masked-load branches.
                     if (k0 == 0) {
                         /*
-                        DPCT1013:437: The rounding mode could not be specified
+                        DPCT1013: The rounding mode could not be specified
                         and the generated code may have different accuracy than
                         the original code. Verify the correctness. SYCL math
                         built-in function rounding mode is aligned with OpenCL
@@ -211,7 +211,7 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
                         vkq[i0 / 8 + j].x() =
                             sycl::fma(rescale, vkq[i0 / 8 + j].x(), a * weight);
                         /*
-                        DPCT1013:438: The rounding mode could not be specified
+                        DPCT1013: The rounding mode could not be specified
                         and the generated code may have different accuracy than
                         the original code. Verify the correctness. SYCL math
                         built-in function rounding mode is aligned with OpenCL
@@ -221,7 +221,7 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
                             sycl::fma(rescale, vkq[i0 / 8 + j].y(), b * weight);
                     } else {
                         /*
-                        DPCT1013:439: The rounding mode could not be specified
+                        DPCT1013: The rounding mode could not be specified
                         and the generated code may have different accuracy than
                         the original code. Verify the correctness. SYCL math
                         built-in function rounding mode is aligned with OpenCL
@@ -230,7 +230,7 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
                         vkq[i0 / 8 + j].x() =
                             sycl::fma(a, weight, vkq[i0 / 8 + j].x());
                         /*
-                        DPCT1013:440: The rounding mode could not be specified
+                        DPCT1013: The rounding mode could not be specified
                         and the generated code may have different accuracy than
                         the original code. Verify the correctness. SYCL math
                         built-in function rounding mode is aligned with OpenCL
@@ -245,14 +245,14 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
     }
     if (warp == 0) { max_shared[lane] = -FLT_MAX / 2.0f; sum_shared[lane] = 0.0f; }
     /*
-    DPCT1065:434: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
     item_ct1.barrier();
     if (lane == 0) max_shared[warp] = maximum;
     /*
-    DPCT1065:435: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -262,14 +262,14 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
         /*
-        DPCT1013:441: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         vkq[i].x() = vkq[i].x() * rescale;
         /*
-        DPCT1013:442: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -289,7 +289,7 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
     sum = warp_sum<32>(sum);
     if (lane == 0) sum_shared[warp] = sum;
     /*
-    DPCT1065:436: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -358,23 +358,23 @@ void native_flash_attn_short_step(const float* q, const uint16_t* k, const uint1
                     });
     }
     /*
-    DPCT1010:445: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto result = 0;
     /*
-    DPCT1000:444: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (result != 0)
         /*
-        DPCT1009:446: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:443: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         throw std::runtime_error(std::string("native FlashAttention launch: ") +
                                  dpct::get_error_string_dummy(result));

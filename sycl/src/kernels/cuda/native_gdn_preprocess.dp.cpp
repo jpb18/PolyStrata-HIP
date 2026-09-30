@@ -41,7 +41,7 @@ __dpct_inline__ float warp_sum(float value) {
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
         /*
-        DPCT1108:100: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -56,7 +56,7 @@ __dpct_inline__ float norm_sum(float value, float *sums) {
     value = warp_sum(value);
     if (lane == 0) sums[item_ct1.get_local_id(2) / 32] = value;
     /*
-    DPCT1065:516: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -83,7 +83,7 @@ __dpct_inline__ void conv_silu(float *__restrict__ history,
     for (int tap = 0; tap < 4; ++tap) sum += values[tap] * weights[c * 4 + tap];
     // The native SSM kernel adds its zero bias even when there is no bias input.
     /*
-    DPCT1013:517: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -110,14 +110,14 @@ __dpct_inline__ void l2_norm(float *input, float epsilon, float scale_after) {
     if (col < S) {
         // Preserve the FP32 store boundary between RMSNorm and ggml_scale.
         /*
-        DPCT1013:518: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         const float normalized = scale * value;
         /*
-        DPCT1013:519: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -141,7 +141,7 @@ __dpct_inline__ void gate_softplus(const float *__restrict__ alpha,
                   item_ct1.get_local_id(2);
     if (i >= count) return;
     /*
-    DPCT1013:520: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -170,7 +170,7 @@ __dpct_inline__ void out_norm(const float *__restrict__ input,
     if (col < S) {
         // RMSNorm+gamma is one pinned fused operator, followed by sigmoid*mul.
         /*
-        DPCT1013:521: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -202,21 +202,21 @@ void norm_geometry(int64_t rows, int64_t cols, float epsilon, void* stream) {
 }
 void check_launch() {
     /*
-    DPCT1010:524: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:525: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:522: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:523: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=

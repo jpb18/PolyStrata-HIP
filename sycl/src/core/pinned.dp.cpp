@@ -122,7 +122,7 @@ uint64_t fnv1a64(const uint8_t* p, uint64_t n, uint64_t seed) {
 
 namespace {
 /*
-DPCT1010:1113: SYCL uses exceptions to report errors and does not use the error
+DPCT1010: SYCL uses exceptions to report errors and does not use the error
 codes. The cudaGetLastError function call was replaced with 0. You need to
 rewrite this code.
 */
@@ -156,7 +156,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t> &bounds,
         const dpct::err0 e =
             capped ? 0 :
                    /*
-                   DPCT1027:1114: The call to cudaHostRegister was replaced with
+                   DPCT1027: The call to cudaHostRegister was replaced with
                    0 because SYCL currently does not support registering of
                    existing host memory for use by device. Use USM to allocate
                    memory for use by host and device.
@@ -173,14 +173,14 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t> &bounds,
                 const uint64_t off = bounds[i], n = bounds[i + 1] - bounds[i];
                 if (capped && (off > max_pinned_bytes || n > max_pinned_bytes - off)) break;
                 /*
-                DPCT1027:1115: The call to cudaHostRegister was replaced with 0
+                DPCT1027: The call to cudaHostRegister was replaced with 0
                 because SYCL currently does not support registering of existing
                 host memory for use by device. Use USM to allocate memory for
                 use by host and device.
                 */
                 if (0 != 0) {
                     /*
-                    DPCT1010:1116: SYCL uses exceptions to report errors and
+                    DPCT1010: SYCL uses exceptions to report errors and
                     does not use the error codes. The cudaGetLastError function
                     call was replaced with 0. You need to rewrite this code.
                     */
@@ -197,7 +197,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t> &bounds,
                               " GiB for CUDA1; "
                         :
                         /*
-                        DPCT1009:1117: SYCL reports errors using exceptions and
+                        DPCT1009: SYCL reports errors using exceptions and
                         does not use error codes. Please replace the
                         "get_error_string_dummy(...)" with a real error-handling
                         function.
@@ -217,7 +217,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t> &bounds,
             }
         } else {
             /*
-            DPCT1009:1118: SYCL reports errors using exceptions and does not use
+            DPCT1009: SYCL reports errors using exceptions and does not use
             error codes. Please replace the "get_error_string_dummy(...)" with a
             real error-handling function.
             */
@@ -237,7 +237,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t> &bounds,
             // It is the same trap `gr.cu` warns about for ASYNC faults, in the other direction: a synchronous
             // failure is sticky too, and it lies about where it happened just as convincingly.
             /*
-            DPCT1010:1119: SYCL uses exceptions to report errors and does not
+            DPCT1010: SYCL uses exceptions to report errors and does not
             use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
@@ -267,7 +267,7 @@ PinnedArena::~PinnedArena() {
         if (locked_bytes) strata::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
         if (slice_bytes) {
             /*
-            DPCT1027:1120: The call to cudaHostUnregister was replaced with 0
+            DPCT1027: The call to cudaHostUnregister was replaced with 0
             because SYCL currently does not support registering of existing host
             memory for use by device. Use USM to allocate memory for use by host
             and device.
@@ -275,7 +275,7 @@ PinnedArena::~PinnedArena() {
             for (uint64_t off : slice_starts) 0;
         } else {
             /*
-            DPCT1026:1121: The call to cudaHostUnregister was removed because
+            DPCT1026: The call to cudaHostUnregister was removed because
             SYCL currently does not support registering of existing host memory
             for use by device. Use USM to allocate memory for use by host and
             device.
@@ -411,7 +411,7 @@ StreamStats stream_bandwidth(const uint8_t *src, uint64_t bytes, uint64_t chunk,
     // one untimed pass so the first transfer's page-fault and setup cost is not in the measurement
     for (uint64_t off = 0; off + chunk <= bytes; off += chunk) {
         /*
-        DPCT1124:1122: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -424,7 +424,7 @@ StreamStats stream_bandwidth(const uint8_t *src, uint64_t bytes, uint64_t chunk,
     for (int it = 0; it < iters; ++it) {
         for (uint64_t off = 0; off + chunk <= bytes; off += chunk) {
             /*
-            DPCT1124:1123: cudaMemcpyAsync is migrated to asynchronous memcpy
+            DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
             API. While the origin API might be synchronous, it depends on the
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.

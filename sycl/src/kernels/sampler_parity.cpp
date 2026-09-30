@@ -108,7 +108,7 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
                                (size_t)n_tokens, dpct::get_in_order_queue())),
           "malloc out");
     /*
-    DPCT1114:503: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -129,7 +129,7 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
                                    hist.size(), dpct::get_in_order_queue())),
               "malloc hist");
         /*
-        DPCT1114:504: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -372,7 +372,7 @@ int main(int argc, char** argv) {
                                    (size_t)NT, dpct::get_in_order_queue())),
               "m3");
         /*
-        DPCT1114:505: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -881,7 +881,7 @@ int main(int argc, char** argv) {
                                    count, dpct::get_in_order_queue())),
               "counter output");
         /*
-        DPCT1114:506: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.

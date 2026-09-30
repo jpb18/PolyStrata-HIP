@@ -69,7 +69,7 @@ constexpr int RT_MAX_THREADS = 512;
 /// One BLOCK per token, so the reductions have somewhere to happen.  `n_tokens` is 1 in decode; the grid keeps
 /// the batch case working without a second code path.
 /*
-DPCT1110:101: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 router_top10_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -107,7 +107,7 @@ __dpct_inline__ void router_top10_kernel(const float *__restrict__ logits,
 #pragma unroll
     for (int e = tid; e < n_expert; e += nt) mx = sycl::fmax(mx, l[e]);
     /*
-DPCT1108:102: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -118,7 +118,7 @@ runtimes. You may need to adjust the code.
                 mx, off));
     if ((tid & 31) == 0) s_red[tid >> 5] = mx;
     /*
-    DPCT1065:526: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -127,7 +127,7 @@ runtimes. You may need to adjust the code.
         const int nw = (nt + 31) >> 5;
         float v = (tid < nw) ? s_red[tid] : -INFINITY;
         /*
-DPCT1108:103: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -139,7 +139,7 @@ runtimes. You may need to adjust the code.
         if (tid == 0) s_red[0] = v;
     }
     /*
-    DPCT1065:527: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -152,7 +152,7 @@ runtimes. You may need to adjust the code.
     for (int e = tid; e < n_expert; e += nt)
         s_ex[e] = sycl::exp((double)l[e] - (double)mx);
     /*
-    DPCT1065:528: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -166,7 +166,7 @@ runtimes. You may need to adjust the code.
         s_sum = sum;
     }
     /*
-    DPCT1065:529: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -186,7 +186,7 @@ runtimes. You may need to adjust the code.
 #pragma unroll
     for (int e = tid; e < n_expert; e += nt) s_p[e] = (float)(s_ex[e] * inv);
     /*
-    DPCT1065:530: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -207,7 +207,7 @@ runtimes. You may need to adjust the code.
 #pragma unroll
     for (int e = tid; e < n_expert; e += nt) s_taken[e] = 0;
     /*
-    DPCT1065:531: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -223,7 +223,7 @@ runtimes. You may need to adjust the code.
         }
         for (int off = 16; off > 0; off >>= 1) {
             /*
-            DPCT1108:106: '__shfl_down_sync' was migrated with the experimental
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -231,7 +231,7 @@ runtimes. You may need to adjust the code.
                 0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 bv, off);
             /*
-            DPCT1108:107: '__shfl_down_sync' was migrated with the experimental
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
             feature masked sub_group function which may not be supported by all
             compilers or runtimes. You may need to adjust the code.
             */
@@ -242,11 +242,11 @@ runtimes. You may need to adjust the code.
         }
         if ((tid & 31) == 0) { s_red[tid >> 5] = bv; s_rid[tid >> 5] = bi; }
         /*
-        DPCT1118:104: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:533: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
@@ -257,7 +257,7 @@ runtimes. You may need to adjust the code.
             int ix = (tid < nw) ? s_rid[tid] : n_expert;
             for (int off = 16; off > 0; off >>= 1) {
                 /*
-                DPCT1108:108: '__shfl_down_sync' was migrated with the
+                DPCT1108: '__shfl_down_sync' was migrated with the
                 experimental feature masked sub_group function which may not be
                 supported by all compilers or runtimes. You may need to adjust
                 the code.
@@ -266,7 +266,7 @@ runtimes. You may need to adjust the code.
                     0xffffffffu,
                     sycl::ext::oneapi::this_work_item::get_sub_group(), v, off);
                 /*
-                DPCT1108:109: '__shfl_down_sync' was migrated with the
+                DPCT1108: '__shfl_down_sync' was migrated with the
                 experimental feature masked sub_group function which may not be
                 supported by all compilers or runtimes. You may need to adjust
                 the code.
@@ -284,18 +284,18 @@ runtimes. You may need to adjust the code.
             }
         }
         /*
-        DPCT1118:105: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         /*
-        DPCT1065:534: Consider replacing sycl::nd_item::barrier() with
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
         sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
         better performance if there is no access to global memory.
         */
         item_ct1.barrier();
     }
     /*
-    DPCT1065:532: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -334,14 +334,14 @@ void router_top10(const float *logits, int n_tokens, int n_expert, int k,
     const size_t taken_bytes = ((size_t) n_expert + 15u) & ~(size_t) 15u;
     const size_t smem =
         /*
-        DPCT1083:111: The size of local memory in the migrated code may be
+        DPCT1083: The size of local memory in the migrated code may be
         different from the original code. Check that the allocated memory size
         in the migrated code is correct.
         */
         taken_bytes + (size_t)n_expert * sizeof(double) +
         (size_t)n_expert * sizeof(float);
     /*
-    DPCT1049:110: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -374,7 +374,7 @@ void router_top10(const float *logits, int n_tokens, int n_expert, int k,
             });
     }
     /*
-    DPCT1010:535: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

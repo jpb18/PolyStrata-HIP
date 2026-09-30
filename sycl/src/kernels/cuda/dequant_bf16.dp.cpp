@@ -45,7 +45,7 @@ __dpct_inline__ void scale_min_k4(int j, const uint8_t *q, int &d, int &m) {
 // One 32-element group `g` (row-major over the whole slice); `out` points at that group's 32 outputs.
 template <int TYPE, typename T>
 /*
-DPCT1110:176: The total declared local variable size in device function group32
+DPCT1110: The total declared local variable size in device function group32
 exceeds 128 bytes and may cause high register pressure. Consult with your
 hardware vendor to find the total register size available and adjust the code,
 or use smaller sub-group size to avoid high register pressure.
@@ -251,13 +251,13 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
     }
 #undef STRATA_DQ
     /*
-    DPCT1010:854: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 e = 0;
     /*
-    DPCT1009:855: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */

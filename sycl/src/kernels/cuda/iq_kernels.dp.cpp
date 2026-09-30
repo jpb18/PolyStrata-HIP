@@ -23,13 +23,13 @@ namespace {
 
 void check(const char* what) {
     /*
-    DPCT1010:928: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 e = 0;
     /*
-    DPCT1009:929: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -393,7 +393,7 @@ template<> struct Fmt<42> { static constexpr int qk = 64, ipb = 2, step = 1;
 __dpct_inline__ float warp_sum(float v) {
 #pragma unroll
     /*
-    DPCT1108:230: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -439,7 +439,7 @@ __dpct_inline__ float row_dot(const uint8_t *row, const block_q8_1 *x, int nb,
     for (int k = lane; k < nb * F::ipb; k += 32) {
         const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
         /*
-        DPCT1084:298: The function call "Fmt::dot" has multiple migration
+        DPCT1084: The function call "Fmt::dot" has multiple migration
         results in different template instantiations that could not be unified.
         You may need to adjust the code.
         */
@@ -768,7 +768,7 @@ __dpct_inline__ void quantize_q8_1_kernel(const float *__restrict__ x,
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) {
         /*
-        DPCT1108:231: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -778,7 +778,7 @@ __dpct_inline__ void quantize_q8_1_kernel(const float *__restrict__ x,
                 0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
                 amax, o));
         /*
-        DPCT1108:232: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -1052,7 +1052,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
     const auto* X = (const block_q8_1*) x_q8_1;
     switch (t) {
         /*
-        DPCT1049:233: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1073,7 +1073,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:234: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1094,7 +1094,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:235: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1115,7 +1115,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:236: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1136,7 +1136,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:237: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1157,7 +1157,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:238: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1178,7 +1178,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:239: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1199,7 +1199,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:240: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -1220,7 +1220,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         });
     } break;
         /*
-        DPCT1049:241: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */

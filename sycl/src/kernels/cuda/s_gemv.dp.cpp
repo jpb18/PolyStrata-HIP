@@ -62,7 +62,7 @@ constexpr int Q8K_BLOCK_ELEMS = 256;
 __dpct_inline__ float q8k_at(const uint8_t *__restrict__ x, long long i) {
     const uint8_t* blk = x + (i / Q8K_BLOCK_ELEMS) * Q8K_BLOCK_BYTES;
     /*
-    DPCT1098:301: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -160,7 +160,7 @@ auto &s_iq4nl =
 /// decode, the quad loop, the shared codebook and the reduction are identical.
 template <int CODE_BITS, bool Q8K>
 /*
-DPCT1110:21: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 s_gemv_q8_split_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -272,7 +272,7 @@ __dpct_inline__ void s_gemv_q8_split_kernel(
         const uint8_t* xb = x + (i / blk_elems) * (Q8K ? Q8K_BLOCK_BYTES : Q8_0_BLOCK_BYTES);
         const int xi = (int) (i % blk_elems);
         /*
-        DPCT1098:302: The '*' expression is used instead of the __ldg call.
+        DPCT1098: The '*' expression is used instead of the __ldg call.
         These two expressions do not provide the exact same functionality. Check
         the generated code for potential precision and/or performance issues.
         */
@@ -329,7 +329,7 @@ __dpct_inline__ void s_gemv_q8_split_kernel(
     float acc = (((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7))) +
                 (((acc8 + acc9) + (acc10 + acc11)) + ((acc12 + acc13) + (acc14 + acc15)));
     /*
-DPCT1108:22: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -488,7 +488,7 @@ namespace {
 // non-power-of-two group rather than silently computing a wrong index.
 template <int CODE_BITS>
 /*
-DPCT1110:23: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 s_gemv_split_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -594,7 +594,7 @@ __dpct_inline__ void s_gemv_split_kernel(
     for (int step = threads_per_row / 2; step > 0; step >>= 1) {
         if (tid < step) partial[tid] += partial[tid + step];
         /*
-        DPCT1118:24: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -631,7 +631,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
     int group_shift = 0;
     while ((1 << group_shift) < form.group_elems) ++group_shift;
     /*
-    DPCT1083:26: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
@@ -640,7 +640,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
     switch (form.code_bits) {
         case 2:
             /*
-            DPCT1049:25: The work-group size passed to the SYCL kernel may
+            DPCT1049: The work-group size passed to the SYCL kernel may
             exceed the limit. To get the device limit, query
             info::device::max_work_group_size. Adjust the work-group size if
             needed.
@@ -674,7 +674,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
             break;
         case 4:
             /*
-            DPCT1049:27: The work-group size passed to the SYCL kernel may
+            DPCT1049: The work-group size passed to the SYCL kernel may
             exceed the limit. To get the device limit, query
             info::device::max_work_group_size. Adjust the work-group size if
             needed.
@@ -708,7 +708,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
             break;
         case 8:
             /*
-            DPCT1049:28: The work-group size passed to the SYCL kernel may
+            DPCT1049: The work-group size passed to the SYCL kernel may
             exceed the limit. To get the device limit, query
             info::device::max_work_group_size. Adjust the work-group size if
             needed.
@@ -790,7 +790,7 @@ bool q8k_form_ok(const SForm& form, int64_t n_in, const char* who) {
 
 void finish(const char *who, void *stream) try {
     /*
-    DPCT1010:305: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

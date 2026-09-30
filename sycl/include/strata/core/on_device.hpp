@@ -13,7 +13,7 @@ struct OnDevice {
     explicit OnDevice(int device) try {
         int cur = 0;
         /*
-        DPCT1093:7: The "device" device may be not the one intended for use.
+        DPCT1093: The "device" device may be not the one intended for use.
         Adjust the selected device if needed.
         */
         if (device >= 0 &&
@@ -27,7 +27,7 @@ struct OnDevice {
       std::exit(1);
     }
     /*
-    DPCT1093:8: The "previous" device may be not the one intended for use.
+    DPCT1093: The "previous" device may be not the one intended for use.
     Adjust the selected device if needed.
     */
     ~OnDevice() { if (previous >= 0) dpct::select_device(previous); }

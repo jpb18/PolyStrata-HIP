@@ -151,6 +151,7 @@ need model fixtures (`iq_parity`, `ple_parity`) or the tensor-core kernel below 
 | bf16_gemv, cvec, dequant_s2, elementwise, gdn, gr, kv_q4, kv_q8, kv_stream, qsa, quantize_act, rope, router_top10, s2_gemv, s2_gemv_q8, s_gemv, s_gemv_q8k, sampler, shared_expert | pass |
 | iq_parity, ple_parity | need fixtures (a `logs/iq_fixture` directory, a Q2_0 shard) |
 | qsa_prompt_attn_parity | needs the tensor-core kernel (below) |
+| kv_hybrid_parity (0.1.27, hybrid K8V4 KV) | appends, gathers and attention pass; its last step is that same tensor-core kernel |
 
 **The engine end to end (2026-09-29, later the same day).** It generates. Prompt "Write a Python function
 that returns the n-th Fibonacci number", greedy, 64 tokens:
@@ -222,6 +223,23 @@ Profiling: `sycl/tools/Dockerfile.unitrace` builds the dev image with Intel's un
 the engine plus `sycl/rank_kernels.py` gives device time per kernel. `mmvq_bench` and `native_expert_parity
 NATIVE_BENCH=1` time the two hot kernel families in isolation (warm the clocks first: a 5 ms run measures
 the ramp, not the kernel).
+
+**Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
+wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
+0.1.25-0.1.27, 2026-09-30):
+
+1. Merge upstream into `b70` and resolve `setup.py` (the Intel path lives beside upstream's AMD one).
+2. Migrate the *old* upstream tree (a `git archive` of the pre-merge commit) with `migrate.sh` into
+   `sycl-base`, and the merged tree into `sycl-new`; about 3 minutes each in the dev image.
+3. `sycl/tools/normalize.sh <dir> <commit>` on both: dpct's file names, the unchanged files, the
+   message serials, then `fixups.py`. Two runs of dpct on the same source now differ only in the kernel
+   name hashes it generates.
+4. For every file present in both: `git merge-file sycl/F sycl-base/F sycl-new/F`. Files upstream did not
+   change are left alone. Copies dpct never produced (`verify.cpp`, `mtp.cpp`, `remote_experts.cpp`
+   include no CUDA header directly) take upstream's diff by hand; new parity tests are copied in and
+   listed in `sycl/CMakeLists.txt`.
+5. A fixup whose pattern upstream changed shows up as a compile error (the PTX gate became an `#elif`
+   under upstream's `__HIPCC__` guard); extend the fixup, re-run it, rebuild.
 
 **Not ported yet.**
 

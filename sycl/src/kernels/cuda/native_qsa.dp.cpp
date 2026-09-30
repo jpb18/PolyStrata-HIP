@@ -42,7 +42,7 @@ __dpct_inline__ float warp_sum(float value) {
 #pragma unroll
     for (int offset = 16; offset; offset >>= 1)
         /*
-        DPCT1108:174: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -114,23 +114,23 @@ void buffers(const float* input, std::size_t in_bytes, const float* weight, std:
 }
 void check_launch() {
     /*
-    DPCT1010:844: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto result = 0;
     /*
-    DPCT1000:843: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (result != 0)
         /*
-        DPCT1009:845: SYCL reports errors using exceptions and does not use
+        DPCT1009: SYCL reports errors using exceptions and does not use
         error codes. Please replace the "get_error_string_dummy(...)" with a
         real error-handling function.
         */
         /*
-        DPCT1001:842: The statement could not be removed.
+        DPCT1001: The statement could not be removed.
         */
         throw std::runtime_error(std::string("native QSA launch: ") +
                                  dpct::get_error_string_dummy(result));
@@ -164,7 +164,7 @@ void native_qsa_rms_norm_weighted(const float* input, const float* gamma, float*
                     });
     } else
     /*
-    DPCT1049:175: The work-group size passed to the SYCL kernel may exceed
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed
     the limit. To get the device limit, query
     info::device::max_work_group_size. Adjust the work-group size if needed.
     */

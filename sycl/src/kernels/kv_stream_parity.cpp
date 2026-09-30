@@ -32,7 +32,7 @@ namespace {
 int g_fail = 0;
 void ck(dpct::err0 e, const char *w) {
     /*
-    DPCT1009:886: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -51,7 +51,7 @@ template <typename T> T* halloc(size_t n) {   // pinned, mapped; returns the dev
     void* h = nullptr;
     void* d = nullptr;
     /*
-    DPCT1048:13: The original value cudaHostAllocMapped is not meaningful in the
+    DPCT1048: The original value cudaHostAllocMapped is not meaningful in the
     migrated code and was removed or replaced with 0. You may need to check the
     migrated code.
     */
@@ -136,7 +136,7 @@ bool run(int fmt) {
         std::vector<int32_t> t(n_blocks);
         for (int64_t i = 0; i < n_blocks; ++i) t[i] = (int32_t) i;
         /*
-        DPCT1114:887: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -172,7 +172,7 @@ bool run(int fmt) {
         for (auto& x : hv) x = nd(rng);
         const int32_t st[4] = {(int32_t) pos, (int32_t) (pos + 1), (int32_t) ((pos + 1) / 4), 0};
         /*
-        DPCT1114:888: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -181,7 +181,7 @@ bool run(int fmt) {
                dpct::get_in_order_queue().memcpy(kc, hk.data(), hk.size() * 4).wait()),
            "k");
         /*
-        DPCT1114:889: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -190,7 +190,7 @@ bool run(int fmt) {
                dpct::get_in_order_queue().memcpy(vc, hv.data(), hv.size() * 4).wait()),
            "v");
         /*
-        DPCT1114:890: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -215,7 +215,7 @@ bool run(int fmt) {
         }
         for (auto& x : hq) x = nd(rng);
         /*
-        DPCT1114:891: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -224,7 +224,7 @@ bool run(int fmt) {
                                                               hids.size() * 4).wait()),
            "ids");
         /*
-        DPCT1114:892: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -233,7 +233,7 @@ bool run(int fmt) {
                                                               hst.size() * 4).wait()),
            "steps");
         /*
-        DPCT1114:893: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -298,7 +298,7 @@ bool run(int fmt) {
         std::vector<int32_t> hids((size_t) cap), hst = {(int32_t) (N - 1), (int32_t) N, (int32_t) (N / 4), (int32_t) width};
         for (int64_t i = 0; i < width; ++i) hids[i] = (int32_t) (N - width + i);   // the window's last cells
         /*
-        DPCT1114:894: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -307,7 +307,7 @@ bool run(int fmt) {
                                                               hids.size() * 4).wait()),
            "ids");
         /*
-        DPCT1114:895: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.

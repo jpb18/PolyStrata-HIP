@@ -23,6 +23,7 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/kernels/gr.hpp"
+#include "strata/kernels/fused_gr.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -196,7 +197,7 @@ int scalar_activation_contract() {
         bf16_bits(2.0f), 0                     // injection: 2*xn[0]
     };
     /*
-    DPCT1114:966: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -205,7 +206,7 @@ int scalar_activation_contract() {
               dpct::get_in_order_queue().memcpy(d_R, ones, sizeof(ones)).wait()),
           "scalar upload R");
     /*
-    DPCT1114:967: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -215,7 +216,7 @@ int scalar_activation_contract() {
           "scalar upload weights");
     dpct::queue_ptr stream;
     /*
-    DPCT1025:968: The SYCL queue is created ignoring the flag and priority
+    DPCT1025: The SYCL queue is created ignoring the flag and priority
     options.
     */
     check(DPCT_CHECK_ERROR(stream =
@@ -225,7 +226,7 @@ int scalar_activation_contract() {
     for (float gamma : {1.0f, 1.00390625f}) {
         const float gammas[] = {gamma, gamma};
         /*
-        DPCT1114:969: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -348,6 +349,260 @@ int scalar_activation_contract() {
     return bad;
 }
 
+int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const uint16_t* d_up,
+                           const uint16_t* d_inject, float eps) {
+    using namespace strata::kernels;
+    constexpr int N = 2560, HC = 4, LR = 320, D = N * HC, T = kFusedGrMaxT;
+    std::mt19937 rng(0x6f8a);
+    std::normal_distribution<float> normal(0.0f, 0.3f);
+    std::vector<float> r((size_t) T * D), bo((size_t) T * N), inj((size_t) T * HC);
+    for (auto& x : r) x = normal(rng);
+    for (auto& x : bo) x = normal(rng);
+    for (auto& x : inj) x = normal(rng);
+
+    float *d_r = nullptr, *d_r_out = nullptr, *d_bo = nullptr, *d_inj = nullptr;
+    float *d_lo = nullptr, *d_rs = nullptr, *d_inj_out = nullptr, *d_mixed = nullptr, *d_xn = nullptr;
+    check(DPCT_CHECK_ERROR(d_r = sycl::malloc_device<float>(
+                               r.size(), dpct::get_in_order_queue())),
+          "multi R");
+    check(DPCT_CHECK_ERROR(d_r_out = sycl::malloc_device<float>(
+                               r.size(), dpct::get_in_order_queue())),
+          "multi R_out");
+    check(DPCT_CHECK_ERROR(d_bo = sycl::malloc_device<float>(
+                               bo.size(), dpct::get_in_order_queue())),
+          "multi bo");
+    check(DPCT_CHECK_ERROR(d_inj = sycl::malloc_device<float>(
+                               inj.size(), dpct::get_in_order_queue())),
+          "multi inj");
+    check(DPCT_CHECK_ERROR(d_lo = sycl::malloc_device<float>(
+                               (size_t)T * LR, dpct::get_in_order_queue())),
+          "multi lo");
+    check(DPCT_CHECK_ERROR(d_rs = sycl::malloc_device<float>(
+                               (size_t)T * HC, dpct::get_in_order_queue())),
+          "multi rs");
+    check(DPCT_CHECK_ERROR(d_inj_out = sycl::malloc_device<float>(
+                               (size_t)T * HC, dpct::get_in_order_queue())),
+          "multi injection");
+    check(DPCT_CHECK_ERROR(d_mixed = sycl::malloc_device<float>(
+                               (size_t)T * N, dpct::get_in_order_queue())),
+          "multi mixed");
+    check(DPCT_CHECK_ERROR(d_xn = sycl::malloc_device<float>(
+                               (size_t)T * D, dpct::get_in_order_queue())),
+          "multi xn");
+    /*
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    the original code the source host memory is pageable memory. If the memory
+    is not pageable, call wait() on event return by memcpy API to ensure
+    synchronization behavior.
+    */
+    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+              d_r, r.data(), r.size() * sizeof(float)).wait()),
+          "multi copy R");
+    /*
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    the original code the source host memory is pageable memory. If the memory
+    is not pageable, call wait() on event return by memcpy API to ensure
+    synchronization behavior.
+    */
+    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+              d_bo, bo.data(), bo.size() * sizeof(float)).wait()),
+          "multi copy bo");
+    /*
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    the original code the source host memory is pageable memory. If the memory
+    is not pageable, call wait() on event return by memcpy API to ensure
+    synchronization behavior.
+    */
+    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+              d_inj, inj.data(), inj.size() * sizeof(float)).wait()),
+          "multi copy inj");
+
+    std::vector<FusedGrArgs> args(T);
+    for (int t = 0; t < T; ++t) {
+        auto& a = args[t];
+        a.R = d_r + (size_t) t * D;
+        a.R_out = d_r_out + (size_t) t * D;
+        a.apply = true;
+        a.bo_prev = d_bo + (size_t) t * N;
+        a.inj_prev = d_inj + (size_t) t * HC;
+        a.w_norm = d_norm;
+        a.w_down = d_down;
+        a.w_up = d_up;
+        a.w_inject = d_inject;
+        a.eps = eps;
+        a.lo = d_lo + (size_t) t * LR;
+        a.rs = d_rs + (size_t) t * HC;
+        a.inject_out = d_inj_out + (size_t) t * HC;
+        a.mixed = d_mixed + (size_t) t * N;
+    }
+
+    struct Snapshot {
+        std::vector<float> r_out, lo, rs, inject, mixed;
+    };
+    auto snapshot = [&]() {
+        try {
+    Snapshot s;
+        s.r_out.resize((size_t) T * D);
+        s.lo.resize((size_t) T * LR);
+        s.rs.resize((size_t) T * HC);
+        s.inject.resize((size_t) T * HC);
+        s.mixed.resize((size_t) T * N);
+        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                   .memcpy(s.r_out.data(), d_r_out,
+                                           s.r_out.size() * sizeof(float))
+                                   .wait()),
+              "multi read R_out");
+        check(DPCT_CHECK_ERROR(
+                  dpct::get_in_order_queue()
+                      .memcpy(s.lo.data(), d_lo, s.lo.size() * sizeof(float))
+                      .wait()),
+              "multi read lo");
+        check(DPCT_CHECK_ERROR(
+                  dpct::get_in_order_queue()
+                      .memcpy(s.rs.data(), d_rs, s.rs.size() * sizeof(float))
+                      .wait()),
+              "multi read rs");
+        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                   .memcpy(s.inject.data(), d_inj_out,
+                                           s.inject.size() * sizeof(float))
+                                   .wait()),
+              "multi read inject");
+        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                   .memcpy(s.mixed.data(), d_mixed,
+                                           s.mixed.size() * sizeof(float))
+                                   .wait()),
+              "multi read mixed");
+        return s;
+    }
+    catch (sycl::exception const &exc) {
+      std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+                << ", line:" << __LINE__ << std::endl;
+      std::exit(1);
+    }
+    };
+    auto same = [](const Snapshot& a, const Snapshot& b) {
+        return std::memcmp(a.r_out.data(), b.r_out.data(), a.r_out.size() * sizeof(float)) == 0 &&
+               std::memcmp(a.lo.data(), b.lo.data(), a.lo.size() * sizeof(float)) == 0 &&
+               std::memcmp(a.rs.data(), b.rs.data(), a.rs.size() * sizeof(float)) == 0 &&
+               std::memcmp(a.inject.data(), b.inject.data(), a.inject.size() * sizeof(float)) == 0 &&
+               std::memcmp(a.mixed.data(), b.mixed.data(), a.mixed.size() * sizeof(float)) == 0;
+    };
+
+    dpct::queue_ptr stream = &dpct::get_in_order_queue();
+    /*
+    DPCT1025: The SYCL queue is created ignoring the flag and priority
+    options.
+    */
+    check(DPCT_CHECK_ERROR(stream =
+                               dpct::get_current_device().create_queue(true)),
+          "multi stream");
+    // Max T forces the HIP kernel's full dynamic-LDS request: 8 * 1280 * sizeof(float) = 40 KiB.
+    fused_gr_read_multi(args.data(), T, d_xn, stream);
+    check(DPCT_CHECK_ERROR(stream->wait()), "multi max-T sync");
+    const Snapshot multi = snapshot();
+    for (int t = 0; t < T; ++t) fused_gr_read(args[t], stream);
+    check(DPCT_CHECK_ERROR(stream->wait()), "single reference sync");
+    const Snapshot single = snapshot();
+    int bad = 0;
+    if (!same(multi, single)) {
+        std::printf("  fused GR multi max-T differs from single-token calls\n");
+        ++bad;
+    }
+
+    dpct::experimental::command_graph_ptr graph = nullptr;
+    dpct::experimental::command_graph_exec_ptr graph_exec = nullptr;
+    check(DPCT_CHECK_ERROR(dpct::experimental::begin_recording(stream)),
+          "multi graph begin");
+    fused_gr_read_multi(args.data(), T, d_xn, stream);
+    check(DPCT_CHECK_ERROR(dpct::experimental::end_recording(stream, &graph)),
+          "multi graph end");
+    check(DPCT_CHECK_ERROR(
+              graph_exec = new sycl::ext::oneapi::experimental::command_graph<
+                  sycl::ext::oneapi::experimental::graph_state::executable>(
+                  graph->finalize())),
+          "multi graph instantiate");
+    check(DPCT_CHECK_ERROR(stream->ext_oneapi_graph(*graph_exec)),
+          "multi graph initial replay");
+    check(DPCT_CHECK_ERROR(stream->wait()), "multi graph initial sync");
+    const Snapshot captured = snapshot();
+    if (!same(multi, captured)) {
+        std::printf("  fused GR multi captured graph differs from direct max-T call\n");
+        ++bad;
+    }
+
+    // Reuse the same captured pointers with new payloads; then independently run the single-token path again.
+    for (size_t i = 0; i < r.size(); ++i) r[i] = -0.7f * r[i] + 0.001f * (float) (i % 17);
+    for (size_t i = 0; i < bo.size(); ++i) bo[i] = -0.4f * bo[i] + 0.02f;
+    for (size_t i = 0; i < inj.size(); ++i) inj[i] += 0.3f;
+    /*
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    the origin API might be synchronous, it depends on the type of operand
+    memory, so you may need to call wait() on event return by memcpy API to
+    ensure synchronization behavior.
+    */
+    check(DPCT_CHECK_ERROR(
+              stream->memcpy(d_r, r.data(), r.size() * sizeof(float))),
+          "multi replay R");
+    /*
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    the origin API might be synchronous, it depends on the type of operand
+    memory, so you may need to call wait() on event return by memcpy API to
+    ensure synchronization behavior.
+    */
+    check(DPCT_CHECK_ERROR(
+              stream->memcpy(d_bo, bo.data(), bo.size() * sizeof(float))),
+          "multi replay bo");
+    /*
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    the origin API might be synchronous, it depends on the type of operand
+    memory, so you may need to call wait() on event return by memcpy API to
+    ensure synchronization behavior.
+    */
+    check(DPCT_CHECK_ERROR(
+              stream->memcpy(d_inj, inj.data(), inj.size() * sizeof(float))),
+          "multi replay inj");
+    check(DPCT_CHECK_ERROR(stream->ext_oneapi_graph(*graph_exec)),
+          "multi graph changed replay");
+    check(DPCT_CHECK_ERROR(stream->wait()), "multi graph changed sync");
+    const Snapshot replay = snapshot();
+    if (std::memcmp(multi.mixed.data(), replay.mixed.data(), multi.mixed.size() * sizeof(float)) == 0) {
+        std::printf("  fused GR graph replay ignored changed inputs\n");
+        ++bad;
+    }
+    for (int t = 0; t < T; ++t) fused_gr_read(args[t], stream);
+    check(DPCT_CHECK_ERROR(stream->wait()), "changed single reference sync");
+    if (!same(replay, snapshot())) {
+        std::printf("  fused GR changed graph replay differs from single-token calls\n");
+        ++bad;
+    }
+
+    std::printf("  fused GR multi max-T=8 LDS launch and changing graph replay %s\n",
+                bad == 0 ? "pass" : "FAIL");
+    check(DPCT_CHECK_ERROR(delete (graph_exec)), "multi graph exec destroy");
+    check(DPCT_CHECK_ERROR(delete (graph)), "multi graph destroy");
+    check(DPCT_CHECK_ERROR(dpct::get_current_device().destroy_queue(stream)),
+          "multi stream destroy");
+    check(DPCT_CHECK_ERROR(sycl::free(d_xn, dpct::get_in_order_queue())),
+          "free multi xn");
+    check(DPCT_CHECK_ERROR(sycl::free(d_mixed, dpct::get_in_order_queue())),
+          "free multi mixed");
+    check(DPCT_CHECK_ERROR(sycl::free(d_inj_out, dpct::get_in_order_queue())),
+          "free multi injection");
+    check(DPCT_CHECK_ERROR(sycl::free(d_rs, dpct::get_in_order_queue())),
+          "free multi rs");
+    check(DPCT_CHECK_ERROR(sycl::free(d_lo, dpct::get_in_order_queue())),
+          "free multi lo");
+    check(DPCT_CHECK_ERROR(sycl::free(d_inj, dpct::get_in_order_queue())),
+          "free multi inj");
+    check(DPCT_CHECK_ERROR(sycl::free(d_bo, dpct::get_in_order_queue())),
+          "free multi bo");
+    check(DPCT_CHECK_ERROR(sycl::free(d_r_out, dpct::get_in_order_queue())),
+          "free multi R_out");
+    check(DPCT_CHECK_ERROR(sycl::free(d_r, dpct::get_in_order_queue())),
+          "free multi R");
+    return bad;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -422,7 +677,7 @@ int main(int argc, char** argv) {
                                (size_t)hc, dpct::get_in_order_queue())),
           "m inject");
     /*
-    DPCT1114:970: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -431,7 +686,7 @@ int main(int argc, char** argv) {
               d_R, R.data(), R.size() * sizeof(float)).wait()),
           "c R");
     /*
-    DPCT1114:971: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -440,7 +695,7 @@ int main(int argc, char** argv) {
               d_norm, w_norm.data(), w_norm.size() * sizeof(float)).wait()),
           "c norm");
     /*
-    DPCT1114:972: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -449,7 +704,7 @@ int main(int argc, char** argv) {
               d_down, q_down.data(), q_down.size() * sizeof(uint16_t)).wait()),
           "c down");
     /*
-    DPCT1114:973: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -458,7 +713,7 @@ int main(int argc, char** argv) {
               d_up, q_up.data(), q_up.size() * sizeof(uint16_t)).wait()),
           "c up");
     /*
-    DPCT1114:974: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -605,7 +860,7 @@ int main(int argc, char** argv) {
             for (long long k = 0; k < hc_lr; ++k)
                 tr_up[(size_t) (k * hc_dim + i)] = q_up[(size_t) (i * hc_lr + k)];
         /*
-        DPCT1114:975: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -614,7 +869,7 @@ int main(int argc, char** argv) {
                   d_down_bad, tr_down.data(), tr_down.size() * 2).wait()),
               "cb d");
         /*
-        DPCT1114:976: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -679,7 +934,7 @@ int main(int argc, char** argv) {
                                R.size(), dpct::get_in_order_queue())),
           "m outw");
     /*
-    DPCT1114:977: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -688,7 +943,7 @@ int main(int argc, char** argv) {
               d_Rw, R.data(), R.size() * sizeof(float)).wait()),
           "c Rw");
     /*
-    DPCT1114:978: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -697,7 +952,7 @@ int main(int argc, char** argv) {
               d_bo, block_out.data(), block_out.size() * sizeof(float)).wait()),
           "c bo");
     /*
-    DPCT1114:979: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -754,7 +1009,7 @@ int main(int argc, char** argv) {
     std::vector<float> inj((size_t) hc);
     for (auto& x : inj) x = gauss(rng) * 3.0f;
     /*
-    DPCT1114:980: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -835,7 +1090,7 @@ int main(int argc, char** argv) {
                                  (size_t)rhc * 4, dpct::get_in_order_queue())),
             "rI");
         /*
-        DPCT1114:981: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -844,7 +1099,7 @@ int main(int argc, char** argv) {
                   dR, rR.data(), rR.size() * 4).wait()),
               "crR");
         /*
-        DPCT1114:982: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -853,7 +1108,7 @@ int main(int argc, char** argv) {
                   dN, rnorm.data(), rnorm.size() * 4).wait()),
               "crN");
         /*
-        DPCT1114:983: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -862,7 +1117,7 @@ int main(int argc, char** argv) {
                   dD, qd.data(), qd.size() * 2).wait()),
               "crD");
         /*
-        DPCT1114:984: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -871,7 +1126,7 @@ int main(int argc, char** argv) {
                   dU, qu.data(), qu.size() * 2).wait()),
               "crU");
         /*
-        DPCT1114:985: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -911,6 +1166,7 @@ int main(int argc, char** argv) {
                         activation_mode_name(mode), ok ? "pass" : "*** FAIL ***", rm, ri);
             if (!ok) ++bad;
         }
+        bad += fused_multi_lds_parity(dN, dD, dU, dJ, eps);
         select_activation_mode(0);
         sycl::free(rws_raw, dpct::get_in_order_queue());
         sycl::free(dR, dpct::get_in_order_queue());

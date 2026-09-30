@@ -113,12 +113,12 @@ void to_f16_kernel(const float* __restrict__ in, uint16_t* __restrict__ out, int
 // 0.5 and reads 1.0 scales the shared expert by 2x and produces perfectly finite, perfectly plausible logits.
 __dpct_inline__ double warp_sum_d(double v) {
     /*
-DPCT1108:242: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
     /*
-DPCT1121:243: Make sure that the "v" which is used in the SYCL group
+DPCT1121: Make sure that the "v" which is used in the SYCL group
 function/algorithm is initialized.
 */
 #pragma unroll
@@ -127,12 +127,12 @@ function/algorithm is initialized.
             0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(), v,
             off);
     /*
-    DPCT1108:244: '__shfl_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
     /*
-    DPCT1121:245: Make sure that the "v" which is used in the SYCL group
+    DPCT1121: Make sure that the "v" which is used in the SYCL group
     function/algorithm is initialized.
     */
     return dpct::experimental::select_from_sub_group(
@@ -184,7 +184,7 @@ __dpct_inline__ void native_scalar_sigmoid_kernel(float *gate) {
 __dpct_inline__ void native_scalar_sigmoid_multi_kernel(
     float *gate) { // thread t = token t, same expression
     /*
-    DPCT1064:936: Migrated __expf call is used in a macro/template definition
+    DPCT1064: Migrated __expf call is used in a macro/template definition
     and may not be valid for all macro/template uses. Adjust the code.
     */
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
@@ -257,7 +257,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
     if (native_bf16 && batch && n_tok > 1) {   // one gemv for all rows (outputs identical), one sigmoid launch
         bf16_gemv_fp32_mmvf_multi(x, n_embd, gate_inp_bf16, g, 1, n_embd, 1, n_tok, stream);
         /*
-        DPCT1049:246: The work-group size passed to the SYCL kernel may exceed
+        DPCT1049: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
         info::device::max_work_group_size. Adjust the work-group size if needed.
         */
@@ -334,21 +334,21 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
             });
     }
     /*
-    DPCT1010:939: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const dpct::err0 e = 0;
     /*
-    DPCT1009:940: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:937: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:938: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (e != 0) throw std::runtime_error(std::string("shared_expert_multi: ") +

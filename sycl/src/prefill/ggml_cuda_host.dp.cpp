@@ -35,24 +35,24 @@ const ggml_cuda_device_info & ggml_cuda_info() {
                 DPCT_CHECK_ERROR(dpct::get_device(id).get_device_info(prop)));
             auto & d = in.devices[id];
             /*
-            DPCT1005:790: The SYCL device version is different from CUDA Compute
+            DPCT1005: The SYCL device version is different from CUDA Compute
             Compatibility. You may need to rewrite this code.
             */
             d.cc =
                 100 * prop.get_major_version() + 10 * prop.get_minor_version();
             d.nsm(prop.set_max_compute_units);
             /*
-            DPCT1019:791: local_mem_size in SYCL is not a complete equivalent of
+            DPCT1019: local_mem_size in SYCL is not a complete equivalent of
             sharedMemPerBlock in CUDA. You may need to adjust the code.
             */
             d.smpb(prop.set_local_mem_size);
             /*
-            DPCT1019:792: local_mem_size in SYCL is not a complete equivalent of
+            DPCT1019: local_mem_size in SYCL is not a complete equivalent of
             sharedMemPerBlockOptin in CUDA. You may need to adjust the code.
             */
             d.smpbo(prop.set_local_mem_size);
             /*
-            DPCT1006:793: SYCL does not provide a standard API to differentiate
+            DPCT1006: SYCL does not provide a standard API to differentiate
             between integrated and discrete GPU devices.
             */
             d.integrated = prop.get_integrated() != 0;

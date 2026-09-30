@@ -41,7 +41,7 @@ struct DeviceScope {
             return;
         }
         /*
-        DPCT1093:88: The "device" device may be not the one intended for use.
+        DPCT1093: The "device" device may be not the one intended for use.
         Adjust the selected device if needed.
         */
         status = DPCT_CHECK_ERROR(dpct::select_device(device));
@@ -52,7 +52,7 @@ struct DeviceScope {
         ok = true;
     }
     /*
-    DPCT1093:89: The "previous" device may be not the one intended for use.
+    DPCT1093: The "previous" device may be not the one intended for use.
     Adjust the selected device if needed.
     */
     ~DeviceScope() { if (previous >= 0) dpct::select_device(previous); }
@@ -60,7 +60,7 @@ struct DeviceScope {
         return std::string("CUDA") + std::to_string(device) +
                " experts: " + (failed_step ? failed_step : "device switch") +
                /*
-               DPCT1009:90: SYCL reports errors using exceptions and does not
+               DPCT1009: SYCL reports errors using exceptions and does not
                use error codes. Please replace the "get_error_string_dummy(...)"
                with a real error-handling function.
                */
@@ -74,7 +74,7 @@ struct DeviceScope {
 bool check(dpct::err0 result, const char *what, std::string &err, int device) {
     if (result == 0) return true;
     /*
-    DPCT1009:91: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -100,18 +100,18 @@ bool RemoteExperts::preflight(int device, double &free_gib,
     // before the device's context exists, so first thing; STRATA_REMOTE_SPIN=0 keeps the driver's default.
     const char* spin = std::getenv("STRATA_REMOTE_SPIN");
     /*
-    DPCT1007:93: Migration of cudaInitDevice is not supported.
+    DPCT1007: Migration of cudaInitDevice is not supported.
     */
     (void) spin;   // SYCL: no cudaInitDevice scheduling flags; the runtime picks its own wait policy
     /*
-    DPCT1026:92: The call to cudaGetLastError was removed because this
+    DPCT1026: The call to cudaGetLastError was removed because this
     functionality is redundant in SYCL.
     */
     DeviceScope scope(device);
     if (!scope.ok) { err = scope.error(device); return false; }
     size_t free_bytes = 0, total_bytes = 0;
     /*
-    DPCT1106:94: 'cudaMemGetInfo' was migrated with the Intel extensions for
+    DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions for
     device information which may not be supported by all compilers or runtimes.
     You may need to adjust the code.
     */
@@ -195,7 +195,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
     }
     size_t free_bytes = 0, total_bytes = 0;
     /*
-    DPCT1106:96: 'cudaMemGetInfo' was migrated with the Intel extensions for
+    DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions for
     device information which may not be supported by all compilers or runtimes.
     You may need to adjust the code.
     */
@@ -237,19 +237,19 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         strata::kernels::native_expert_scratch_bytes(CAP, FF));
     const bool allocated =
         /*
-        DPCT1025:97: The SYCL queue is created ignoring the flag and priority
+        DPCT1025: The SYCL queue is created ignoring the flag and priority
         options.
         */
         check(DPCT_CHECK_ERROR(
                   stream_ = dpct::get_current_device().create_queue(true)),
               "stream", err, device) &&
         /*
-        DPCT1048:2: The original value cudaHostAllocPortable is not meaningful
+        DPCT1048: The original value cudaHostAllocPortable is not meaningful
         in the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
         /*
-        DPCT1048:3: The original value cudaHostAllocMapped is not meaningful in
+        DPCT1048: The original value cudaHostAllocMapped is not meaningful in
         the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -258,12 +258,12 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
                                  (size_t)CAP * H, dpct::get_in_order_queue())),
             "input staging", err, device) &&
         /*
-        DPCT1048:4: The original value cudaHostAllocPortable is not meaningful
+        DPCT1048: The original value cudaHostAllocPortable is not meaningful
         in the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
         /*
-        DPCT1048:5: The original value cudaHostAllocMapped is not meaningful in
+        DPCT1048: The original value cudaHostAllocMapped is not meaningful in
         the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -272,7 +272,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
                                  (size_t)CAP * H, dpct::get_in_order_queue())),
             "result staging", err, device) &&
         /*
-        DPCT1048:6: The original value cudaHostAllocPortable is not meaningful
+        DPCT1048: The original value cudaHostAllocPortable is not meaningful
         in the migrated code and was removed or replaced with 0. You may need to
         check the migrated code.
         */
@@ -311,7 +311,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
                  DPCT_CHECK_ERROR(*(void **)&z_x_ = (float *)h_x_) == 0 &&
                  DPCT_CHECK_ERROR(*(void **)&z_out_ = (float *)h_out_) == 0;
     /*
-    DPCT1026:95: The call to cudaGetLastError was removed because this
+    DPCT1026: The call to cudaGetLastError was removed because this
     functionality is redundant in SYCL.
     */
     auto *meta = (RemoteMeta *)d_meta_;
@@ -405,7 +405,7 @@ bool RemoteExperts::begin(int64_t layer, const float *x, const int32_t *ids,
     const dpct::queue_ptr s = stream_;
     const bool staged =
         /*
-        DPCT1124:98: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -415,7 +415,7 @@ bool RemoteExperts::begin(int64_t layer, const float *x, const int32_t *ids,
                    s->memcpy(d_x_, h_x_, (size_t)n_tok * H * sizeof(float))),
                "copy input", err, device_)) &&
         /*
-        DPCT1124:99: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
@@ -437,7 +437,7 @@ bool RemoteExperts::begin(int64_t layer, const float *x, const int32_t *ids,
     }
     const uint64_t compact_bytes = (uint64_t) dst_.size() * H * sizeof(float);
     /*
-    DPCT1124:100: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
+    DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API. While
     the origin API might be synchronous, it depends on the type of operand
     memory, so you may need to call wait() on event return by memcpy API to
     ensure synchronization behavior.

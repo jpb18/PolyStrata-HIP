@@ -13,7 +13,7 @@
 #include <dpct/dpct.hpp>
 #include <cstdint>
 
-#if defined(SYCL_LANGUAGE_VERSION)
+#if defined(SYCL_LANGUAGE_VERSION) || defined(__HIPCC__)
 #define STRATA_ROPE_HD 
 #else
 #define STRATA_ROPE_HD

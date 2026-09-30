@@ -24,7 +24,7 @@ constexpr int WARPS = THREADS / 32;
 __dpct_inline__ float warp_sum(float v) {
 #pragma unroll
     /*
-    DPCT1108:85: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -37,7 +37,7 @@ __dpct_inline__ float warp_sum(float v) {
 __dpct_inline__ float warp_max(float v) {
 #pragma unroll
     /*
-    DPCT1108:86: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -49,55 +49,67 @@ __dpct_inline__ float warp_max(float v) {
 }
 
 // 8 consecutive values of one cell's key or value row for KV head `kvh`, dimensions [d0, d0+8).
+// Per-format bodies; `load8` below is the KV_MODE dispatcher. value=false is the K side, true the V side.
+__dpct_inline__ void load8_f16(const QsaAttnPools &p, bool value, long long row,
+                               int d0, float *out) {
+    const uint16_t* base = (value ? p.v_pool : p.k_pool) + row * HD + d0;
+    const sycl::uint4 raw = *reinterpret_cast<const sycl::uint4 *>(base);
+    const sycl::half2 *h2 = reinterpret_cast<const sycl::half2 *>(&raw);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const sycl::float2 f =
+            h2[j].template convert<float, sycl::rounding_mode::automatic>();
+        out[2 * j] = f.x();
+        out[2 * j + 1] = f.y();
+    }
+}
+__dpct_inline__ void load8_q8(const QsaAttnPools &p, bool value, long long row,
+                              int d0, float *out) {
+    const int8_t* codes = (value ? p.v_q : p.k_q) + row * HD + d0;
+    const uint16_t sbits = (value ? p.v_scale : p.k_scale)[row * (HD / KV_Q8_GROUP) + d0 / KV_Q8_GROUP];
+    const float sc = sycl::vec<sycl::half, 1>(
+                         sycl::bit_cast<sycl::half, unsigned short>(sbits))
+                         .convert<float, sycl::rounding_mode::automatic>()[0];
+    const sycl::uint2 raw = *reinterpret_cast<const sycl::uint2 *>(codes);
+    const int8_t* c = reinterpret_cast<const int8_t*>(&raw);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) out[j] = (float) c[j] * sc;
+}
+__dpct_inline__ void load8_q4(const QsaAttnPools &p, bool value, long long row,
+                              int d0, float *out) {
+    constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
+    const int b = d0 / QK4_0;
+    const int rem = d0 % QK4_0;
+    const block_q4_0* blk = reinterpret_cast<const block_q4_0*>((value ? p.v_q4 : p.k_q4) + row * bytes_per_head) + b;
+    const float d = sycl::vec<sycl::half, 1>(
+                        sycl::bit_cast<sycl::half, unsigned short>(blk->d))
+                        .convert<float, sycl::rounding_mode::automatic>()[0];
+    const int j = (rem == 0 || rem == 16) ? 0 : 8;
+    const uint8_t* bytes = blk->qs + j;
+    if (rem < 16) {
+#pragma unroll
+        for (int k = 0; k < 8; ++k) out[k] = (float) ((int)(bytes[k] & 0x0F) - 8) * d;
+    } else {
+#pragma unroll
+        for (int k = 0; k < 8; ++k) out[k] = (float) ((int)(bytes[k] >> 4) - 8) * d;
+    }
+}
 template <int KV_MODE>
 __dpct_inline__ void load8(const QsaAttnPools &p, bool value, long long row,
                            int d0, float *out) {
-    if constexpr (KV_MODE == 0) {
-        const uint16_t* base = (value ? p.v_pool : p.k_pool) + row * HD + d0;
-        const sycl::uint4 raw = *reinterpret_cast<const sycl::uint4 *>(base);
-        const sycl::half2 *h2 = reinterpret_cast<const sycl::half2 *>(&raw);
-#pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            const sycl::float2 f =
-                h2[j].template convert<float, sycl::rounding_mode::automatic>();
-            out[2 * j] = f.x();
-            out[2 * j + 1] = f.y();
-        }
-    } else if constexpr (KV_MODE == 1) {
-        const int8_t* codes = (value ? p.v_q : p.k_q) + row * HD + d0;
-        const uint16_t sbits = (value ? p.v_scale : p.k_scale)[row * (HD / KV_Q8_GROUP) + d0 / KV_Q8_GROUP];
-        const float sc =
-            sycl::vec<sycl::half, 1>(
-                sycl::bit_cast<sycl::half, unsigned short>(sbits))
-                .convert<float, sycl::rounding_mode::automatic>()[0];
-        const sycl::uint2 raw = *reinterpret_cast<const sycl::uint2 *>(codes);
-        const int8_t* c = reinterpret_cast<const int8_t*>(&raw);
-#pragma unroll
-        for (int j = 0; j < 8; ++j) out[j] = (float) c[j] * sc;
-    } else {
-        constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
-        const int b = d0 / QK4_0;
-        const int rem = d0 % QK4_0;
-        const block_q4_0* blk = reinterpret_cast<const block_q4_0*>((value ? p.v_q4 : p.k_q4) + row * bytes_per_head) + b;
-        const float d =
-            sycl::vec<sycl::half, 1>(
-                sycl::bit_cast<sycl::half, unsigned short>(blk->d))
-                .convert<float, sycl::rounding_mode::automatic>()[0];
-        const int j = (rem == 0 || rem == 16) ? 0 : 8;
-        const uint8_t* bytes = blk->qs + j;
-        if (rem < 16) {
-#pragma unroll
-            for (int k = 0; k < 8; ++k) out[k] = (float) ((int)(bytes[k] & 0x0F) - 8) * d;
-        } else {
-#pragma unroll
-            for (int k = 0; k < 8; ++k) out[k] = (float) ((int)(bytes[k] >> 4) - 8) * d;
-        }
-    }
+    if constexpr (KV_MODE == 0) load8_f16(p, value, row, d0, out);
+    else if constexpr (KV_MODE == 1) load8_q8(p, value, row, d0, out);
+    else if constexpr (KV_MODE == 3) {
+        // hybrid K8V4: both sides are defined - K unrotated INT8, V rotated Q4_0 - so a value=true call
+        // reads the Q4_0 pool instead of dereferencing the null v_q (no call site does today; PR review)
+        if (value) load8_q4(p, value, row, d0, out);
+        else load8_q8(p, value, row, d0, out);
+    } else load8_q4(p, value, row, d0, out);
 }
 
 template <int KV_MODE>
 /*
-DPCT1110:87: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 attn_chunk_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -130,7 +142,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
             sycl::ext::oneapi::this_work_item::get_work_group<
                 3>()); // pool row of each cell (page, kv head, slot)
     /*
-    DPCT1098:447: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -157,7 +169,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
         srow[t] = r;
     }
     /*
-    DPCT1065:448: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -184,7 +196,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
         }
     }
     /*
-    DPCT1065:449: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -201,7 +213,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
         if (lane == 0) { part_m[slot * G + h] = m; part_l[slot * G + h] = l; }
     }
     /*
-    DPCT1065:450: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -225,7 +237,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
                                   t / KV_Q8_GROUP]))
                     .convert<float, sycl::rounding_mode::automatic>()[0];
             v = (float) p.v_q[srow[c] * HD + t] * sc;
-        } else {
+        } else {   // modes 2 and 3: V is rotated Q4_0 (kv_q4.hpp); the caller rotates the output back
             constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
             const int b = t / QK4_0;
             const int rem = t % QK4_0;
@@ -284,13 +296,11 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     if (n_q <= 0) return;
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
         !pools.page_table || n_q > 65535) {
-        std::fprintf(stderr, "qsa_decode_attn_batch: unsupported geometry or missing buffers (head_dim %lld want %d, "
-                     "n_head %lld, n_head_kv %lld, cap %lld, n_q %lld, scratch %d ids %d steps %d page_table %d)\n",
-                     (long long) s.head_dim, HD, (long long) s.n_head, (long long) s.n_head_kv, (long long) cap,
-                     (long long) n_q, scratch != nullptr, ids != nullptr, steps != nullptr, pools.page_table != nullptr);
+        std::fprintf(stderr, "qsa_decode_attn_batch: unsupported geometry or missing buffers\n");
         std::exit(1);
     }
-    const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr ? 1 : 0);
+    const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr && pools.v_q4 != nullptr ? 3
+                        : (pools.k_q != nullptr ? 1 : 0));
     const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
     // per query: [acc: n_chunks*n_head*HD][m: n_chunks*n_head][l: n_chunks*n_head], all offsets from one stride
     const long long stride = (long long) qsa_decode_attn_scratch_floats(cap, s);
@@ -301,13 +311,29 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     const dpct::dim3 grid((unsigned)n_chunks, (unsigned)s.n_head_kv,
                           (unsigned)n_q);
     dpct::queue_ptr st = strata::q_of(stream);
-    if (kv_mode == 2)
+    if (kv_mode == 3)
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_411f11,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_b8af5b,
+                                          dpct_kernel_scalar<3>>>(
+            sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
+                              sycl::range(1, 1, THREADS)),
+            exp_props,
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
+                attn_chunk_kernel<3>(q, pools, ids, steps, (int)s.n_head_kv,
+                                     (int)s.page_size, scale, part_acc, part_m,
+                                     part_l, n_chunks, (int)cap, stride);
+            });
+    } else if (kv_mode == 2)
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+        dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
+
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_dfacfc,
                                           dpct_kernel_scalar<2>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -323,7 +349,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_5a54ec,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_b0d448,
                                           dpct_kernel_scalar<1>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -338,7 +364,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_d59020,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_2ad0a4,
                                           dpct_kernel_scalar<0>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -353,7 +379,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_ed01b1>>(
+        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_b5c617>>(
             sycl::nd_range<3>(
                 sycl::range(1, (unsigned)n_q, (unsigned)s.n_head) *
                     sycl::range(1, 1, HD),
@@ -364,7 +390,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             });
     }
     /*
-    DPCT1010:451: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -383,8 +409,11 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
         std::fprintf(stderr, "qsa_decode_attn: unsupported geometry or missing buffers\n");
         std::exit(1);
     }
-    const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr ? 1 : 0);
-    if (kv_mode == 2 ? (!pools.v_q4) : (kv_mode == 1 ? (!pools.v_q || !pools.k_scale || !pools.v_scale) : (!pools.k_pool || !pools.v_pool))) {
+    const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr && pools.v_q4 != nullptr ? 3
+                        : (pools.k_q != nullptr ? 1 : 0));
+    if (kv_mode == 3 ? (!pools.k_scale || !pools.v_q4)
+                     : (kv_mode == 2 ? (!pools.v_q4) : (kv_mode == 1 ? (!pools.v_q || !pools.k_scale || !pools.v_scale)
+                                                                     : (!pools.k_pool || !pools.v_pool)))) {
         std::fprintf(stderr, "qsa_decode_attn: incomplete KV pools\n");
         std::exit(1);
     }
@@ -395,13 +424,29 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
     const float scale = 1.0f / sqrtf((float) HD);
     const dpct::dim3 grid((unsigned)n_chunks, (unsigned)s.n_head_kv);
     dpct::queue_ptr st = strata::q_of(stream);
-    if (kv_mode == 2)
+    if (kv_mode == 3)
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_bd420a,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_61a169,
+                                          dpct_kernel_scalar<3>>>(
+            sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
+                              sycl::range(1, 1, THREADS)),
+            exp_props,
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
+                attn_chunk_kernel<3>(q, pools, ids, step, (int)s.n_head_kv,
+                                     (int)s.page_size, scale, part_acc, part_m,
+                                     part_l, n_chunks, 0, 0);
+            });
+    } else if (kv_mode == 2)
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+        dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
+
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_f262e6,
                                           dpct_kernel_scalar<2>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -417,7 +462,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_19615d,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_4fd923,
                                           dpct_kernel_scalar<1>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -432,7 +477,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_bf0626,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_f6855e,
                                           dpct_kernel_scalar<0>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -447,7 +492,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_814186>>(
+        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_a9568f>>(
             sycl::nd_range<3>(sycl::range(1, 1, (unsigned)s.n_head) *
                                   sycl::range(1, 1, HD),
                               sycl::range(1, 1, HD)),
@@ -456,7 +501,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             });
     }
     /*
-    DPCT1010:453: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

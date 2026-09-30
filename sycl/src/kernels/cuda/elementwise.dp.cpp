@@ -35,14 +35,14 @@ __dpct_inline__ void embedding_gather_kernel(const uint8_t *__restrict__ codes,
     const int code = (codes[i / per_byte] >> ((i % per_byte) * code_bits)) & mask;
     const int64_t group = i / group_elems;
     /*
-    DPCT1013:1056: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
     */
     const float product = (float)(code + code_bias) * scales[group];
     /*
-    DPCT1013:1057: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -151,7 +151,7 @@ __dpct_inline__ void rms_norm_weighted_kernel(float *__restrict__ x,
 #pragma unroll
     for (int64_t c = lane; c < cols; c += 32) acc += r[c] * r[c];
     /*
-DPCT1108:275: '__shfl_down_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -166,7 +166,7 @@ runtimes. You may need to adjust the code.
     float inv = 0.0f;
     if (lane == 0) inv = sycl::rsqrt(acc / (float)cols + eps);
     /*
-    DPCT1108:276: '__shfl_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -191,7 +191,7 @@ catch (sycl::exception const &exc) {
 
 bool check_launch(const char* what) {
     /*
-    DPCT1010:1059: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -365,7 +365,7 @@ void silu_inplace(float* x, int64_t n, void* stream) {
 /// very expensive substitute for one fence instruction.
 __dpct_inline__ void doorbell_ring_kernel(uint32_t *seq) {
     /*
-    DPCT1078:277: Consider replacing memory_order::acq_rel with
+    DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
     are needed.
     */
@@ -377,13 +377,13 @@ __dpct_inline__ void doorbell_wait_kernel(const volatile uint32_t *flag,
                                           const volatile uint32_t *seq) {
     const uint32_t want = strata::sys_load(seq);
     /*
-    DPCT1008:1061: __nanosleep function is not defined in SYCL. This is a
+    DPCT1008: __nanosleep function is not defined in SYCL. This is a
     hardware-specific feature. Consult with your hardware vendor to find a
     replacement.
     */
     for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) != want; ++spin) {}
     /*
-    DPCT1078:278: Consider replacing memory_order::acq_rel with
+    DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
     are needed.
     */
@@ -407,7 +407,7 @@ void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream) 
 }
 
 /*
-DPCT1052:1062: SYCL does not support the member access for a volatile qualified
+DPCT1052: SYCL does not support the member access for a volatile qualified
 vector type. The volatile qualifier was removed. You may need to rewrite the
 code.
 */
@@ -428,7 +428,7 @@ __dpct_inline__ void copy_from_mapped_kernel(sycl::float4 *__restrict__ dst,
 // the CPU rows of a verify window, skipping the rows the GPU plan computes itself (the
 // pool writes +0.0 into those, so this writes +0.0 too): block = row, the plan's hit rows `dst[0, *count)`.
 /*
-DPCT1052:1063: SYCL does not support the member access for a volatile qualified
+DPCT1052: SYCL does not support the member access for a volatile qualified
 vector type. The volatile qualifier was removed. You may need to rewrite the
 code.
 */
@@ -455,7 +455,7 @@ __dpct_inline__ void copy_rows_from_mapped_kernel(
             d[i] = sycl::float4(0.0f, 0.0f, 0.0f, 0.0f);
     } else {
         /*
-        DPCT1052:1064: SYCL does not support the member access for a volatile
+        DPCT1052: SYCL does not support the member access for a volatile
         qualified vector type. The volatile qualifier was removed. You may need
         to rewrite the code.
         */
@@ -537,20 +537,20 @@ __dpct_inline__ void doorbell_publish_kernel(const float *__restrict__ x,
         w_out[item_ct1.get_local_id(2)] = w[item_ct1.get_local_id(2)];
     }
     /*
-    DPCT1078:279: Consider replacing memory_order::acq_rel with
+    DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
     are needed.
     */
     sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
     /*
-    DPCT1065:1065: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
     item_ct1.barrier();
     if (item_ct1.get_local_id(2) == 0) {
         /*
-        DPCT1078:280: Consider replacing memory_order::acq_rel with
+        DPCT1078: Consider replacing memory_order::acq_rel with
         memory_order::seq_cst for correctness if strong memory order
         restrictions are needed.
         */
@@ -564,7 +564,7 @@ void doorbell_publish(const float* x, const int32_t* ids, const float* weights, 
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }
     /*
-    DPCT1049:281: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */

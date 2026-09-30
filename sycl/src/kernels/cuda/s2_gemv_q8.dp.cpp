@@ -77,7 +77,7 @@ __dpct_inline__ void s2_gemv_q8_kernel(const uint8_t *__restrict__ act,
     for (int step = threads_per_row / 2; step > 0; step >>= 1) {
         if (tid < step) partial[tid] += partial[tid + step];
         /*
-        DPCT1118:47: SYCL group functions and algorithms must be encountered in
+        DPCT1118: SYCL group functions and algorithms must be encountered in
         converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -95,13 +95,13 @@ void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, f
         std::exit(1);
     }
     /*
-    DPCT1083:49: The size of local memory in the migrated code may be different
+    DPCT1083: The size of local memory in the migrated code may be different
     from the original code. Check that the allocated memory size in the migrated
     code is correct.
     */
     const size_t smem = (size_t)threads_per_row * sizeof(float);
     /*
-    DPCT1049:48: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -129,7 +129,7 @@ void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, f
             });
     }
     /*
-    DPCT1010:367: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */

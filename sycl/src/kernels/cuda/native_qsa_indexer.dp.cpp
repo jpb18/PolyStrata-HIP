@@ -39,7 +39,7 @@ inline float warp_sum(float x) {
 #pragma unroll
     for (int offset = 16; offset; offset >>= 1)
         /*
-        DPCT1108:133: '__shfl_xor_sync' was migrated with the experimental
+        DPCT1108: '__shfl_xor_sync' was migrated with the experimental
         feature masked sub_group function which may not be supported by all
         compilers or runtimes. You may need to adjust the code.
         */
@@ -82,14 +82,14 @@ append(const float *__restrict__ raw, const int32_t *__restrict__ pos_dev,
 #pragma unroll
         for (int j = 1; j < R; ++j)
             /*
-            DPCT1013:637: The rounding mode could not be specified and the
+            DPCT1013: The rounding mode could not be specified and the
             generated code may have different accuracy than the original code.
             Verify the correctness. SYCL math built-in function rounding mode is
             aligned with OpenCL C 1.2 standard.
             */
             sum = sum + pos == 0 || j == R - 1 ? incoming : tail[j * D + d];
         /*
-        DPCT1013:638: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -102,7 +102,7 @@ append(const float *__restrict__ raw, const int32_t *__restrict__ pos_dev,
     const int lane = d % 32;
     if (lane == 0) partials[d / 32] = square_sum;
     /*
-    DPCT1065:635: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -112,7 +112,7 @@ append(const float *__restrict__ raw, const int32_t *__restrict__ pos_dev,
     const float scale = sycl::rsqrt(square_sum / D + epsilon);
     if (d < D) values[d] = scale * mean * gamma[d];
     /*
-    DPCT1065:636: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -159,7 +159,7 @@ __dpct_inline__ float norm_scale(float mean, float *partials, int d) {
     const int lane = d % 32;
     if (lane == 0) partials[d / 32] = square_sum;
     /*
-    DPCT1065:639: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -192,14 +192,14 @@ __dpct_inline__ void append_first(const float *__restrict__ raw,
         float sum = incoming;
 #pragma unroll
         /*
-        DPCT1013:641: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         for (int j = 1; j < R; ++j) sum = sum + incoming;
         /*
-        DPCT1013:642: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -210,7 +210,7 @@ __dpct_inline__ void append_first(const float *__restrict__ raw,
     const float scale = sycl::rsqrt(square_sum / D + epsilon);
     if (d < D) values[d] = scale * mean * gamma[d];
     /*
-    DPCT1113:640: Consider replacing
+    DPCT1113: Consider replacing
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) with
     sycl::nd_item::barrier() if function "append_first" is called in a
     multidimensional kernel.
@@ -253,14 +253,14 @@ append_blocks(const float *__restrict__ raw, int64_t n, int64_t p0,
         float sum = key(0);
 #pragma unroll
         /*
-        DPCT1013:643: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         for (int j = 1; j < R; ++j) sum = sum + key(j);
         /*
-        DPCT1013:644: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -344,21 +344,21 @@ void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_dev
             });
     }
     /*
-    DPCT1010:647: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:648: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:645: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:646: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=
@@ -419,21 +419,21 @@ void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, in
             });
     }
     /*
-    DPCT1010:651: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:652: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:649: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:650: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=

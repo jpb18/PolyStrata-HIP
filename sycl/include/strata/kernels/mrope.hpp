@@ -25,12 +25,12 @@ namespace strata::kernels {
 void mrope_table_set(const int32_t* device_table);
 const int32_t* mrope_table();
 
-#if defined(SYCL_LANGUAGE_VERSION)
+#if defined(SYCL_LANGUAGE_VERSION) || defined(__HIPCC__)
 /// ggml rope_multi, is_imrope, sections {11, 11, 10, 0}: sector = pair % 32; sector % 3 == 1 -> h (sector < 33),
 /// == 2 -> w (sector < 30), == 0 -> t (sector < 33).  For pairs 0..31 all three bounds hold, so it is pair % 3.
 __dpct_inline__ int mrope_pos(const int32_t *tab, int pos, int pair) {
     /*
-    DPCT1098:387: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */

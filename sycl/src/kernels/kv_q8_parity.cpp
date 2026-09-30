@@ -26,7 +26,7 @@ namespace {
 int g_fail = 0;
 void ck(dpct::err0 e, const char *w) {
     /*
-    DPCT1009:423: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
@@ -54,7 +54,7 @@ int main() {
     for (int i = 0; i < pages; ++i) table[i] = (i * 5 + 3) % pages;            // a non-identity permutation
     int32_t* d_table = dalloc<int32_t>(pages);
     /*
-    DPCT1114:424: cudaMemcpy is migrated to asynchronization memcpy, assuming in
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
     the original code the source host memory is pageable memory. If the memory
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
@@ -83,7 +83,7 @@ int main() {
         hk[pos] = kv; hv[pos] = vv;
         int32_t hstep[k::kStepCount] = {pos, pos + 1, 0, 0};
         /*
-        DPCT1114:425: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -92,7 +92,7 @@ int main() {
                dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep).wait()),
            "step");
         /*
-        DPCT1114:426: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -101,7 +101,7 @@ int main() {
                                                               kv.size() * 4).wait()),
            "k");
         /*
-        DPCT1114:427: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -165,7 +165,7 @@ int main() {
         std::vector<int32_t> ids(n_ids);
         for (auto& id : ids) id = positions[rng() % n_fill];
         /*
-        DPCT1114:428: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -175,7 +175,7 @@ int main() {
            "ids");
         int32_t hstep[k::kStepCount] = {0, 0, 0, n_ids};
         /*
-        DPCT1114:429: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.

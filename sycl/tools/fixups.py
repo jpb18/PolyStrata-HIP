@@ -185,6 +185,7 @@ ON = "#if 1   // SYCL: the scalar path (the PTX one above is not ported yet)"
 for rel in ["src/kernels/cuda/qsa_prompt_attn.dp.cpp", "src/kernels/cuda/qsa_select.dp.cpp",
             "src/kernels/cuda/native_qsa_score.dp.cpp"]:
     edit(rel, lambda s: s.replace("#if !defined(DPCT_COMPATIBILITY_TEMP) || DPCT_COMPATIBILITY_TEMP >= 800", OFF)
+         .replace("#elif !defined(DPCT_COMPATIBILITY_TEMP) || DPCT_COMPATIBILITY_TEMP >= 800", OFF.replace("#if 0", "#elif 0"))   # after upstream's __HIPCC__ guard (0.1.27)
          .replace("#if defined(DPCT_COMPATIBILITY_TEMP) && DPCT_COMPATIBILITY_TEMP < 800", ON)
          .replace("    __trap();", "    /* unreachable on SYCL: the launcher refuses this device */"))
 for rel in ["src/kernels/cuda/qsa_prompt_attn.dp.cpp", "src/kernels/cuda/qsa_select.dp.cpp"]:
@@ -195,7 +196,7 @@ for rel in ["src/kernels/cuda/qsa_prompt_attn.dp.cpp", "src/kernels/cuda/qsa_sel
 #     which the shared multi-column kernel cannot call. A constexpr copy of the table restores the 2-argument form.
 def mmvq(s):
     if "kIq4nlTable" in s: return s   # already applied (the table is the marker)
-    m = re.search(r"iq4nl_values\(sycl::range\(16\), \{([^}]*)\}", s, re.S)
+    m = re.search(r"iq4nl_values[^;{]*\(sycl::range\(16\), \{([^}]*)\}", s, re.S)   # also after 8c's heap allocation
     vals = " ".join(m.group(1).split())
     table = "static constexpr int8_t kIq4nlTable[16] = {%s};\n" % vals
     s = s.replace("__dpct_inline__ sycl::int2 iq4_table_lookup(", table + "__dpct_inline__ sycl::int2 iq4_table_lookup(", 1)

@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
                       (size_t)s.n_out * 4, dpct::get_in_order_queue())),
               "y");
         /*
-        DPCT1114:1141: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
                                                                  x.size() * 2).wait()),
               "cx");
         /*
-        DPCT1114:1142: cudaMemcpy is migrated to asynchronization memcpy,
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
         assuming in the original code the source host memory is pageable memory.
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
             // fp16.  That is the whole difference between the two contracts at this call site.
             for (size_t i = 0; i < fp16_as_f32.size(); ++i) x[i] = bf16_from_f32(fp16_as_f32[i]);
             /*
-            DPCT1114:1143: cudaMemcpy is migrated to asynchronization memcpy,
+            DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
             assuming in the original code the source host memory is pageable
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.

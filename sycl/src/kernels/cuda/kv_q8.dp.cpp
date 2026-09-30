@@ -14,7 +14,7 @@ namespace {
 
 void check(const char* what) {
     /*
-    DPCT1010:1135: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -37,7 +37,7 @@ __dpct_inline__ void kv_append_q8_kernel(
     const float *__restrict__ kcur, const float *__restrict__ vcur,
     int kv_heads, int head_dim, int page_size, KvHostPools host) {
     /*
-    DPCT1098:1138: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */
@@ -51,7 +51,7 @@ __dpct_inline__ void kv_append_q8_kernel(
     // max |x| over the 64 values: two warps, then combine through shared memory in a fixed order
     float a = sycl::fabs(x);
     /*
-DPCT1108:289: '__shfl_xor_sync' was migrated with the experimental feature
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
 masked sub_group function which may not be supported by all compilers or
 runtimes. You may need to adjust the code.
 */
@@ -65,7 +65,7 @@ runtimes. You may need to adjust the code.
             sycl::ext::oneapi::this_work_item::get_work_group<3>());
     if ((t & 31) == 0) warp_max[t >> 5] = a;
     /*
-    DPCT1065:1137: Consider replacing sycl::nd_item::barrier() with
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
     performance if there is no access to global memory.
     */
@@ -101,7 +101,7 @@ __dpct_inline__ void kv_gather_q8_kernel(
     const int32_t *__restrict__ step, int kv_heads, int head_dim, int page_size,
     uint16_t *__restrict__ k_scratch, uint16_t *__restrict__ v_scratch) {
     /*
-    DPCT1098:1139: The '*' expression is used instead of the __ldg call. These
+    DPCT1098: The '*' expression is used instead of the __ldg call. These
     two expressions do not provide the exact same functionality. Check the
     generated code for potential precision and/or performance issues.
     */

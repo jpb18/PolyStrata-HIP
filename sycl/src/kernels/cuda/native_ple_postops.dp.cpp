@@ -37,7 +37,7 @@ namespace {
 constexpr int N = 2560, H = 4, D = N * H, HISTORY = 9;
 inline float warp_sum(float x) {
     /*
-DPCT1108:50: '__shfl_xor_sync' was migrated with the experimental feature masked
+DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature masked
 sub_group function which may not be supported by all compilers or runtimes. You
 may need to adjust the code.
 */
@@ -58,7 +58,7 @@ __dpct_inline__ void gate_kernel(const float *key, const float *query,
     for (int j = 0; j < 8; ++j) {
         const int d = item_ct1.get_local_id(2) + j * 512;
         /*
-        DPCT1013:372: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -82,7 +82,7 @@ __dpct_inline__ void gate_kernel(const float *key, const float *query,
     sum = warp_sum(sum);
     if (item_ct1.get_local_id(2) == 0) {
         /*
-        DPCT1013:373: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -91,7 +91,7 @@ __dpct_inline__ void gate_kernel(const float *key, const float *query,
         const float mag = sycl::sqrt(sycl::fmax(sycl::fabs(s), 1e-6f));
         const float sign = float((s > 0.0f) - (s < 0.0f));
         /*
-        DPCT1013:374: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -106,7 +106,7 @@ __dpct_inline__ void broadcast_kernel(const float *value, const float *gate,
     const int i = item_ct1.get_group(2) * item_ct1.get_local_range(2) +
                   item_ct1.get_local_id(2);
     /*
-    DPCT1013:375: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -130,14 +130,14 @@ conv_residual_kernel(const float *history, const float *normalized,
                 sycl::bit_cast<sycl::half, unsigned short>(weights[c * 4 + k]))
                 .convert<float, sycl::rounding_mode::automatic>()[0];
         /*
-        DPCT1013:376: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         const float term = x * w;
         /*
-        DPCT1013:377: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -148,7 +148,7 @@ conv_residual_kernel(const float *history, const float *normalized,
     conv[c] = activation;
     // Exact hidden/result alias is safe: each thread owns one element.
     /*
-    DPCT1013:378: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -160,7 +160,7 @@ conv_residual_kernel(const float *history, const float *normalized,
 inline float norm_warp_sum(float value) {
 #pragma unroll
     /*
-    DPCT1108:51: '__shfl_xor_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_xor_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
@@ -212,7 +212,7 @@ __dpct_inline__ void broadcast_batch_kernel(const float *value,
     if (i >= size_t(T) * D) return;
     const size_t t = i / D, d = i % D;
     /*
-    DPCT1013:379: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -241,14 +241,14 @@ __dpct_inline__ void conv_residual_batch_kernel(const float *history,
                 sycl::bit_cast<sycl::half, unsigned short>(weights[c * 4 + k]))
                 .convert<float, sycl::rounding_mode::automatic>()[0];
         /*
-        DPCT1013:380: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
         const float term = x * wk;
         /*
-        DPCT1013:381: The rounding mode could not be specified and the generated
+        DPCT1013: The rounding mode could not be specified and the generated
         code may have different accuracy than the original code. Verify the
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
@@ -257,7 +257,7 @@ __dpct_inline__ void conv_residual_batch_kernel(const float *history,
     }
     const float activation = sum / (1.0f + sycl::native::exp(-sum));
     /*
-    DPCT1013:382: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -293,21 +293,21 @@ void validate(Span span) {
 }
 void launch_check() {
     /*
-    DPCT1010:385: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
     const auto error = 0;
     /*
-    DPCT1009:386: SYCL reports errors using exceptions and does not use error
+    DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
     error-handling function.
     */
     /*
-    DPCT1001:383: The statement could not be removed.
+    DPCT1001: The statement could not be removed.
     */
     /*
-    DPCT1000:384: Error handling if-stmt was detected but could not be
+    DPCT1000: Error handling if-stmt was detected but could not be
     rewritten.
     */
     if (error !=
@@ -339,7 +339,7 @@ void native_ple_postops(const float* projected_key, const float* hidden,
     native_gr_rms_norm_weighted(hidden,w.norm_query,b.query,N,H,NG_RMS_EPS,stream);
     auto st = strata::q_of(stream);
     /*
-    DPCT1049:52: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -399,7 +399,7 @@ void native_ple_postops_batch(float* key, float* hidden, const float* value, flo
     const unsigned rows = unsigned(T) * H;
     const unsigned blocks = unsigned((size_t(T) * D + 255) / 256);
     /*
-    DPCT1049:53: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -416,7 +416,7 @@ void native_ple_postops_batch(float* key, float* hidden, const float* value, flo
             });
     }
     /*
-    DPCT1049:54: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -433,7 +433,7 @@ void native_ple_postops_batch(float* key, float* hidden, const float* value, flo
             });
     }
     /*
-    DPCT1049:55: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */
@@ -469,7 +469,7 @@ void native_ple_postops_batch(float* key, float* hidden, const float* value, flo
             });
     }
     /*
-    DPCT1049:56: The work-group size passed to the SYCL kernel may exceed the
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
     Adjust the work-group size if needed.
     */

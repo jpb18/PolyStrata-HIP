@@ -106,12 +106,12 @@ row_dot_s2_q8(const uint8_t *__restrict__ codes,
 __dpct_inline__ float warp_sum(float v) {
 #pragma unroll
     /*
-    DPCT1108:282: '__shfl_down_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
     /*
-    DPCT1121:283: Make sure that the "v" which is used in the SYCL group
+    DPCT1121: Make sure that the "v" which is used in the SYCL group
     function/algorithm is initialized.
     */
     for (int off = 16; off > 0; off >>= 1) v +=
@@ -237,7 +237,7 @@ __dpct_inline__ void activation_correction_kernel(const uint8_t *q8,
 #pragma unroll
     for (int j = 0; j < 32; ++j) sum += q[j];
     /*
-    DPCT1013:1077: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -267,14 +267,14 @@ __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
         const int hi = dot4(codes + b * 16 + 8 + lane,
                            (const int8_t*) (xq + (size_t) (2 * b + 1) * 34 + 2) + lane * 4);
         /*
-        DPCT1013:1078: The rounding mode could not be specified and the
+        DPCT1013: The rounding mode could not be specified and the
         generated code may have different accuracy than the original code.
         Verify the correctness. SYCL math built-in function rounding mode is
         aligned with OpenCL C 1.2 standard.
         */
         acc = sycl::fma(d * xs[2 * b], (float)lo, acc);
         /*
-        DPCT1013:1079: The rounding mode could not be specified and the
+        DPCT1013: The rounding mode could not be specified and the
         generated code may have different accuracy than the original code.
         Verify the correctness. SYCL math built-in function rounding mode is
         aligned with OpenCL C 1.2 standard.
@@ -282,7 +282,7 @@ __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
         acc = sycl::fma(d * xs[2 * b + 1], (float)hi, acc);
         if (lane == 0)
             /*
-            DPCT1013:1080: The rounding mode could not be specified and the
+            DPCT1013: The rounding mode could not be specified and the
             generated code may have different accuracy than the original code.
             Verify the correctness. SYCL math built-in function rounding mode is
             aligned with OpenCL C 1.2 standard.
@@ -293,12 +293,12 @@ __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
     // a standard shuffle tree in the order 4, 2, 1 is a different floating-point expression.
     constexpr unsigned mask = 0xffffffffu;
     /*
-    DPCT1108:284: '__shfl_down_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
     /*
-    DPCT1013:1081: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -307,12 +307,12 @@ __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
                     mask, sycl::ext::oneapi::this_work_item::get_sub_group(),
                     acc, 4, 8);
     /*
-    DPCT1108:285: '__shfl_down_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
     /*
-    DPCT1013:1082: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -321,12 +321,12 @@ __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
                     mask, sycl::ext::oneapi::this_work_item::get_sub_group(),
                     acc, 1, 8);
     /*
-    DPCT1108:286: '__shfl_down_sync' was migrated with the experimental feature
+    DPCT1108: '__shfl_down_sync' was migrated with the experimental feature
     masked sub_group function which may not be supported by all compilers or
     runtimes. You may need to adjust the code.
     */
     /*
-    DPCT1013:1083: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -335,7 +335,7 @@ __dpct_inline__ float row_dot_cpu_order(const uint8_t *codes,
                     mask, sycl::ext::oneapi::this_work_item::get_sub_group(),
                     acc, 2, 8);
     /*
-    DPCT1013:1084: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -380,7 +380,7 @@ __dpct_inline__ void cpu_order_swiglu_kernel(float *gu, int pairs) {
     // CPU/GPU libc last-bit differences are diagnosed separately by the micro, not hidden with FP64 here.
     const float eg = sycl::native::exp(-g);
     /*
-    DPCT1013:1085: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -401,14 +401,14 @@ __dpct_inline__ void cpu_order_quantize_kernel(const float *x, uint8_t *blocks,
 #pragma unroll
     for (int j = 0; j < 32; ++j) amax = sycl::fmax(amax, sycl::fabs(xb[j]));
     /*
-    DPCT1013:1086: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
     */
     const float s = amax > 0.0f ? amax / 127.0f : 0.0f;
     /*
-    DPCT1013:1087: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -423,14 +423,14 @@ __dpct_inline__ void cpu_order_quantize_kernel(const float *x, uint8_t *blocks,
     int sum = 0;
     for (int j = 0; j < 32; ++j) {
         /*
-        DPCT1013:1088: The rounding mode could not be specified and the
+        DPCT1013: The rounding mode could not be specified and the
         generated code may have different accuracy than the original code.
         Verify the correctness. SYCL math built-in function rounding mode is
         aligned with OpenCL C 1.2 standard.
         */
         const float t = xb[j] * inv;
         /*
-        DPCT1013:1089: The rounding mode could not be specified and the
+        DPCT1013: The rounding mode could not be specified and the
         generated code may have different accuracy than the original code.
         Verify the correctness. SYCL math built-in function rounding mode is
         aligned with OpenCL C 1.2 standard.
@@ -441,7 +441,7 @@ __dpct_inline__ void cpu_order_quantize_kernel(const float *x, uint8_t *blocks,
         sum += v;
     }
     /*
-    DPCT1013:1090: The rounding mode could not be specified and the generated
+    DPCT1013: The rounding mode could not be specified and the generated
     code may have different accuracy than the original code. Verify the
     correctness. SYCL math built-in function rounding mode is aligned with
     OpenCL C 1.2 standard.
@@ -453,7 +453,7 @@ constexpr int THREADS = 256;
 
 void check(const char* who, void* stream) {
     /*
-    DPCT1010:1091: SYCL uses exceptions to report errors and does not use the
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
     need to rewrite this code.
     */
@@ -896,7 +896,7 @@ __dpct_inline__ float chunk_dot(sycl::uint2 cb, const int *xw, float dw,
 // its fp32 scales) are staged once into shared memory as aligned words; each warp then walks its rows, loading
 // each lane's code chunks once and dotting them with every entry.
 /*
-DPCT1110:287: The total declared local variable size in device function
+DPCT1110: The total declared local variable size in device function
 gu_grouped_kernel exceeds 128 bytes and may cause high register pressure.
 Consult with your hardware vendor to find the total register size available and
 adjust the code, or use smaller sub-group size to avoid high register pressure.
@@ -1269,7 +1269,7 @@ void moe_hit_grouped_s2_cpu_order(const uint8_t *blob_base,
     check("cpu_order/gate_up", stream);
     if (gate_up_trace != nullptr &&
         /*
-        DPCT1124:1093: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
         While the origin API might be synchronous, it depends on the type of
         operand memory, so you may need to call wait() on event return by memcpy
         API to ensure synchronization behavior.
