@@ -287,7 +287,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                 ++registered_slices;
             }
             note = (capped ? "cudaHostRegister limited to " + std::to_string(max_pinned_bytes >> 30) +
-                             " GiB for CUDA1; " :
+                             " GiB of the arena; " :
                              "cudaHostRegister of the whole arena FAILED (" + std::string(cudaGetErrorString(e)) + "); ") +
                    std::to_string(registered_slices) + " slices pinned (" + std::to_string(registered_bytes >> 30) +
                    " GiB); " + note;

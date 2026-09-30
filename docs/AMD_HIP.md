@@ -170,8 +170,10 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
   | R9700 + 9070 XT, auto split | 1,384 tok/s | 1,906 tok/s | 42-43 tok/s |
   | RX 9070 XT alone | 1,016 tok/s | 1,519 tok/s | 38-40 tok/s |
 
-  A split is worth it when no single card holds the model's experts. On Linux the split pins at most 8 GiB of the
-  expert arena (a Windows limit that also applies here).
+  A split is worth it when no single card holds the model's experts. Since 0.1.31 a split pins the whole expert
+  arena on Linux (the 8 GiB cap is for Windows/WSL2 only, #253): with an expert cache of 1,500 on the R9700 (most
+  experts streamed) the split read a 16K prompt at 1,803 tok/s instead of 1,287, with the same tokens in 5 + 5
+  starts.
 - **Known:** rarely (about 1 start in 10) a HIP run's greedy output differs from another start's at some token, on
   one card or two and on engine 0.1.29 as well; not yet explained.
 - **Not validated:** images, long contexts beyond 16K, answer-quality benchmarks.
