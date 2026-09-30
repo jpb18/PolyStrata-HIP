@@ -165,7 +165,8 @@ Measured on the same card, same 2,185-token prompt, 64 greedy tokens (AOT build,
 | | llama.cpp SYCL | Strata SYCL port |
 |---|---|---|
 | prompt reading | 138-319 tok/s | **560 tok/s** (693 at 2,000 tokens, 180 at 300) |
-| decode | 24.2-26.0 tok/s | 20.2-20.8 tok/s |
+| decode, suffix drafter only (`--spec 2`) | 24.2-26.0 tok/s | 20.2-20.8 tok/s |
+| decode with the MTP draft layer (`--spec 4 --mtp`) | - | **45.3 tok/s** (drafts accepted 87%, 3.4 tokens per round) |
 
 Prompt reading is where Strata's design pays (oneMKL GEMM over dequantised experts, the whole model on
 the card). Decode is at ~80%: a speculative round costs ~53 ms whatever its size and the suffix drafter
@@ -173,8 +174,11 @@ is accepted 9% of the time, so nearly every round yields one token; `--spec 4` (
 than `--spec 2` (20.8) for that reason. The kernels themselves run at 130-160 GB/s of weights on a card
 that streams 600 GB/s (`sycl/probe/bw.cpp`, incompressible data) - the same class llama.cpp reaches -
 and five variants of the hot Q6_K matvec (lanes per row, rows per warp, unroll, 16-byte loads, software
-pipelining; `mmvq_bench`) all landed in that band. The lever left for decode is the draft source: the
-base model's MTP layer (`tools/mtp_fetch.py` + `mtp_pack.py`) is being tried.
+pipelining; `mmvq_bench`) all landed in that band. The draft source was the lever: the base
+Qwen3.8-Flash-Next checkpoint's MTP layer (`tools/mtp_fetch.py fetch`, `mtp_pack.py --experts q2_0`,
+`mtp_rt.py`; 4.9 GB downloaded, 809 MiB of VRAM) drafts for the Coder fine-tune at 87% acceptance:
+3.4 tokens per 53 ms round, 45 tok/s, the same greedy tokens. The `mtp.cpp` path ran on the first try
+under the same flags.
 
 Without AOT the runtime JIT-compiles every kernel on first use, ~47 s the first time a process runs;
 `SYCL_CACHE_PERSISTENT=1 SYCL_CACHE_DIR=<dir>` keeps that across runs (15 MB).
