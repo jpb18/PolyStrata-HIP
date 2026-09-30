@@ -180,7 +180,7 @@ __global__ void __launch_bounds__(THREADS) gr_norm_multi_kernel(GrMulti m) {
 }
 
 #if defined(__HIPCC__)
-constexpr int TILE = 1280;             // eight-token tile fits gfx1100's 64 KiB LDS limit
+constexpr int TILE = 1280;             // eight-token tile fits RDNA3/RDNA4's 64 KiB LDS limit
 #else
 constexpr int TILE = 2560;             // xn floats per token staged at a time: 320 chunks of 8, 10 per lane
 #endif

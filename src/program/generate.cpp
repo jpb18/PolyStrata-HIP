@@ -14,6 +14,7 @@
 // AND IT IS PHASE 2, so hit rate is `h = 0` and the number it prints is slow on purpose
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
+#include "strata/core/device.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/core/conversation_memory.hpp"
@@ -1293,6 +1294,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
                      split_devs.size() + 1, devs.c_str(), o.layer_split.c_str());
     }
+#if defined(STRATA_USE_HIP)
+    {
+        // every GPU this run uses must be an architecture the binary has code for (a gfx1100 build on a gfx1201
+        // card would otherwise fail later with "invalid device function")
+        std::vector<int> used{0};
+        if (multi_gpu) used.insert(used.end(), split_devs.begin(), split_devs.end());
+        for (int r = 0; r < 3; ++r)
+            if (o.expert_cache_remote[(size_t) r] > 0) used.push_back(remote_dev[r]);
+        for (const int d : used) {
+            if (const std::string why = strata::core::gpu_arch_problem(d); !why.empty()) {
+                std::fprintf(stderr, "strata generate: %s\n", why.c_str());
+                return 1;
+            }
+        }
+    }
+#endif
     if (o.prefill_auto && (o.no_prefill_borrow || o.expert_profile.empty())) {
         o.prefill_auto = false;       // nothing to lend from: the buffers are reserved for the session, so keep them small
         o.prefill_chunk = 2048;
