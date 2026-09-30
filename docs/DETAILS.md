@@ -410,9 +410,48 @@ prompt when that is 2,048 tokens or more (engine 0.1.20; PR #62 + #65), so that 
 system prompts and tool lists. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`,
 `--prompt-cache-root N` (0 = no system-prompt checkpoint), `--turn-token ID`.
 
-**Current limits (v1):** one request at a time, and one conversation's history in the KV cache at a time (switching
-between two chats re-reads the part where they diverge; the shared prefix, such as the system prompt, is reused); images
-only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
+**Multiple conversations (opt-in).** Add `--conversation-cache-mib 8192
+--conversation-cache-slots 4` to the engine arguments to park up to four conversations
+in a bounded 8 GiB host-RAM cache. This preserves controller/worker histories when
+their requests alternate; it does not execute requests concurrently. No client session
+ID is required: only exact token/image prefixes with matching steering mode are reused.
+The default budget is 0 (disabled); `--prompt-cache 0` also disables parking.
+The initial shared-core integration supports a single session GPU: combining
+enabled parking with `--layer-split` is rejected before model loading. Ordinary
+upstream layer-split checkpoints remain available with parking disabled. FP16,
+INT8, Q4_0 and identity-layout K8V4 snapshots are supported; the K8V4 draft ring
+remains INT8, as in upstream. Windows/HIP and multi-GPU runtime coverage must be
+reported separately from Linux/CUDA evidence.
+
+Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/V.
+They add host RAM, not another model or VRAM allocation. The byte budget also counts
+an incoming snapshot during a switch. After a restore, unchanged K/V pages can be
+retained for the next parking operation; growth appends storage without copying
+the existing pages. Rewinds refresh the affected pages, and running state and
+checkpoints are captured again. Retained active K/V counts against the same byte
+budget and is discarded before evicting parked entries under memory pressure.
+If reserving space for growth would evict another conversation, parking uses a
+full capture instead.
+Oldest parked entries are evicted first.
+Oversized snapshots or host allocation failures fall back to ordinary prompt processing.
+`--conversation-cache-min-free-mib N` (default 2560) additionally requires that
+physical-RAM headroom remain available: the engine checks before allocation and
+again after capture. Unknown telemetry or insufficient RAM skips parking. Windows
+uses `GlobalMemoryStatusEx`, Linux uses `MemAvailable`; these are host-level samples,
+not a reservation or enforcement of container/job memory limits. An 8 GiB budget
+is a cap, not a recommendation for every machine.
+
+The shared snapshot core validates all layers and checkpoints before applying any
+state. Invalid entries are discarded; transfer/synchronization failure is fatal
+rather than permission to continue with partial state. Indexer spare keys and the
+moving spare row are preserved, including checkpoint rewinds.
+The engine log reports parking, restoration, bytes, evictions, individual snapshot
+sizes and K/V bytes reused during capture. `STRATA_SNAPSHOT_FULL_CAPTURE=1` disables
+retention for diagnostic comparisons. Snapshots are not
+persisted across restarts.
+
+**Current limits (v1):** one request at a time, and one conversation cached at a time (switching between two chats
+re-reads the other one unless the opt-in cache above is enabled); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
 seed** are honored per request (OpenAI and Anthropic fields); with the default adaptive expert tier a sampled result
 is not reproducible run to run - for seed-reproducible output add `--adapt-every 100000` (static residency) to the
 engine arguments. The run config's optional `sampling` block sets the defaults for requests that leave the fields out
