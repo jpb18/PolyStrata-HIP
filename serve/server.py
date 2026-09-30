@@ -30,6 +30,7 @@ import ctypes
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1985,6 +1986,15 @@ def main() -> int:
     if a.open:
         import webbrowser
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
+    # #96: docker stop sends SIGTERM, which Python ignores by default, so the container's PID 1 would be killed after
+    # the grace period with the engine still running. SIGTERM takes Ctrl+C's path below (QUIT to the engine).
+    # SIGINT keeps Python's own handler, so Ctrl+C and a second Ctrl+C work as before.
+    def on_sigterm(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, on_sigterm)
+    except (ValueError, OSError, AttributeError):         # not the main thread
+        pass
     try:
         while True:
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
