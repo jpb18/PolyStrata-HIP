@@ -1923,6 +1923,17 @@ int main(int argc, char** argv) {
         pio.max_inflight = (uint32_t) o.ple_inflight;
         pio.cache_rows = (uint64_t) o.ple_row_cache;
         pio.io_thread = !o.ple_sync_submit;
+        // Keep the SSD awake while rows are being asked for (PleReader::set_keepalive): some SSDs stall the first
+        // reads 50-150 ms after ~250 ms without a command.  STRATA_SSD_KEEPALIVE = ms without a read before one
+        // page is read anyway (default 100, 0 = off), STRATA_SSD_KEEPALIVE_WINDOW = seconds after the last row
+        // request that this goes on (default 60; then the SSD may sleep until the next request).
+        {
+            const char* ka = std::getenv("STRATA_SSD_KEEPALIVE");
+            const char* kw = std::getenv("STRATA_SSD_KEEPALIVE_WINDOW");
+            pio.keepalive_ms = ka != nullptr && *ka ? std::clamp(std::atof(ka), 0.0, 10000.0) : 100.0;
+            pio.keepalive_window_s = kw != nullptr && *kw ? std::clamp(std::atof(kw), 1.0, 86400.0) : 60.0;
+            if (pio.mode != strata::kernels::PleIo::Direct || !pio.io_thread) pio.keepalive_ms = 0;
+        }
         if (!ple_table.open(o.ple_gguf, err, pio)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -1931,6 +1942,12 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: PLE table %s (--ple-io ram) in %.1f s\n",
                          ple_table.locked() ? "locked in RAM" : "loaded (not locked)",
                          std::chrono::duration<double>(Clock::now() - tpl).count());
+        if (pio.keepalive_ms > 0)
+            std::fprintf(stderr, "strata generate: the SSD is kept awake while rows are read: one page of the table after "
+                                 "%.0f ms without a read, until %.0f s after the last request "
+                                 "(STRATA_SSD_KEEPALIVE=0 turns it off)\n", pio.keepalive_ms, pio.keepalive_window_s);
+        else if (pio.mode == strata::kernels::PleIo::Direct)
+            std::fprintf(stderr, "strata generate: SSD keep-alive off: the SSD may fall asleep between reads\n");
         const strata::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
         const strata::core::WeightRef* wv = wt.find("blk.1.ple_value.weight");
         const strata::core::WeightRef* wnk = wt.find("blk.1.ple_norm_key.weight");

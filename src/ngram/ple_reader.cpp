@@ -2,6 +2,7 @@
 #include "strata/ngram/ple_reader.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -79,6 +80,7 @@ struct Job {
     uint32_t ticket = 0;
     std::vector<Use> uses;
     double issued_us = 0;
+    bool keepalive = false;// no rows and no ticket: it only keeps the SSD awake (`set_keepalive`)
 };
 
 struct TicketState {
@@ -108,6 +110,12 @@ struct PleReader::Impl {
     size_t ring_pos = 0;
     double delay_us = 0;
     std::string error;
+    // the keep-alive (`set_keepalive`), steady-clock microseconds; `keep_us` 0 = off
+    double keep_us = 0;
+    double keep_window_us = 0;
+    double last_issue_us = 0;             // the last `issue`
+    double last_read_us = 0;              // the last read that went out, rows or keep-alive
+    uint64_t rng = 0x9E3779B97F4A7C15ull;
 
     bool threaded = false;
     bool stop = false;
@@ -141,7 +149,14 @@ struct PleReader::Impl {
             queue.pop_front();
             Job& j = inflight[s];
             j.issued_us = now_us();
-            if (!file.submit(j.offset, slot_buf(s), j.length, s, error)) {
+            std::string kerr;             // a keep-alive read that cannot go out must not fail the reader
+            if (!file.submit(j.offset, slot_buf(s), j.length, s, j.keepalive ? kerr : error)) {
+                if (j.keepalive) {                 // no more of them: the SSD may sleep as before
+                    keep_us = 0;
+                    j.keepalive = false;
+                    free_slots.push_back(s);
+                    continue;
+                }
                 j.uses.clear();
                 auto it = tickets.find(j.ticket);
                 if (it != tickets.end() && it->second.pending > 0) --it->second.pending;
@@ -149,10 +164,33 @@ struct PleReader::Impl {
                 cancel_queued();
                 return false;
             }
-            stats.submit_us += now_us() - j.issued_us;
-            ++stats.reads;
+            last_read_us = j.issued_us;
+            if (!j.keepalive) {                    // a keep-alive read counts when it completes (`finish`)
+                stats.submit_us += now_us() - j.issued_us;
+                ++stats.reads;
+            }
         }
         return true;
+    }
+
+    /// When the next keep-alive read is due, or < 0 when none is: it is off, the reader failed, or no rows
+    /// were asked for within the window (then the SSD may sleep; the next `issue` re-arms it).
+    double keepalive_due(double now) const {
+        if (keep_us <= 0 || !error.empty() || last_issue_us <= 0 || now - last_issue_us > keep_window_us) return -1;
+        return last_read_us + keep_us;
+    }
+
+    /// One page of the table, a different one each time, so the SSD really reads (not its controller's buffer).
+    void queue_keepalive() {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        const uint64_t first = table_offset / PAGE, end = (table_offset + n_rows * (uint64_t) ROW_BYTES) / PAGE;
+        Job j;
+        j.offset = (first + (end > first ? rng % (end - first) : 0)) * PAGE;
+        j.length = PAGE;
+        j.keepalive = true;
+        queue.push_back(std::move(j));
     }
 
     bool finish(const Completion& c) {
@@ -163,6 +201,17 @@ struct PleReader::Impl {
             return false;
         }
         Job& j = inflight[s];
+        if (j.keepalive) {                         // no rows: it counts once it is done, with how long it took;
+            if (c.ok) {                            // a failed one turns the keep-alive off, not the reader
+                ++stats.keepalive_reads;
+                stats.keepalive_us_max = std::max(stats.keepalive_us_max, now_us() - j.issued_us);
+            } else {
+                keep_us = 0;
+            }
+            j.keepalive = false;
+            free_slots.push_back(s);
+            return error.empty() ? pump() : true;
+        }
         if (!c.ok) {
             error = "PleReader: a table read failed";
             cancel_queued();
@@ -246,7 +295,14 @@ struct PleReader::Impl {
     void worker_loop() {
         std::unique_lock<std::mutex> lk(mu);
         for (;;) {
-            cv_work.wait(lk, [&] { return stop || !queue.empty() || busy(); });
+            // Idle: wait for work. While rows are being asked for, the wait ends in time for a keep-alive read.
+            while (!(stop || !queue.empty() || busy())) {
+                const double now = now_us();
+                const double due = keepalive_due(now);
+                if (due < 0) cv_work.wait(lk);
+                else if (now >= due) queue_keepalive();
+                else cv_work.wait_for(lk, std::chrono::microseconds(std::max<int64_t>(1000, (int64_t) (due - now))));
+            }
             if (stop && !busy()) break;
             if (error.empty() && !pump() && error.empty()) error = "PleReader: submit failed";
             if (!delayed.empty() && !release_delayed() && error.empty()) error = "PleReader: read failed";
@@ -293,6 +349,10 @@ bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_
     for (uint32_t s = max_inflight; s-- > 0;) impl_->free_slots.push_back(s);
     impl_->cache.init(cache_rows);
     impl_->error.clear();
+    impl_->keep_us = 0;
+    impl_->last_issue_us = impl_->last_read_us = 0;
+    impl_->rng = 0x9E3779B97F4A7C15ull ^ (uint64_t) now_us();
+    if (impl_->rng == 0) impl_->rng = 1;
     reset_stats();
     impl_->stop = false;
     impl_->threaded = io_thread;
@@ -346,6 +406,8 @@ void PleReader::close() {
     m.cache.init(0);
     m.threaded = false;
     m.stop = false;
+    m.keep_us = 0;
+    m.last_issue_us = m.last_read_us = 0;
 }
 
 bool PleReader::is_open() const { return impl_->file.is_open(); }
@@ -356,6 +418,9 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
     if (m.threaded) lk.lock();
     const uint32_t id = m.next_ticket++;
     if (m.next_ticket == 0) m.next_ticket = 1;
+    const double now = now_us();
+    const bool rearm = m.keep_us > 0 && (m.last_issue_us <= 0 || now - m.last_issue_us > m.keep_window_us);
+    m.last_issue_us = now;
     TicketState& ts = m.tickets[id];
     std::unordered_map<uint64_t, size_t> by_page;     // aligned offset -> index in `jobs`
     std::vector<Job> jobs;
@@ -400,6 +465,8 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
         if (has_jobs) {
             m.cv_work.notify_one();
             m.file.wake();                         // in case the worker is blocked in the port
+        } else if (rearm) {
+            m.cv_work.notify_one();                // the keep-alive had lapsed: start it again
         }
     } else if (!m.pump() && m.error.empty()) {
         m.error = "PleReader: submit failed";
@@ -439,14 +506,33 @@ bool PleReader::collect(Ticket t, std::string& err) {
     return true;
 }
 
+void PleReader::set_keepalive(double period_ms, double window_s) {
+    Impl& m = *impl_;
+    {
+        std::lock_guard<std::mutex> lk(m.mu);
+        m.keep_us = m.threaded && period_ms > 0 ? period_ms * 1000.0 : 0.0;
+        m.keep_window_us = window_s > 0 ? window_s * 1e6 : 0.0;
+    }
+    m.cv_work.notify_all();
+}
+
 void PleReader::set_injected_delay_us(double delay_us) {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->delay_us = delay_us < 0 ? 0 : delay_us;
 }
 const ReaderStats& PleReader::stats() const { return impl_->stats; }
+ReaderStats PleReader::snapshot() const {
+    Impl& m = *impl_;
+    std::unique_lock<std::mutex> lk(m.mu, std::defer_lock);
+    if (m.threaded) lk.lock();
+    return m.stats;
+}
 void PleReader::reset_stats() {
-    impl_->stats = ReaderStats{};
-    impl_->ring_pos = 0;
+    Impl& m = *impl_;
+    std::unique_lock<std::mutex> lk(m.mu, std::defer_lock);
+    if (m.threaded) lk.lock();                     // the worker may be counting a keep-alive read
+    m.stats = ReaderStats{};
+    m.ring_pos = 0;
 }
 uint64_t PleReader::cache_capacity() const { return impl_->cache.sets * WAYS; }
 uint64_t PleReader::cache_size() const { return impl_->cache.used; }

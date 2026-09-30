@@ -37,6 +37,8 @@ struct ReaderStats {
     double submit_us = 0;         ///< time spent inside the read submission call (non-zero = it blocks)
     double read_us_sum = 0;       ///< sum of per-read latencies (issue to completion)
     uint64_t late_injected = 0;   ///< reads delayed by fault injection
+    uint64_t keepalive_reads = 0; ///< pages read only to keep the SSD awake (not in `reads`, `bytes` or latencies)
+    double keepalive_us_max = 0;  ///< the slowest of them
     std::vector<float> read_us;   ///< last <= 65,536 read latencies, for percentiles
     double percentile(double q) const;
 };
@@ -68,12 +70,22 @@ public:
     /// Block until every row of the ticket is in `out_raw`. Returns false on an I/O error (message in `err`).
     bool collect(Ticket t, std::string& err);
 
+    /// Keep the SSD awake while the table is in use (io_thread mode only; call after `open`): when no read has
+    /// gone out for `period_ms`, the worker reads one page of the table, until `window_s` after the last `issue`.
+    /// Some SSDs drop into a power state after ~250 ms without a command and stall the next reads 50-150 ms
+    /// (a WD_BLACK SN7100 on Windows 11; the NVMe idle timeouts of the power plan did not change it), which in
+    /// decode happens after a few rounds whose rows all came from the row cache. 0 turns it off (the reader's
+    /// default; generate turns it on, see STRATA_SSD_KEEPALIVE). A keep-alive read that fails turns it off.
+    void set_keepalive(double period_ms, double window_s);
+
     /// Fault injection for tests and for the plan's P2 exit check: every read completes no earlier than
     /// `delay_us` after it was issued. 0 disables.
     void set_injected_delay_us(double delay_us);
 
-    /// Read with no ticket in flight (the worker updates these while reads are outstanding).
+    /// Read with no ticket in flight (the worker updates these while reads are outstanding; with the keep-alive
+    /// on it may also be counting a keep-alive read - `snapshot` takes a consistent copy).
     const ReaderStats& stats() const;
+    ReaderStats snapshot() const;
     void reset_stats();
     uint64_t cache_capacity() const;
     uint64_t cache_size() const;

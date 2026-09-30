@@ -113,6 +113,11 @@ struct PleIoOptions {
     /// Mmap mode only (`--ple-io ram`): lock the whole mapped table in RAM at open, so no SSD read ever sits on
     /// the prompt or token path. Needs RAM for the full table. POSIX only (mlock); `locked()` reports the outcome.
     bool lock = false;
+    /// Direct mode with the I/O worker only: keep the SSD awake while rows are asked for - one page of the table
+    /// after this long without a read (0 = off), until `keepalive_window_s` after the last request for rows
+    /// (see PleReader::set_keepalive).
+    double keepalive_ms = 0;
+    double keepalive_window_s = 60;
 };
 
 /// The PLE table.  Held by pointer-to-impl so this header does not drag `<windows.h>` into every

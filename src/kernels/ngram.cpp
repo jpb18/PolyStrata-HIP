@@ -198,6 +198,7 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
             close();
             return false;
         }
+        impl_->reader.set_keepalive(io.keepalive_ms, io.keepalive_window_s);
         impl_->n_rows = n_rows;
     }
     if (io.mode == PleIo::Mmap && io.lock && impl_->data != nullptr) {
@@ -317,15 +318,18 @@ void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_del
 
 std::string PleTable::io_report() const {
     if (impl_->mode != PleIo::Direct || !impl_->reader.is_open()) return {};
-    const strata::ngram::ReaderStats& s = impl_->reader.stats();
-    char buf[320];
-    std::snprintf(buf, sizeof buf,
+    const strata::ngram::ReaderStats s = impl_->reader.snapshot();
+    char buf[400];
+    int n = std::snprintf(buf, sizeof buf,
                   "ple io: %llu rows, %.1f%% row-cache hits, %llu SSD reads (%.1f MB), read p50 %.0f us p99 %.0f us, "
                   "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu rows",
                   (unsigned long long) s.requests, s.requests ? 100.0 * (double) s.cache_hits / (double) s.requests : 0.0,
                   (unsigned long long) s.reads, (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99),
                   s.wait_us / 1000.0, s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),
                   (unsigned long long) impl_->reader.cache_capacity());
+    if (s.keepalive_reads > 0 && n > 0 && n < (int) sizeof buf)
+        std::snprintf(buf + n, sizeof buf - (size_t) n, ", SSD kept awake by %llu reads (slowest %.1f ms)",
+                      (unsigned long long) s.keepalive_reads, s.keepalive_us_max / 1000.0);
     return buf;
 }
 
