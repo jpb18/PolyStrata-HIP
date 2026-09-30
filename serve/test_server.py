@@ -281,7 +281,7 @@ class UnfinishedToolCall(unittest.TestCase):
                         self.assertEqual(len(calls), 1)
                         self.assertEqual(json.loads(streamed), {"path": "notes.txt", "content": content})
 
-    def answers(self, script):
+    def answers(self, script, max_tokens=500):
         """(finish reason, the call's arguments) from OpenAI and Anthropic, whole and streamed, for the model's `script`."""
         tok = ByteTokenizer()
         svc = Service(MockEngine(tok, script, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
@@ -294,7 +294,7 @@ class UnfinishedToolCall(unittest.TestCase):
         try:
             for api, path in (("openai", "/v1/chat/completions"), ("anthropic", "/v1/messages")):
                 for stream in (False, True):
-                    body = {"model": "x", "max_tokens": 500, "stream": stream, "tools": tools[api],
+                    body = {"model": "x", "max_tokens": max_tokens, "stream": stream, "tools": tools[api],
                             "messages": [{"role": "user", "content": "save my notes"}]}
                     req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={
                         "Content-Type": "application/json", "anthropic-version": "2023-06-01"})
@@ -325,9 +325,32 @@ class UnfinishedToolCall(unittest.TestCase):
     def test_a_cut_call(self):
         cut = '{"path":"notes.txt","content":"first half of the fi'
         self.assertEqual(self.answers(self.CUT), {
-            ("openai", False): ("stop", [cut]), ("openai", True): ("stop", cut),
-            ("anthropic", False): ("end_turn", []),                      # no input to give: the call is left out
+            ("openai", False): ("stop", []), ("openai", True): ("stop", cut),    # whole answers leave the cut
+            ("anthropic", False): ("end_turn", []),                      # call out: it has no arguments to give
             ("anthropic", True): ("end_turn", cut)})
+
+    def test_a_call_cut_at_the_token_limit(self):
+        """The same cut by max_tokens: "length" / "max_tokens", and the whole (non-streamed) answers leave the call
+        out in both APIs."""
+        a = self.answers(self.CUT + "rest of the file, never reached" * 40, max_tokens=len(self.CUT))
+        self.assertEqual((a["openai", False], a["anthropic", False]), (("length", []), ("max_tokens", [])))
+        self.assertEqual((a["openai", True][0], a["anthropic", True][0]), ("length", "max_tokens"))
+
+    def test_collect_keeps_calls_whose_arguments_parse(self):
+        from serve.server import openai_collect
+
+        def chunk(delta, finish=None):
+            return {"id": "c", "created": 1, "model": "m", "usage": {},
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        whole = {"index": 0, "id": "a", "type": "function", "function": {"name": "f", "arguments": '{"x": 1}'}}
+        cut = {"index": 1, "id": "b", "type": "function", "function": {"name": "g", "arguments": '{"y": "ha'}}
+        for finish, want in (("stop", ["a"]), ("length", ["a"]), ("tool_calls", ["a", "b"])):
+            with self.subTest(finish=finish):
+                msg = openai_collect([chunk({"tool_calls": [whole]}), chunk({"tool_calls": [cut]}),
+                                      chunk({}, finish)])["choices"][0]["message"]
+                self.assertEqual([c["id"] for c in msg["tool_calls"]], want)
+        msg = openai_collect([chunk({"tool_calls": [cut]}), chunk({}, "stop")])["choices"][0]["message"]
+        self.assertNotIn("tool_calls", msg)
 
     def test_a_whole_call(self):
         whole = {"path": "notes.txt", "content": "all of it"}

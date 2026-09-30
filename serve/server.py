@@ -1280,6 +1280,14 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
             yield last
 
 
+def _is_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
+
+
 def openai_collect(chunks) -> dict:
     content, reasoning, by_index, last, mcp = [], [], {}, None, []
     for c in chunks:
@@ -1299,6 +1307,8 @@ def openai_collect(chunks) -> dict:
             cur["function"]["arguments"] += fn.get("arguments") or ""
         last = c
     calls = [by_index[i] for i in sorted(by_index)]
+    if last["choices"][0]["finish_reason"] != "tool_calls":
+        calls = [c for c in calls if _is_json(c["function"]["arguments"])]   # a call the output ended inside (#211)
     msg = {"role": "assistant", "content": "".join(content) or None}
     if "".join(reasoning):
         msg["reasoning_content"] = "".join(reasoning)
