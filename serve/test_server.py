@@ -1070,5 +1070,86 @@ class SharingTheGpu(unittest.TestCase):
         self.assertEqual((self.svc.idle_unload_s, self.svc.min_free_vram_mib, self.svc.before_load), (0, 0, None))
         self.assertEqual(self.req("/health")[1]["loaded"], True)
 
+
+class StatusHandover(unittest.TestCase):
+    """#266: a stream aborted mid-way and the next request, which was waiting for the fifo.  The aborted request's
+    status/history block ran after the fifo was released, so the waiting request could start in that gap: the old
+    request then recorded the NEW request's status as its own, set busy=False and popped `tail`, and the new request
+    crashed in _note (KeyError 'tail').  The fifo below lets the waiting request run to its first token as soon as
+    it is released, before the releasing thread goes on - the worst case of that gap, every time."""
+
+    def test_abort_then_the_next_request(self):
+        tok = ByteTokenizer()
+        second_running = threading.Event()
+
+        class Engine(MockEngine):
+            calls = 0
+
+            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+                Engine.calls += 1
+                me = Engine.calls
+                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+                    if me == 2 and i == 2:
+                        second_running.set()        # the second request has its status and two tokens noted
+                    yield t
+
+        class SlowRelease:
+            """A Lock whose release waits (briefly) until the thread it let in has started generating."""
+
+            def __init__(self):
+                self.lock, self.armed = threading.Lock(), False
+
+            def acquire(self, blocking=True):
+                return self.lock.acquire(blocking)
+
+            def __enter__(self):
+                self.lock.acquire()
+
+            def __exit__(self, *exc):
+                self.lock.release()
+                if self.armed:
+                    self.armed = False
+                    second_running.wait(5)
+
+            def release(self):
+                self.lock.release()
+
+        svc = Service(Engine(tok, "</think>\n\n" + "y" * 40, max_context=CTX), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.fifo = SlowRelease()
+        ids = tok.encode("hi")
+        first = svc.run(ids, True, None, 30, {}, threading.Event())
+        for _ in range(5):
+            next(first)                                 # mid-answer
+        out, errors = [], []
+
+        def second():
+            try:
+                out.extend(svc.run(ids, True, None, 20, {}, threading.Event()))
+            except Exception as e:                      # noqa: BLE001 - the crash this test is about
+                errors.append(e)
+
+        waiter = threading.Thread(target=second)
+        waiter.start()
+        deadline = time.time() + 5
+        while svc.status.get("queued") != 1 and time.time() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(svc.status.get("queued"), 1, "the second request never queued")
+        svc.fifo.armed = True
+        first.close()                                   # the client went away: GeneratorExit in the first request
+        waiter.join(10)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(out[-1][0], "done")
+        self.assertEqual(out[-1][1]["completion_tokens"], 20)
+        rows = list(svc.history)
+        self.assertEqual([r["finish"] for r in rows], ["disconnect", "length"])
+        self.assertTrue(0 < rows[0]["output_tokens"] < 30, rows)     # where the first one stopped, not the second's
+        self.assertEqual(rows[1]["output_tokens"], 20)
+        self.assertEqual(svc.totals["requests"], 2)
+        self.assertEqual(svc.totals["output_tokens"], rows[0]["output_tokens"] + 20)
+        self.assertFalse(svc.status["busy"])
+        self.assertNotIn("tail", svc.status)
+
 if __name__ == "__main__":
     unittest.main()

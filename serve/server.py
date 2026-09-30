@@ -955,7 +955,7 @@ class Service:
                     s["phase"], s["tool"] = f"writing a tool call: {ev.call.name}", ev.call.name
                 elif ev.kind == "tool_call":
                     s["phase"] = "tool call complete"
-                s["tail"] = (s["tail"] + (ev.text or ""))[-600:]
+                s["tail"] = ((s.get("tail") or "") + (ev.text or ""))[-600:]
 
     def _progress(self, last_print, every=1.0):
         """A progress line in the server window every `every` seconds while a request runs."""
@@ -993,101 +993,108 @@ class Service:
             self.status["queued"] += 1
         try:
             with self.fifo:
-                with self.status_lock:
-                    self.status["queued"] -= 1
-                # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
-                self.ensure_loaded()
-                with self.status_lock:
-                    self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids), generated=0,
-                                       started=time.time(), first_token=None, tool=None, tail="", max_tokens=max_new)
-                    self.last_request_at = time.time()
-                    self.rate.clear()               # the previous request's samples must not leak into this one
-                before = getattr(self.engine, "last", None)
-                last_print = time.time()
-                gen = self.engine.generate(ids, max_new, sampling, cancel, embeddings=emb) if emb else \
-                    self.engine.generate(ids, max_new, sampling, cancel)
                 try:
-                    for t in gen:
-                        if t is None:                   # heartbeat while the engine is quiet
-                            last_print = self._progress(last_print)
-                            yield "ping", None
-                            continue
-                        n += 1
-                        if t in self.stop_ids:
-                            finish = "stop"
+                    with self.status_lock:
+                        self.status["queued"] -= 1
+                    # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
+                    self.ensure_loaded()
+                    with self.status_lock:
+                        self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
+                                           generated=0, started=time.time(), first_token=None, tool=None, tail="",
+                                           max_tokens=max_new)
+                        self.last_request_at = time.time()
+                        self.rate.clear()               # the previous request's samples must not leak into this one
+                    before = getattr(self.engine, "last", None)
+                    last_print = time.time()
+                    gen = self.engine.generate(ids, max_new, sampling, cancel, embeddings=emb) if emb else \
+                        self.engine.generate(ids, max_new, sampling, cancel)
+                    try:
+                        for t in gen:
+                            if t is None:                   # heartbeat while the engine is quiet
+                                last_print = self._progress(last_print)
+                                yield "ping", None
+                                continue
+                            n += 1
+                            if t in self.stop_ids:
+                                finish = "stop"
+                                raw_ids.append(t)
+                                break
                             raw_ids.append(t)
-                            break
-                        raw_ids.append(t)
-                        evs = parser.feed(detok.push(t))
-                        self._note(n, evs)
-                        last_print = self._progress(last_print)
-                        for ev in evs:
-                            yield "event", ev
-                    if cancel.is_set():
-                        finish = "cancel"
-                except EngineDied as e:
-                    finish = "error"
-                    note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
-                    print(f"[strata] {e}. {note} The next request starts the engine again."
-                          f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
-                          flush=True)
-                    raise
-                except ValueError as e:                 # the engine's ERR line (it may have ended after it)
-                    finish = "error"
-                    print(f"[strata] the engine reported an error: {e}", flush=True)
+                            evs = parser.feed(detok.push(t))
+                            self._note(n, evs)
+                            last_print = self._progress(last_print)
+                            for ev in evs:
+                                yield "event", ev
+                        if cancel.is_set():
+                            finish = "cancel"
+                    except EngineDied as e:
+                        finish = "error"
+                        note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
+                        log = getattr(self.engine, "log_path", None)
+                        print(f"[strata] {e}. {note} The next request starts the engine again."
+                              f"{' Its log: ' + log if log else ''}", flush=True)
+                        raise
+                    except ValueError as e:                 # the engine's ERR line (it may have ended after it)
+                        finish = "error"
+                        print(f"[strata] the engine reported an error: {e}", flush=True)
+                        raise
+                    finally:
+                        gen.close()                     # STOP+drain to THIS request's DONE while still holding the
+                        #                                 fifo, so a stop-token break can't leave the shared engine
+                        #                                 queue mid-drain for the next request to read as its own DONE
+                except GeneratorExit:                   # the client disconnected mid-stream
+                    finish = "disconnect"
                     raise
                 finally:
-                    gen.close()                         # STOP+drain to THIS request's DONE while still holding the
-                    #                                     fifo, so a stop-token break can't leave the shared engine
-                    #                                     queue mid-drain for the next request to read as its own DONE
-        except GeneratorExit:                           # the client disconnected mid-stream
-            finish = "disconnect"
-            raise
+                    # #266: settle this request's status, history and totals while still holding the fifo: once
+                    # it is released the next request sets its own status, which this must not record or clear
+                    with self.status_lock:
+                        if self.status.get("busy"):
+                            # only this request's DONE counts: same object means no DONE arrived (death, error,
+                            # disconnect)
+                            last = dict(getattr(self.engine, "last", {}) or {}) \
+                                if getattr(self.engine, "last", None) is not engine_last0 else {}
+                            started = self.status.get("started", time.time())
+                            cvec = (getattr(self.engine, "info", {}) or {}).get("cvec", 0)
+                            loaded = str(cvec) not in ("0", "", "None")
+                            hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
+                            self.history.append({
+                                "projection": (sampling or {}).get("experimental_speed_projection") is not False
+                                if loaded else None,
+                                "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
+                                "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
+                                "engine_generated": last.get("generated"),
+                                "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
+                                "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
+                                if n and last.get("generated") and last.get("decode_ms") else None,
+                                "hit_rate": hit_rate})
+                            t = self.totals
+                            t["requests"] += 1
+                            t["prompt_tokens"] += len(ids)
+                            t["reused"] += last.get("reused") or 0
+                            t["output_tokens"] += n
+                            t["prompt_ms"] += last.get("prompt_ms") or 0.0
+                            t["decode_ms"] += last.get("decode_ms") or 0.0
+                            fresh = getattr(self.engine, "last", None)
+                            if fresh is not None and fresh is not before:      # the engine's clock for THIS request
+                                timings = request_timings(len(ids), n, last)
+                                self.last_timings = dict(timings, at=int(time.time())) if timings else None
+                            self.last_request_at = time.time()
+                            now = time.time()
+                            el = now - self.status.get("started", now)
+                            ft = self.status.get("first_token")
+                            rate = n / max(1e-6, now - ft) if ft else 0.0
+                            hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
+                            print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
+                                  f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
+                            if os.environ.get("STRATA_DEBUG") and raw_ids:
+                                print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
+                        self.status["busy"] = False
+                        self.status.pop("tail", None)            # #212: the answer's end is not kept once it is done
+                        self.status.pop("tool", None)
         finally:
             if emb:
                 Path(emb).unlink(missing_ok=True)
-            with self.status_lock:
-                if self.status.get("busy"):
-                    # only this request's DONE counts: same object means no DONE arrived (death, error, disconnect)
-                    last = dict(getattr(self.engine, "last", {}) or {}) \
-                        if getattr(self.engine, "last", None) is not engine_last0 else {}
-                    started = self.status.get("started", time.time())
-                    loaded = str((getattr(self.engine, "info", {}) or {}).get("cvec", 0)) not in ("0", "", "None")
-                    hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
-                    self.history.append({
-                        "projection": (sampling or {}).get("experimental_speed_projection") is not False
-                        if loaded else None,
-                        "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
-                        "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
-                        "engine_generated": last.get("generated"),
-                        "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
-                        "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
-                        if n and last.get("generated") and last.get("decode_ms") else None,
-                        "hit_rate": hit_rate})
-                    t = self.totals
-                    t["requests"] += 1
-                    t["prompt_tokens"] += len(ids)
-                    t["reused"] += last.get("reused") or 0
-                    t["output_tokens"] += n
-                    t["prompt_ms"] += last.get("prompt_ms") or 0.0
-                    t["decode_ms"] += last.get("decode_ms") or 0.0
-                    fresh = getattr(self.engine, "last", None)
-                    if fresh is not None and fresh is not before:      # the engine's clock for THIS request
-                        timings = request_timings(len(ids), n, last)
-                        self.last_timings = dict(timings, at=int(time.time())) if timings else None
-                    self.last_request_at = time.time()
-                    now = time.time()
-                    el = now - self.status.get("started", now)
-                    ft = self.status.get("first_token")
-                    rate = n / max(1e-6, now - ft) if ft else 0.0
-                    hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
-                    print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
-                          f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
-                    if os.environ.get("STRATA_DEBUG") and raw_ids:
-                        print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
-                self.status["busy"] = False
-                self.status.pop("tail", None)            # #212: the answer's end is not kept once it is done
-                self.status.pop("tool", None)
         for ev in parser.finish():
             yield "event", ev
         yield "done", {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
