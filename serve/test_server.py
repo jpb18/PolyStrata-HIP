@@ -196,6 +196,61 @@ class ImageMarkers(unittest.TestCase):
             svc.embeddings.path.unlink(missing_ok=True)
 
 
+class StatusNeedsTheKey(unittest.TestCase):
+    """#212: /status shows the end of the answer being written, so it needs the key like /v1/*."""
+
+    def test_status(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.api_key = "k3y"
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}/status"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(base, timeout=10)
+            self.assertEqual(e.exception.code, 401)
+            e.exception.close()
+            req = urllib.request.Request(base, headers={"Authorization": "Bearer k3y"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                self.assertEqual(r.status, 200)
+                self.assertNotIn("tail", json.loads(r.read()))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class ToolCallTerminators(unittest.TestCase):
+    """#210: a value that contains </parameter> or </tool_call> (a file documenting the call format) is kept whole."""
+    CONTENT = ("Close each value with </parameter> and the call with </function></tool_call>.\n"
+               "<parameter=x>\nnot a parameter\n</parameter>\nend")
+    SCHEMA = [{"name": "write", "parameters": {"properties": {"path": {"type": "string"},
+                                                              "content": {"type": "string"}}}}]
+
+    def run_parser(self, stream_tools, step):
+        from serve.frontend import OutputParser
+        text = ("</think>\n\n<tool_call>\n<function=write>\n<parameter=path>\ndoc.md\n</parameter>\n"
+                f"<parameter=content>\n{self.CONTENT}\n</parameter>\n</function>\n</tool_call>")
+        p = OutputParser(thinking=True, tools=self.SCHEMA, stream_tools=stream_tools)
+        evs = []
+        for i in range(0, len(text), step):
+            evs += p.feed(text[i:i + step])
+        evs += p.finish()
+        return evs
+
+    def test_values_keep_the_terminators(self):
+        for stream_tools in (False, True):
+            for step in (1, 7, 10_000):
+                with self.subTest(stream_tools=stream_tools, step=step):
+                    evs = self.run_parser(stream_tools, step)
+                    calls = [e.call for e in evs if e.kind == "tool_call"]
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0].arguments, {"path": "doc.md", "content": self.CONTENT})
+                    self.assertFalse([e for e in evs if e.kind == "content" and e.text.strip()])
+                    if stream_tools:
+                        streamed = "".join(e.text for e in evs if e.kind == "tool_args")
+                        self.assertEqual(json.loads(streamed), {"path": "doc.md", "content": self.CONTENT})
+
+
 class ClientShapes(unittest.TestCase):
     """What real clients send: Claude Code posts /v1/messages?beta=true (issue #55) and puts hook context into the
     conversation as a mid-conversation system message (issue #56); some OpenAI clients send a late developer message."""
@@ -424,6 +479,41 @@ class LiveRate(unittest.TestCase):
     def metrics(self):
         with urllib.request.urlopen(self.base + "/metrics", timeout=10) as r:
             return json.loads(r.read())
+
+    def test_prefill_rate_excludes_cached_tokens(self):
+        import io
+        import queue
+        from types import SimpleNamespace
+        engine = StrataEngine.__new__(StrataEngine)
+        engine.proc = SimpleNamespace(stdin=io.StringIO())
+        engine.lines = queue.Queue()
+        engine.can_stop = False
+        engine.max_context = 262144
+        engine.prefill_tok_s_mean = 9999.0
+        engine.lines.put("PP 10000 12000 2000 1000.0")  # 8000 cached, 2000 newly read in two seconds
+        engine.lines.put("DONE 1 12000 4000 10 stop 0 0 8000")
+        gen = engine.generate([1], 1, {}, threading.Event())
+        self.assertIsNone(next(gen))
+        self.assertEqual(engine.progress, (10000, 12000))
+        self.assertEqual(engine.prefill_tok_s_mean, 1000.0)
+        self.svc.engine = engine
+        self.svc.status.update(busy=True, first_token=None)
+        self.assertEqual(self.metrics()["live"]["prefill_tok_s_mean"], 1000.0)
+        self.assertNotIn("prefill_tok_s", self.metrics()["live"])
+        self.assertEqual(self.svc._prefill_tok_s_mean(), 1000.0)
+        self.svc.status.update(first_token=time.time(), generated=1)
+        self.assertEqual(self.svc._prefill_tok_s_mean(), 0.0)
+        self.assertEqual(list(gen), [])
+        timings = request_timings(12000, 1, engine.last)
+        self.assertEqual(timings["prompt_per_second"], 1000.0)
+        engine.lines.put("PP 8000 12000")
+        engine.lines.put("DONE 0 12000 0 0 stop 0 0 12000")
+        gen = engine.generate([1], 1, {}, threading.Event())
+        next(gen)
+        self.assertIsNone(engine.prefill_tok_s_mean)
+        list(gen)
+        self.svc.status["busy"] = False
+        self.assertIsNone(self.metrics()["live"]["prefill_tok_s_mean"])
 
     def test_the_live_number_is_a_rate(self):
         live_samples, stop = [], threading.Event()
