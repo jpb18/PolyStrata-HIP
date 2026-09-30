@@ -1,5 +1,6 @@
 """Focused pack compatibility tests; run .venv/bin/python -m unittest discover -s tools -p test_iq_pack.py."""
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -51,9 +52,10 @@ class CompatibilityTests(unittest.TestCase):
             source = root / "model.gguf"
             values = np.linspace(-1, 1, 256, dtype=np.float32).reshape(2, 128)
             router = np.full((2, 128), 0.10001, dtype=np.float32)
-            names = ["blk.0.hc_attn_down.weight", "output_hc_up.weight", "blk.1.ple_key.weight",
+            names = ["blk.0.hc_attn_down.weight", "output_hc_up.weight",
                      "blk.0.ssm_alpha.weight", "blk.3.indexer.q_proj.weight", "blk.1.ple_value.weight"]
             write_gguf(source, [(n, values, Q.Q8_0) for n in names] + [
+                ("blk.1.ple_key.weight", values, Q.Q8_0),
                 ("blk.0.ffn_gate_inp.weight", router, Q.F32),
                 ("blk.0.attn_qkv.weight", values, Q.Q8_0),
                 ("per_layer_token_embd.weight", values, Q.Q8_0),
@@ -77,12 +79,16 @@ class CompatibilityTests(unittest.TestCase):
                 self.assertEqual(row[2], "4")
                 offset, size = int(row[3]), int(row[4])
                 np.testing.assert_array_equal(np.frombuffer(dense[offset:offset + size], dtype=np.uint16), expected)
-            native = rows["blk.0.attn_qkv.weight"]
-            self.assertEqual(native[4], "0")
-            self.assertEqual(native[9], "8")
+            for name in ["blk.0.attn_qkv.weight", "blk.1.ple_key.weight"]:   # a Q8_0 PLE key stays native
+                native = rows[name]
+                self.assertEqual(native[2], "0")
+                self.assertEqual(native[4], "0")
+                self.assertEqual(native[9], "8")
             self.assertNotIn("per_layer_token_embd.weight", rows)
             self.assertEqual(source.read_bytes(), before)
-            self.assertEqual(len(json.loads((root / "compat-bf16.json").read_text())["tensors"]), 7)
+            self.assertEqual(len(json.loads((root / "compat-bf16.json").read_text())["tensors"]), 6)
+            conv = json.loads((root / "conversions.json").read_text())
+            self.assertEqual(sorted(r["name"] for r in conv["tensors"]), sorted(names + ["blk.0.ffn_gate_inp.weight"]))
 
     def test_default_still_refuses_inexact_f32_router(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -114,6 +120,8 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_q2_ple_and_large_tensors_stay_native(self):
         self.assertFalse(iq_pack.needs_bf16("blk.1.ple_key.weight", "Q2_0"))
+        self.assertFalse(iq_pack.needs_bf16("blk.1.ple_key.weight", "Q8_0"))
+        self.assertTrue(iq_pack.needs_bf16("blk.1.ple_key.weight", "IQ3_XXS"))
         for name in ["blk.0.ffn_gate_exps.weight", "token_embd.weight", "output.weight",
                      "per_layer_token_embd.weight", "blk.0.attn_qkv.weight"]:
             self.assertFalse(iq_pack.needs_bf16(name, "IQ3_XXS"))
@@ -152,6 +160,132 @@ class CompatibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "truncated tensor"):
                 iq_pack.Model(first)
 
+
+
+def bits(u32):
+    return np.array(u32, dtype=np.uint32).view(np.float32)
+
+
+def pack_one(root, tensors, *flags):
+    """A one-file model of `tensors` packed into `root` (index only): (rc, printed, rows, dense, conversions)."""
+    source = root / "model.gguf"
+    write_gguf(source, tensors)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = iq_pack.index_standalone(source, root, iq_pack.Model(source), *flags)
+    if rc:
+        return rc, buf.getvalue(), None, None, None
+    _, rows = iq_pack.read_index(root / "index.txt")
+    conv = json.loads((root / "conversions.json").read_text())
+    return rc, buf.getvalue(), rows, (root / "dense.bin").read_bytes(), conv
+
+
+def stored(rows, dense, name, dtype):
+    row = rows[name]
+    return np.frombuffer(dense[int(row[3]):int(row[3]) + int(row[4])], dtype=dtype)
+
+
+class ConversionTests(unittest.TestCase):
+    """CS2: FORM decides the engine's form; exact F32->BF16 by default, rounding only with --compat-bf16, the PLE
+    conv F32 -> F16 by the loader (index kind 3), non-finite values refused, every conversion in conversions.json."""
+
+    def test_exact_f32_to_bf16_by_default(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            x = bits(np.arange(64, dtype=np.uint32).reshape(2, 32) << 16 | 0x3F000000)   # BF16 values held as F32
+            rc, log, rows, dense, conv = pack_one(Path(tmp), [("blk.0.hc_attn_inject.weight", x, Q.F32),
+                                                              ("blk.0.ssm_beta.weight", x, Q.F32),
+                                                              ("blk.0.ssm_norm.weight", x, Q.F32)])
+            self.assertEqual(rc, 0, log)
+            for name in ["blk.0.hc_attn_inject.weight", "blk.0.ssm_beta.weight"]:
+                self.assertEqual(rows[name][2], "4")
+                np.testing.assert_array_equal(stored(rows, dense, name, "<u2"), (x.view(np.uint32) >> 16).ravel())
+            self.assertEqual(rows["blk.0.ssm_norm.weight"][2], "2")               # F32 form: as stored
+            recs = {r["name"]: r for r in conv["tensors"]}
+            self.assertEqual(set(recs), {"blk.0.hc_attn_inject.weight", "blk.0.ssm_beta.weight"})
+            r = recs["blk.0.ssm_beta.weight"]
+            self.assertEqual((r["src_type"], r["dst_type"], r["exact"], r["max_abs_err"], r["shard"]),
+                             ("F32", "BF16", True, 0.0, "model.gguf"))
+            self.assertEqual(r["source_sha256"], hashlib.sha256(x.tobytes()).hexdigest())
+            self.assertEqual(conv["schema"], 1)
+            self.assertEqual(conv["source_shards"], [{"name": "model.gguf",
+                                                      "size": (Path(tmp) / "model.gguf").stat().st_size}])
+
+    def test_inexact_f32_rounds_only_with_compat(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            x = np.linspace(-1, 1, 64, dtype=np.float32).reshape(2, 32) + np.float32(1e-4)
+            rc, log, *_ = pack_one(Path(tmp), [("blk.0.hc_ffn_inject.weight", x, Q.F32)])
+            self.assertEqual(rc, 1)
+            self.assertIn("not BF16", log)
+            rc, log, rows, dense, conv = pack_one(Path(tmp), [("blk.0.hc_ffn_inject.weight", x, Q.F32)], True)
+            self.assertEqual(rc, 0, log)
+            got = stored(rows, dense, "blk.0.hc_ffn_inject.weight", "<u2")
+            np.testing.assert_array_equal(got, np.frombuffer(iq_pack.bf16_bytes(x.view(np.uint8).ravel(), "F32"),
+                                                             dtype="<u2"))
+            r = conv["tensors"][0]
+            back = (got.astype(np.uint32) << 16).view(np.float32)
+            self.assertFalse(r["exact"])
+            self.assertAlmostEqual(r["max_abs_err"], float(np.max(np.abs(back - x.ravel()))))
+            self.assertLessEqual(r["max_abs_err"], 2.0 ** -8)
+            self.assertIn("--compat-bf16", r["method"])
+
+    def test_non_finite_is_refused(self):
+        for bad in (0x7FC00000, 0x7F800000, 0xFF800000):          # NaN and +-Inf: their low 16 bits are zero too
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                x = bits([[0x3F800000] * 31 + [bad]] * 2)
+                (Path(tmp) / "dense.bin").write_bytes(b"previous pack")
+                for flags in ((), (True,)):
+                    rc, log, *_ = pack_one(Path(tmp), [("blk.0.ssm_alpha.weight", x, Q.F32)], *flags)
+                    self.assertEqual(rc, 1, (hex(bad), flags))
+                    self.assertIn("non-finite", log)
+                self.assertEqual((Path(tmp) / "dense.bin").read_bytes(), b"previous pack")
+                self.assertFalse((Path(tmp) / "dense.bin.tmp").exists())
+                rc, log, *_ = pack_one(Path(tmp), [("blk.1.ple_conv1d.weight", x, Q.F32)])
+                self.assertEqual(rc, 1)
+                self.assertIn("non-finite", log)
+
+    def test_ple_conv1d_f32_is_narrowed_by_the_loader(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            conv1d = np.random.default_rng(3).normal(0, 0.0062, (32, 4)).astype(np.float32)
+            rc, log, rows, dense, conv = pack_one(Path(tmp), [("blk.1.ple_conv1d.weight", conv1d, Q.F32)])
+            self.assertEqual(rc, 0, log)                                          # no --compat-bf16 needed
+            row = rows["blk.1.ple_conv1d.weight"]
+            self.assertEqual((row[2], row[4], row[6]), ("3", str(conv1d.nbytes), str(conv1d.nbytes // 2)))
+            np.testing.assert_array_equal(stored(rows, dense, "blk.1.ple_conv1d.weight", "<f4"), conv1d.ravel())
+            r = conv["tensors"][0]
+            self.assertEqual((r["src_type"], r["dst_type"]), ("F32", "F16"))
+            self.assertIn("index kind 3", r["method"])
+            h = conv1d.astype(np.float16).astype(np.float32)
+            self.assertEqual(r["exact"], bool(np.array_equal(h, conv1d)))
+            self.assertAlmostEqual(r["max_abs_err"], float(np.max(np.abs(h - conv1d))))
+            self.assertIn("narrowed to F16 by the loader", log)
+            # an F16 conv (the GSQ-RCO files) stays as it is: index kind 5, nothing recorded
+            rc, log, rows, dense, conv = pack_one(Path(tmp), [("blk.1.ple_conv1d.weight", conv1d, Q.F16)])
+            self.assertEqual((rows["blk.1.ple_conv1d.weight"][2], conv["tensors"]), ("5", []))
+            # beyond F16's range: refused, not saturated
+            rc, log, *_ = pack_one(Path(tmp), [("blk.1.ple_conv1d.weight", conv1d * 1e7, Q.F32)])
+            self.assertEqual(rc, 1)
+            self.assertIn("beyond F16", log)
+
+    def test_q8_0_projections_need_compat_and_are_recorded(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            v = np.random.default_rng(4).normal(0, 0.05, (4, 64)).astype(np.float32)
+            tensors = [("blk.1.ple_value.weight", v, Q.Q8_0), ("blk.2.hc_attn_up.weight", v, Q.Q8_0),
+                       ("blk.1.ple_key.weight", v, Q.Q8_0)]
+            rc, log, *_ = pack_one(Path(tmp), tensors)
+            self.assertEqual(rc, 1)
+            self.assertIn("use --compat-bf16", log)
+            self.assertNotIn("ple_key", log)                                      # the Q8_0 key stays native
+            rc, log, rows, dense, conv = pack_one(Path(tmp), tensors, True)
+            self.assertEqual(rc, 0, log)
+            self.assertEqual(rows["blk.1.ple_key.weight"][2], "0")
+            recs = {r["name"]: r for r in conv["tensors"]}
+            self.assertEqual(set(recs), {"blk.1.ple_value.weight", "blk.2.hc_attn_up.weight"})
+            deq = quants.dequantize(quants.quantize(v, Q.Q8_0), Q.Q8_0).ravel()
+            got = (stored(rows, dense, "blk.1.ple_value.weight", "<u2").astype(np.uint32) << 16).view(np.float32)
+            r = recs["blk.1.ple_value.weight"]
+            self.assertEqual((r["src_type"], r["dst_type"]), ("Q8_0", "BF16"))
+            self.assertAlmostEqual(r["max_abs_err"], float(np.max(np.abs(got - deq))))
+            self.assertEqual(conv["compat_bf16"], True)
 
 
 # ---- split artifacts: Unsloth's UD-Q4_K_XL in miniature.  Shard 1 holds the metadata and no tensor; shard 2 the

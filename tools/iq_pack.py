@@ -14,7 +14,10 @@ its GGUF form:
                        written last, so a pack without it is not finished
   index.txt            the table the engine loads.  Quantized dense tensors, token_embd and output are served
                        natively from the GGUF by the engine (--native): their rows carry shape only.
-  dense.bin            standalone: the BF16/F16/F32 tensors exactly as the GGUF stores them (index kinds 4/5/2).
+  dense.bin            standalone: the BF16/F16/F32 tensors in the form the engine reads them (index kinds 4/5/2;
+                       3 = F32 narrowed to F16 by the loader) - as the GGUF stores them, or converted (FORM below).
+  conversions.json     every tensor that was converted: shard, source/destination type, method, whether it was
+                       exact, the largest absolute error, the source bytes' sha256 (schema 1).
                        With --base: the base (Q2_0) pack's dense.bin, hard-linked - the float tensors are
                        byte-identical in all three model files (checked) - plus extra.bin for tensors that are
                        float here but quantized in the base pack (blk.1.ple_key).
@@ -27,11 +30,12 @@ may even fall inside a layer (Unsloth's UD-Q4_K_XL: layer 11's down in shard 2, 
 layer's shard column is per role, `gate,up,down` (an empty field = the --gguf shard), and only then is the file
 v4, so an older engine refuses it instead of misreading it.  Every other pack stays v3, byte for byte.  Router
 tensors stored as F32 whose values are exactly BF16 (Swift 1.5) are written as BF16, the form the engine's router
-takes; anything else is refused.
+takes (so are the other F32 tensors the engine reads as BF16, when exact); anything else is refused.
 
 For ordinary quants, --compat-bf16 dequantizes the small projections that the engine reads as BF16, using
 round-to-nearest-even. This introduces BF16 rounding; it does not reconstruct the original full-precision
-weights. Experts, native attention projections, token embeddings and the disk-backed PLE table stay unchanged.
+weights. Experts, native attention projections, token embeddings, a Q2_0/Q8_0 PLE key and the disk-backed PLE
+table stay unchanged.
 """
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -54,25 +59,60 @@ FLOAT = {"BF16", "F32", "F16"}
 ROUTERS = ("ffn_gate_inp.weight", "ffn_gate_inp_shexp.weight")
 NOT_IN_PACK = {"per_layer_token_embd.weight"}      # the 28.8 GB PLE table: read from its GGUF by the engine
 
-# These small projections are read as BF16 by the residual, router, GDN, QSA and PLE kernels.
-# GSQ-RCO files already store them that way. Ordinary GGUF quants (including OrcaRouter's IQ3_XXS)
-# quantize them too; --compat-bf16 explicitly dequantizes and rounds ONLY these tensors.
-BF16_PROJECTIONS = (
-    "hc_attn_down.weight", "hc_attn_up.weight", "hc_attn_inject.weight",
-    "hc_ffn_down.weight", "hc_ffn_up.weight", "hc_ffn_inject.weight",
-    "ssm_alpha.weight", "ssm_beta.weight", "indexer.q_proj.weight", "indexer.k_proj.weight",
-    "ple_value.weight", *ROUTERS,
-)
-BF16_OUTPUT = {"output_hc_down.weight", "output_hc_up.weight"}
+# The float form the engine reads each pack tensor in (name without `blk.N.`; from eddoursul/Strata's FORM table).
+# The residual, router, GDN, QSA and PLE kernels read these small projections as BF16, the norms as F32 and the PLE
+# conv as F16.  GSQ-RCO files already store them that way; other files do not (Unsloth's UD-Q4_K_XL: the routers,
+# SSM gates and injections F32, the hyper-connection projections and the PLE value Q8_0, the PLE conv F32), so a
+# tensor stored otherwise is converted, and every conversion is recorded in conversions.json:
+#   F32 -> BF16 whose values are exactly BF16 (low 16 bits zero)    exact, by default
+#   F32 with other values, F16 or a quantized type -> BF16          rounds (nearest-even): only with --compat-bf16
+#   F32 -> F16 (ple_conv1d)                                         index kind 3, narrowed by the loader (#255),
+#                                                                   by default - the kernel reads nothing else
+#   F16 / BF16 -> F32                                               exact widening, by default
+# Tensors not named here are written as stored (floats) or served from the GGUF (quantized), as before.
+FORM = {
+    "ffn_gate_inp.weight": "BF16", "ffn_gate_inp_shexp.weight": "BF16",
+    "hc_attn_down.weight": "BF16", "hc_attn_up.weight": "BF16", "hc_attn_inject.weight": "BF16",
+    "hc_ffn_down.weight": "BF16", "hc_ffn_up.weight": "BF16", "hc_ffn_inject.weight": "BF16",
+    "output_hc_down.weight": "BF16", "output_hc_up.weight": "BF16",
+    "indexer.k_proj.weight": "BF16", "indexer.q_proj.weight": "BF16",
+    "ssm_alpha.weight": "BF16", "ssm_beta.weight": "BF16",
+    "ple_key.weight": "BF16", "ple_value.weight": "BF16", "ple_conv1d.weight": "F16",
+    "attn_q_norm.weight": "F32", "attn_k_norm.weight": "F32", "hc_attn_norm.weight": "F32",
+    "hc_ffn_norm.weight": "F32", "output_hc_norm.weight": "F32", "indexer.q_norm.weight": "F32",
+    "indexer.k_norm.weight": "F32", "ple_norm_conv.weight": "F32", "ple_norm_key.weight": "F32",
+    "ple_norm_query.weight": "F32", "ssm_a": "F32", "ssm_conv1d.weight": "F32", "ssm_dt.bias": "F32",
+    "ssm_norm.weight": "F32",
+}
+# PLE key encodings left in the GGUF for the engine's native PLE key (Q2_0; Q8_0 in UD-Q4_K_XL).  Other quantized
+# keys take the BF16 path (--compat-bf16), as before.
+NATIVE_PLE_KEY = {"Q2_0", "Q8_0"}
+KIND = {"BF16": "4", "F16": "5", "F32": "2"}
+
+
+def form_of(name: str):
+    return FORM.get(re.sub(r"^blk\.\d+\.", "", name))
 
 
 def needs_bf16(name: str, type_name: str) -> bool:
-    if name in BF16_OUTPUT:
-        return True
-    if not name.startswith("blk."):
+    """Whether the engine reads `name` as BF16 from the pack (not natively from the GGUF)."""
+    if name == "blk.1.ple_key.weight" and type_name in NATIVE_PLE_KEY:
         return False
-    # The existing native PLE key supports Q2_0 only. Other key encodings use the BF16 path.
-    return name.endswith(BF16_PROJECTIONS) or (name == "blk.1.ple_key.weight" and type_name != "Q2_0")
+    return form_of(name) == "BF16"
+
+
+def dequantize(raw: np.ndarray, type_name: str) -> np.ndarray:
+    """The tensor's values as float32 (float types exactly, quantized ones through gguf-py's dequantizer)."""
+    if type_name == "F32":
+        return raw.view(np.float32)
+    if type_name == "F16":
+        return raw.view(np.float16).astype(np.float32)
+    if type_name == "BF16":
+        return (raw.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+    from _paths import add_gguf_py
+    add_gguf_py()
+    from gguf import GGMLQuantizationType as Q, quants
+    return quants.dequantize(raw, Q[type_name]).astype(np.float32).reshape(-1)
 
 
 def bf16_bytes(raw: np.ndarray, type_name: str) -> bytes:
@@ -84,6 +124,18 @@ def bf16_bytes(raw: np.ndarray, type_name: str) -> bytes:
         raise ValueError("cannot convert non-finite weights to BF16")
     # ggml's round-to-nearest-even conversion, including correct halfway rounding.
     return quants.quantize(values, Q.BF16).tobytes()
+
+
+def f16_values(values: np.ndarray, name: str) -> np.ndarray:
+    """values -> F16, nearest-even (numpy's conversion, which is the engine loader's f16_from_f32); refuses a value
+    that is not finite or overflows F16."""
+    if not np.isfinite(values).all():
+        raise ValueError(f"{name}: cannot convert non-finite weights to F16")
+    with np.errstate(over="ignore"):
+        h = values.astype(np.float16)
+    if not np.isfinite(h).all():
+        raise ValueError(f"{name}: a value is beyond F16's range, which the engine reads it as")
+    return h
 
 
 class Model:
@@ -171,59 +223,134 @@ def is_expert(name: str) -> bool:
     return name.startswith("blk.") and name.endswith(("_exps.weight",))
 
 
+def convert(name: str, type_name: str, raw: np.ndarray, compat_bf16: bool):
+    """The pack form of one tensor the engine reads from dense.bin: (kind, stored bytes, destination bytes,
+    record or None), or an error string.  `record` describes a conversion for conversions.json."""
+    form = form_of(name)
+    if form is None or form == type_name:
+        return KIND[type_name], raw.tobytes(), raw.nbytes, None
+    values = dequantize(raw, type_name)
+    rec = {"src_type": type_name, "dst_type": form}
+    if form == "BF16":
+        u = values.view(np.uint32) if type_name == "F32" else None
+        if u is not None and not np.count_nonzero(u & 0xFFFF):
+            if not np.isfinite(values).all():
+                return f"{name} is F32 with non-finite values; refused rather than converted"
+            data = (u >> 16).astype("<u2").tobytes()       # the exact BF16 values
+            rec.update(method="f32->bf16: the values are BF16's (low 16 bits zero)", exact=True, max_abs_err=0.0)
+            return "4", data, len(data), rec
+        if not compat_bf16:
+            what = "F32 with values that are not BF16" if type_name == "F32" else type_name
+            return f"{name} is {what}, but the engine requires BF16; use --compat-bf16 (rounds to nearest-even)"
+        data = bf16_bytes(raw, type_name)
+        got = (np.frombuffer(data, dtype="<u2").astype(np.uint32) << 16).view(np.float32)
+        rec.update(method="dequantize->bf16 round-to-nearest-even (--compat-bf16)" if type_name not in FLOAT else
+                   "%s->bf16 round-to-nearest-even (--compat-bf16)" % type_name.lower())
+        rec.update(exact=bool(np.array_equal(got, values)),
+                   max_abs_err=float(np.max(np.abs(got.astype(np.float64) - values))) if values.size else 0.0)
+        return "4", data, len(data), rec
+    if form == "F16":
+        if type_name != "F32" and not compat_bf16:
+            return f"{name} is {type_name}, but the engine reads F16; use --compat-bf16 (rounds to nearest-even)"
+        h = f16_values(values, name)
+        err = float(np.max(np.abs(h.astype(np.float64) - values))) if values.size else 0.0
+        rec.update(exact=bool(np.array_equal(h.astype(np.float32), values)), max_abs_err=err)
+        if type_name == "F32":
+            # The F32 bytes go into dense.bin as index kind 3 and the loader narrows them to F16 (nearest-even), the
+            # form the PLE conv kernel reads (#255, gopinath87607): 4 B/elem in, 2 B/elem out.
+            rec.update(method="f32->f16 by the loader (index kind 3, round-to-nearest-even)")
+            return "3", raw.tobytes(), raw.nbytes // 2, rec
+        rec.update(method="%s->f16 round-to-nearest-even (--compat-bf16)" % type_name.lower())
+        data = h.astype("<f2").tobytes()
+        return "5", data, len(data), rec
+    # form == "F32"
+    if type_name not in ("F16", "BF16") and not compat_bf16:
+        return f"{name} is {type_name}, but the engine reads F32; use --compat-bf16"
+    data = values.astype("<f4").tobytes()
+    rec.update(method="%s->f32 widening" % type_name.lower(), exact=True, max_abs_err=0.0)
+    return "2", data, len(data), rec
+
+
 def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
-    """Every non-expert tensor of the model: floats into dense.bin as stored (exact-BF16 F32 routers as BF16),
-    quantized ones native-only."""
-    if not compat_bf16:
-        for name, (_, t, _, _) in model.where.items():
-            if needs_bf16(name, t.type_name) and t.type_name != "BF16" and not (
-                    t.type_name == "F32" and name.endswith(ROUTERS)):
-                print(f"{name} is {t.type_name}, but the engine requires BF16; use --compat-bf16")
-                return 1
+    """Every non-expert tensor of the model: the floats the engine reads from the pack into dense.bin in the form it
+    reads them (FORM; converted when stored otherwise, see above), quantized ones served natively from the GGUF."""
+    todo, problems = [], []
+    for name, (g, t, mm, p) in model.where.items():
+        if is_expert(t.name) or t.name in NOT_IN_PACK:
+            continue
+        if len(t.shape) > 2:
+            print("tensor %s has %d dimensions; the index holds two" % (t.name, len(t.shape)))
+            return 1
+        # quantized: served from the GGUF unless the engine reads it from the pack (FORM), which takes
+        # --compat-bf16 to dequantize - except the native PLE key encodings
+        form = form_of(name)
+        native = t.type_name not in FLOAT and (form is None or (
+            name == "blk.1.ple_key.weight" and t.type_name in NATIVE_PLE_KEY))
+        if t.type_name not in FLOAT and not native and not compat_bf16:
+            problems.append(f"{name} is {t.type_name}, but the engine requires {form}; use --compat-bf16")
+        todo.append((name, g, t, mm, p, native))
+    # refused before anything is written: the previous pack stays as it was
+    if problems:
+        for m in problems[:8]:
+            print(m)
+        if len(problems) > 8:
+            print("... and %d more" % (len(problems) - 8))
+        return 1
     rows, at = [], 0
     served = 0
-    converted = []
+    converted, records = [], []
     with open(out / "dense.bin.tmp", "wb") as fo:
-        for name, (g, t, mm, _) in model.where.items():
-            if is_expert(t.name) or t.name in NOT_IN_PACK:
-                continue
-            if len(t.shape) > 2:
-                print("tensor %s has %d dimensions; the index holds two" % (t.name, len(t.shape)))
-                return 1
+        for name, g, t, mm, p, native in todo:
             ne0 = int(t.shape[0])
             ne1 = int(t.shape[1]) if len(t.shape) > 1 else 0
-            convert = compat_bf16 and needs_bf16(t.name, t.type_name) and t.type_name != "BF16"
-            if t.type_name in FLOAT or convert:
-                raw = tensor_bytes(mm, g, t).tobytes()
-                if convert:
-                    raw = bf16_bytes(np.frombuffer(raw, dtype=np.uint8), t.type_name)
-                    kind = "4"
-                    converted.append({"name": t.name, "source_type": t.type_name, "bytes": len(raw)})
-                else:
-                    kind = {"BF16": "4", "F16": "5", "F32": "2"}[t.type_name]
-                if not convert and t.type_name == "F32" and t.name.endswith(ROUTERS):
-                    u = np.frombuffer(raw, dtype=np.uint32)
-                    if np.count_nonzero(u & 0xFFFF):
-                        print("router %s is F32 with values that are not BF16; the engine's router is BF16" % t.name)
-                        return 1
-                    raw = (u >> 16).astype(np.uint16).tobytes()     # the exact BF16 values
-                    kind = "4"
-                rows.append([t.name, "0", kind, str(at), str(len(raw)), "0", str(len(raw)), str(ne0), str(ne1),
-                             "0", "0", "1"] + ["0"] * 7)
-                fo.write(raw)
-                pad = (-len(raw)) % ALIGN
-                fo.write(b"\0" * pad)
-                at += len(raw) + pad
-            else:
+            if native:
                 served += 1
                 rows.append([t.name, "0", "0", "0", "0", "0", "0", str(ne0), str(ne1), "8", "0", "32"] + ["0"] * 7)
+                continue
+            raw = tensor_bytes(mm, g, t)
+            try:
+                got = convert(name, t.type_name, raw, compat_bf16)
+            except ValueError as e:
+                got = str(e)
+            if isinstance(got, str):
+                print(got)
+                fo.close()
+                (out / "dense.bin.tmp").unlink(missing_ok=True)
+                return 1
+            kind, data, dst_bytes, rec = got
+            if rec is not None:
+                rec = {"name": name, "shard": p.name, **rec,
+                       "source_sha256": hashlib.sha256(raw.tobytes()).hexdigest()}
+                records.append(rec)
+                if "--compat-bf16" in rec["method"]:          # the rounding the flag allowed
+                    converted.append({"name": name, "source_type": t.type_name, "bytes": len(data)})
+            rows.append([t.name, "0", kind, str(at), str(len(data)), "0", str(dst_bytes), str(ne0), str(ne1),
+                         "0", "0", "1"] + ["0"] * 7)
+            fo.write(data)
+            pad = (-len(data)) % ALIGN
+            fo.write(b"\0" * pad)
+            at += len(data) + pad
     write_index(out, rows, src, served, 0, publish=False)
+    conv = out / "conversions.json.tmp"
+    conv.write_text(json.dumps({
+        "schema": 1, "tool": "tools/iq_pack.py", "compat_bf16": compat_bf16,
+        "source_shards": [{"name": q.name, "size": s} for q, s in zip(model.paths, model.sizes)],
+        "tensors": records,
+    }, indent=1) + "\n", encoding="utf-8")
     # published together, and the completion marker (native_experts.txt, written last by main) goes first: a stop
     # from here on leaves a pack that setup and the engine see as unfinished, never a new dense.bin under an old
     # index or the reverse
     (out / "native_experts.txt").unlink(missing_ok=True)
     (out / "dense.bin.tmp").replace(out / "dense.bin")
     (out / "index.txt.tmp").replace(out / "index.txt")
+    conv.replace(out / "conversions.json")
+    if records:
+        exact = sum(1 for r in records if r["exact"])
+        print("conversions.json: %d tensors converted to the engine's form (%d exact, %d rounded; max |err| %.3g)"
+              % (len(records), exact, len(records) - exact, max(r["max_abs_err"] for r in records)))
+        for r in records:
+            if r["dst_type"] == "F16":
+                print("narrowed to F16 by the loader: %s (%s, index kind 3)" % (r["name"], r["method"]))
     if compat_bf16:
         (out / "compat-bf16.json").write_text(json.dumps({
             "source": str(src), "rounding": "nearest-even", "tensors": converted,
