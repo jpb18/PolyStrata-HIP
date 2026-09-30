@@ -451,7 +451,8 @@ void FileExpertSource::close() {
         if (complement_pinned_ && !complement_partial_) (void) cudaFreeHost(complement_arena_);
         else {
             if (complement_partial_) (void) cudaHostUnregister(complement_arena_);
-            if (complement_locked_ > 0) strata::platform::unlock_resident(complement_arena_, complement_locked_);
+            if (complement_locked_ > 0)
+                strata::platform::unlock_resident((uint8_t*) complement_arena_ + complement_lock_off_, complement_locked_);
             std::free(complement_arena_);
         }
     }
@@ -475,6 +476,7 @@ void FileExpertSource::close() {
     complement_pinned_ = false;
     complement_partial_ = false;
     complement_pin_limit_ = 0;
+    complement_lock_off_ = 0;
     complement_ready_ = false;
     complement_locked_ = 0;
     complement_lent_slots_ = 0;
@@ -964,13 +966,14 @@ bool FileExpertSource::pin_cache_complement(
     bool pinned_ok = false;
     uint64_t locked = 0;
     uint64_t partial_pin = 0;   ///< CS-T: a registered prefix of a locked arena
+    uint64_t lock_off = 0;      ///< where the working-set lock starts (after the registered prefix)
     std::string note;
     auto release = [&]() {
         if (arena == nullptr) return;
         if (pinned_ok) (void) cudaFreeHost(arena);
         else {
             if (partial_pin > 0) (void) cudaHostUnregister(arena);
-            if (locked > 0) strata::platform::unlock_resident(arena, locked);
+            if (locked > 0) strata::platform::unlock_resident((uint8_t*) arena + lock_off, locked);
             std::free(arena);
         }
         arena = nullptr;
@@ -1010,12 +1013,11 @@ bool FileExpertSource::pin_cache_complement(
                 return false;
             }
             if (pin) {
-                const strata::platform::LockResult lr = strata::platform::lock_resident(arena, bytes);
-                locked = lr.locked_bytes;
-                note += (note.empty() ? "" : "; ") + lr.note;
                 // CS-T, a RAM budget: its bytes are in profile order, hottest first, so the driver is asked to
-                // register the largest prefix it takes (from the whole, down in 2 GiB steps).  Those experts can be
-                // read by the GPU over PCIe (--pcie-frac) and copied by DMA; the rest stay locked-only.
+                // register the largest prefix it takes (from the cap down in 2 GiB steps).  Those experts can be
+                // read by the GPU over PCIe (--pcie-frac) and copied by DMA; only the rest is locked in the working
+                // set (the registered prefix is page-locked by the driver already - locking it twice made the next
+                // device allocation fail).
                 static const bool partial_on = [] {
                     const char* v = std::getenv("STRATA_PARTIAL_PIN");   // 0: the A/B arm without it
                     return v == nullptr || std::atoi(v) != 0;
@@ -1029,7 +1031,15 @@ bool FileExpertSource::pin_cache_complement(
                 if (budget_bytes > 0 && partial_on) {
                     const uint64_t step = 2ull << 30;
                     for (uint64_t want = std::min(bytes, pin_cap); want >= step; want = want > step ? want - step : 0) {
-                        const uint64_t w = want - want % (64ull << 10);
+                        // cut at an expert boundary: a blob that started inside the registered range and ran past it
+                        // would be taken as page-locked by a cudaMemcpyAsync and refused ("adaptive refill failed")
+                        uint64_t w = want;
+                        for (size_t i = 0; i < offsets.size(); ++i) {
+                            if (offsets[i] == kNoComplement) continue;
+                            const uint64_t b = layer_blob_bytes_[i / (size_t) n_expert_];
+                            if (offsets[i] < want && offsets[i] + b > want) { w = offsets[i]; break; }
+                        }
+                        if (w == 0) break;
                         if (cudaHostRegister(arena, (size_t) w, cudaHostRegisterMapped | cudaHostRegisterPortable) ==
                             cudaSuccess) {
                             void* alias = nullptr;
@@ -1050,6 +1060,11 @@ bool FileExpertSource::pin_cache_complement(
                                   (double) partial_pin / 1073741824.0);
                     note += std::string("; ") + msg;
                 }
+                lock_off = partial_pin;
+                const strata::platform::LockResult lr =
+                    strata::platform::lock_resident((uint8_t*) arena + lock_off, bytes - lock_off);
+                locked = lr.locked_bytes;
+                note += (note.empty() ? "" : "; ") + lr.note;
             }
         }
         host = (const uint8_t*) arena;
@@ -1146,6 +1161,7 @@ bool FileExpertSource::pin_cache_complement(
     complement_pin_limit_ = pinned_ok ? bytes : partial_pin;
     complement_partial_ = !pinned_ok && partial_pin > 0;
     complement_locked_ = locked;
+    complement_lock_off_ = lock_off;
     complement_lent_slots_ = lend ? n_slots - keep_from : 0;
     complement_ready_ = true;
     std::fprintf(stderr, "FileExpertSource: %s cache complement ready: resident %.2f GiB, pinned %.2f GiB%s%s\n",
