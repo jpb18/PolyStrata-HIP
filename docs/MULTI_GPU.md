@@ -54,6 +54,12 @@ Or edit an existing config (`strata-*.json`), then restart:
 "layer_split": "auto"
 ```
 
+**Skip the split when the first card holds everything** (opt-in, 0.1.31): `"split_skip_if_fits": true` in the config
+(engine flag `--split-skip-if-fits`, with `--layer-split auto`) runs on the first card alone when it holds every
+profiled expert plus the context's KV, the draft layer and the reserve, and says so in the log; otherwise the split
+stays. On an R9700 32 GB + RX 9070 XT the R9700 holds all of the Coder's experts: with the flag 4K prompts read at
+1,776 tok/s instead of 1,244 (split) and decode runs at ~60 tok/s instead of ~51 (16K prompts ~5% slower than split).
+
 The engine flags behind it: `--layer-split K1[,K2..]|auto` and `--split-device D1[,D2..]` (the later stages'
 devices; default the next visible ones). `--layer-split K --split-device 0` runs both stages on one card sharing
 everything - the bit-exact check of the hand-off, not a speed mode.

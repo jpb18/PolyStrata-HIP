@@ -360,6 +360,10 @@ struct Options {
     /// the later stages' devices "D1,D2,.." (default: the next visible GPUs; "0" with one K: both stages on this
     /// GPU, sharing everything - the bit-exact A/B of the hand-off)
     std::string split_device;
+    /// --split-skip-if-fits (opt-in; the server passes it for a config's "split_skip_if_fits"): with
+    /// --layer-split auto, run on CUDA0 alone when it holds every profiled expert pair plus the whole session (KV),
+    /// the drafter and the reserve - a split then only adds hand-offs (two RDNA4 cards: 1,384 vs 1,794 tok/s at 4K)
+    bool split_skip_if_fits = false;
     /// Plan v0.3 P8: stay resident and take requests on stdin (see the --serve block in main).
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
@@ -1109,6 +1113,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-split") o.spec_split = true;
         else if (a == "--layer-split") o.layer_split = next("--layer-split");
         else if (a == "--split-device") o.split_device = next("--split-device");
+        else if (a == "--split-skip-if-fits") o.split_skip_if_fits = true;
         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
         else if (a == "--serve") o.serve = true;
         else if (a == "--vision") o.vision = true;
@@ -1265,7 +1270,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    const bool multi_gpu = !split_devs.empty() && !split_same;
+    bool multi_gpu = !split_devs.empty() && !split_same;   // cleared by --split-skip-if-fits before any stage loads
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
         std::fprintf(stderr, "strata generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
         return 2;
@@ -1930,6 +1935,52 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // ---- --split-skip-if-fits: before any later stage loads, does CUDA0 alone hold every profiled pair?  What it
+    // still has to allocate on one GPU is the whole session (the KV of every layer), the drafter and the head
+    // (kDrafterMib below), the verify windows and the reserve; the prompt path borrows from the cache.  If the
+    // profile's pairs fit in what is left, a split would only add the hand-offs: run on CUDA0 alone.
+    if (multi_gpu && split_auto && o.split_skip_if_fits) {
+        std::vector<std::pair<int32_t, int32_t>> prof;
+        int64_t pslots = 0;
+        std::string perr;
+        const bool remote = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+        if (remote || o.expert_profile.empty() ||
+            !strata::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, prof, pslots, perr)) {
+            std::fprintf(stderr, "strata generate: --split-skip-if-fits: %s; the split stays\n",
+                         remote ? "remote expert caches are in use" : perr.empty() ? "no expert profile" : perr.c_str());
+        } else {
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            int64_t pairs_bytes = 0;
+            for (const auto& pr : prof)
+                pairs_bytes += native_pack ? ((int64_t) lay.blob_bytes(pr.first) + 255) / 256 * 256 : (int64_t) lay.max_blob;
+            size_t fb = 0, tb = 0;
+            cudaMemGetInfo(&fb, &tb);
+            const int64_t session = (int64_t) strata::core::session_bytes(g, o.max_context, K, 0, g.n_layers);
+            const int64_t held_back = session + (((int64_t) o.vram_reserve_mib + 1000 + 96) << 20);   // + drafter/head, windows
+            const int64_t room = (int64_t) fb - held_back;
+            cudaDeviceProp dp{};
+            cudaGetDeviceProperties(&dp, 0);
+            if (pairs_bytes <= room) {
+                std::fprintf(stderr, "strata generate: layer split skipped (--split-skip-if-fits): CUDA0 (%s) holds all "
+                                     "%zu profiled pairs (%.2f GiB) with the session (%.2f GiB, %lld-token context), "
+                                     "the drafter and the reserve: %.2f GiB free, %.2f GiB to spare - one GPU\n",
+                             dp.name, prof.size(), (double) pairs_bytes / 1073741824.0, (double) session / 1073741824.0,
+                             (long long) o.max_context, (double) fb / 1073741824.0,
+                             (double) (room - pairs_bytes) / 1073741824.0);
+                multi_gpu = false;
+                split_auto = false;
+                split_devs.clear();
+                split_at.clear();
+                o.layer_split.clear();
+            } else {
+                std::fprintf(stderr, "strata generate: --split-skip-if-fits: CUDA0 (%s) would hold only %.2f of the "
+                                     "profile's %.2f GiB (%.2f GiB free, %.2f GiB for the session, drafter and "
+                                     "reserve): the split stays\n", dp.name,
+                             (double) std::max<int64_t>(room, 0) / 1073741824.0, (double) pairs_bytes / 1073741824.0,
+                             (double) fb / 1073741824.0, (double) held_back / 1073741824.0);
+            }
+        }
+    }
     // ---- layer split across GPUs: each later stage's own copy of the dense weights, its session and (the last) the
     // head, made on its device before the host arena is mapped (as the drafter below, for the same WDDM reason)
     std::vector<std::unique_ptr<GpuStage>> stages;
