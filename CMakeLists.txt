@@ -460,7 +460,8 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_test(NAME iq_parity_fixtures
              COMMAND ${_iq_python} ${CMAKE_CURRENT_SOURCE_DIR}/tools/iq_fixture.py
                      --out ${CMAKE_CURRENT_BINARY_DIR}/iq_fixture)
-    set_tests_properties(iq_parity_fixtures PROPERTIES FIXTURES_SETUP iq_fixture_data)
+    # exit 3: numpy or the vendored gguf-py is missing (a trimmed third_party) - a skip, not a failure
+    set_tests_properties(iq_parity_fixtures PROPERTIES FIXTURES_SETUP iq_fixture_data SKIP_RETURN_CODE 3)
     add_test(NAME iq_parity COMMAND iq_parity ${CMAKE_CURRENT_BINARY_DIR}/iq_fixture)
     set_tests_properties(iq_parity PROPERTIES FIXTURES_REQUIRED iq_fixture_data)
   else()

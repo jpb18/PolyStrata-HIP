@@ -84,7 +84,6 @@ def repair_scales(name: str, raw: np.ndarray) -> None:
 # name -> (the KERNEL type id written into the .bin header, identical to the gguf-py enum id)
 KERNEL_IDS = {"IQ2_XXS": 16, "IQ2_XS": 17, "IQ2_S": 22, "IQ3_XXS": 18, "IQ3_S": 21,
               "IQ1_M": 29, "IQ4_NL": 20, "IQ4_XS": 23, "Q2_0": 42, "Q3_K": 11}
-SCALE_F16 = struct.pack("<e", 0.5)     # a tame scale: values land well inside the tolerances
 
 
 def build(name: str, rows: int, cols: int, seed: int):
