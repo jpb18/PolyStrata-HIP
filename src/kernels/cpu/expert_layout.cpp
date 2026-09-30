@@ -152,6 +152,18 @@ bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n
     while (std::getline(in, line)) {
         if (line.empty() || line[0] == '#') {
             if (!line.empty() && line[0] == '#') {
+                // "# strata native experts vN: ...".  A version this engine does not know may mean columns it
+                // would misread, so it is refused rather than parsed as far as the known columns go.
+                static const char tag[] = "# strata native experts v";
+                if (line.compare(0, sizeof tag - 1, tag) == 0) {
+                    L.version = std::atoi(line.c_str() + sizeof tag - 1);
+                    if (L.version > kExpertLayoutVersion) {
+                        err = "native_experts.txt is v" + std::to_string(L.version) + "; this engine reads up to v" +
+                              std::to_string(kExpertLayoutVersion) + " (the pack was written by a newer tools/"
+                              "iq_pack.py: update the engine, or repack with this one)";
+                        return false;
+                    }
+                }
                 // v3 packs record their expert count in the header; a pruned model (GSQ-RCO Coder) ships
                 // fewer experts than the canonical geometry the caller passes, which is a compile-time
                 // default, so the header wins.
@@ -181,8 +193,29 @@ bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n
             L.gguf_off[(size_t) (3 * l + 2)] = dox;
             std::string file;             // v3: the shard that holds this layer (a file name beside --native)
             if (ss >> file) {
-                if (L.gguf_file.empty()) L.gguf_file.assign((size_t) n_layers, std::string());
-                L.gguf_file[(size_t) l] = file;
+                if (L.gguf_file.empty()) L.gguf_file.assign((size_t) (3 * n_layers), std::string());
+                // One name covers all three roles.  When a shard boundary falls inside a layer the packer writes
+                // "gate,up,down" instead (v4), an empty field meaning the --native shard.  A GGUF file name has no
+                // comma, so the split is unambiguous; an engine older than v4 fails to open such a "file" loudly.
+                // The comma form is from #255 (gopinath87607).
+                std::vector<std::string> parts;
+                for (size_t from = 0;;) {
+                    const size_t comma = file.find(',', from);
+                    parts.push_back(file.substr(from, comma == std::string::npos ? comma : comma - from));
+                    if (comma == std::string::npos) break;
+                    from = comma + 1;
+                }
+                if (parts.size() == 1) {
+                    const std::string one = parts[0];   // not parts.assign(3, parts[0]): that aliases the element
+                    parts.assign(3, one);                //   the assignment is about to overwrite
+                }
+                std::string extra;
+                if (parts.size() != 3 || (ss >> extra)) {
+                    err = "native_experts.txt: layer " + std::to_string(l) + ": the shard column is one name or "
+                          "gate,up,down, not: " + line;
+                    return false;
+                }
+                for (size_t r = 0; r < 3; ++r) L.gguf_file[(size_t) (3 * l) + r] = parts[r];
             }
         }
         L.fmt[(size_t) l] = f;
