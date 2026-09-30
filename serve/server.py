@@ -284,6 +284,8 @@ class StrataEngine:
             self.last.update(drafts_accepted=int(f[6]), drafts_offered=int(f[7]), reused=int(f[8]))
         if len(f) >= 11:                                  # decode hit rate fields
             self.last.update(hits=int(f[9]), lookups=int(f[10]))
+        if len(f) >= 14:                                  # the expert tiers (engine 0.1.31+): RAM / file blobs, file MB
+            self.last.update(ram_blobs=int(f[11]), file_blobs=int(f[12]), file_mb=float(f[13]))
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -1063,7 +1065,8 @@ class Service:
                         "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                         "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                         if n and last.get("generated") and last.get("decode_ms") else None,
-                        "hit_rate": hit_rate})
+                        "hit_rate": hit_rate, "ram_blobs": last.get("ram_blobs"),
+                        "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb")})
                     t = self.totals
                     t["requests"] += 1
                     t["prompt_tokens"] += len(ids)

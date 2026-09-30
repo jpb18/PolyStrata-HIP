@@ -251,6 +251,10 @@ struct Options {
     bool resident_pin = false;
     uint64_t resident_headroom = 8ull << 30;
     bool resident_soft = false;
+    /// CS-T `--resident-budget-gib N`: the resident mode with a RAM budget - the N GiB of experts the GPU cache does
+    /// not hold that the expert profile ranks hottest are copied into RAM, the rest are read from the files in place
+    /// (the GGUF shards when the pack has no experts.bin).  0 = the whole complement (--resident-experts).
+    uint64_t resident_budget = 0;
     /// R4: slots of VRAM-resident experts.  **0 = off, and off is the default.**
     /// **THE COMMENT THAT USED TO BE HERE WAS FALSE AND ROUND 328 MEASURED IT.**  It said "the cache has no
     /// consumer yet - `moe_hit_grouped_s2` does not exist - so switching it on costs the fill traffic and
@@ -1150,6 +1154,17 @@ int main(int argc, char** argv) {
             o.resident_headroom = 4ull << 30;
             // A/B arms: STRATA_RESIDENT_PIN=0 keeps the copy pageable (the --resident-cpu-experts form);
             // STRATA_RESIDENT_HEADROOM_GIB=N leaves N GiB of the available RAM free instead of 4
+            if (const char* v = std::getenv("STRATA_RESIDENT_PIN"); v != nullptr && std::string(v) == "0")
+                o.resident_pin = false;
+            if (const char* v = std::getenv("STRATA_RESIDENT_HEADROOM_GIB"); v != nullptr && std::atof(v) >= 0.0)
+                o.resident_headroom = (uint64_t) (std::atof(v) * 1073741824.0);
+        }
+        else if (a == "--resident-budget-gib") {
+            const double gib = std::atof(next("--resident-budget-gib"));
+            if (!(gib > 0.0)) { std::fprintf(stderr, "strata generate: --resident-budget-gib needs N > 0\n"); return 2; }
+            o.resident_budget = (uint64_t) (gib * 1073741824.0);
+            o.mmap_experts = o.resident_cpu_experts = o.resident_pin = true;
+            o.resident_headroom = 4ull << 30;
             if (const char* v = std::getenv("STRATA_RESIDENT_PIN"); v != nullptr && std::string(v) == "0")
                 o.resident_pin = false;
             if (const char* v = std::getenv("STRATA_RESIDENT_HEADROOM_GIB"); v != nullptr && std::atof(v) >= 0.0)
@@ -2302,17 +2317,15 @@ int main(int argc, char** argv) {
         // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
         // mode: the experts come from the file through the OS cache instead of a pinned copy in RAM, for a PC whose
         // GPU holds most of them but whose RAM cannot hold them all.
-        if (native_pack && !std::filesystem::exists(std::filesystem::path(o.pack) / "experts.bin")) {
-            std::fprintf(stderr, "strata generate: --mmap-experts needs the pack's experts.bin; %s is a native (IQ) pack "
-                                 "built without it: python tools/iq_pack.py --gguf <shard 1> --out %s --experts-bin\n",
-                         o.pack.c_str(), o.pack.c_str());
-            return 2;
-        }
+        // CS-T: a native pack without experts.bin maps the model's GGUF shards instead (native_experts.txt's spans,
+        // checked against the files first) - no 30-77 GB copy of the experts on the disk
+        src.set_gguf(o.native_preset);
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: experts via mmap (--mmap-experts; the A/B arm of R2.1)\n");
+        std::fprintf(stderr, "strata generate: experts via mmap (--mmap-experts; %s)\n",
+                     src.gguf_mode() ? "the GGUF shards in place, no experts.bin" : "the A/B arm of R2.1");
         srcp = &src;
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
@@ -3453,7 +3466,8 @@ int main(int argc, char** argv) {
             const int64_t k = plan_lend(chunk);
             if (k > 0) lend_from = xcache.slots() - k;
         }
-        if (src.pin_cache_complement(xcache, err, o.resident_pin, {}, lend_from, o.resident_headroom)) {
+        if (src.pin_cache_complement(xcache, err, o.resident_pin, {}, lend_from, o.resident_headroom,
+                                     o.resident_budget, &profile)) {
             if (o.adapt_every > 0 && o.adapt_swaps > 0 &&
                 !src.reserve_exchanges(std::min<int64_t>(o.adapt_swaps, 96), err)) {
                 std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
@@ -4766,6 +4780,9 @@ int main(int argc, char** argv) {
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             int64_t dec_windows = 0, dec_T = 0;
             const int64_t decode_hits0 = drive.d.cache_hits;
+            // CS-T: the RAM and file tiers of this request (the mmap source; 0 with the arena)
+            const int64_t ram0 = src.ram_reads(), files0 = src.file_reads();
+            const uint64_t file_bytes0 = src.file_read_bytes();
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             if (cancelled) finish = "cancel";
             while (!cancelled && produced_n < max_new) {
@@ -5007,9 +5024,12 @@ int main(int argc, char** argv) {
             const int64_t req_hits = drive.d.cache_hits - decode_hits0;
             const int64_t req_look = (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused) - decode_look0;
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld\n", (long long) produced_n, (long long) n, prompt_ms,
-                        decode_ms, finish, (long long) draft_accepted, (long long) draft_offered, (long long) resume,
-                        (long long) req_hits, (long long) req_look);
+            //      [RAM blobs] [file blobs] [file MB]   (CS-T tiers; appended, so an older server reads the rest)
+            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f\n", (long long) produced_n,
+                        (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
+                        (long long) resume, (long long) req_hits, (long long) req_look,
+                        (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
+                        (double) (src.file_read_bytes() - file_bytes0) / 1e6);
             std::fflush(stdout);
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             const int64_t fresh = n - resume;
@@ -5033,6 +5053,12 @@ int main(int argc, char** argv) {
                                      "VRAM tier, %lld blob reads from the file\n",
                              (double) src.resident_bytes() / 1073741824.0, (long long) src.exchanges(),
                              (long long) src.file_reads());
+            // CS-T: the tiers, cumulative - GPU cache hits (the decode lookups above), RAM copy, files (SSD / OS cache)
+            if (srcp == &src)
+                std::fprintf(stderr, "strata serve: expert tiers: GPU %lld hits this request; since the start RAM %lld blobs, files %lld blobs "
+                                     "%.1f MB read%s\n", (long long) req_hits, (long long) src.ram_reads(),
+                             (long long) src.file_reads(), (double) src.file_read_bytes() / 1e6,
+                             src.gguf_mode() ? " (the GGUF in place)" : "");
             // STRATA_SPLIT_TIMING: where each verify stage's host time went, cumulative per window since the start
             // (waiting for its GPU to ring a layer, the CPU pool and plan per layer, staging the window)
             if (static const bool st_timing = std::getenv("STRATA_SPLIT_TIMING") != nullptr; st_timing)
@@ -5690,6 +5716,12 @@ int main(int argc, char** argv) {
             std::printf("%-24s %.2f GiB of experts in RAM, %lld exchanged with the VRAM tier, %lld blob reads from "
                         "the file\n", "resident RAM", (double) src.resident_bytes() / 1073741824.0,
                         (long long) src.exchanges(), (long long) src.file_reads());
+        if (srcp == &src)   // CS-T: the RAM and file tiers (the GPU cache's share is the hit rate above)
+            std::printf("%-24s RAM %lld blobs, files %lld blobs, %.1f MB read from the files (%.2f MB/round)%s\n",
+                        "expert tiers", (long long) src.ram_reads(), (long long) src.file_reads(),
+                        (double) src.file_read_bytes() / 1e6,
+                        rounds > 0 ? (double) src.file_read_bytes() / 1e6 / rounds : 0.0,
+                        src.gguf_mode() ? " (the GGUF in place)" : "");
         if (rounds > 0 && drive.d.pcie_num > 0)
             std::printf("%-24s %.2f distinct experts per layer read over PCIe (share %d/256 of the misses)\n",
                         "pcie experts", (double) (drive.d.pcie_experts - pcie0) / (double) (rounds * g.n_layers),

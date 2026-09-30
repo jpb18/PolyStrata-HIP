@@ -18,7 +18,9 @@
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -205,6 +207,57 @@ void arena() {
             }
     }
     check(exact, "every blob is [gate | up | down] of its expert, layer 1 from both files");
+
+    {   // CS-T: the same blobs from FileExpertSource reading the shards in place (no experts.bin in the pack)
+        strata::core::FileExpertSource fs;
+        fs.set_gguf(A.string());
+        std::string e1;
+        const bool opened = fs.open(pack.string(), 2, NE, e1);
+        check(opened && fs.gguf_mode(), "FileExpertSource opens the GGUF in place" + (opened ? "" : ": " + e1));
+        if (opened) {
+            bool same = true, copies = true, transient = true;
+            std::vector<uint8_t> buf((size_t) std::max(f0.bytes, f1.bytes));
+            for (int64_t l = 0; l < 2; ++l)
+                for (int64_t e = 0; e < NE; ++e) {
+                    fs.begin_layer(l, nullptr, 0);
+                    const uint8_t* b = fs.blob(l, e);
+                    const size_t n = (size_t) L.blob_bytes(l);
+                    same = same && b != nullptr && std::memcmp(b, dst.data() + L.blob_offset(l, e), n) == 0;
+                    copies = copies && fs.copy_blob(l, e, buf.data()) &&
+                             std::memcmp(buf.data(), dst.data() + L.blob_offset(l, e), n) == 0;
+                    transient = transient && fs.transient(l, e);
+                }
+            check(same && copies && transient, "blob() and copy_blob() equal the loaded arena byte for byte (transient)");
+            // a blob asked again in the same layer is the same buffer; its bytes hold through two more layers
+            fs.begin_layer(0, nullptr, 0);
+            const uint8_t* p = fs.blob(0, 1);
+            const uint8_t* q = fs.blob(0, 1);
+            fs.begin_layer(1, nullptr, 0);
+            (void) fs.blob(1, 0);
+            (void) fs.blob(1, 1);
+            fs.begin_layer(0, nullptr, 0);
+            (void) fs.blob(0, 0);
+            check(p == q && std::memcmp(p, dst.data() + L.blob_offset(0, 1), (size_t) L.blob_bytes(0)) == 0,
+                  "an assembled blob stays put while it is in use");
+            check(fs.file_read_bytes() > 0, "the file tier counts its bytes (" + std::to_string(fs.file_read_bytes()) + ")");
+        }
+        fs.close();
+        // with experts.bin present, the pack's file is mapped as before, whatever set_gguf says
+        {
+            std::ofstream eb(pack / "experts.bin", std::ios::binary);
+            eb.write((const char*) dst.data(), (std::streamsize) dst.size());
+        }
+        strata::core::FileExpertSource fb;
+        fb.set_gguf(A.string());
+        std::string e2;
+        const bool ob = fb.open(pack.string(), 2, NE, e2);
+        const uint8_t* b11 = ob ? fb.blob(1, 1) : nullptr;
+        check(ob && !fb.gguf_mode() && !fb.transient(1, 1) && b11 != nullptr &&
+                  std::memcmp(b11, dst.data() + L.blob_offset(1, 1), (size_t) L.blob_bytes(1)) == 0,
+              "with experts.bin the mapped file is used (unchanged behaviour)");
+        fb.close();
+        fs::remove(pack / "experts.bin");
+    }
 
     auto refused = [&](const std::string& what, const std::string& needle) {
         std::string e2;
