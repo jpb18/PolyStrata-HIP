@@ -4,6 +4,7 @@
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/prefill/prefill.hpp"
+#include "strata/core/gguf_expert_source.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/core/on_device.hpp"
@@ -84,6 +85,13 @@ double g_pinned_share = 1.0;
 inline int ring_slots(size_t T) {
     const char* v = std::getenv("STRATA_PREFILL_RING");
     const int r = v ? std::atoi(v) : (g_pinned_share >= 0.9 ? 384 : 96);
+    if (v && r == STAGE) return STAGE; // Explicit opt-in to routed-only staging, including large chunks.
+    // SYCL port: routed-only staging by default. The stream-all walk (every non-resident expert of every layer, copied
+    // ahead across layers) hangs on the B70 in its first large chunk - the copy engine stops on a barrier (xe resets bcs
+    // on kill) - with any ring size and either issuer, while the per-layer walk streams correctly (8,000 tokens with
+    // 4,051 streamed experts, 2026-09-30). STRATA_PREFILL_STREAM_ALL=1 restores it for debugging.
+    static const bool stream_all_ok = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_ALL"); return e && e[0] == '1'; }();
+    if (!stream_all_ok) return STAGE;
     const int big = r < 16 ? 16 : r > RING_MAX ? RING_MAX : r;
     return (int64_t) T >= STREAM_ALL_MIN ? big : STAGE;
 }
@@ -140,7 +148,8 @@ struct Stager {
     // D-5: the pinned ring's depth (STRATA_STAGER_RING, default 16) - how far the host copies can run ahead of the
     // DMAs of the unpinned experts' blobs
     int kRing = 16;
-    struct Job { const uint8_t* src; size_t bytes; };
+    // SYCL port: a job may name the expert instead of a host pointer - the thread reads it from the GGUF itself
+    struct Job { const uint8_t* src; size_t bytes; int64_t layer = -1; int64_t expert = -1; const core::GgufExpertSource* gsrc = nullptr; };
     std::vector<uint8_t*> buf;
     std::vector<char> pinned;
     std::vector<std::vector<uint8_t>> pageable;   // the fallback when no more RAM can be pinned
@@ -223,7 +232,15 @@ struct Stager {
                     while (issued.load(std::memory_order_acquire) <= j - kRing) std::this_thread::yield();
                     dma_done[b]->wait_and_throw();
                 }
-                std::memcpy(buf[b], jobs[(size_t) j].src, jobs[(size_t) j].bytes);
+                if (jobs[(size_t) j].gsrc != nullptr) {
+                    if (!jobs[(size_t) j].gsrc->read_into(jobs[(size_t) j].layer, jobs[(size_t) j].expert, buf[b], jobs[(size_t) j].bytes)) {
+                        std::fprintf(stderr, "prefill: reading expert %lld of layer %lld from the GGUF failed\n",
+                                     (long long) jobs[(size_t) j].expert, (long long) jobs[(size_t) j].layer);
+                        std::memset(buf[b], 0, jobs[(size_t) j].bytes);
+                    }
+                } else {
+                    std::memcpy(buf[b], jobs[(size_t) j].src, jobs[(size_t) j].bytes);
+                }
                 ready[(size_t) j].store(1, std::memory_order_release);
                 active.fetch_sub(1, std::memory_order_acq_rel);
             }
@@ -1067,6 +1084,7 @@ struct PfTimer {
 
 bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                   std::string &err) try {
+    err.clear();
     Impl& m = *impl_;
     const core::OnDevice on_device(m.device);
     const core::ModelGeometry& g = *m.g;
@@ -1273,6 +1291,8 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
         std::vector<StreamEntry> seq;
         std::vector<size_t> seq_start;
         size_t issued = 0, consumed = 0;
+        static const bool plan_reads = [] { const char* v = std::getenv("STRATA_GGUF_PLAN_READ"); return v && v[0] == '1'; }();
+        const core::GgufExpertSource* gsrc = plan_reads ? nullptr : dynamic_cast<const core::GgufExpertSource*>(m.src);
         if (stream_all) {
             seq_start.assign((size_t) g.n_layers + 1, 0);
             std::vector<Stager::Job> js;
@@ -1280,12 +1300,18 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                 seq_start[(size_t) l] = seq.size();
                 for (int32_t e = 0; e < m.g->n_expert; ++e) {
                     if (m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0) continue;
-                    const uint8_t* b = m.src->blob(l, e);
-                    if (!b) { err = "prefill: expert source has no blob"; return false; }
+                    const uint8_t* b = nullptr;
                     int job = -1;
-                    if (!m.src->pinned(l, e)) {
+                    if (gsrc != nullptr) {   // read by the stager's thread when its turn comes (see Stager::Job)
                         job = (int) js.size();
-                        js.push_back({b, (size_t) lay0.blob_bytes(l)});
+                        js.push_back({nullptr, (size_t) lay0.blob_bytes(l), l, e, gsrc});
+                    } else {
+                        b = m.src->blob(l, e);
+                        if (!b) { err = "prefill: expert source has no blob"; return false; }
+                        if (!m.src->pinned(l, e)) {
+                            job = (int) js.size();
+                            js.push_back({b, (size_t) lay0.blob_bytes(l)});
+                        }
                     }
                     seq.push_back({(int32_t) l, e, b, job});
                 }
@@ -1882,9 +1908,10 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                             const int32_t e = order[j];
                             if (m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0) continue;
                             if (m.src->pinned(l, e)) continue;
+                            job_of[j] = (int) js.size();
+                            if (gsrc != nullptr) { js.push_back({nullptr, (size_t) lay.blob_bytes(l), l, e, gsrc}); continue; }
                             const uint8_t* b = m.src->blob(l, e);
                             if (!b) { err = "prefill: expert source has no blob"; return false; }
-                            job_of[j] = (int) js.size();
                             js.push_back({b, (size_t) lay.blob_bytes(l)});
                         }
                         m.stager->start(std::move(js));

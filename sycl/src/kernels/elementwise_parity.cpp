@@ -15,6 +15,7 @@
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include "strata/kernels/dequant_bf16.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/f16_bits.hpp"
 
@@ -614,6 +615,99 @@ int main(int argc, char** argv) {
         std::printf("  embedding gather: %d row cases, %d bit mismatches, %d guard failures, %d FMA differences\n",
                     cases, mismatches, guards, fma_diff);
         if (mismatches || guards || fma_diff == 0) ++bad;
+    }
+
+    // ---- THE f32 -> bf16 CONVERSIONS KEEP A NaN A NaN.  `f32_to_bf16_bulk` (the header's `bf16_from_f32`
+    // on the device) and the prompt path's dequantizer (its own `f2bf`) against ggml_compute_fp32_to_bf16's rule;
+    // before the fix 0x7FFFFFFF came back as -0 and 0x7F800001 as +inf.  `bf16_bits_test` covers every f32 on
+    // the host; this is the same header compiled by nvcc, plus the second copy in dequant_bf16.cu.
+    {
+        auto ggml_bf16 = [](uint32_t u) -> uint16_t {
+            if ((u & 0x7fffffffu) > 0x7f800000u) return (uint16_t) ((u >> 16) | 64);
+            return (uint16_t) ((u + (0x7fffu + ((u >> 16) & 1u))) >> 16);
+        };
+        std::vector<uint32_t> bits = {0x7FFFFFFFu, 0xFFFFFFFFu, 0x7F800001u, 0xFF800001u, 0x7FC00000u, 0x7FBFFFFFu,
+                                      0x7F800000u, 0xFF800000u, 0x7F7FFFFFu, 0x00000000u, 0x80000000u, 0x3F808000u,
+                                      0x3F818000u, 0x00008000u, 0x7F7F8000u};
+        std::mt19937 rng(13);
+        while (bits.size() < 4096) bits.push_back((uint32_t) rng());
+        const size_t n = bits.size();
+        float* dx = nullptr;
+        uint16_t* dy = nullptr;
+        check(DPCT_CHECK_ERROR(dx = (float *)sycl::malloc_device(
+                                   n * 4, dpct::get_in_order_queue())),
+              "bf16 x");
+        check(DPCT_CHECK_ERROR(dy = (uint16_t *)sycl::malloc_device(
+                                   n * 2, dpct::get_in_order_queue())),
+              "bf16 y");
+        /*
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
+        assuming in the original code the source host memory is pageable memory.
+        If the memory is not pageable, call wait() on event return by memcpy API
+        to ensure synchronization behavior.
+        */
+        check(DPCT_CHECK_ERROR(
+                  dpct::get_in_order_queue().memcpy(dx, bits.data(), n * 4).wait()),
+              "bf16 cx");
+        strata::kernels::f32_to_bf16_bulk(dx, dy, (int64_t) n, nullptr);
+        std::vector<uint16_t> got(n);
+        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                   .memcpy(got.data(), dy, n * 2)
+                                   .wait()),
+              "bf16 cy");
+        int wrong = 0;
+        for (size_t i = 0; i < n; ++i) wrong += got[i] != ggml_bf16(bits[i]);
+
+        // A Q8_0 block (type 8) whose fp16 scale is a NaN: every dequantized value is NaN * q, a NaN, and it must
+        // still be one in BF16.  A second block with an ordinary scale checks the finite path did not move.
+        std::vector<uint8_t> blk(2 * 34, 0);
+        blk[0] = 0x00; blk[1] = 0x7E;                        // fp16 quiet NaN
+        blk[34] = 0x00; blk[35] = 0x3C;                      // fp16 1.0
+        for (int j = 0; j < 32; ++j) {
+            blk[(size_t) (2 + j)] = (uint8_t) (int8_t) (j - 16);
+            blk[(size_t) (36 + j)] = (uint8_t) (int8_t) (3 * j - 50);
+        }
+        uint8_t* db = nullptr;
+        uint16_t* dq = nullptr;
+        check(DPCT_CHECK_ERROR(db = (uint8_t *)sycl::malloc_device(
+                                   blk.size(), dpct::get_in_order_queue())),
+              "q8 blk");
+        check(DPCT_CHECK_ERROR(dq = (uint16_t *)sycl::malloc_device(
+                                   64 * 2, dpct::get_in_order_queue())),
+              "q8 out");
+        /*
+        DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
+        assuming in the original code the source host memory is pageable memory.
+        If the memory is not pageable, call wait() on event return by memcpy API
+        to ensure synchronization behavior.
+        */
+        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(db, blk.data(),
+                                                                 blk.size()).wait()),
+              "q8 cblk");
+        strata::kernels::dequant_bf16(8, db, 0, 2, 32, dq, nullptr);
+        check(DPCT_CHECK_ERROR(
+                  dpct::get_current_device().queues_wait_and_throw()),
+              "dequant_bf16");
+        std::vector<uint16_t> q(64);
+        check(
+            DPCT_CHECK_ERROR(
+                dpct::get_in_order_queue().memcpy(q.data(), dq, 64 * 2).wait()),
+            "q8 cout");
+        int dq_wrong = 0;
+        for (int j = 0; j < 32; ++j) {
+            if (!((q[(size_t) j] & 0x7FFFu) > 0x7F80u)) ++dq_wrong;           // row 0: NaN scale -> NaN
+            const float v = (float) (3 * j - 50);                                // row 1: d = 1.0 -> the integer
+            uint32_t vb;
+            std::memcpy(&vb, &v, 4);
+            if (q[(size_t) (32 + j)] != ggml_bf16(vb)) ++dq_wrong;
+        }
+        std::printf("  f32 -> bf16 (NaN kept): bulk %d of %zu differ from ggml, dequant_bf16 %d of 64 wrong\n",
+                    wrong, n, dq_wrong);
+        if (wrong || dq_wrong) ++bad;
+        sycl::free(dx, dpct::get_in_order_queue());
+            sycl::free(dy, dpct::get_in_order_queue());
+            sycl::free(db, dpct::get_in_order_queue());
+            sycl::free(dq, dpct::get_in_order_queue());
     }
 
     std::printf("\nelementwise: %d failures\n", bad);

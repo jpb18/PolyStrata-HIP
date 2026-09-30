@@ -323,8 +323,9 @@ void usage() {
                  "  --tokens-file PATH   pretokenized prompt, commas or whitespace (alternative to --tokens)\n"
                  "  --ple-gguf PATH      required PLE table (original second GGUF shard)\n"
                  "  --no-ple             explicit diagnostic ablation of the PLE layer\n"
-                 "  --ple-io direct|mmap  n-gram table reads (plan v0.3 P2). direct (default): unbuffered SSD\n"
-                 "                       reads, the table never enters RAM or the file cache; mmap: A/B arm\n"
+                 "  --ple-io direct|mmap|ram  n-gram table reads (plan v0.3 P2). direct (default): unbuffered SSD\n"
+                 "                       reads, the table never enters RAM or the file cache; mmap: A/B arm;\n"
+                 "                       ram: mmap with the whole table locked in RAM at start (Linux/macOS)\n"
                  "  --ple-row-cache N    bounded cache of fetched rows, 90 B each (default 1048576; 0 = off)\n"
                  "  --ple-inflight N     outstanding SSD reads (default 64)\n"
                  "  --ple-delay-us U     fault injection: each row read completes no earlier than U us\n"
@@ -1285,11 +1286,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if ((o.ple_io != "direct" && o.ple_io != "mmap") || o.ple_row_cache < 0 || o.ple_inflight < 1 ||
+    if ((o.ple_io != "direct" && o.ple_io != "mmap" && o.ple_io != "ram") || o.ple_row_cache < 0 || o.ple_inflight < 1 ||
         o.ple_inflight > 1024 || !(o.ple_delay_us >= 0)) {
         std::fprintf(stderr, "strata generate: invalid --ple-io/--ple-row-cache/--ple-inflight/--ple-delay-us\n");
         return 2;
     }
+#if defined(_WIN32)
+    if (o.ple_io == "ram") {
+        std::fprintf(stderr, "strata generate: --ple-io ram is not available on Windows (no mlock); use --ple-io mmap\n");
+        return 2;
+    }
+#endif
     if (o.kv == "q4") o.kv = "q4_0";
     if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4") {
         std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0 or k8v4\n");
@@ -1414,16 +1421,21 @@ int main(int argc, char** argv) {
         }
     }
     const bool native_pack = strata::kernels::cpu::expert_layout().native;
-    if (o.expert_cache_remote[0] > 0) {
+    // STRATA_EARLY_REMOTE_CONTEXTS=1: create EVERY secondary context here, like CUDA1's.  Under WSL2 the driver's
+    // pinned/mapped host budget (dxg gpadl, ~1 GiB) is spent by CUDA0's weights and MTP before the later loop runs,
+    // and a new context then fails with cudaErrorMemoryAllocation (CUDA2: "cudaSetDevice(2) failed: out of memory").
+    const char* early_env = std::getenv("STRATA_EARLY_REMOTE_CONTEXTS");
+    const bool early_remote = early_env && early_env[0] == '1';
+    for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0 && (r == 0 || early_remote)) {
         // Keep CUDA1's proven startup order: initialise its context before
         // allocating GPU0 weights or mapping the large host expert arena.
         double free_gib = 0;
-        if (!strata::core::RemoteExperts::preflight(remote_dev[0], free_gib, err)) {
+        if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
         std::fprintf(stderr, "strata generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
-                     remote_dev[0], free_gib);
+                     remote_dev[r], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
     // PR #44: a x8 link carries half of what the native default assumes - the GPU's SMs read that share over the
@@ -1623,6 +1635,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: session_init failed\n");
         return 1;
     }
+    // **A GENERATE RUN ON A NATIVE PACK NEVER ZEROED THE SESSION STATE.**  The canonical path zeroes it from
+    // `put_input` at position 0 (`session_zero`, with the embedding as `R`), but a native pack breaks out of that
+    // loop before the first `put_input` - it runs verify windows instead - and neither the batched prompt path
+    // nor the verifier zeroes anything.  `sbuf` is `cudaMalloc`'d, so the GDN recurrence, the QSA KV/indexer
+    // state, the PLE history and `R` all started from whatever the allocator last held: finite on a fresh
+    // allocation and overflow/NaN after reuse, which surfaced as the whole layer stack saturating and every
+    // prompt decoding to the same token.  `--serve` zeroes exactly this state when `resume == 0`; generate mode
+    // always starts from an empty sequence, so it must too.
+    // (#167) Every pack, not only a native one: a canonical pack whose prompt goes through the batched prompt path
+    // (--prefill) starts at position 0 without a put_input, so it never zeroed the state either.
+    strata::core::session_zero(ss, g, nullptr, main_cs);
+    if (DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()) !=
+        0) {
+        std::fprintf(stderr, "strata generate: zeroing the session state failed\n");
+        return 1;
+    }
     if (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1)
         std::fprintf(stderr, "strata generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
                              "%.2f GiB of pinned RAM\n", (long long) (ss.qsa_states[0].n_slots * 4),
@@ -1677,7 +1705,9 @@ int main(int argc, char** argv) {
     float* ple_scratch = nullptr;
     if (!o.ple_gguf.empty()) {
         strata::kernels::PleIoOptions pio;
-        pio.mode = o.ple_io == "mmap" ? strata::kernels::PleIo::Mmap : strata::kernels::PleIo::Direct;
+        pio.mode = o.ple_io == "mmap" || o.ple_io == "ram" ? strata::kernels::PleIo::Mmap : strata::kernels::PleIo::Direct;
+        pio.lock = o.ple_io == "ram";
+        const auto tpl = Clock::now();
         pio.max_inflight = (uint32_t) o.ple_inflight;
         pio.cache_rows = (uint64_t) o.ple_row_cache;
         pio.io_thread = !o.ple_sync_submit;
@@ -1685,6 +1715,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
+        if (pio.lock)
+            std::fprintf(stderr, "strata generate: PLE table %s (--ple-io ram) in %.1f s\n",
+                         ple_table.locked() ? "locked in RAM" : "loaded (not locked)",
+                         std::chrono::duration<double>(Clock::now() - tpl).count());
         const strata::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
         const strata::core::WeightRef* wv = wt.find("blk.1.ple_value.weight");
         const strata::core::WeightRef* wnk = wt.find("blk.1.ple_norm_key.weight");
@@ -1884,7 +1918,7 @@ int main(int argc, char** argv) {
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
     // before the host arena maps its expert pages into their address spaces.
-    for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
+    for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0 && !early_remote) {
         double free_gib = 0;
         if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
@@ -2187,12 +2221,20 @@ int main(int argc, char** argv) {
         // (with borrowing - the default with a profile - the prompt path lends cache slots instead)
         const bool borrow = !o.no_prefill_borrow && !o.expert_profile.empty();
         const int64_t prefill_mib = (o.prefill_chunk > 0 && !borrow) ? 160 + (o.prefill_chunk * 680) / 1024 : 0;
-        const int64_t reserve = ((int64_t) o.vram_reserve_mib + prefill_mib) << 20;
+        // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
+        // ~110-180 MiB larger, and out of the reserve they left 16 GB cards below the stall line (#199)
+        const int64_t mtp_bind = (!o.mtp.empty() && native_head.loaded())
+                                     ? (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) : 0;
+        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind;
         int64_t slots = ((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
-        std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved -> %d slots\n",
-                     (double) free_b / 1073741824.0, o.vram_reserve_mib, o.expert_cache);
+        std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved (+%lld MiB for the "
+                             "draft head) -> %d slots\n",
+                     (double) free_b / 1073741824.0, o.vram_reserve_mib, (long long) (mtp_bind >> 20), o.expert_cache);
+        if (o.expert_cache == 0)   // the verify window cannot start without it (#174): say what makes room
+            std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: lower --max-context, use "
+                                 "--kv k8v4, run images on the CPU, or close other programs that use the GPU\n");
     } else if (multi_gpu && o.expert_cache > 0) {
         // a layer split's prompt path has its own buffers (it borrows no slots): an explicit cache size leaves room
         // for them and the reserve, or the first prompt fails with "device buffers ... do not fit"
@@ -2268,6 +2310,7 @@ int main(int argc, char** argv) {
         // STRATA_TEST_CACHE_FAIL=N: the first N opens fail as an out-of-commit cudaMalloc does (tests the retry)
         int fake_fails = std::getenv("STRATA_TEST_CACHE_FAIL") ? std::atoi(std::getenv("STRATA_TEST_CACHE_FAIL")) : 0;
         int failed = 0;
+        int zero_reads = 0;
         for (int attempt = 0;; ++attempt) {
             bool ok = false;
             if (fake_fails > 0) {
@@ -2318,9 +2361,11 @@ int main(int argc, char** argv) {
             dpct::get_current_device().get_memory_info(free_b, total_b);
             const int64_t want = (int64_t) o.vram_reserve_mib << 20;
             if ((int64_t) free_b >= want - (64ll << 20)) break;
-            // short by (want - free); a figure of 0 only says "at least", so then give back a quarter as well
+            // short by (want - free); a figure of 0 only says "at least": the first two such reads give back 1 GiB
+            // each (under WDDM the free figure read before the allocation runs ~0.7 GiB high), later ones a quarter
             int64_t give = want - (int64_t) free_b + (64ll << 20);
-            if (free_b < ((size_t) 16 << 20)) give = std::max<int64_t>(give, xcache.bytes() / 4);
+            if (free_b < ((size_t) 16 << 20))
+                give = std::max<int64_t>(give, ++zero_reads <= 2 ? 1ll << 30 : xcache.bytes() / 4);
             const int64_t keep_bytes = xcache.bytes() - give;
             std::fprintf(stderr, "strata generate: only %lld MiB free once the slots are written (reserve %d MiB); "
                                  "shrinking the expert cache\n", (long long) (free_b >> 20), o.vram_reserve_mib);
@@ -3950,6 +3995,7 @@ int main(int argc, char** argv) {
                 ~BusyScope() { strata::core::progress().busy.store(false); strata::core::progress_at("idle"); }
             } busy_scope;
             stop_req.store(false);   // a STOP that arrived between requests is stale
+            err.clear();
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
@@ -4251,6 +4297,7 @@ int main(int argc, char** argv) {
             };
             // tokens [a, b) through the windows: commit all of them, then give the draft layer their residuals
             auto read_windows = [&](int64_t a, int64_t b, std::string& e) -> bool {
+                strata::core::progress_at("reading the prompt (verify windows), from token", a);   // #217: not "batched"
                 // every token is committed and the picks are discarded: no head sampling (see set_head_sampling)
                 struct NoHeadSampling {
                     strata::core::Verifier& v;
@@ -4403,6 +4450,7 @@ int main(int argc, char** argv) {
             int64_t at = read_from;
             for (const int64_t to : {reread_to, root_at, turn_at, n - 1}) {
                 if (to <= at) continue;
+                err.clear();
                 const bool win = windows_ok(at, to);
                 if (win && !refill(err)) {
                     std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
@@ -4424,6 +4472,19 @@ int main(int argc, char** argv) {
                     if (!stop_req.load()) {
                         std::fprintf(stderr, "strata serve: %s\n", err.c_str());
                         std::printf("ERR %s\n", err.c_str());
+                        // #224: a CUDA fault (an illegal address) poisons the context for the whole process, and
+                        // unwinding the destructors on it could hang until the 60 s watchdog: leave at once
+                        /*
+                        DPCT1010: SYCL uses exceptions to report errors and
+                        does not use the error codes. The cudaPeekAtLastError
+                        function call was replaced with 0. You need to rewrite
+                        this code.
+                        */
+                        if (0 != 0) {
+                            std::fflush(stdout);
+                            std::fflush(stderr);
+                            std::_Exit(1);
+                        }
                         return 1;
                     }
                     cancelled = true;   // stopped while reading the prompt: refill the lent slots below, then DONE cancel

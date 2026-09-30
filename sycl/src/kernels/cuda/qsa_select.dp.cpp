@@ -675,6 +675,89 @@ auto &hist =
     }
 }
 
+
+// Block scores with every key block read ONCE for all of a call's queries (block_scores_kernel's grid is
+// (max_blocks / 8) x nq: ~24,600 mostly-idle blocks per layer at a decode window, each key re-read per query).  A fixed
+// grid strides over the blocks; per (block, query) the same arithmetic in the same order as block_scores_kernel.
+// qsa_block_scores takes it for every call without an active-block count and at most MQ queries: the captured decode
+// window, the uncaptured decode, and prefill's pooled16 call.
+constexpr int MQ = 8;
+/*
+DPCT1110: The total declared local variable size in device function
+block_scores_multi_kernel exceeds 128 bytes and may cause high register
+pressure. Consult with your hardware vendor to find the total register size
+available and adjust the code, or use smaller sub-group size to avoid high
+register pressure.
+*/
+__dpct_inline__ void block_scores_multi_kernel(
+    const float *__restrict__ pooled, const float *__restrict__ dead,
+    const float *__restrict__ q_idx, const int32_t *__restrict__ steps, int nq,
+    int64_t max_blocks, float *__restrict__ out) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+auto &qs = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+    float[MQ * IDX_HEADS * IDX_DIM]>(
+    sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &s_nkv =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<int64_t[MQ]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &s_nbid =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<int64_t[MQ]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+#pragma unroll
+    for (int i = item_ct1.get_local_id(2); i < nq * IDX_HEADS * IDX_DIM;
+         i += item_ct1.get_local_range(2)) qs[i] = q_idx[i];
+    if (item_ct1.get_local_id(2) < nq) {
+        s_nkv[item_ct1.get_local_id(2)] =
+            steps[item_ct1.get_local_id(2) * kStepCount + kStepNKv];
+        s_nbid[item_ct1.get_local_id(2)] =
+            steps[item_ct1.get_local_id(2) * kStepCount + kStepNBid];
+    }
+    item_ct1.barrier(sycl::access::fence_space::local_space);
+    int64_t top = 0;
+#pragma unroll
+    for (int q = 0; q < nq; ++q) top = s_nbid[q] > top ? s_nbid[q] : top;
+    const int lane = item_ct1.get_local_id(2) & 31;
+    const int64_t wstride = (int64_t)item_ct1.get_group_range(2) * SCORE_WARPS;
+    for (int64_t b = (int64_t)item_ct1.get_group(2) * SCORE_WARPS +
+                     (item_ct1.get_local_id(2) >> 5);
+         b <= top && b < max_blocks; b += wstride) {
+        const sycl::float4 kp = *reinterpret_cast<const sycl::float4 *>(
+            pooled + b * IDX_DIM + lane * 4);
+        const sycl::float4 kd =
+            *reinterpret_cast<const sycl::float4 *>(dead + lane * 4);
+        for (int qi = 0; qi < nq; ++qi) {
+            const int64_t n_bid = s_nbid[qi];
+            if (b > n_bid) continue;
+            const sycl::float4 k4 = (b == n_bid) ? kd : kp;
+            const float* q = qs + qi * IDX_HEADS * IDX_DIM + lane * 4;
+            float score = 0.0f;
+#pragma unroll
+            for (int h = 0; h < IDX_HEADS; ++h) {
+                const sycl::float4 q4 =
+                    *reinterpret_cast<const sycl::float4 *>(q + h * IDX_DIM);
+                float d = k4.x() * q4.x() + k4.y() * q4.y() + k4.z() * q4.z() +
+                          k4.w() * q4.w();
+#pragma unroll
+                /*
+                DPCT1108: '__shfl_xor_sync' was migrated with the
+                experimental feature masked sub_group function which may not be
+                supported by all compilers or runtimes. You may need to adjust
+                the code.
+                */
+                for (int o = 16; o > 0; o >>= 1) d +=
+                    dpct::experimental::permute_sub_group_by_xor(
+                        0xffffffffu,
+                        sycl::ext::oneapi::this_work_item::get_sub_group(), d,
+                        o);
+                score += d > 0.0f ? d : 0.0f;
+            }
+            if (lane == 0) {
+                if (b == n_bid && s_nkv[qi] % R != 0) score += 1e9f;
+                out[qi * max_blocks + b] = score;
+            }
+        }
+    }
+}
 }  // namespace
 
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
@@ -685,6 +768,40 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
         std::exit(1);
     }
     // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)
+    static const bool multi = [] { const char* v = std::getenv("STRATA_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
+    if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
+        {
+            auto exp_props = sycl::ext::oneapi::experimental::properties{
+                sycl::ext::oneapi::experimental::use_root_sync};
+
+            strata::q_of(stream)
+                ->parallel_for<
+                    dpct_kernel_name<class block_scores_multi_kernel_dea7d4>>(
+                    sycl::nd_range<3>(sycl::range(1, 1, 256) *
+                                          sycl::range(1, 1, SCORE_WARPS * 32),
+                                      sycl::range(1, 1, SCORE_WARPS * 32)),
+                    exp_props,
+                    [=](sycl::nd_item<3> item_ct1)
+                        [[sycl::reqd_sub_group_size(32)]] {
+                            block_scores_multi_kernel(pooled, dead, q_idx,
+                                                      steps, (int)nq,
+                                                      max_blocks, scores);
+                        });
+        }
+        /*
+        DPCT1010: SYCL uses exceptions to report errors and does not use the
+        error codes. The cudaGetLastError function call was replaced with 0. You
+        need to rewrite this code.
+        */
+        const dpct::err0 e = 0;
+        /*
+        DPCT1009: SYCL reports errors using exceptions and does not use
+        error codes. Please replace the "get_error_string_dummy(...)" with a
+        real error-handling function.
+        */
+
+        return;
+    }
     const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
     const dpct::dim3 grid((unsigned)((reach + SCORE_WARPS - 1) / SCORE_WARPS),
                           (unsigned)nq);
@@ -693,7 +810,7 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class block_scores_kernel_6f5935>>(
+            ->parallel_for<dpct_kernel_name<class block_scores_kernel_925c9d>>(
                 sycl::nd_range<3>(grid * sycl::range(1, 1, SCORE_WARPS * 32),
                                   sycl::range(1, 1, SCORE_WARPS * 32)),
                 exp_props,
@@ -788,7 +905,7 @@ bool qsa_block_scores_tc(const float *pooled, const float *dead,
                     sycl::range(bytes), cgh);
 
                 cgh.parallel_for<
-                    dpct_kernel_name<class block_scores_tc_kernel_f08b24>>(
+                    dpct_kernel_name<class block_scores_tc_kernel_bc5f07>>(
                     sycl::nd_range<3>(grid * sycl::range(1, 1, 128),
                                       sycl::range(1, 1, 128)),
                     exp_props, [=](sycl::nd_item<3> item_ct1) {
@@ -806,7 +923,7 @@ bool qsa_block_scores_tc(const float *pooled, const float *dead,
 
         strata::q_of(stream)
             ->parallel_for<
-                dpct_kernel_name<class block_scores_tail_kernel_8303e7>>(
+                dpct_kernel_name<class block_scores_tail_kernel_70dfaa>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)nq) *
                                       sycl::range(1, 1, 32),
                                   sycl::range(1, 1, 32)),
@@ -849,7 +966,7 @@ void qsa_block_topk_ref(const float* scores, const int32_t* steps, int64_t nq, i
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class block_topk_kernel_409264>>(
+            ->parallel_for<dpct_kernel_name<class block_topk_kernel_213104>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)nq) *
                                       sycl::range(1, 1, TOPK_T),
                                   sycl::range(1, 1, TOPK_T)),
@@ -895,7 +1012,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
 
         strata::q_of(stream)
             ->parallel_for<
-                dpct_kernel_name<class block_topk_reg_kernel_a867d1>>(
+                dpct_kernel_name<class block_topk_reg_kernel_652097>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)nq) *
                                       sycl::range(1, 1, TK_T),
                                   sycl::range(1, 1, TK_T)),

@@ -7,6 +7,7 @@
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 
@@ -155,6 +156,8 @@ const NativeEmbed* native_embed() { return g_embed; }
 
 NativeEmbed::~NativeEmbed() {
     if (host_) sycl::free(host_, dpct::get_in_order_queue());
+    else if (dev_)
+        sycl::free((void *) dev_, dpct::get_in_order_queue()); // the VRAM fallback below
 }
 
 bool NativeEmbed::load(const std::string &path, int64_t n_embd, int64_t n_vocab,
@@ -184,17 +187,48 @@ bool NativeEmbed::load(const std::string &path, int64_t n_embd, int64_t n_vocab,
         */
         if (DPCT_CHECK_ERROR(host_ = (void *)sycl::malloc_host(
                                  bytes_, dpct::get_in_order_queue())) != 0) {
+            // Under WSL2 the driver's pinned/mapped host budget (~1 GiB) can be spent by the GPU contexts
+            // themselves (three cards). The table is only gathered from, so keep it in the current device's VRAM
+            // instead: it costs its size there and reads faster than over PCIe.
+            /*
+            DPCT1026: The call to cudaGetLastError was removed because this
+            functionality is redundant in SYCL.
+            */
             host_ = nullptr;
-            err = "native embedding: cannot pin " + std::to_string(bytes_ >> 20) + " MiB";
-            return false;
+            void* d = nullptr;
+            if (DPCT_CHECK_ERROR(d = (void *)sycl::malloc_device(
+                                     bytes_, dpct::get_in_order_queue())) !=
+                    0 ||
+                /*
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
+                */
+                DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+                    d, gguf.tensor_data(*t), bytes_).wait()) != 0) {
+                if (d) sycl::free(d, dpct::get_in_order_queue());
+                /*
+                DPCT1026: The call to cudaGetLastError was removed because
+                this functionality is redundant in SYCL.
+                */
+                err = "native embedding: cannot pin " +
+                      std::to_string(bytes_ >> 20) +
+                      " MiB, nor place it in VRAM";
+                return false;
+            }
+            std::fprintf(stderr, "strata: native embedding: cannot pin %llu MiB, kept in VRAM instead\n",
+                         (unsigned long long) (bytes_ >> 20));
+            dev_ = d;
+        } else {
+            std::memcpy(host_, gguf.tensor_data(*t), bytes_);
+            void* d = nullptr;
+            if (DPCT_CHECK_ERROR(d = (void *)host_) != 0) {
+                err = "native embedding: no device alias for the mapped table";
+                return false;
+            }
+            dev_ = d;
         }
-        std::memcpy(host_, gguf.tensor_data(*t), bytes_);
-        void* d = nullptr;
-        if (DPCT_CHECK_ERROR(d = (void *)host_) != 0) {
-            err = "native embedding: no device alias for the mapped table";
-            return false;
-        }
-        dev_ = d;
         type_ = (int) t->type;
         n_embd_ = n_embd;
         n_vocab_ = n_vocab;

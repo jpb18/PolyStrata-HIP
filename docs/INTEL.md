@@ -236,6 +236,7 @@ same prompts as above (outputs identical before and after each change):
 |---|---|
 | every window graph and the drafter's graphs captured at load (`STRATA_WARM_GRAPHS=0`: as before) | the first request no longer pays 250-290 ms of captures |
 | the commit graph left running while the drafter's round runs on its own queue (`Verifier::commit(wait=false)` + `commit_finish`) | decode 38.3 -> 43.0 tok/s at the 2,184-token context, 46.5 -> 49.8 short |
+| upstream 0.1.29 merged (GDN recurrence pipelining, the block-scores read, sampler) | 2,184-token prompt 765 -> 792 tok/s, decode at that context 43.1 -> 45.2 |
 | the draft layer's batched prompt pass takes prompts under 64 rows (it fell back to per-6-token graphs) | its prompt cost on 19 tokens 106 -> 16 ms |
 | one device module per kernel (`-fsycl-device-code-split=per_kernel`) | the first launch in the prompt path (the embedding gather) 245 -> 1 ms |
 | the expert dequant writes each thread's run of FP16 values as one vector store (it wrote them one 2-byte store at a time) | dequant per expert 0.085 -> 0.030 ms; prompt 496 -> 575 tok/s at 2,184 tokens, 720 -> 841 at 8,000 |
@@ -261,28 +262,26 @@ A trap worth knowing: with a native pack `--prefill-until N` does not feed the r
 token loop (it is skipped for native packs), so the tokens after N are dropped and the model free-runs. Compare
 output tokens between paths, never only timings.
 
-**An 80,000-token prompt (2026-09-30).** Where the time goes changes completely at this scale, and the first
-attempt did not finish at all:
+**An 80,000-token prompt (2026-09-30).** Where the time goes changes completely at this scale:
 
 - **The VRAM plan.** `--expert-cache auto` fills the card down to `--vram-reserve-mib` *before* the KV state
   (about 1 GB in INT8 at 81,920 cells) and the prompt chunk buffers (about 2 GB at `--prefill 8192`) exist. With
-  the 1,536 MiB default that put 30.95 of the B70's 32.6 GB in use, the driver started migrating buffers, the GPU
-  read 100% busy at 2,800 MHz with nothing finishing, and the rig's watchdog killed the run after 25 minutes
-  (one copy-engine reset, the GT recovered by itself). For long contexts pass a reserve that covers both:
-  `--max-context 81920 --kv int8 --vram-reserve-mib 3072 --prefill 4096` peaks at 28.8 GB. Until the auto
-  formula accounts for them itself, watch `vram_used_mb` on such runs. (80k ids also exceed Linux's 128 KB
-  single-argument limit: `--tokens-file`.)
-- **Expert streaming decides the speed.** The reserve costs cache slots (10,348 of 12,288 at 3 GB), and the
-  prompt path streams every non-resident expert from the GGUF *once per chunk*. 2,048-token chunks: 40 chunks,
-  62,942 blob reads (~125 GB), 278 s = 288 tok/s, the GPU idle 75% of the time. 4,096-token chunks: 21 chunks,
-  37,678 reads, **77 s = 1,037 tok/s**, close to the 8k-token rate. The bigger chunk costs 0.5 GB more VRAM.
-  Twelve host copy threads instead of the default four (`STRATA_STAGER_THREADS`) take it to 75 s (1,065
-  tok/s): they empty the copy wait (5.6 s to 0.05 s) but the 52 s of host staging is the SSD delivering
-  ~70 GB of blobs, and 16 s of chunk setup remains where the GPU waits for each chunk's stream plan.
-- **Compute at 80k** (of the 75 s): attention 13.9 s, QSA block selection 9.9 s (it was 0.2 s at 8k: it scans
-  every block of the context per query), GDN recurrence 6.1 s, the chunk setup wait 16 s, the per-layer
-  grouping sync 4.6 s, GEMMs 4.6 s, dequant 1.4 s. The PLE rows are no longer a cost: 1.28 M row
-  lookups with a 97.6% row-cache hit rate, 90 ms.
+  the 1,536 MiB default that put 30.95 of the B70's 32.6 GB in use, the driver started migrating buffers and the
+  run never finished. `--max-context 81920 --kv int8 --vram-reserve-mib 3072 --prefill 4096` peaks at 28.8 GB.
+  (80k ids also exceed Linux's 128 KB single-argument limit: `--tokens-file`.)
+- **Streamed experts.** The reserve costs cache slots (10,348 of 12,288 at 3 GB), and the prompt path streams the
+  missing experts from the GGUF for every chunk. Two port bugs sat on this path and are fixed: the stream plan
+  held `GgufExpertSource::blob()` pointers across ~1,900 reads of a 512-slot ring (so blobs were overwritten
+  before they were copied: the 75 s / 1,065 tok/s measured first was computed partly with the wrong experts), and
+  the stream-all walk hangs on this card in its first large chunk (the copy engine stops on a barrier). The stager
+  threads now read the blobs themselves, and the port uses the per-layer routed-only walk (`STRATA_PREFILL_RING=8`
+  upstream, the port's default; `STRATA_PREFILL_STREAM_ALL=1` restores the other for debugging).
+- **Correct result: 80,000 tokens in 101 s = 790 tok/s.** GPU time: expert down GEMM 26.0 s, attention 15.4 s,
+  dequant 12.7 s, QSA block selection 9.3 s (0.2 s at 8k: it scans every block of the context per query), gate/up
+  GEMM 8.9 s, gather 6.1 s, the per-layer grouping sync 5.2 s, GDN recurrence 4.8 s. The PLE rows are free at this
+  scale (97.6% row-cache hits).
+- **Open: decode after such a prompt runs at 2-3 tok/s**, because the experts the reserve pushed out of the cache
+  stay out; the prompt buffers should give their VRAM back to the cache when the prompt ends.
 
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for

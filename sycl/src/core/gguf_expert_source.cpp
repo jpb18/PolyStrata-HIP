@@ -97,4 +97,25 @@ const uint8_t* GgufExpertSource::blob(int64_t layer, int64_t expert) {
     return buf.data();
 }
 
+bool GgufExpertSource::read_into(int64_t layer, int64_t expert, uint8_t* dst, size_t bytes) const {
+    if (layer < 0 || layer >= n_layers_ || expert < 0 || expert >= n_expert_ || dst == nullptr) return false;
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& fm = lay.fmt[(size_t) layer];
+    const uint64_t blob = lay.bytes[(size_t) layer];
+    if (bytes < blob) return false;
+    const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
+    const uint64_t at[3] = {0, fm.up_off, fm.down_off};
+    const int fd = fds_[(size_t) layer_fd_[(size_t) layer]];
+    for (int r = 0; r < 3; ++r) {
+        const uint64_t src = lay.gguf_off[(size_t) (3 * layer + r)] + per[r] * (uint64_t) expert;
+        uint64_t done = 0;
+        while (done < per[r]) {
+            const ssize_t n = ::pread(fd, dst + at[r] + done, (size_t) (per[r] - done), (off_t) (src + done));
+            if (n <= 0) return false;
+            done += (uint64_t) n;
+        }
+    }
+    return true;
+}
+
 }  // namespace strata::core

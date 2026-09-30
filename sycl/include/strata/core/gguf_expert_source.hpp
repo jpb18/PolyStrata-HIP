@@ -35,6 +35,10 @@ public:
     void close();
 
     const uint8_t* blob(int64_t layer, int64_t expert) override;
+    /// The blob gathered straight into `dst` (bytes = the layer's blob size), from any thread: no ring slot, so the
+    /// prompt path's stager threads read the streamed experts themselves instead of holding ring pointers that a
+    /// later blob() call overwrites (the 80k-token run of 2026-09-30 streamed ~1,900 blobs per chunk through 512 slots).
+    bool read_into(int64_t layer, int64_t expert, uint8_t* dst, size_t bytes) const;
     int64_t reads() const override { return reads_; }
 
 private:

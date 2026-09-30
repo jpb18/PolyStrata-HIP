@@ -22,6 +22,9 @@ __dpct_inline__ float h2f(const uint8_t *p) {
 }
 __dpct_inline__ uint16_t f2bf(float f) {
     uint32_t u = sycl::bit_cast<unsigned int>(f);
+    // a NaN (a NaN scale in the block) stays a quiet NaN, as in ggml_compute_fp32_to_bf16 and `bf16_from_f32`:
+    // the rounding add below would carry it into -0 or inf
+    if ((u & 0x7fffffffu) > 0x7f800000u) return (uint16_t) ((u >> 16) | 64u);
     u += 0x7fffu + ((u >> 16) & 1u);          // round to nearest even
     return (uint16_t) (u >> 16);
 }
@@ -226,7 +229,7 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
             auto gpr_ct4 = gpr;                                                \
             auto out_ct5 = out;                                                \
                                                                                \
-            cgh.parallel_for<dpct_kernel_name<class dequant_kernel_c70bbf,     \
+            cgh.parallel_for<dpct_kernel_name<class dequant_kernel_ec9311,     \
                                               dpct_kernel_scalar<TY>, T>>(     \
                 sycl::nd_range<3>(sycl::range(1, 1, grid) *                    \
                                       sycl::range(1, 1, 256),                  \

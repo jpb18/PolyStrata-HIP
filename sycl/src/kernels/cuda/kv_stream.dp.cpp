@@ -330,6 +330,14 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
         std::fprintf(stderr, "kv_stream: a block's scale run must be a multiple of 16 bytes\n");
         std::exit(1);
     }
+    // one sweep step looks at RT consecutive slots `(hand + thread) % n_slots`; with fewer slots than RT two
+    // threads see the same slot and may both take it for two different misses.  The engine never streams with fewer
+    // than qsa_kv_resident_min() / page_size = 5,120 slots, so this is a guard, not a limit.
+    if (m.n_slots < RT) {
+        std::fprintf(stderr, "kv_stream: %lld slots is fewer than the resolve block (%d): the clock sweep would take a "
+                             "slot twice\n", (long long) m.n_slots, RT);
+        std::exit(1);
+    }
     /*
     DPCT1049: The work-group size passed to the SYCL kernel may exceed the
     limit. To get the device limit, query info::device::max_work_group_size.
@@ -340,7 +348,7 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class resolve_kernel_d27792>>(
+            ->parallel_for<dpct_kernel_name<class resolve_kernel_148a81>>(
                 sycl::nd_range<3>(sycl::range(1, 1, RT), sycl::range(1, 1, RT)),
                 exp_props,
                 [=](sycl::nd_item<3> item_ct1)
@@ -359,7 +367,7 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
                 auto runs_of_slots_host_fmt_s_ct1 =
                     runs_of(slots, host, fmt, s);
 
-                cgh.parallel_for<dpct_kernel_name<class copy_kernel_e47935>>(
+                cgh.parallel_for<dpct_kernel_name<class copy_kernel_4bb253>>(
                     sycl::nd_range<3>(sycl::range(1, 1, 96) *
                                           sycl::range(1, 1, 128),
                                       sycl::range(1, 1, 128)),
@@ -377,7 +385,7 @@ void kv_ring_table(int32_t* page_table, int64_t n_blocks, int64_t n_slots, void*
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class ring_kernel_728502>>(
+            ->parallel_for<dpct_kernel_name<class ring_kernel_f9df1d>>(
                 sycl::nd_range<3>(sycl::range(1, 1, 64) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),

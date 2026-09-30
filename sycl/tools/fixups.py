@@ -239,3 +239,9 @@ edit("src/core/remote_experts.cpp", lambda s: s.replace(
 edit("include/strata/core/graph.hpp", lambda s: s.replace(
     "    std::chrono::time_point<std::chrono::steady_clock> done__ct1;", "    mutable std::chrono::time_point<std::chrono::steady_clock> done__ct1;"))
 print("files changed:", changed)
+
+# 0.1.29: a stream cast dpct leaves as cudaStream_t (sampler's capture check): the port's queue lookup.
+for rel in all_sources():
+    edit(str(rel), sub(r"\(\(cudaStream_t\)(\w+)\)->", r"strata::q_of(\1)->"))
+# 0.1.29: sycl::free takes void*; NativeEmbed frees a const device pointer.
+edit("src/core/native_head.cpp", lambda s: s.replace("sycl::free(dev_, dpct::get_in_order_queue())", "sycl::free((void *) dev_, dpct::get_in_order_queue())"))

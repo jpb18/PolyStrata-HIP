@@ -164,7 +164,9 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
         if (t < n_here) {
             const int cell = ids[c0 + t];
             const long long page = (long long) p.page_table[cell / page_size];
-            r = (page * n_kv_heads + kvh) * page_size + (cell % page_size);
+            // a block the KV streaming could not make resident keeps page -1 (ctl[3]); its cells are masked
+            // (score -FLT_MAX, weight 0) instead of being read from before the pool.
+            if (page >= 0) r = (page * n_kv_heads + kvh) * page_size + (cell % page_size);
         }
         srow[t] = r;
     }
@@ -176,7 +178,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
     item_ct1.barrier();
     // scores: each warp takes cells warp, warp+8, ...; each lane holds 8 of the 256 dimensions.
     for (int c = warp; c < CHUNK; c += WARPS) {
-        if (c >= n_here) {
+        if (c >= n_here || srow[c] < 0) {
             if (lane < G) sp[lane][c] = -FLT_MAX;
             continue;
         }
@@ -205,8 +207,12 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
     for (int h = warp; h < G; h += WARPS) {
         const float a = sp[h][lane], b = sp[h][lane + 32];
         const float m = warp_max(sycl::fmax(a, b));
-        const float ea = (lane < n_here) ? sycl::native::exp(a - m) : 0.0f;
-        const float eb = (lane + 32 < n_here) ? sycl::native::exp(b - m) : 0.0f;
+        const float ea = (lane < n_here && srow[lane] >= 0)
+                             ? sycl::native::exp(a - m)
+                             : 0.0f;
+        const float eb = (lane + 32 < n_here && srow[lane + 32] >= 0)
+                             ? sycl::native::exp(b - m)
+                             : 0.0f;
         sp[h][lane] = ea;
         sp[h][lane + 32] = eb;
         const float l = warp_sum(ea + eb);
@@ -223,6 +229,7 @@ attn_chunk_kernel(const float *__restrict__ q, QsaAttnPools p,
 #pragma unroll
     for (int h = 0; h < G; ++h) acc[h] = 0.0f;
     for (int c = 0; c < n_here; ++c) {
+        if (srow[c] < 0) continue;   // masked above, weight 0
         float v;
         if constexpr (KV_MODE == 0) {
             v = sycl::vec<sycl::half, 1>(
@@ -317,7 +324,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_b8af5b,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_dfacfc,
                                           dpct_kernel_scalar<3>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -333,7 +340,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_dfacfc,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_b0d448,
                                           dpct_kernel_scalar<2>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -349,7 +356,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_b0d448,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_2ad0a4,
                                           dpct_kernel_scalar<1>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -364,7 +371,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_2ad0a4,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_5c04f7,
                                           dpct_kernel_scalar<0>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -379,7 +386,7 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_b5c617>>(
+        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_2cdaf7>>(
             sycl::nd_range<3>(
                 sycl::range(1, (unsigned)n_q, (unsigned)s.n_head) *
                     sycl::range(1, 1, HD),
@@ -430,7 +437,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_61a169,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_f262e6,
                                           dpct_kernel_scalar<3>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -446,7 +453,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_f262e6,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_4fd923,
                                           dpct_kernel_scalar<2>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -462,7 +469,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_4fd923,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_f6855e,
                                           dpct_kernel_scalar<1>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -477,7 +484,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
             sycl::ext::oneapi::experimental::use_root_sync};
         dpct::has_capability_or_fail(st->get_device(), {sycl::aspect::fp16});
 
-        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_f6855e,
+        st->parallel_for<dpct_kernel_name<class attn_chunk_kernel_7c8e09,
                                           dpct_kernel_scalar<0>>>(
             sycl::nd_range<3>(grid * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),
@@ -492,7 +499,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_a9568f>>(
+        st->parallel_for<dpct_kernel_name<class attn_merge_kernel_4bb902>>(
             sycl::nd_range<3>(sycl::range(1, 1, (unsigned)s.n_head) *
                                   sycl::range(1, 1, HD),
                               sycl::range(1, 1, HD)),

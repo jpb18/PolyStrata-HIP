@@ -175,17 +175,23 @@ __dpct_inline__ void s_gemv_q8_split_kernel(
     const int warps_per_block = (int)(item_ct1.get_local_range(2) >> 5);
     const long long o = (long long)item_ct1.get_group(2) * warps_per_block +
                         (item_ct1.get_local_id(2) >> 5);
-    if (o >= n_out) return;
     const int lane = item_ct1.get_local_id(2) & 31;
 
     // THE CODEBOOK, IN SHARED MEMORY.  16 bytes, loaded once per block by the first 16 threads, instead of a
     // divergent constant read per element - measured at 2.12x of this whole kernel (see the note on `kIq4Nl`).
+    //
+    // THE LOAD AND THE BARRIER COME BEFORE THE EARLY RETURN, as in `s_gemv_q8k_kernel`.  The return used to
+    // sit above them, so whenever `n_out % 8 != 0` the last block's surplus warps left before a barrier the
+    // others still waited at - undefined behaviour that every shape in the pack (a multiple of 8) happened to
+    // avoid.  `o` is per-WARP, so the return below keeps whole warps together and the shuffle reduction's
+    // full mask stays valid.
     auto &s_iq4nl =
         *sycl::ext::oneapi::group_local_memory_for_overwrite<signed char[16]>(
             sycl::ext::oneapi::this_work_item::get_work_group<3>());
     if (item_ct1.get_local_id(2) < 16) s_iq4nl[item_ct1.get_local_id(2)] =
         kIq4Nl[item_ct1.get_local_id(2)];
     item_ct1.barrier(sycl::access::fence_space::local_space);
+    if (o >= n_out) return;
 
     const long long n_groups = n_in >> group_shift;
     const long long codes_per_row = n_in / PER_BYTE;
@@ -416,7 +422,7 @@ void s_gemv(const uint16_t *x, const uint8_t *codes, const float *scales,
             sycl::ext::oneapi::experimental::use_root_sync};
 
         dpct::get_in_order_queue()
-            .parallel_for<dpct_kernel_name<class s_gemv_kernel_2c435c,
+            .parallel_for<dpct_kernel_name<class s_gemv_kernel_4f63f9,
                                            dpct_kernel_scalar<2>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)blocks) *
                                       sycl::range(1, 1, threads),
@@ -432,7 +438,7 @@ void s_gemv(const uint16_t *x, const uint8_t *codes, const float *scales,
             sycl::ext::oneapi::experimental::use_root_sync};
 
         dpct::get_in_order_queue()
-            .parallel_for<dpct_kernel_name<class s_gemv_kernel_1b4b21,
+            .parallel_for<dpct_kernel_name<class s_gemv_kernel_9c529a,
                                            dpct_kernel_scalar<4>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)blocks) *
                                       sycl::range(1, 1, threads),
@@ -448,7 +454,7 @@ void s_gemv(const uint16_t *x, const uint8_t *codes, const float *scales,
             sycl::ext::oneapi::experimental::use_root_sync};
 
         dpct::get_in_order_queue()
-            .parallel_for<dpct_kernel_name<class s_gemv_kernel_c5017e,
+            .parallel_for<dpct_kernel_name<class s_gemv_kernel_e40e1f,
                                            dpct_kernel_scalar<8>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, (unsigned)blocks) *
                                       sycl::range(1, 1, threads),
@@ -656,7 +662,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
                     sycl::range(smem), cgh);
 
                 cgh.parallel_for<dpct_kernel_name<
-                    class s_gemv_split_kernel_51319d, dpct_kernel_scalar<2>>>(
+                    class s_gemv_split_kernel_8538ef, dpct_kernel_scalar<2>>>(
                     sycl::nd_range<3>(sycl::range(1, 1, grid) *
                                           sycl::range(1, 1, threads_per_row),
                                       sycl::range(1, 1, threads_per_row)),
@@ -690,7 +696,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
                     sycl::range(smem), cgh);
 
                 cgh.parallel_for<dpct_kernel_name<
-                    class s_gemv_split_kernel_36431d, dpct_kernel_scalar<4>>>(
+                    class s_gemv_split_kernel_6cb7af, dpct_kernel_scalar<4>>>(
                     sycl::nd_range<3>(sycl::range(1, 1, grid) *
                                           sycl::range(1, 1, threads_per_row),
                                       sycl::range(1, 1, threads_per_row)),
@@ -724,7 +730,7 @@ static void s_gemv_split_impl(const uint16_t *x, const uint8_t *codes,
                     sycl::range(smem), cgh);
 
                 cgh.parallel_for<dpct_kernel_name<
-                    class s_gemv_split_kernel_377b5e, dpct_kernel_scalar<8>>>(
+                    class s_gemv_split_kernel_63886c, dpct_kernel_scalar<8>>>(
                     sycl::nd_range<3>(sycl::range(1, 1, grid) *
                                           sycl::range(1, 1, threads_per_row),
                                       sycl::range(1, 1, threads_per_row)),
@@ -822,7 +828,7 @@ void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales,
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class s_gemv_q8k_kernel_6a05ad,
+            ->parallel_for<dpct_kernel_name<class s_gemv_q8k_kernel_9b1637,
                                             dpct_kernel_scalar<4>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks) *
                                       sycl::range(1, 1, threads),
@@ -838,7 +844,7 @@ void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales,
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class s_gemv_q8k_kernel_c8cb93,
+            ->parallel_for<dpct_kernel_name<class s_gemv_q8k_kernel_adeed5,
                                             dpct_kernel_scalar<8>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks) *
                                       sycl::range(1, 1, threads),
@@ -889,7 +895,7 @@ void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* s
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_c3278e,
+            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_19ad26,
                                             dpct_kernel_scalar<4>,
                                             dpct_kernel_scalar<true>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks) *
@@ -908,7 +914,7 @@ void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* s
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_7d9a26,
+            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_4da4f5,
                                             dpct_kernel_scalar<8>,
                                             dpct_kernel_scalar<true>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks) *
@@ -946,8 +952,10 @@ void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float*
                      form.group_elems);
         std::exit(1);
     }
-    if (form.group_elems % 4 != 0) {
-        std::fprintf(stderr, "s_gemv_q8_0_split: group_elems %d is not a multiple of 4\n", form.group_elems);
+    // SIXTEEN, NOT FOUR: a lane-iteration takes QE = 16 consecutive elements under ONE scale (see the kernel),
+    // so a group of 4 or 8 would read the wrong scale for most of them.  The Q8_K launcher already said 16.
+    if (form.group_elems % 16 != 0) {
+        std::fprintf(stderr, "s_gemv_q8_0_split: group_elems %d is not a multiple of 16\n", form.group_elems);
         std::exit(1);
     }
     int group_shift = 0;
@@ -964,7 +972,7 @@ void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float*
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_ee83d2,
+            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_147ee4,
                                             dpct_kernel_scalar<4>,
                                             dpct_kernel_scalar<false>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks) *
@@ -983,7 +991,7 @@ void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float*
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
-            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_47112d,
+            ->parallel_for<dpct_kernel_name<class s_gemv_q8_split_kernel_bac5c0,
                                             dpct_kernel_scalar<8>,
                                             dpct_kernel_scalar<false>>>(
                 sycl::nd_range<3>(sycl::range(1, 1, blocks) *
