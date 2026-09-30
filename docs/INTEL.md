@@ -166,7 +166,7 @@ Measured on the same card, same 2,185-token prompt, 64 greedy tokens (AOT build,
 |---|---|---|
 | prompt reading | 138-319 tok/s | **560 tok/s** (693 at 2,000 tokens, 180 at 300) |
 | decode, suffix drafter only (`--spec 2`) | 24.2-26.0 tok/s | 20.2-20.8 tok/s |
-| decode with the MTP draft layer (`--spec 4 --mtp`) | - | **45.3 tok/s** (drafts accepted 87%, 3.4 tokens per round) |
+| decode with the MTP draft layer (`--spec 4 --mtp`) | - | **42.7 tok/s** at the 2,185-token context (81% accepted, 2.9 tokens/round); 45.3 on a short prompt |
 
 Prompt reading is where Strata's design pays (oneMKL GEMM over dequantised experts, the whole model on
 the card). Decode is at ~80%: a speculative round costs ~53 ms whatever its size and the suffix drafter
