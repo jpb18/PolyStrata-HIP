@@ -1,5 +1,7 @@
 // src/kernels/cuda/fused_gr.cu - see include/strata/kernels/fused_gr.hpp.
 #define DPCT_PROFILING_ENABLED
+#include <mutex>
+#include <unordered_map>
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
@@ -19,6 +21,19 @@ constexpr int D = N * HC;       // 10240
 constexpr int LR = 320;         // hc_lr
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
+#if defined(__HIPCC__)
+constexpr int TILE = 1280;             // eight-token tile fits gfx1100's 64 KiB LDS limit
+#else
+constexpr int TILE = 2560;             // xn floats per token staged at a time: 320 chunks of 8, 10 per lane
+#endif
+constexpr int TQ = TILE / 8 / 32;      // uint4 weight chunks per lane per tile
+// SYCL port: the down kernel's 41 work-groups filled 15% of the B70's threads (metrics 2026-09-30); each row's
+// D = 4 tiles are split over DOWN_SPLIT work-groups that write partial sums, summed in a fixed order by the up
+// kernel (deterministic, unlike atomics) before the row's nonlinearity.
+#ifndef STRATA_GR_DOWN_SPLIT
+#define STRATA_GR_DOWN_SPLIT (D / TILE)   // 4: one tile per split (1: the unsplit order, for A/B)
+#endif
+constexpr int DOWN_SPLIT = STRATA_GR_DOWN_SPLIT;
 constexpr int DOWN_BLOCKS = LR / WARPS;          // 40 blocks of 8 rows; one more for the inject rows
 constexpr int UP_COLS = 32;                      // columns d per `up` block (x 4 streams = 128 rows)
 constexpr int UP_BLOCKS = N / UP_COLS;           // 80
@@ -134,15 +149,21 @@ auto &xn = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[D]>(
     if (inject_block && (a.w_inject == nullptr || warp >= HC)) return;
     const uint16_t* wrow = (inject_block ? a.w_inject : a.w_down) + (size_t) row * D;
     const sycl::uint4 *w4 = reinterpret_cast<const sycl::uint4 *>(wrow);
+    // SYCL port: the multi kernel's order - per-tile partial sums for the split rows (gr_parity: bit-identical),
+    // the inject rows still one accumulation over the whole row (their block is not split there)
     float acc = 0.0f;
+    if (inject_block) {
 #pragma unroll 4
-    /*
-    DPCT1098: The '*' expression is used instead of the __ldg call. These
-    two expressions do not provide the exact same functionality. Check the
-    generated code for potential precision and/or performance issues.
-    */
-    for (int j = lane; j < D / 8; j += 32) acc += dot8(*(w4 + j), xn + j * 8);
-    acc = warp_sum(acc);
+        for (int j = lane; j < D / 8; j += 32) acc += dot8(*(w4 + j), xn + j * 8);
+        acc = warp_sum(acc);
+    } else {
+        for (int sp = 0; sp < DOWN_SPLIT; ++sp) {
+            float part = 0.0f;
+#pragma unroll 5
+            for (int j = lane + sp * (TILE / 8); j < (sp + 1) * (TILE / 8); j += 32) part += dot8(*(w4 + j), xn + j * 8);
+            acc += warp_sum(part);
+        }
+    }
     if (lane != 0) return;
     if (inject_block) {
         a.inject_out[row] = acc;
@@ -218,6 +239,7 @@ struct GrMulti {
     FusedGrArgs a[kFusedGrMaxT];
     float* xn;
     int T;
+    float* part;   ///< [DOWN_SPLIT][kFusedGrMaxT][LR] partial row sums of the down kernel
 };
 
 // Step 1 of `gr_down_kernel`, one block per token, same threads and reduction order: rs[t] and xn[t] to global.
@@ -290,12 +312,6 @@ auto &part =
     for (int i = t; i < D; i += THREADS) xn[i] *= s_rs[i / N];
 }
 
-#if defined(__HIPCC__)
-constexpr int TILE = 1280;             // eight-token tile fits gfx1100's 64 KiB LDS limit
-#else
-constexpr int TILE = 2560;             // xn floats per token staged at a time: 320 chunks of 8, 10 per lane
-#endif
-constexpr int TQ = TILE / 8 / 32;      // uint4 weight chunks per lane per tile
 
 // Step 2 of `gr_down_kernel` for T tokens.  One warp per row (so each lane accumulates the same chunks in the
 // same order as the single-token kernel); per tile the lane's 10 weight chunks are loaded BEFORE the activation
@@ -311,15 +327,17 @@ __dpct_inline__ void gr_down_multi_kernel(GrMulti m, uint8_t *dpct_local) {
     auto tile = (float *)dpct_local; // [T][TILE]
     const int t = item_ct1.get_local_id(2), lane = t & 31, warp = t >> 5;
     const int T = m.T;
-    const bool inject_block = item_ct1.get_group(2) == DOWN_BLOCKS;
-    const int row = inject_block ? warp : item_ct1.get_group(2) * WARPS + warp;
+    const int gid = (int) item_ct1.get_group(2);
+    const bool inject_block = gid == DOWN_BLOCKS * DOWN_SPLIT;
+    const int split = inject_block ? 0 : gid % DOWN_SPLIT, rb = inject_block ? 0 : gid / DOWN_SPLIT;
+    const int row = inject_block ? warp : rb * WARPS + warp;
     const bool active = !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
     const uint16_t* wrow = (inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) (active ? row : 0) * D;
     const sycl::uint4 *w4 = reinterpret_cast<const sycl::uint4 *>(wrow);
     float acc[kFusedGrMaxT];
 #pragma unroll
     for (int k = 0; k < kFusedGrMaxT; ++k) acc[k] = 0.0f;
-    for (int base = 0; base < D; base += TILE) {
+    for (int base = inject_block ? 0 : split * TILE; base < D; base += inject_block ? TILE : TILE * DOWN_SPLIT) {
         sycl::uint4 wv[TQ];
         if (active) {
 #pragma unroll
@@ -378,8 +396,7 @@ __dpct_inline__ void gr_down_multi_kernel(GrMulti m, uint8_t *dpct_local) {
         if (inject_block) {
             m.a[k].inject_out[row] = s[k];
         } else {
-            const float x = s[k] / (float) HC;
-            m.a[k].lo[row] = x / (1.0f + sycl::native::exp(-x));
+            m.part[((size_t) split * kFusedGrMaxT + k) * LR + row] = s[k];   // the up kernel sums the splits
         }
     }
 }
@@ -407,8 +424,16 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
     const int T = m.T;
     const int d0 = item_ct1.get_group(2) * UPM_COLS;
 #pragma unroll
-    for (int i = t; i < T * LR; i += THREADS)
-        lo[i / LR][i % LR] = m.a[i / LR].lo[i % LR];
+    for (int i = t; i < T * LR; i += THREADS) {   // the down kernel's partial sums, in split order, then silu
+        const int k = i / LR, r = i % LR;
+        float x = 0.0f;
+#pragma unroll
+        for (int sp = 0; sp < DOWN_SPLIT; ++sp) x += m.part[((size_t) sp * kFusedGrMaxT + k) * LR + r];
+        x /= (float) HC;
+        const float v = x / (1.0f + sycl::native::exp(-x));
+        lo[k][r] = v;
+        m.a[k].lo[r] = v;
+    }
     /*
     DPCT1065: Consider replacing sycl::nd_item::barrier() with
     sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
@@ -478,6 +503,19 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
 
 }  // namespace
 
+// one partials buffer per queue (the verifier's and the drafter's launches never share a queue; within a queue the
+// launches are ordered, and a graph capture records the pointer)
+static float* down_partials(sycl::queue* q) {
+    static std::mutex mu;
+    static std::unordered_map<sycl::queue*, float*> bufs;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = bufs.find(q);
+    if (it != bufs.end()) return it->second;
+    float* p = sycl::malloc_device<float>((size_t) DOWN_SPLIT * kFusedGrMaxT * LR, *q);
+    bufs[q] = p;
+    return p;
+}
+
 void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
                          int stamp_i0) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
@@ -498,6 +536,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     m.xn = xn_scratch;
     m.T = n_tok;
     dpct::queue_ptr st = strata::q_of(stream);
+    m.part = down_partials(st);
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -564,7 +603,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
 
             cgh.parallel_for<
                 dpct_kernel_name<class gr_down_multi_kernel_7f5820>>(
-                sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
+                sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS * DOWN_SPLIT + 1) *
                                       sycl::range(1, 1, THREADS),
                                   sycl::range(1, 1, THREADS)),
                 exp_props,
@@ -583,6 +622,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             c.xn = xn_scratch + (size_t) c0 * D;
             c.T = ct;
             for (int k = 0; k < ct; ++k) c.a[k] = a[c0 + k];
+            c.part = m.part;
             {
                 auto exp_props = sycl::ext::oneapi::experimental::properties{
                     sycl::ext::oneapi::experimental::use_root_sync};
@@ -598,7 +638,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
 
                     cgh.parallel_for<
                         dpct_kernel_name<class gr_down_multi_kernel_88cb86>>(
-                        sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
+                        sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS * DOWN_SPLIT + 1) *
                                               sycl::range(1, 1, THREADS),
                                           sycl::range(1, 1, THREADS)),
                         exp_props,

@@ -13,6 +13,9 @@
 #include <cstdlib>
 #include <time.h>
 
+#ifndef STRATA_PLAN_LOCAL
+#define STRATA_PLAN_LOCAL 1   // 0: the original one-thread plan kernel (A/B)
+#endif
 namespace strata::kernels {
 namespace {
 
@@ -928,11 +931,40 @@ __dpct_inline__ void resident_plan_kernel(
     const int32_t *__restrict__ res, int n_expert, const uint8_t *cache_base,
     const unsigned long long *slot_off, long long blob,
     int32_t *__restrict__ pl, long long capx, uint32_t *skip, uint32_t ring) {
-    // one thread: at most kVerifyMaxT * 10 entries, the host's exact loop
+#if STRATA_PLAN_LOCAL
+    // SYCL port: the host's exact loop, but over a local copy of the ids and their slots. One thread reading global
+    // memory for every compare (n^2 of them) took 87 us per layer on the B70 - 4% of a decode round; a work-group
+    // of 64 loads the n <= 60 entries once, then thread 0 groups them from local memory.
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    auto &s_ids = *sycl::ext::oneapi::group_local_memory_for_overwrite<int32_t[64]>(item.get_group());
+    auto &s_res = *sycl::ext::oneapi::group_local_memory_for_overwrite<int32_t[64]>(item.get_group());
+    auto &s_bad = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(item.get_group());
+    const int tid = (int) item.get_local_id(2);
+    if (tid == 0) s_bad = 0;
+    item.barrier(sycl::access::fence_space::local_space);
+    for (int i = tid; i < n && i < 64; i += 64) {
+        const int32_t e = ids[i];
+        const bool ok = e >= 0 && e < n_expert && res[e] >= 0;
+        s_ids[i] = e;
+        s_res[i] = ok ? res[e] : -1;
+        if (!ok) s_bad = 1;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+    if (tid != 0) return;
+    if (s_bad || n > 64) { *skip = 0; return; }   // n > 64 never happens (kVerifyMaxT * 10 = 60); refuse rather than read past
+#else
+    // the original: one thread, the host's exact loop over global memory
     for (int i = 0; i < n; ++i) {
         const int32_t e = ids[i];
         if (e < 0 || e >= n_expert || res[e] < 0) { *skip = 0; return; }
     }
+#endif
+#if !STRATA_PLAN_LOCAL
+#define s_ids ids
+#define S_RES(i) res[ids[i]]
+#else
+#define S_RES(i) s_res[i]
+#endif
     int32_t* counts = pl;
     int32_t* start = pl + 4;
     int32_t* dst = start + capx + 1;
@@ -943,17 +975,15 @@ __dpct_inline__ void resident_plan_kernel(
     int groups = 0, entries = 0;
     for (int i0 = 0; i0 < n; ++i0) {
         bool first = true;
-#pragma unroll
-        for (int j = 0; j < i0; ++j) if (ids[j] == ids[i0]) {
+        for (int j = 0; j < i0; ++j) if (s_ids[j] == s_ids[i0]) {
             first = false; break;
         }
         if (!first) continue;
-        const int32_t slot = res[ids[i0]];
+        const int32_t slot = S_RES(i0);
         ptr[groups] = (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob));
         start[groups] = entries;
-#pragma unroll
         for (int i = i0; i < n; ++i)
-            if (ids[i] == ids[i0]) {
+            if (s_ids[i] == s_ids[i0]) {
                 // an entry belongs to i0's group when its first occurrence is i0: the same expert id
                 dst[entries] = i;
                 tok[entries] = i / k;
@@ -973,6 +1003,8 @@ __dpct_inline__ void resident_plan_kernel(
     */
     sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::device);
     strata::sys_store(skip, ring);
+#undef s_ids
+#undef S_RES
 }
 __dpct_inline__ void wait_flag_ge_or_kernel(const volatile uint32_t *flag,
                                             uint32_t value,
@@ -1031,8 +1063,8 @@ void resident_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_
 
         strata::q_of(stream)
             ->parallel_for<dpct_kernel_name<class resident_plan_kernel_db6b7a>>(
-                sycl::nd_range<3>(sycl::range(1, 1, 1), sycl::range(1, 1, 1)),
-                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                sycl::nd_range<3>(sycl::range(1, 1, STRATA_PLAN_LOCAL ? 64 : 1), sycl::range(1, 1, STRATA_PLAN_LOCAL ? 64 : 1)),
+                exp_props, [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
                     resident_plan_kernel(ids, n_entries, k, res_layer, n_expert,
                                          cache_base, slot_off, blob, plan, capx,
                                          skip, ring);

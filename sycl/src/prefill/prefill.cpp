@@ -808,8 +808,11 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
     const bool q8 = !f16_only && mmq::built() && mmq::supported(kQ8_0);
     const uint64_t per_row = 4 * (2 * Nn + 4 * HCN + LR + HC + Nn + 2 * KV + 1) + 2 * (Nn + 2 * HCN + LR + Nn) + 64 +
                              (q8 ? (uint64_t) mmq::q8_bytes(g.hc, Nn) + 4 * g.hc : 0);
-    const int64_t B = std::min<int64_t>(n - r0, (int64_t) (m.region_bytes / per_row) & ~(int64_t) 63);
-    if (B < 64) return false;
+    // SYCL port: B is the batch buffers' capacity, not the row count (each batch uses nb <= B rows), so a short
+    // prompt gets 64-row buffers instead of the per-6-token fallback (19 tokens: 106 ms there, a few ms here)
+    const int64_t cap = (int64_t) (m.region_bytes / per_row) & ~(int64_t) 63;
+    if (cap < 64) return false;
+    const int64_t B = std::min<int64_t>(std::max<int64_t>(n - r0, 64), cap);
     uint8_t* q = m.region;
     auto carve = [&](size_t bytes) { void* p = q; q += (bytes + 255) & ~(size_t) 255; return p; };
     float* emb = (float*) carve((size_t) B * Nn * 4);
@@ -1125,6 +1128,11 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
         ++stats_.chunks;
         pt.mark(kPfStart, cs);
         const auto tsetup = Clock::now();
+        auto tlap = tsetup;   // STRATA_PREFILL_TIMING=1: where the host's chunk setup goes
+        auto lap = [&](const char* what) {
+            if (pt.on) { std::fprintf(stderr, "strata prefill timing: setup %s %.1f ms\n", what, ms_since(tlap)); tlap = Clock::now(); }
+        };
+        if (pt.on) { m.cs->wait(); lap("work queued before the chunk"); }
         // ---- embeddings, broadcast to the four streams - or, in a later stage of a layer split, the rows the
         // previous stage handed on
         if (hand_in_ != nullptr) {
@@ -1167,8 +1175,10 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                 err = "prefill: the token id upload failed";
                 return false;
             }
+            lap("token ids uploaded");
             if (nemb) {
                 nemb->gather_dev(m.tok_dev, T, m.emb, m.cs);
+                if (pt.on) { m.cs->wait(); lap("embedding gather (waited)"); }
             } else {
                 const auto* codes = (const uint8_t*) wemb->data;
                 const auto* scales = (const float*) (codes + wemb->codes_bytes);
@@ -1200,6 +1210,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             }
         }
         if (hand_in_ == nullptr) gr_broadcast(m.emb, m.R, T, m.cs);
+        lap("embeddings");
         // ---- the PLE rows of the whole chunk, one batched SSD request (read ahead on a thread, see ple_gather)
         if (ple_on) {
             const auto tp = Clock::now();
@@ -1229,6 +1240,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             stats_.ms_ple += ms_since(tp);
         }
         for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
+        lap("PLE rows");
         // ---- the QSA step records of every position in the chunk
         for (int64_t t = 0; t < T; ++t) strata::kernels::qsa_step_fill(m.steps_host.data() + t * strata::kernels::kStepCount, p0 + t, s);
         /*
@@ -1242,6 +1254,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
 
         int64_t qsa_index = 0, gdn_index = 0;
         for (int64_t l = 0; l < LB; ++l) (core::is_qsa_layer(g, l) ? qsa_index : gdn_index) += 1;
+        lap("step records");
         // step 3: this chunk's stream - every non-resident expert of every layer, layer by layer in id order (entry
         // k lands in ring slot k % ring); a copy is issued once the entry `ring` before it is consumed (its slot's
         // `used` event recorded), so the copy stream never waits on an event that is not queued yet
@@ -1394,6 +1407,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             if (threaded_issue) a_consumed.store(upto, std::memory_order_release);
             else issue_until(upto + (size_t) m.ring);
         };
+        lap("expert stream plan");
         host_setup_ms += ms_since(tsetup);
         bool normed = false;   // F-2: the previous half's write already normed R for this half (grs, xn16)
         for (int64_t l = LB; l < LE; ++l) {

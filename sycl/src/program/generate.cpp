@@ -5292,6 +5292,20 @@ int main(int argc, char** argv) {
         // plan v0.3 P6: with a native pack the first window is the last prompt token alone (it produces the first
         // generated token and the MTP's first cell); otherwise the token loop already did that.
         bool first_window = native_pack;
+        // SYCL port: every window graph and the drafter's graphs are captured here, once, instead of on first use in
+        // the loop below (STRATA_WARM_GRAPHS=0: as before). A server pays this once per process, not per request.
+        {
+            static const bool warm_on = [] { const char* v = std::getenv("STRATA_WARM_GRAPHS"); return !(v && v[0] == '0'); }();
+            if (warm_on) {
+                const Clock::time_point tw = Clock::now();
+                if (!ver.warm(err) || (use_mtp && !mtp.warm(err))) {
+                    std::fprintf(stderr, "strata generate: warm-up capture: %s\n", err.c_str());
+                    return 1;
+                }
+                std::fprintf(stderr, "strata generate: window and draft graphs captured in %.0f ms\n",
+                             std::chrono::duration<double, std::milli>(Clock::now() - tw).count());
+            }
+        }
         if (use_mtp && !first_window &&
             !mtp.draft_first(o.spec, ss.R, x, p - 1, drafts.data(), err, dprob.data(), (float) o.spec_min_p)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
@@ -5370,7 +5384,9 @@ int main(int argc, char** argv) {
             bool adapt_ok = true;
             if (!drive.d.usage.empty() && ((rounds + 1) % o.adapt_every) == 0)
                 adapt_thr = std::thread([&] { adapt_ok = adapt(); });
-            if (!ver.commit(a + 1, err)) {
+            // SYCL port: the commit graph is left running while the drafter's round (its own queue) runs; collected
+            // below, before anything reads the committed state
+            if (!ver.commit(a + 1, err, /*wait=*/!use_mtp)) {
                 if (adapt_thr.joinable()) adapt_thr.join();
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
@@ -5388,6 +5404,7 @@ int main(int argc, char** argv) {
             }
             if (eos) {
                 if (adapt_thr.joinable()) adapt_thr.join();
+                if (!ver.commit_finish(err)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
                 total_ms += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 break;
             }
@@ -5399,6 +5416,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
             }
+            if (!ver.commit_finish(err)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
             x = outv[(size_t) a];
             p += a + 1;
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();

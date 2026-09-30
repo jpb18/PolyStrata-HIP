@@ -4,6 +4,7 @@
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
+#include "strata/kernels/qsa_prompt_attn_xmx.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/kv_q4.hpp"
 
@@ -1186,7 +1187,9 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
             cc_major[dev] = major;
         }
         (void) cc_major[dev];
-        return false;   // SYCL: the tensor-core kernel is not ported yet; the caller takes the older kernel
+        // SYCL: the mma.sync kernel below is not ported; its XMX port takes the same arguments
+        if (qsa_prompt_attn_xmx(q, pools, ids, steps, cap, s, attn, n_q, stream)) return true;
+        return false;   // the caller takes the older kernel
     }
 #if defined(__HIPCC__)
     return false;   // the tensor-core kernel is compiled out on AMD (its major version is not a CUDA sm)

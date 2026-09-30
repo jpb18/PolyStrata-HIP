@@ -1455,9 +1455,10 @@ void Verifier::publish_plan(void* ctx) {
     *(volatile uint32_t*) v->h_flagA_ = v->cur_layer_ + 1;
 }
 
-bool Verifier::commit(int n_keep, std::string &err) try {
+bool Verifier::commit(int n_keep, std::string &err, bool wait) try {
     const OnDevice on_device(device_);
     if (n_keep < 1 || n_keep > last_t_) { err = "verify: commit count out of range"; return false; }
+    if (pending_commit_ != 0 && !commit_finish(err)) return false;
     const Clock::time_point t0 = Clock::now();
     h_commit_[0] = n_keep;
     h_commit_[1] = n_keep - 1;
@@ -1481,21 +1482,36 @@ bool Verifier::commit(int n_keep, std::string &err) try {
               dpct::get_error_string_dummy(le);
         return false;
     }
+    if (!wait && next_ == nullptr) {   // left running: commit_finish() collects it (the drafter overlaps it)
+        pending_commit_ = n_keep;
+        pending_commit_t0_ = t0;
+        return true;
+    }
+    pending_commit_ = n_keep;
+    pending_commit_t0_ = t0;
+    if (!commit_finish(err)) return false;
+    return next_ == nullptr || next_->commit(n_keep, err);
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+bool Verifier::warm(std::string &err) {
+    for (int T = 1; T <= max_t_; ++T)
+        if (!capture(T, err)) return false;
+    return true;
+}
+
+bool Verifier::commit_finish(std::string &err) try {
+    if (pending_commit_ == 0) return true;
+    const OnDevice on_device(device_);
+    const int n_keep = pending_commit_;
+    pending_commit_ = 0;
     const dpct::err0 se = DPCT_CHECK_ERROR(cs_->wait());
-    /*
-    DPCT1009: SYCL reports errors using exceptions and does not use error
-    codes. Please replace the "get_error_string_dummy(...)" with a real
-    error-handling function.
-    */
-    /*
-    DPCT1001: The statement could not be removed.
-    */
-    /*
-    DPCT1000: Error handling if-stmt was detected but could not be rewritten.
-    */
     if (se != 0) {
-        err =
-            std::string("verify: commit: ") + dpct::get_error_string_dummy(se);
+        err = std::string("verify: commit: ") + dpct::get_error_string_dummy(se);
         return false;
     }
     if (ple_stage())   // stages that share one session must advance it once
@@ -1503,8 +1519,8 @@ bool Verifier::commit(int n_keep, std::string &err) try {
             ss_->ple_prev[0] = ss_->ple_prev[1];
             ss_->ple_prev[1] = last_tokens_[t];
         }
-    ms_commit += ms_since(t0);
-    return next_ == nullptr || next_->commit(n_keep, err);
+    ms_commit += ms_since(pending_commit_t0_);
+    return true;
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__

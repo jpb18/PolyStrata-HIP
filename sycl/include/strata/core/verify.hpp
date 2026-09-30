@@ -31,6 +31,7 @@
 #include "strata/kernels/sampler.hpp"
 
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -108,7 +109,13 @@ public:
     static int64_t handoff_floats(const ModelGeometry& g) { return (int64_t) g.hc * g.n_embd + g.n_embd + g.hc; }
 
     /// Keep the first `n_keep` (1..T) tokens of the last window; advances `ss.ple_prev` by them.
-    bool commit(int n_keep, std::string& err);
+    /// `wait = false` (SYCL port, single stage only): the commit graph is launched and left running so the drafter's
+    /// round (its own queue, reads only the window's residuals) overlaps it; `commit_finish()` before the next run.
+    bool commit(int n_keep, std::string& err, bool wait = true);
+    bool commit_finish(std::string& err);
+    /// SYCL port: capture every window graph now (one per window size) instead of on first use, so the first
+    /// request does not pay for them (a 2,400-node graph takes tens of ms to finalize on this backend).
+    bool warm(std::string& err);
 
     /// Token t's residual after the last layer, (hc, n_embd) on the device, valid until the next `run`.
     const float* final_R(int t) const;
@@ -155,6 +162,8 @@ private:
     void* next_user_ = nullptr;
     bool ple_stage() const { return lb_ <= 1 && 1 < le_; }   ///< holds layer 1, where the PLE block runs
     bool capture_commit(std::string& err);
+    int pending_commit_ = 0;                  ///< n_keep of a launched, unfinished commit (0: none)
+    std::chrono::steady_clock::time_point pending_commit_t0_{};
     bool record_window(int T, dpct::queue_ptr cs, std::string &err);
     static constexpr int kProfPer = 32;              // stamps per layer
     bool prof_on_ = false;

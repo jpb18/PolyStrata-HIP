@@ -25,6 +25,7 @@
 #include "strata/core/session.hpp"
 
 #include <cstdint>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,14 @@ public:
     void set_prompt_len(int64_t n) { prompt_len_ = n; }
     /// At most this many drafts per round (below max_t - 1): a window longer than the MTP's comes from elsewhere.
     void set_max_drafts(int k) { max_drafts_ = k; }
+    /// SYCL port: capture the round, step and prompt graphs at load rather than on first use (see Verifier::warm)
+    bool warm(std::string& err) {
+        for (int T = 1; T <= max_t_; ++T)
+            if (!capture_round(T, err) || !capture_prefill(T, err)) return false;
+        for (int j = 1; j < std::min(max_t_ - 1, max_drafts_); ++j)
+            if (!capture_step(j, err)) return false;
+        return true;
+    }
     uint64_t vram_bytes() const { return vram_; }
     /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
     const QsaState& kv_state() const { return st_; }

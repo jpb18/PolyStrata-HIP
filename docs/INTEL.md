@@ -229,6 +229,36 @@ the ramp, not the kernel).
 38.3 tok/s decode (77% accepted on that text); the draft layer's prompt pass is now upstream's batched one
 (38.6 ms for 2,184 tokens, from 105 ms for 19 before it). Parity: 19 of 22, byte-exact `quantize_act` back.
 
+**Speed work, 2026-09-30 (after the 0.1.27 merge).** What moved the numbers, measured on the B70 with the
+same prompts as above (outputs identical before and after each change):
+
+| change | effect |
+|---|---|
+| every window graph and the drafter's graphs captured at load (`STRATA_WARM_GRAPHS=0`: as before) | the first request no longer pays 250-290 ms of captures |
+| the commit graph left running while the drafter's round runs on its own queue (`Verifier::commit(wait=false)` + `commit_finish`) | decode 38.3 -> 43.0 tok/s at the 2,184-token context, 46.5 -> 49.8 short |
+| the draft layer's batched prompt pass takes prompts under 64 rows (it fell back to per-6-token graphs) | its prompt cost on 19 tokens 106 -> 16 ms |
+| one device module per kernel (`-fsycl-device-code-split=per_kernel`) | the first launch in the prompt path (the embedding gather) 245 -> 1 ms |
+| the expert dequant writes each thread's run of FP16 values as one vector store (it wrote them one 2-byte store at a time) | dequant per expert 0.085 -> 0.030 ms; prompt 496 -> 575 tok/s at 2,184 tokens, 720 -> 841 at 8,000 |
+| SWAR sign compare/subtract in the expert dots, a local-memory resident-plan kernel, a split-K fused down kernel (bit-identical to the single-token one) | parity-clean, no measurable decode change; kept |
+
+Draft policy sweep (2,184-token prompt, 128 tokens): windows of 6 (`--spec 4`) at 41.6-43.5 tok/s; `--spec 2`
+33.6, `--spec 6` 35-37; `--spec-min-p` 0.3-0.7 within noise. Profiles (unitrace, `strata-sycl-dev:metrics` with
+Intel's metrics libraries and `dev.xe.observation_paranoid=0`): the expert dot kernels are ALU-bound (77% XVE
+active), the dense projections memory-latency bound (92-128 GB/s at 84-93% occupancy), a decode round is 80-85%
+kernel time and ~5 us of launch gap per node over 2,400-2,600 nodes.
+
+**XMX.** oneMKL's FP16 GEMMs already run on the XMX units (30-60 TFLOP/s in `xmx_gemm_bench`); the prompt path is
+bound by the dequant that feeds them, not by the products. Two joint_matrix kernels were written and are correct
+but lose to the existing paths on this card, so both stay opt-in: `xmx_gemm_iq` (a fused dequant + GEMM straight
+from the quantized rows, 4-5x slower than dequant + oneMKL) and `qsa_prompt_attn_xmx` (the port of the mma.sync
+prompt attention; `qsa_prompt_attn_parity` passes at 1e-6 of scale, 3x slower than the FP32 fallback per chunk;
+`STRATA_PROMPT_ATTN_XMX=1`). Where the prompt time goes now (2,184 / 8,000 tokens): dequant 28% / 27%, GEMMs
+22% / 20%, the per-layer host grouping 9.5% / 9%, attention 7% / 14%, embeddings + PLE rows 13% / 5%.
+
+A trap worth knowing: with a native pack `--prefill-until N` does not feed the rest of the prompt through the
+token loop (it is skipped for native packs), so the tokens after N are dropped and the model free-runs. Compare
+output tokens between paths, never only timings.
+
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
 0.1.25-0.1.27, 2026-09-30):

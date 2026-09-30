@@ -15,6 +15,9 @@
 #define GGML_COMMON_IMPL_SYCL
 #include "ggml-common.h"
 
+#include <sycl/ext/oneapi/matrix/matrix.hpp>
+#include <algorithm>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 
@@ -95,6 +98,29 @@ __dpct_inline__ float vec_dot_q2_0_q8_1(const void *__restrict__ vbq,
     return d2 * d8 * sumi;
 }
 
+// SYCL port: ggml's __vcmpne4 / __vsub4 came out of dpct as per-byte loops (extract, compare, insert, x4); on Xe the
+// expert dot kernels were ALU-bound with them (77% XVE active, metrics 2026-09-30). SWAR forms of the two uses:
+//   swar_ne4(x): 0xFF in every byte of x that is non-zero (the sign masks: at most one bit per byte)
+//   swar_sub4(a, s) with s from swar_ne4: per byte a - s, i.e. a + 1 where the sign byte is set (two's complement
+//   of the grid value after the xor: the same bits as __vsub4(a, s) for s in {0x00, 0xFF})
+#ifndef STRATA_SWAR
+#define STRATA_SWAR 1   // 1: the SWAR forms; 0: dpct's per-byte loops (A/B 2026-09-30: both correct)
+#endif
+#if STRATA_SWAR
+__dpct_inline__ int swar_ne4(unsigned x) {
+    x = (x | (x >> 4)) & 0x0F0F0F0Fu;
+    x = (x | (x >> 2)) & 0x03030303u;
+    x = (x | (x >> 1)) & 0x01010101u;
+    return (int) (x * 0xFFu);
+}
+__dpct_inline__ int swar_sub4(unsigned a, unsigned s) {
+    return (int) (((a & 0x7F7F7F7Fu) + (s & 0x01010101u)) ^ (a & 0x80808080u));
+}
+#else
+__dpct_inline__ int swar_ne4(unsigned x) { return dpct::vectorized_binary<sycl::uchar4>(x, 0, std::not_equal_to<>()); }
+__dpct_inline__ int swar_sub4(unsigned a, unsigned s) { return dpct::vectorized_binary<sycl::uchar4>(a, s, std::minus<>()); }
+#endif
+
 __dpct_inline__ float vec_dot_iq2_xxs_q8_1(const void *__restrict__ vbq,
                                            const block_q8_1 *__restrict__ bq8_1,
                                            const int &kbx, const int &iqs) {
@@ -108,16 +134,12 @@ __dpct_inline__ float vec_dot_iq2_xxs_q8_1(const void *__restrict__ vbq,
         const sycl::uint2 grid_pos =
             ((const sycl::uint2 *)iq2xxs_grid)[aux8[k0 / 2]];
         const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
-        const int signs0 = dpct::vectorized_binary<sycl::uchar4>(
-            signs & 0x08040201, 0, std::not_equal_to<>());
-        const int grid0 = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.x() ^ signs0, signs0, std::minus<>());
+        const int signs0 = swar_ne4(signs & 0x08040201);
+        const int grid0 = swar_sub4(grid_pos.x() ^ signs0, signs0);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 0);
         sumi = ggml_cuda_dp4a(grid0, u0, sumi);
-        const int signs1 = dpct::vectorized_binary<sycl::uchar4>(
-            signs & 0x80402010, 0, std::not_equal_to<>());
-        const int grid1 = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.y() ^ signs1, signs1, std::minus<>());
+        const int signs1 = swar_ne4(signs & 0x80402010);
+        const int grid1 = swar_sub4(grid_pos.y() ^ signs1, signs1);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 1);
         sumi = ggml_cuda_dp4a(grid1, u1, sumi);
     }
@@ -144,15 +166,11 @@ __dpct_inline__ float vec_dot_iq2_xs_q8_1(const void *__restrict__ vbq,
         const sycl::uint2 grid_pos =
             ((const sycl::uint2 *)iq2xs_grid)[q2[l0 / 2] & 0x1FF];
         const uint32_t signs = unpack_ksigns(q2[l0 / 2] >> 9);
-        const int signs0 = dpct::vectorized_binary<sycl::uchar4>(
-            signs & 0x08040201, 0, std::not_equal_to<>());
-        const int grid_l = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.x() ^ signs0, signs0, std::minus<>());
+        const int signs0 = swar_ne4(signs & 0x08040201);
+        const int grid_l = swar_sub4(grid_pos.x() ^ signs0, signs0);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
-        const int signs1 = dpct::vectorized_binary<sycl::uchar4>(
-            signs & 0x80402010, 0, std::not_equal_to<>());
-        const int grid_h = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.y() ^ signs1, signs1, std::minus<>());
+        const int signs1 = swar_ne4(signs & 0x80402010);
+        const int grid_h = swar_sub4(grid_pos.y() ^ signs1, signs1);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         if (l0 < 4) {
             sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
@@ -184,18 +202,12 @@ __dpct_inline__ float vec_dot_iq2_s_q8_1(const void *__restrict__ vbq,
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
-        const int signs0 = dpct::vectorized_binary<sycl::uchar4>(
-            ((signs_packed_8[l0 / 2] & 0x03) << 7) |
-                ((signs_packed_8[l0 / 2] & 0x0C) << 21),
-            0x00000000, std::not_equal_to<>());
-        const int signs1 = dpct::vectorized_binary<sycl::uchar4>(
-            ((signs_packed_8[l0 / 2] & 0x30) << 3) |
-                ((signs_packed_8[l0 / 2] & 0xC0) << 17),
-            0x00000000, std::not_equal_to<>());
-        const int grid_l = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos[0] ^ signs0, signs0, std::minus<>());
-        const int grid_h = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos[1] ^ signs1, signs1, std::minus<>());
+        const int signs0 = swar_ne4(((signs_packed_8[l0 / 2] & 0x03) << 7) |
+                ((signs_packed_8[l0 / 2] & 0x0C) << 21));
+        const int signs1 = swar_ne4(((signs_packed_8[l0 / 2] & 0x30) << 3) |
+                ((signs_packed_8[l0 / 2] & 0xC0) << 17));
+        const int grid_l = swar_sub4(grid_pos[0] ^ signs0, signs0);
+        const int grid_h = swar_sub4(grid_pos[1] ^ signs1, signs1);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         if (l0 < 4) {
@@ -227,15 +239,11 @@ __dpct_inline__ float vec_dot_iq3_xxs_q8_1(const void *__restrict__ vbq,
         const sycl::int2 grid_pos =
             sycl::int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
         const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
-        const int signs0 = dpct::vectorized_binary<sycl::uchar4>(
-            signs & 0x08040201, 0, std::not_equal_to<>());
-        const int grid_l = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.x() ^ signs0, signs0, std::minus<>());
+        const int signs0 = swar_ne4(signs & 0x08040201);
+        const int grid_l = swar_sub4(grid_pos.x() ^ signs0, signs0);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
-        const int signs1 = dpct::vectorized_binary<sycl::uchar4>(
-            signs & 0x80402010, 0, std::not_equal_to<>());
-        const int grid_h = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.y() ^ signs1, signs1, std::minus<>());
+        const int signs1 = swar_ne4(signs & 0x80402010);
+        const int grid_h = swar_sub4(grid_pos.y() ^ signs1, signs1);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         sumi = ggml_cuda_dp4a(grid_l, u0, sumi);
         sumi = ggml_cuda_dp4a(grid_h, u1, sumi);
@@ -264,18 +272,12 @@ __dpct_inline__ float vec_dot_iq3_s_q8_1(const void *__restrict__ vbq,
         const sycl::int2 grid_pos =
             sycl::int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
                        iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
-        const int signs0 = dpct::vectorized_binary<sycl::uchar4>(
-            ((signs_packed_8[l0 / 2] & 0x03) << 7) |
-                ((signs_packed_8[l0 / 2] & 0x0C) << 21),
-            0x00000000, std::not_equal_to<>());
-        const int signs1 = dpct::vectorized_binary<sycl::uchar4>(
-            ((signs_packed_8[l0 / 2] & 0x30) << 3) |
-                ((signs_packed_8[l0 / 2] & 0xC0) << 17),
-            0x00000000, std::not_equal_to<>());
-        const int grid_l = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.x() ^ signs0, signs0, std::minus<>());
-        const int grid_h = dpct::vectorized_binary<sycl::uchar4>(
-            grid_pos.y() ^ signs1, signs1, std::minus<>());
+        const int signs0 = swar_ne4(((signs_packed_8[l0 / 2] & 0x03) << 7) |
+                ((signs_packed_8[l0 / 2] & 0x0C) << 21));
+        const int signs1 = swar_ne4(((signs_packed_8[l0 / 2] & 0x30) << 3) |
+                ((signs_packed_8[l0 / 2] & 0xC0) << 17));
+        const int grid_l = swar_sub4(grid_pos.x() ^ signs0, signs0);
+        const int grid_h = swar_sub4(grid_pos.y() ^ signs1, signs1);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         sumi = ggml_cuda_dp4a(grid_l, u0, sumi);
@@ -370,7 +372,8 @@ __dpct_inline__ float vec_dot_iq4_xs_q8_1(const void *__restrict__ vbq,
 
 // ---------------------------------------------------------------- the formats
 // qk = values per block, ipb = dot calls per block (qi / vdr), step = the iqs stride between calls.
-template<int TY> struct Fmt;
+template<int TY> 
+struct Fmt;
 template<> struct Fmt<16> { static constexpr int qk = 256, ipb = 8, step = 2;
     static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq2_xxs_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<17> { static constexpr int qk = 256, ipb = 8, step = 2;
@@ -489,10 +492,10 @@ template <> struct Multi<18> {   // iq3_xxs
         for (int l0 = 0; l0 < 8; l0 += 2) {
             const sycl::int2 grid_pos = sycl::int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
             const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
-            const int signs0 = dpct::vectorized_binary<sycl::uchar4>(signs & 0x08040201, 0, std::not_equal_to<>());
-            const int signs1 = dpct::vectorized_binary<sycl::uchar4>(signs & 0x80402010, 0, std::not_equal_to<>());
-            m.w[l0 + 0] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.x() ^ signs0, signs0, std::minus<>());
-            m.w[l0 + 1] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.y() ^ signs1, signs1, std::minus<>());
+            const int signs0 = swar_ne4(signs & 0x08040201);
+            const int signs1 = swar_ne4(signs & 0x80402010);
+            m.w[l0 + 0] = swar_sub4(grid_pos.x() ^ signs0, signs0);
+            m.w[l0 + 1] = swar_sub4(grid_pos.y() ^ signs1, signs1);
         }
         m.a = (int) (aux32 >> 28);
         m.d = sycl::vec<sycl::half, 1>(bq3->d).convert<float, sycl::rounding_mode::automatic>()[0];
@@ -520,10 +523,10 @@ template <> struct Multi<22> {   // iq2_s
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
             const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
-            const int signs0 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21), 0, std::not_equal_to<>());
-            const int signs1 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17), 0, std::not_equal_to<>());
-            m.w[l0 + 0] = dpct::vectorized_binary<sycl::uchar4>(grid_pos[0] ^ signs0, signs0, std::minus<>());
-            m.w[l0 + 1] = dpct::vectorized_binary<sycl::uchar4>(grid_pos[1] ^ signs1, signs1, std::minus<>());
+            const int signs0 = swar_ne4(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21));
+            const int signs1 = swar_ne4(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17));
+            m.w[l0 + 0] = swar_sub4(grid_pos[0] ^ signs0, signs0);
+            m.w[l0 + 1] = swar_sub4(grid_pos[1] ^ signs1, signs1);
         }
         m.a = bq2->scales[iqs / 2] & 0x0F;
         m.b = bq2->scales[iqs / 2] >> 4;
@@ -552,10 +555,10 @@ template <> struct Multi<21> {   // iq3_s
         for (int l0 = 0; l0 < 8; l0 += 2) {
             const sycl::int2 grid_pos = sycl::int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
                                                    iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
-            const int signs0 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21), 0, std::not_equal_to<>());
-            const int signs1 = dpct::vectorized_binary<sycl::uchar4>(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17), 0, std::not_equal_to<>());
-            m.w[l0 + 0] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.x() ^ signs0, signs0, std::minus<>());
-            m.w[l0 + 1] = dpct::vectorized_binary<sycl::uchar4>(grid_pos.y() ^ signs1, signs1, std::minus<>());
+            const int signs0 = swar_ne4(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21));
+            const int signs1 = swar_ne4(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17));
+            m.w[l0 + 0] = swar_sub4(grid_pos.x() ^ signs0, signs0);
+            m.w[l0 + 1] = swar_sub4(grid_pos.y() ^ signs1, signs1);
         }
         m.a = 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
         m.d = sycl::vec<sycl::half, 1>(bq3->d).convert<float, sycl::rounding_mode::automatic>()[0];
@@ -802,6 +805,21 @@ __dpct_inline__ sycl::half cvt<sycl::half>(float v) {
         .convert<sycl::half, sycl::rounding_mode::automatic>()[0];
 }
 
+// SYCL port: the dequant functions below wrote one 2-byte value at a time (dq_* = llama.cpp's per-thread loops); on Xe
+// the FP16 expert dequant ran at ~80 GB/s of writes, 40% of the prompt path. Each thread's run of values goes out as one
+// vector store instead (the offsets are multiples of the run length, so the stores are aligned).
+template <typename dst_t, int N>
+__dpct_inline__ void store_run(dst_t* y, const float* v) {
+    if constexpr (std::is_same_v<dst_t, sycl::half> && (N == 4 || N == 8)) {
+        sycl::vec<sycl::half, N> h;
+#pragma unroll
+        for (int j = 0; j < N; ++j) h[j] = sycl::half(v[j]);
+        *reinterpret_cast<sycl::vec<sycl::half, N>*>(y) = h;
+    } else {
+#pragma unroll
+        for (int j = 0; j < N; ++j) y[j] = cvt<dst_t>(v[j]);
+    }
+}
 template <typename dst_t>
 inline void dq_iq2_xxs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const block_iq2_xxs* x = (const block_iq2_xxs*) vx;
@@ -813,9 +831,10 @@ inline void dq_iq2_xxs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const uint32_t aux32 = q2[2] | (q2[3] << 16);
     const float d = (float) x[ibs].d * (0.5f + (aux32 >> 28)) * 0.25f;
     const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * il) & 127];
+    float v[8];
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
-        y[j] = cvt<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+    for (int j = 0; j < 8; ++j) v[j] = d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f);
+    store_run<dst_t, 8>(y, v);
 }
 template <typename dst_t>
 inline void dq_iq2_xs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
@@ -826,9 +845,10 @@ inline void dq_iq2_xs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const uint8_t* grid = (const uint8_t*) (iq2xs_grid + (q2[il] & 511));
     const float d = (float) x[ibs].d * (0.5f + ((x[ibs].scales[ib] >> 4 * (il / 2)) & 0xf)) * 0.25f;
     const uint8_t signs = ksigns_iq2xs[q2[il] >> 9];
+    float v[8];
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
-        y[j] = cvt<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+    for (int j = 0; j < 8; ++j) v[j] = d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f);
+    store_run<dst_t, 8>(y, v);
 }
 template <typename dst_t>
 inline void dq_iq2_s(const void *vx, int64_t ibs, dst_t *yy, int tid) {
@@ -838,9 +858,10 @@ inline void dq_iq2_s(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const uint8_t* grid = (const uint8_t*) (iq2s_grid + (x[ibs].qs[4 * ib + il] | ((x[ibs].qh[ib] << (8 - 2 * il)) & 0x300)));
     const float d = (float) x[ibs].d * (0.5f + ((x[ibs].scales[ib] >> 4 * (il / 2)) & 0xf)) * 0.25f;
     const uint8_t signs = x[ibs].qs[QK_K / 8 + 4 * ib + il];
+    float v[8];
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
-        y[j] = cvt<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+    for (int j = 0; j < 8; ++j) v[j] = d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f);
+    store_run<dst_t, 8>(y, v);
 }
 template <typename dst_t>
 inline void dq_iq3_xxs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
@@ -854,11 +875,13 @@ inline void dq_iq3_xxs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const uint32_t aux32 = gas[0] | (gas[1] << 16);
     const float d = (float) x[ibs].d * (0.5f + (aux32 >> 28)) * 0.5f;
     const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * il) & 127];
+    float v[8];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
-        y[j + 0] = cvt<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f));
-        y[j + 4] = cvt<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f));
+        v[j + 0] = d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f);
+        v[j + 4] = d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f);
     }
+    store_run<dst_t, 8>(y, v);
 }
 template <typename dst_t>
 inline void dq_iq3_s(const void *vx, int64_t ibs, dst_t *yy, int tid) {
@@ -870,11 +893,13 @@ inline void dq_iq3_s(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const uint8_t* grid2 = (const uint8_t*) (iq3s_grid + (qs[2 * il + 1] | ((x[ibs].qh[ib] << (7 - 2 * il)) & 256)));
     const float d = (float) x[ibs].d * (1 + 2 * ((x[ibs].scales[ib / 2] >> 4 * (ib % 2)) & 0xf));
     const uint8_t signs = x[ibs].signs[4 * ib + il];
+    float v[8];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
-        y[j + 0] = cvt<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f));
-        y[j + 4] = cvt<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f));
+        v[j + 0] = d * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f);
+        v[j + 4] = d * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f);
     }
+    store_run<dst_t, 8>(y, v);
 }
 template <typename dst_t>
 inline void dq_iq1_m(const void *vx, int64_t ibs, dst_t *yy, int tid) {
@@ -902,11 +927,14 @@ inline void dq_iq4_nl(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     dst_t* y = yy + 32 * ib + 4 * il;
     const uint8_t* q4 = x[ib].qs + 4 * il;
     const float d = (float) x[ib].d;
+    float lo[4], hi[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
-        y[j + 0] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] & 0xf]);
-        y[j + 16] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] >> 4]);
+        lo[j] = d * kvalues_iq4nl[q4[j] & 0xf];
+        hi[j] = d * kvalues_iq4nl[q4[j] >> 4];
     }
+    store_run<dst_t, 4>(y, lo);
+    store_run<dst_t, 4>(y + 16, hi);
 }
 // Q3_K (the Q2_0 file's token_embd): llama.cpp's dequantize_block_q3_K, its 64 threads folded onto 32
 template <typename dst_t>
@@ -939,11 +967,14 @@ inline void dq_iq4_xs(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     dst_t* y = yy + 32 * ib + 4 * il;
     const uint8_t* q4 = x->qs + 16 * ib + 4 * il;
     const float d = (float) x->d * ((((x->scales_l[ib / 2] >> 4 * (ib % 2)) & 0xf) | (((x->scales_h >> 2 * ib) & 3) << 4)) - 32);
+    float lo[4], hi[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
-        y[j + 0] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] & 0xf]);
-        y[j + 16] = cvt<dst_t>(d * kvalues_iq4nl[q4[j] >> 4]);
+        lo[j] = d * kvalues_iq4nl[q4[j] & 0xf];
+        hi[j] = d * kvalues_iq4nl[q4[j] >> 4];
     }
+    store_run<dst_t, 4>(y, lo);
+    store_run<dst_t, 4>(y + 16, hi);
 }
 template <typename dst_t>
 inline void dq_q2_0(const void *vx, int64_t ibs, dst_t *yy, int tid) {
@@ -951,11 +982,14 @@ inline void dq_q2_0(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const block_q2_0* x = (const block_q2_0*) vx + ibs * 4;
     const int b = tid / 8, part = tid % 8;          // block 0..3, 8 values each
     const float d = (float) x[b].d;
+    float v[8];
+#pragma unroll
     for (int j = 0; j < 8; ++j) {
         const int i = part * 8 + j;
         const int code = (x[b].qs[i / 4] >> ((i % 4) * 2)) & 3;
-        yy[b * 64 + i] = cvt<dst_t>(d * (float) (code - 1));
+        v[j] = d * (float) (code - 1);
     }
+    store_run<dst_t, 8>(yy + b * 64 + part * 8, v);
 }
 
 template <typename dst_t>
@@ -1649,4 +1683,160 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     check("native_expert_grouped/down");
 }
 
+
+// ================================================================ SYCL port: XMX GEMM straight from the quantized rows
+//
+// The prompt path dequantizes every routed expert to FP16 (8 MB written, then read back by oneMKL) before its GEMMs:
+// 39-41% of the prompt time on the B70 (2026-09-30), the GEMMs themselves another 16%. This kernel dequantizes a
+// 16-feature strip of the weight matrix into local memory, packs it for the XMX B operand and multiplies it against
+// every activation row with joint_matrix (16x16x16, FP16 in, FP32 out; sub-group 16 as XMX wants). The FP16 weights
+// never touch global memory.
+//
+//   Y[M][n_out] = X[M][K] . W[n_out][K]^T      X FP16 row-major (lda K), Y FP32 (ldy), W quantized rows (a ggml IQ type)
+//
+// Gate/up: `up != nullptr`, virtual row 2r = gate row r, 2r+1 = up row r (the order iq_dequant_gu_f16 produces, which
+// swiglu_interleaved expects). K must be a multiple of 256 (a QK_K block per slab) or the whole row must fit a slab
+// (K = 640: 16 rows are 40 blocks, block-aligned since 16 * 640 / 256 = 40).
+namespace xmx {
+namespace jm = sycl::ext::oneapi::experimental::matrix;
+constexpr int SG = 16;                 // XMX sub-group size
+constexpr int NSG = 8;                 // sub-groups per work-group
+constexpr int WG = SG * NSG;
+constexpr int NT = 16;                 // features per work-group: one B tile
+constexpr int MAXT = 4;                // C tiles per sub-group -> 512 rows per chunk
+constexpr int APAD = 8;                // halves of padding on the staged A tile rows
+struct Src { const uint8_t* gate; const uint8_t* up; int ty; int64_t per_row; };
+struct Smem { sycl::half* stage; sycl::half* packed; sycl::half* atile; float* ctile; };
+
+// the block index (x[ibs] in dq_dispatch) of virtual row v's k-range [k0, k0 + 256) - rows are per_row blocks long
+__dpct_inline__ const void* block_of(const Src& s, int v, int cblk, int64_t& ibs) {
+    if (s.up != nullptr) { ibs = (int64_t) (v >> 1) * s.per_row + cblk; return (v & 1) ? s.up : s.gate; }
+    ibs = (int64_t) v * s.per_row + cblk;
+    return s.gate;
+}
+
+// one work-group: features [f0, f0 + 16) of the weight matrix against all M rows; slab_k halves of K per pass
+void gemm_kernel(Src src, const sycl::half* X, int K, int slab_k, float* Y, int64_t ldy, int M, int n_out, Smem sm) {
+    auto it = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    auto sg = it.get_sub_group();
+    const int sgid = (int) sg.get_group_id()[0], lane = (int) sg.get_local_id()[0], t = (int) it.get_local_id(2);
+    const int f0 = (int) it.get_group(2) * NT;
+    const int per_slab = slab_k / 256;                    // blocks of one row per slab (K % 256 == 0), or
+    const int whole = (slab_k == K) ? 1 : 0;              // the whole 16-row strip as NT * K / 256 flat blocks
+    const int nblk = whole ? NT * K / 256 : NT * per_slab;
+    auto gptr = [](auto* p) { return sycl::address_space_cast<sycl::access::address_space::global_space, sycl::access::decorated::no>(p); };
+    auto lptr = [](auto* p) { return sycl::address_space_cast<sycl::access::address_space::local_space, sycl::access::decorated::no>(p); };
+    sycl::half* atile = sm.atile + (size_t) sgid * 16 * (16 + APAD);
+    float* ctile = sm.ctile + (size_t) sgid * 256;
+    for (int m_base = 0; m_base < M; m_base += MAXT * NSG * 16) {
+        jm::joint_matrix<sycl::sub_group, float, jm::use::accumulator, 16, 16> C[MAXT];
+#pragma unroll
+        for (int k = 0; k < MAXT; ++k) jm::joint_matrix_fill(sg, C[k], 0.0f);
+        const int tiles = std::min((M - m_base + 15) / 16, MAXT * NSG);
+        for (int k0 = 0; k0 < K; k0 += slab_k) {
+            it.barrier(sycl::access::fence_space::local_space);
+            // dequantize the strip's blocks of this slab into stage[NT][slab_k] (flat, row-major): 32 "threads" per
+            // block in dq_dispatch's terms, two calls per lane
+            for (int b = sgid; b < nblk; b += NSG) {
+                int v, kk;
+                if (whole) { v = (b * 256) / K; kk = (b * 256) % K; }
+                else { v = b / per_slab; kk = (b % per_slab) * 256; }
+                sycl::half* dst = sm.stage + (size_t) v * slab_k + kk;
+                const int row = f0 + v;
+                if (row < n_out) {
+                    int64_t ibs;
+                    const void* blk = src.gate;
+                    if (whole) ibs = ((int64_t) f0 * K) / 256 + b;   // flat blocks of the [n_out][K] matrix
+                    else blk = block_of(src, row, k0 / 256 + b % per_slab, ibs);
+                    dq_dispatch<sycl::half>(src.ty, blk, ibs, dst, lane);
+                    dq_dispatch<sycl::half>(src.ty, blk, ibs, dst, lane + 16);
+                } else {
+                    for (int i = lane; i < 256; i += SG) dst[i] = sycl::half(0.0f);
+                }
+            }
+            it.barrier(sycl::access::fence_space::local_space);
+            // pack for the XMX B operand: element (k, n) at packed[(k / 2) * (NT * 2) + n * 2 + (k & 1)]
+            for (int i = t; i < NT * slab_k; i += WG) {
+                const int n = i / slab_k, k = i - n * slab_k;
+                sm.packed[(k >> 1) * (NT * 2) + n * 2 + (k & 1)] = sm.stage[i];
+            }
+            it.barrier(sycl::access::fence_space::local_space);
+            for (int ks = 0; ks < slab_k; ks += 16) {
+                jm::joint_matrix<sycl::sub_group, sycl::half, jm::use::b, 16, 16, jm::layout::ext_intel_packed> B;
+                jm::joint_matrix_load(sg, B, lptr(sm.packed + (ks >> 1) * (NT * 2)), NT * 2);
+#pragma unroll
+                for (int tt = 0; tt < MAXT; ++tt) {
+                    const int tile = sgid + tt * NSG;
+                    if (tile >= tiles) break;
+                    const int m0 = m_base + tile * 16;
+                    jm::joint_matrix<sycl::sub_group, sycl::half, jm::use::a, 16, 16, jm::layout::row_major> A;
+                    if (m0 + 16 <= M) {
+                        jm::joint_matrix_load(sg, A, gptr(X + (size_t) m0 * K + k0 + ks), (size_t) K);
+                    } else {   // the tail tile: valid rows staged, the rest zero
+                        for (int i = lane; i < 16 * 16; i += SG) {
+                            const int r = i >> 4, c = i & 15;
+                            atile[r * (16 + APAD) + c] = (m0 + r < M) ? X[(size_t) (m0 + r) * K + k0 + ks + c] : sycl::half(0.0f);
+                        }
+                        sycl::group_barrier(sg);
+                        jm::joint_matrix_load(sg, A, lptr(atile), (size_t) (16 + APAD));
+                        sycl::group_barrier(sg);
+                    }
+                    jm::joint_matrix_mad(sg, C[tt], A, B, C[tt]);
+                }
+            }
+        }
+        // the chunk's results
+#pragma unroll
+        for (int tt = 0; tt < MAXT; ++tt) {
+            const int tile = sgid + tt * NSG;
+            if (tile >= tiles) break;
+            const int m0 = m_base + tile * 16;
+            if (m0 + 16 <= M && f0 + NT <= n_out) {
+                jm::joint_matrix_store(sg, C[tt], gptr(Y + (size_t) m0 * ldy + f0), (size_t) ldy, jm::layout::row_major);
+            } else {
+                jm::joint_matrix_store(sg, C[tt], lptr(ctile), (size_t) 16, jm::layout::row_major);
+                sycl::group_barrier(sg);
+                for (int i = lane; i < 256; i += SG) {
+                    const int r = i >> 4, c = i & 15;
+                    if (m0 + r < M && f0 + c < n_out) Y[(size_t) (m0 + r) * ldy + f0 + c] = ctile[i];
+                }
+                sycl::group_barrier(sg);
+            }
+        }
+    }
+}
+}  // namespace xmx
+
+bool xmx_gemm_iq(int ty, const void* gate, const void* up, int64_t K, int n_out, const uint16_t* X, int M, float* Y,
+                 int64_t ldy, void* stream) {
+    if (!is_iq(ty) || ty == 16 || ty == 17 || ty == 29 || ty == 23 || ty == 11) return false;   // dq_dispatch covers these; the rest untested here
+    if (M <= 0 || n_out <= 0 || n_out % xmx::NT != 0 || K <= 0) return false;
+    const bool by_block = (K % 256) == 0;
+    const bool whole = !by_block && ((int64_t) xmx::NT * K) % 256 == 0 && K % 16 == 0;
+    if (!by_block && !whole) return false;
+    const int slab_k = by_block ? 256 : (int) K;
+    if (up != nullptr && !by_block) return false;   // gate/up rows are per_row blocks each
+    const size_t stage_halves = (size_t) xmx::NT * slab_k;
+    const size_t bytes = stage_halves * 2 /*stage*/ + stage_halves * 2 /*packed*/ + (size_t) xmx::NSG * 16 * (16 + xmx::APAD) * 2 +
+                         (size_t) xmx::NSG * 256 * 4;
+    if (bytes > 96 * 1024) return false;
+    dpct::queue_ptr q = strata::q_of(stream);
+    xmx::Src src{(const uint8_t*) gate, (const uint8_t*) up, ty, by_block ? K / 256 : 0};
+    const int groups = n_out / xmx::NT;
+    q->submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<uint8_t, 1> slm(sycl::range<1>(bytes), cgh);
+        cgh.parallel_for(
+            sycl::nd_range<3>(sycl::range<3>(1, 1, (size_t) groups * xmx::WG), sycl::range<3>(1, 1, xmx::WG)),
+            [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(16)]] {
+                uint8_t* base = slm.get_multi_ptr<sycl::access::decorated::no>().get();
+                xmx::Smem sm;
+                sm.stage = (sycl::half*) base;
+                sm.packed = sm.stage + stage_halves;
+                sm.atile = sm.packed + stage_halves;
+                sm.ctile = (float*) (sm.atile + (size_t) xmx::NSG * 16 * (16 + xmx::APAD));
+                xmx::gemm_kernel(src, (const sycl::half*) X, (int) K, slab_k, Y, ldy, M, n_out, sm);
+            });
+    });
+    return true;
+}
 }  // namespace strata::kernels
