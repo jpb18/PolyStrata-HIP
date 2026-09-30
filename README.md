@@ -177,6 +177,19 @@ the same way - nothing big is downloaded again.
 **Good to know:** it answers one request at a time. The first message of a chat is read in full (about 1 minute per
 30,000 tokens); after that it keeps the conversation and reads only what is new, so follow-ups start in seconds.
 
+### Where things are stored
+
+- **Your chats: only in your browser.** The Chat tab keeps the conversation, its settings and the API key you typed
+  in the browser's local storage (`strata.*` keys) - not on the server and not in the Strata folder. Pictures are not
+  kept, only their names. Another browser or a private window starts empty; clearing the site's data deletes them.
+- **How the model starts:** `strata-<model>.json` in the Strata folder (context, GPUs, host, API key, ...), written
+  by setup; next to it `run-<model>.bat` / `.sh`, the log `strata-<model>.log` and, when you use "Use for other
+  apps too", `strata-<model>.shared-settings.json`.
+- **The model files** (`models/`, `packs/`, `mtp/`, 70-120 GB): in **`Strata-data` next to the Strata folder**, or
+  wherever `--data-dir` put them.
+- **Where that data folder is:** `%APPDATA%\Strata\settings.json` on Windows, `~/.config/strata/settings.json` on
+  Linux ([details](docs/DETAILS.md)).
+
 ## Something went wrong?
 
 **My PC froze, or got very slow, the first time Strata started.**
