@@ -938,6 +938,7 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { std::fprintf(stderr, "%s needs a value\n", what); std::exit(2); }
             return argv[++i];
         };
+        bool parsed = true;
         if (a == "--help" || a == "-h") { usage(); return 0; }
         else if (a == "--pack") o.pack = next("--pack");
         else if (a == "--tokens") {
@@ -1024,7 +1025,11 @@ int main(int argc, char** argv) {
         else if (a == "--pool-workers") o.pool_workers = std::atoi(next("--pool-workers"));
         else if (a == "--no-host-worker") o.no_host_worker = true;
         else if (a == "--no-ple-prefetch") o.no_ple_prefetch = true;
-        else if (a == "--expert-cache") {
+        else parsed = false;
+        // The chain continues here in a second statement: one chain of 120+ `else if` passed MSVC's limit of 128
+        // nested blocks (C1061).  The order of the tests and what each does are unchanged.
+        if (!parsed) {
+        if (a == "--expert-cache") {
             const std::string v = next("--expert-cache");
             o.expert_cache = (v == "auto") ? -1 : std::atoi(v.c_str());
         }
@@ -1127,6 +1132,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
             usage();
             return 2;
+        }
         }
     }
     // Layer split (multi-GPU): the later stages run layers [K_i, K_i+1) on their own GPUs (--split-device, default
