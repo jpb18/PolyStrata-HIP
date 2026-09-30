@@ -113,8 +113,9 @@ The worker count above was used on a 16-core CPU; measure it for your CPU.
 The 4K context is a smoke-test starting point, not a model limit. The expert cache
 sizes itself automatically and leaves 1 GiB of VRAM headroom.
 
-The installer supports this backend (see "Install with setup" above). The vision helper and multi-GPU layer
-splits are NVIDIA-only for now.
+The installer supports this backend (see "Install with setup" above). The vision helper is NVIDIA-only for now.
+Setup installs one AMD card; the engine's layer split also runs on two AMD cards when the config is written by hand
+(see RDNA4 below).
 
 ## RDNA4 (gfx1201)
 
@@ -148,8 +149,25 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
 - **hipBLASLt:** there is no gfx1201 table in `tools/hip`. A table calibrated on the R9700 at the engine's shapes
   (hipBLASLt 1.4.1; 0.98-1.76x per GEMM over hipBLAS) changed the end-to-end prompt speed by 0-3%, within noise,
   so none is shipped: on gfx1201 the plain hipBLAS path is already close.
-- **Not validated:** gfx1200 (RX 9060 XT; a community report is #176), both cards in one run (layer split),
-  images, long contexts beyond 16K, answer-quality benchmarks.
+- **Both cards in one run (layer split, engine 0.1.30):** the config's `"backend": "hip", "gpu": [1, 0]` (R9700
+  first) runs through `serve/server.py`; setup does not offer it yet. Auto split put layers 0-27 on the R9700 and
+  28-47 on the 9070 XT. With every expert on the GPUs the split gives exactly the tokens of the R9700 alone (4K and
+  16K prompts); checkpoints on the split (second turn, rewind, a prompt sharing a prefix, a cancelled prompt
+  retried) give exactly the tokens of a fresh read. The conversation cache refuses a split at start (exit 2).
+  On this pair the split does not pay: the R9700 alone already holds all 12,288 expert pairs.
+
+  | run (the same session, warm) | 4K prompt | 16K prompt | decode |
+  |---|---|---|---|
+  | R9700 alone | 1,794 tok/s | 1,804 tok/s | 51-52 tok/s |
+  | R9700 + 9070 XT, auto split | 1,384 tok/s | 1,906 tok/s | 42-43 tok/s |
+  | RX 9070 XT alone | 1,016 tok/s | 1,519 tok/s | 38-40 tok/s |
+
+  A split is worth it when no single card holds the model's experts. On Linux the split pins at most 8 GiB of the
+  expert arena (a Windows limit that also applies here).
+- **Known:** rarely (about 1 start in 10) a HIP run's greedy output differs from another start's at some token, on
+  one card or two and on engine 0.1.29 as well; not yet explained.
+- **Not validated:** gfx1200 (RX 9060 XT; a community report is #176), images, long contexts beyond 16K,
+  answer-quality benchmarks.
 
 ## Tuning table
 
