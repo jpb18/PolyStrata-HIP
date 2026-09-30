@@ -63,6 +63,8 @@ struct ConversationKvReuse {
 struct SavedConversation {
     // Runtime compatibility only; NOT a model/weights identity or disk schema.
     std::array<int64_t, 18> geometry{};
+    // The session's layer carve the image was captured from ([0, n_layers) on one GPU); restore requires the same.
+    int64_t layer_lo = 0, layer_hi = 0;
     ConversationCheckpoint live;
     std::vector<ConversationCheckpoint> checkpoints;
     std::vector<ConversationKv> kv; // main layers followed by the draft layer

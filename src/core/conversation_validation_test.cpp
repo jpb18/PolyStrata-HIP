@@ -82,12 +82,15 @@ void fixture(int format, int experts, bool zero_qsa, bool ple) {
     std::vector<uint8_t> gdn(z.gdn, 0xa5), history(ple ? z.ple : 0, 0xa5);
     SessionState ss;
     ss.max_cells = 96; ss.gdn_state = (float*) gdn.data();
+    // the whole-model carve, as session_init leaves a one-GPU session
+    ss.layer_hi = g.n_layers; ss.gdn_alloc = g.n_gdn_layers(); ss.qsa_alloc = g.n_qsa_layers();
     ss.ple_hist = ple ? (float*) history.data() : nullptr;
     ss.qsa_states = zero_qsa ? nullptr : layers.data();
     SavedConversation image;
     image.geometry = {g.n_embd,g.n_layers,g.qsa_interval,g.ssm_state_size,g.ssm_k_heads,g.ssm_v_heads,
                       g.ssm_d_conv,g.ssm_conv_channels,g.ssm_value_dim,g.n_head,g.n_head_kv,g.head_dim,
                       g.idx_q_heads,g.idx_key_dim,g.hc,g.hc_lr,g.n_expert,g.n_ff};
+    image.layer_hi = g.n_layers;
     auto checkpoint = [&](size_t tokens) {
         ConversationCheckpoint c;
         c.ids.resize(tokens);
@@ -138,6 +141,23 @@ void fixture(int format, int experts, bool zero_qsa, bool ple) {
         ss.qsa_states = nullptr;
         check(!conversation_snapshot_validate(image,ss,g,draft.st,error), "missing QSA targets rejected");
         ss.qsa_states = layers.data();
+        reject([](auto& s){s.layer_lo = 4;}, "snapshot from another layer range rejected");
+        // #216's carve: a split stage owning layers [4, 8) holds GDN rows 3..5 and QSA ordinal 1 only
+        SessionState stage = ss;
+        stage.layer_lo = 4; stage.gdn_alloc = 3; stage.qsa_ord0 = 1; stage.qsa_alloc = 1;
+        ConversationStateSizes zs;
+        check(conversation_session_sizes(g,stage,zs,error) && zs.gdn == z.gdn / 6 * 3 && zs.tail == z.tail,
+              "carved session sizes cover the owned rows only");
+        check(!conversation_checkpoint_validate(image.live,stage,g,error), "whole-model checkpoint rejected by a carve");
+        ConversationCheckpoint part = image.live;
+        part.gdn.resize(zs.gdn); part.tails.resize(zs.tail); part.dead.resize(zs.dead);
+        part.block_pos.resize(zs.block_pos);
+        check(conversation_checkpoint_validate(part,stage,g,error), "carve-sized checkpoint validates");
+        check(!conversation_snapshot_validate(image,stage,g,draft.st,error), "whole-model snapshot rejected by a carve");
+        stage.qsa_alloc = 2;
+        check(!conversation_session_sizes(g,stage,zs,error), "carve past the last QSA ordinal rejected");
+        stage.qsa_alloc = 1; stage.gdn_alloc = 7;
+        check(!conversation_session_sizes(g,stage,zs,error), "carve past the GDN rows rejected");
     }
     auto bad_geometry = g; bad_geometry.ssm_state_size = std::numeric_limits<int64_t>::max();
     check(!conversation_state_sizes(bad_geometry,z,error), "running-state arithmetic overflow rejected");

@@ -809,9 +809,9 @@ using ConvStateSizes = strata::core::ConversationStateSizes;
 ConvStateSizes conv_state_sizes(const strata::core::ModelGeometry& g, const strata::core::SessionState& ss) {
     ConvStateSizes z;
     std::string error;
-    strata::core::conversation_state_sizes(g, z, error); // geometry has already passed engine validation
-    // a split stage's session owns only its layer range's state (see SessionState's carve note)
-    if (g.n_gdn_layers() > 0) z.gdn = z.gdn / (size_t) g.n_gdn_layers() * (size_t) ss.gdn_alloc;
+    // a split stage's session owns only its layer range's state (see SessionState's carve note); the geometry
+    // and the carve have already passed engine validation
+    strata::core::conversation_session_sizes(g, ss, z, error);
     return z;
 }
 

@@ -111,6 +111,7 @@ void full_session(int fmt, int mode, int experts) {
     g.ssm_state_size=2; g.ssm_v_heads=2; g.ssm_conv_channels=8;
     SessionState ss;
     ss.max_cells=96; ss.qsa_states=&main.state;
+    ss.layer_hi=g.n_layers; ss.gdn_alloc=g.n_gdn_layers(); ss.qsa_alloc=g.n_qsa_layers();   // the whole-model carve
     std::string err;
     ConversationStateSizes sizes;
     check(conversation_state_sizes(g,sizes,err),"whole-session geometry sizes");
