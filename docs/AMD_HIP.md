@@ -36,7 +36,13 @@ the kernel's amdgpu driver (no ROCm install needed):
   card's architecture and the installed hipBLASLt version (read from `hipblaslt-version.h`; 1.2.0 is `100200`).
   Otherwise it says so and the prompt's dense matrix products use plain hipBLAS (slower prompts, same answers).
   A table's solution ids are valid only for that pair, and the engine refuses any other table.
-- **Limits for now:** one GPU, no images, no calibration. The Monitor shows no GPU statistics.
+- **Several cards:** setup takes one card (the one with the most VRAM, or `--gpu N`) unless you name more:
+  `./setup.sh --backend hip --gpus 1,0` splits the model's layers across them, the first one the main card (numbers
+  as setup lists them; `--gpus all` = every supported card, the most VRAM first). Every chosen card must be one of the
+  architectures above; the engine is compiled for each of them (cards of two families, e.g. gfx1100 + gfx1201, need
+  a system ROCm 7: AMD's wheels hold one family). A split pays only when no single card holds the model's experts
+  (see RDNA4 below).
+- **Limits for now:** no images, no calibration. The Monitor shows no GPU statistics.
 
 The rest of setup is the same as on NVIDIA: the model download, the start script, the server.
 
@@ -115,8 +121,7 @@ The 4K context is a smoke-test starting point, not a model limit. The expert cac
 sizes itself automatically and leaves 1 GiB of VRAM headroom.
 
 The installer supports this backend (see "Install with setup" above). The vision helper is NVIDIA-only for now.
-Setup installs one AMD card; the engine's layer split also runs on two AMD cards when the config is written by hand
-(see RDNA4 below).
+Setup installs one AMD card, or several with `--gpus` (the engine's layer split; see RDNA4 below).
 
 ## RDNA4 (gfx1201)
 
@@ -153,7 +158,7 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
   (hipBLASLt 1.4.1; 0.98-1.76x per GEMM over hipBLAS) changed the end-to-end prompt speed by 0-3%, within noise,
   so none is shipped: on gfx1201 the plain hipBLAS path is already close.
 - **Both cards in one run (layer split, engine 0.1.30):** the config's `"backend": "hip", "gpu": [1, 0]` (R9700
-  first) runs through `serve/server.py`; setup does not offer it yet. Auto split put layers 0-27 on the R9700 and
+  first) runs through `serve/server.py` (setup writes it with `--gpus 1,0` since 0.1.31). Auto split put layers 0-27 on the R9700 and
   28-47 on the 9070 XT. With every expert on the GPUs the split gives exactly the tokens of the R9700 alone (4K and
   16K prompts); checkpoints on the split (second turn, rewind, a prompt sharing a prefix, a cancelled prompt
   retried) give exactly the tokens of a fresh read. The conversation cache refuses a split at start (exit 2).

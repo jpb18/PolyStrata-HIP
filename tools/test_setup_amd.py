@@ -77,5 +77,80 @@ class KfdDetection(unittest.TestCase):
         self.assertEqual(setup.ROCM_INDEXES["gfx1200"], setup.ROCM_INDEXES["gfx1201"])
 
 
+class GpuLists(unittest.TestCase):
+    """--gpus with AMD cards: every chosen card must be supported; the first is the main one."""
+    AMD = [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_gb": 16.0, "arch": "gfx1201"},
+           {"index": 1, "name": "AMD Radeon AI PRO R9700", "vram_gb": 32.0, "arch": "gfx1201"},
+           {"index": 2, "name": "AMD Radeon (gfx1036)", "vram_gb": 0.5, "arch": "gfx1036"},
+           {"index": 3, "name": "AMD Radeon RX 7900 XTX", "vram_gb": 24.0, "arch": "gfx1100"}]
+
+    def setUp(self):
+        self.say = setup.say
+        setup.say = lambda *a, **k: None
+
+    def tearDown(self):
+        setup.say = self.say
+
+    def test_list_in_order(self):
+        self.assertEqual([g["index"] for g in setup.amd_parse_gpus("1,0", self.AMD)], [1, 0])
+        self.assertEqual([g["index"] for g in setup.amd_parse_gpus(" 0, 3 ", self.AMD)], [0, 3])
+
+    def test_all_is_every_supported_card_most_vram_first(self):
+        self.assertEqual([g["index"] for g in setup.amd_parse_gpus("all", self.AMD)], [1, 3, 0])
+
+    def test_refusals(self):
+        for text in ("1,2", "1,7", "1", "1,1", "x,y"):
+            with self.assertRaises(SystemExit, msg=text):
+                setup.amd_parse_gpus(text, self.AMD)
+
+    def test_wheels_hold_one_family(self):
+        with tempfile.TemporaryDirectory() as d:        # no system ROCm there: the wheels would be needed
+            old = setup.os.environ.get("ROCM_PATH")
+            setup.os.environ["ROCM_PATH"] = d
+            try:
+                with self.assertRaises(SystemExit):
+                    setup.rocm_root(["gfx1100", "gfx1201"])
+            finally:
+                if old is None:
+                    del setup.os.environ["ROCM_PATH"]
+                else:
+                    setup.os.environ["ROCM_PATH"] = old
+
+    def test_build_for_every_arch(self):
+        """build_engine_hip compiles for the set of the chosen cards' archs and records it in BUILD.json."""
+        calls = {}
+        saved = {k: getattr(setup, k) for k in ("ROOT", "rocm_root", "cmake_build", "source_hash", "source_version",
+                                                "ok", "shutil")}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            def fake_build(src, bdir, target, defs, vcvars, bat):
+                calls["defs"] = defs
+                (bdir).mkdir(parents=True, exist_ok=True)
+                (bdir / setup.EXE).write_text("engine")
+
+            class Sh:
+                which = staticmethod(lambda name: "/usr/bin/" + name)
+                copy2 = staticmethod(lambda a, b: Path(b).write_text(Path(a).read_text()))
+            setup.ROOT, setup.cmake_build, setup.ok, setup.shutil = root, fake_build, lambda *a: None, Sh
+            setup.source_hash, setup.source_version = (lambda *a: "h"), (lambda: "0.1.31")
+            setup.rocm_root = lambda archs: (calls.setdefault("archs", archs) and root, [str(root / "lib")])
+            try:
+                setup.build_engine_hip({"arch": "gfx1201", "archs": ["gfx1201", "gfx1100", "gfx1201"]}, root)
+                self.assertEqual(calls["archs"], ["gfx1100", "gfx1201"])
+                self.assertIn("-DCMAKE_HIP_ARCHITECTURES=gfx1100;gfx1201", calls["defs"])
+                import json
+                self.assertEqual(json.loads((root / "engine" / "BUILD.json").read_text())["archs"],
+                                 ["gfx1100", "gfx1201"])
+                calls.clear()                            # one of those cards alone: already built, no compile
+                setup.build_engine_hip({"arch": "gfx1100"}, root)
+                self.assertNotIn("defs", calls)
+                setup.build_engine_hip({"arch": "gfx1101"}, root)   # another arch: compiled again
+                self.assertIn("-DCMAKE_HIP_ARCHITECTURES=gfx1101", calls["defs"])
+            finally:
+                for k, v in saved.items():
+                    setattr(setup, k, v)
+
+
 if __name__ == "__main__":
     unittest.main()
