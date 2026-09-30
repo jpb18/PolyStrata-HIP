@@ -67,34 +67,35 @@ exceeds 128 bytes and may cause high register pressure. Consult with your
 hardware vendor to find the total register size available and adjust the code,
 or use smaller sub-group size to avoid high register pressure.
 */
+template <int NE>   // SYCL port: 512 (canonical) or 256 (the Coder) experts, 32 lanes x NE/32 values
 __dpct_inline__ void route(const float *__restrict__ logits,
                            int32_t *__restrict__ ids,
                            float *__restrict__ weights) {
     // Preserve the pinned 32x8 block geometry; only row zero is active here.
     // blockIdx.x = the token (a multi-token launch; 0 for the single one)
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    logits += (size_t)item_ct1.get_group(2) * 512;
+    logits += (size_t)item_ct1.get_group(2) * NE;
         ids += (size_t)item_ct1.get_group(2) * 10;
         weights += (size_t)item_ct1.get_group(2) * 10;
     if (item_ct1.get_local_id(1) != 0) return;
     const int lane = item_ct1.get_local_id(2);
-    float values[16];
+    float values[NE / 32];
 #pragma unroll
-    for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
+    for (int i = 0; i < NE / 32; ++i) values[i] = logits[lane + i * 32];
     item_ct1.barrier(sycl::access::fence_space::local_space);
     float maximum = -INFINITY;
 #pragma unroll
-    for (int i = 0; i < 16; ++i) maximum = sycl::max(maximum, values[i]);
+    for (int i = 0; i < NE / 32; ++i) maximum = sycl::max(maximum, values[i]);
     maximum = warp_max(maximum);
     float sum = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < NE / 32; ++i) {
         values[i] = sycl::native::exp(values[i] - maximum);
         sum += values[i];
     }
     const float reciprocal = 1.0f / warp_sum(sum);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < NE / 32; ++i) {
         values[i] *= reciprocal;
         if (sycl::isnan(values[i])) values[i] = -FLT_MAX;
     }
@@ -103,7 +104,7 @@ __dpct_inline__ void route(const float *__restrict__ logits,
         float best = values[0];
         int expert = lane;
 #pragma unroll
-        for (int i = 1; i < 16; ++i) {
+        for (int i = 1; i < NE / 32; ++i) {
             if (values[i] > best) { best = values[i]; expert = lane + i * 32; }
         }
 #pragma unroll
@@ -165,7 +166,7 @@ void native_router_top10(const float* logits, int32_t* ids, float* weights, void
                 exp_props,
                 [=](sycl::nd_item<3> item_ct1)
                     [[sycl::reqd_sub_group_size(32)]] {
-                        route(logits, ids, weights);
+                        route<512>(logits, ids, weights);
                     });
     }
     /*
@@ -205,7 +206,7 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
                 exp_props,
                 [=](sycl::nd_item<3> item_ct1)
                     [[sycl::reqd_sub_group_size(32)]] {
-                        route(logits, ids, weights);
+                        route<512>(logits, ids, weights);
                     });
     }
     /*
@@ -228,5 +229,16 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     */
     if (error !=
         0) throw std::runtime_error(dpct::get_error_string_dummy(error));
+}
+
+void native_router_top10_multi_ne(const float* logits, int32_t* ids, float* weights, int n_tok, int n_expert, void* stream) {
+    if (n_expert == 512) { native_router_top10_multi(logits, ids, weights, n_tok, stream); return; }
+    if (!stream || n_tok < 1 || n_expert != 256 || !valid(logits, (size_t) n_tok * 256 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
+        !valid(weights, (size_t) n_tok * 10 * 4))
+        throw std::invalid_argument("native router (multi, 256): a stream, 256 experts and aligned [n,256]/[n,10] buffers");
+    ((sycl::queue *)(strata::q_of(stream)))
+        ->parallel_for<dpct_kernel_name<class route_256_multi>>(
+            sycl::nd_range<3>(sycl::range(1, 1, (unsigned) n_tok) * sycl::range(1, 8, 32), sycl::range(1, 8, 32)),
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] { route<256>(logits, ids, weights); });
 }
 }
