@@ -32,6 +32,7 @@
 #include "strata/kernels/iq_kernels.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -482,8 +483,7 @@ __dpct_inline__ void native_q3_k_mmvq_kernel(const Q3KBlock *__restrict__ w,
 
 // The pinned nonlinear IQ4 codebook and its CUDA two-stage byte lookup. The
 // explicit alignment satisfies the four 32-bit table loads; values are unchanged.
-inline dpct::global_memory<int8_t, 1>
-    iq4nl_values(sycl::range(16), {-127, -104, -83, -65, -49, -35, -22, -10, 1,
+inline dpct::global_memory<int8_t, 1>& iq4nl_values = *new dpct::global_memory<int8_t, 1>(sycl::range(16), {-127, -104, -83, -65, -49, -35, -22, -10, 1,
                                    13, 25, 38, 53, 69, 89, 113});
 
 static constexpr int8_t kIq4nlTable[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
@@ -1079,27 +1079,51 @@ struct Q6KTraits {
     using Block = Q6KBlock;
     static constexpr int DIV = 256, T = 32, KBY = 8, BPI = WARPS * WARP / 32;
     static int kqs(int tid) { return tid % 32; }
-    struct W { int vl, vh; float d; const int8_t* scales; int bq8_offset; };
+    // SYCL port: the weight unpack (shifts, masks, the saturating byte subtract) is column-independent, so it is
+    // done once in load(); apply() is two dp4a and two fmas per column.
+    struct W { int vi[2]; float dsc[2]; int bq8_offset; };
     static W load(const Block* __restrict__ w, int iqs) {
         W r;
         r.bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
         const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
         const int vh_shift = 2 * ((iqs % 16) / 8);
-        r.vl = load_int_b2(w->ql, iqs);
-        r.vh = load_int_b2(w->qh, 8 * (iqs / 16) + iqs % 8) >> vh_shift;
-        r.scales = w->scales + scale_offset;
-        r.d = w->d;
+        const int vl = load_int_b2(w->ql, iqs);
+        const int vh = load_int_b2(w->qh, 8 * (iqs / 16) + iqs % 8) >> vh_shift;
+        const float d = w->d;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const int vil = (vl >> (4 * i)) & 0x0f0f0f0f;
+            const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
+            r.vi[i] = dpct::vectorized_binary<sycl::char4>(vil | vih, 0x20202020, dpct::sub_sat());
+            r.dsc[i] = d * (float) w->scales[scale_offset + 4 * i];
+        }
         return r;
     }
     static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) {
-        int u[2];
-        float d8[2];
+        float sumf = 0.0f;
 #pragma unroll
         for (int i = 0; i < 2; ++i) {
-            u[i] = reinterpret_cast<const int*>(x[r.bq8_offset + 2 * i].qs)[iqs % 8];
-            d8[i] = x[r.bq8_offset + 2 * i].ds[0];
+            const int u = reinterpret_cast<const int*>(x[r.bq8_offset + 2 * i].qs)[iqs % 8];
+            sumf += x[r.bq8_offset + 2 * i].ds[0] * r.dsc[i] * (float) strata::dp4a(r.vi[i], u, 0);
         }
-        return q6_q8_dot_impl(r.vl, r.vh, u, r.scales, r.d, d8);
+        return sumf;
+    }
+    // SYCL port, row-blocked kernel: the activation's part for this (block, lane), loaded once per column and
+    // reused across the warp's rows.
+    struct A { int u[2]; float ds[2]; };
+    static A acts(const Q81Block* __restrict__ x, int iqs) {
+        A a;
+        const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            a.u[i] = reinterpret_cast<const int*>(x[bq8_offset + 2 * i].qs)[iqs % 8];
+            a.ds[i] = x[bq8_offset + 2 * i].ds[0];
+        }
+        return a;
+    }
+    static float dot(const W& r, const A& a) {
+        return a.ds[0] * r.dsc[0] * (float) strata::dp4a(r.vi[0], a.u[0], 0) +
+               a.ds[1] * r.dsc[1] * (float) strata::dp4a(r.vi[1], a.u[1], 0);
     }
 };
 struct IQ4XSTraits {
@@ -1233,6 +1257,61 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
     }
 }
 
+// ---------------------------------------------------------------- SYCL port: row-blocked mmvq
+//
+// Measured on the B70 (mmvq_bench): the shared kernel above spends its time re-reading the activation - every
+// row's work-group loads all NCOLS columns of it again, and a 4-warp work-group per row ends in a barrier and an
+// SLM reduction for ten blocks of work. Here each warp owns RPW rows outright: per 256-block it loads the
+// activation parts once for all columns and the RPW weight parts once, does RPW x NCOLS dots, and reduces its
+// own lanes at the end. No barrier, no SLM. Only for traits with acts()/dot() (Q6_K so far).
+template <typename F, int NCOLS, int RPW>
+void native_mmvq_rowwarp_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
+                                float* __restrict__ y, int n_in, int n_out) {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int lane = int(item.get_local_id(2)), warp = int(item.get_local_id(1));
+    const int row0 = (int(item.get_group(2)) * WARPS + warp) * RPW;
+    const int blocks_per_row = n_in / F::DIV, x_stride = n_in / Q8K;
+    const int kqs = F::kqs(lane);
+    float tmp[RPW][NCOLS] = {};
+    for (int kbx = lane / F::T; kbx < blocks_per_row; kbx += WARP / F::T) {
+        const int kby = kbx * F::KBY;
+        typename F::A a[NCOLS];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) a[j] = F::acts(x + std::size_t(j) * x_stride + kby, kqs);
+#pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            if (row0 + r >= n_out) break;
+            const typename F::W wv = F::load(w + std::size_t(row0 + r) * blocks_per_row + kbx, kqs);
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) tmp[r][j] += F::dot(wv, a[j]);
+        }
+    }
+    auto sg = item.get_sub_group();
+#pragma unroll
+    for (int r = 0; r < RPW; ++r)
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            float v = tmp[r][j];
+#pragma unroll
+            for (int o = WARP / 2; o > 0; o >>= 1) v += dpct::experimental::permute_sub_group_by_xor(0xffffffffu, sg, v, o);
+            if (lane == 0 && row0 + r < n_out) y[std::size_t(j) * n_out + row0 + r] = v;
+        }
+}
+
+template <typename F, int NCOLS, int RPW>
+void launch_rowwarp(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, dpct::queue_ptr s) {
+    const auto* w = static_cast<const typename F::Block*>(weights);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const unsigned blocks = unsigned((std::size_t(n_out) + WARPS * RPW - 1) / (WARPS * RPW));
+    s->parallel_for<dpct_kernel_name<class native_mmvq_rowwarp, F, dpct_kernel_scalar<NCOLS>, dpct_kernel_scalar<RPW>>>(
+        sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
+        [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_rowwarp_kernel<F, NCOLS, RPW>(w, x, y, n_in, n_out); });
+}
+inline int rowwarp_rpw() {   // STRATA_MMVQ_RPW: 0 = the shared kernel, 1/2/4 = rows per warp (bench knob)
+    static const int v = std::getenv("STRATA_MMVQ_RPW") ? std::atoi(std::getenv("STRATA_MMVQ_RPW")) : 0;   // default: the shared kernel (measured equal at warm clocks)
+    return v;
+}
+
 template <typename F, int NCOLS>
 void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
                     int n_out, dpct::queue_ptr s) {
@@ -1240,7 +1319,8 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
     if (!g_multi_exact) {
         constexpr int NW = NCOLS <= 4 ? 4 : 2;
-        const unsigned blocks = unsigned((std::size_t(n_out) + 1) / 2);
+        constexpr int ROWS = 1;   // SYCL port: one row per work-group (more groups: the kernel is latency-bound here)
+        const unsigned blocks = unsigned((std::size_t(n_out) + ROWS - 1) / ROWS);
         /*
         DPCT1049:207: The work-group size passed to the SYCL kernel may exceed
         the limit. To get the device limit, query
@@ -1261,8 +1341,8 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
                 exp_props,
                 [=](sycl::nd_item<3> item_ct1)
                     [[sycl::reqd_sub_group_size(32)]] {
-                        native_mmvq_multi_kernel<F, NCOLS, NW, 2>(w, x, y, n_in,
-                                                                  n_out);
+                        native_mmvq_multi_kernel<F, NCOLS, NW, ROWS>(w, x, y, n_in,
+                                                                     n_out);
                     });
         }
         return;
@@ -1884,6 +1964,16 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
+    // SYCL port: the row-blocked kernel for the decode shapes (ncols <= 4)
+    if (ncols >= 1 && ncols <= 4 && rowwarp_rpw() > 0 && n_in % 256 == 0) {
+        dpct::queue_ptr s = strata::q_of(stream);
+        const int rpw = rowwarp_rpw();
+#define STRATA_RW(NC, RP) if (ncols == NC && rpw == RP) { launch_rowwarp<Q6KTraits, NC, RP>(weights, x_q8_1, y, n_in, n_out, s); return; }
+        STRATA_RW(1, 1) STRATA_RW(1, 2) STRATA_RW(1, 4) STRATA_RW(2, 1) STRATA_RW(2, 2) STRATA_RW(2, 4)
+        STRATA_RW(3, 1) STRATA_RW(3, 2) STRATA_RW(3, 4) STRATA_RW(4, 1) STRATA_RW(4, 2) STRATA_RW(4, 4)
+#undef STRATA_RW
+    }
+
     validate_shape(n_in, ncols, 256);
     if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
     validate_pointer(weights);

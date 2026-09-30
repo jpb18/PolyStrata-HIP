@@ -41,7 +41,7 @@ constexpr int QK_S2 = 64;
 constexpr int MAX_SHARED_HALVES = 4096;      // 8 KB of shared for x; n_embd 2560 fits with room
 
 // byte -> the four code values with the -1 bias already applied, in element order (bits 0,2,4,6).
-inline dpct::constant_memory<float, 2> c_codes(256, 4);
+inline dpct::constant_memory<float, 2>& c_codes = *new dpct::constant_memory<float, 2>(256, 4);   // never freed: exit-order safe
 
 bool g_lut_ready[64] = {};   // per device: __constant__ memory is per device (a layer split runs on two)
 

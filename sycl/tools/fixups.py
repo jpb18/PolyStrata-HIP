@@ -128,6 +128,15 @@ def native_dp4a(s):
 for rel in all_sources():
     edit(str(rel), native_dp4a)
 
+# 7f. dpct's static global_memory/constant_memory objects destruct after the default queue at exit and segfault
+#     in queue::get_device(). Heap-allocate them and never delete: the process is exiting anyway.
+edit("src/kernels/cuda/native_mmvq.dp.cpp", lambda s: s.replace(
+    "inline dpct::global_memory<int8_t, 1>\n    iq4nl_values(sycl::range(16), {",
+    "inline dpct::global_memory<int8_t, 1>& iq4nl_values = *new dpct::global_memory<int8_t, 1>(sycl::range(16), {"))
+edit("src/kernels/cuda/s2_gemv_fast.dp.cpp", lambda s: s.replace(
+    "inline dpct::constant_memory<float, 2> c_codes(256, 4);",
+    "inline dpct::constant_memory<float, 2>& c_codes = *new dpct::constant_memory<float, 2>(256, 4);   // never freed: exit-order safe"))
+
 # 8. ggml-common.h has a SYCL declaration mode (sycl::half instead of cuda_fp16.h).
 edit("src/kernels/cuda/iq_kernels.dp.cpp", lambda s: s.replace("#define GGML_COMMON_DECL_CUDA", "#define GGML_COMMON_DECL_SYCL")
      .replace("#define GGML_COMMON_IMPL_CUDA", "#define GGML_COMMON_IMPL_SYCL"))
