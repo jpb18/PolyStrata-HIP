@@ -1536,12 +1536,12 @@ int main(int argc, char** argv) {
     // allocation and overflow/NaN after reuse, which surfaced as the whole layer stack saturating and every
     // prompt decoding to the same token.  `--serve` zeroes exactly this state when `resume == 0`; generate mode
     // always starts from an empty sequence, so it must too.
-    if (native_pack) {
-        strata::core::session_zero(ss, g, nullptr, main_cs);
-        if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: zeroing the session state failed\n");
-            return 1;
-        }
+    // (#167) Every pack, not only a native one: a canonical pack whose prompt goes through the batched prompt path
+    // (--prefill) starts at position 0 without a put_input, so it never zeroed the state either.
+    strata::core::session_zero(ss, g, nullptr, main_cs);
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "strata generate: zeroing the session state failed\n");
+        return 1;
     }
     if (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1)
         std::fprintf(stderr, "strata generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "

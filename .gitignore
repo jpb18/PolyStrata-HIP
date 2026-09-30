@@ -20,7 +20,6 @@ __pycache__/
 *.nsys-rep
 
 # Pi harness metadata (local session state, not project source)
-.pi/
 *.sqlite
 *.npz
 *.occ1
