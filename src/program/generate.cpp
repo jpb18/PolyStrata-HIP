@@ -3990,6 +3990,7 @@ int main(int argc, char** argv) {
             req_sp.penalty_present = req_penalty_present;
             req_sp.counter = 0;
             ver.set_sampling(req_sp);
+            mtp.set_draft_sampling(req_sp);   // STRATA_SPEC_COUPLED=1: sampled drafts (a no-op otherwise)
             drive.d.pcie_num = std::max(0, std::min(256, (int) (req_pcie_frac * 256.0 + 0.5)));
             // a layer split: CUDA0's share as asked; a later GPU keeps its own (its link) unless the request sets one
             for (int st = 0; st < split_drive.n; ++st)
@@ -4180,6 +4181,10 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
                 ++rounds;
                 const Clock::time_point tw2 = Clock::now();
+                // coupled drafts with penalties: the next window's row-0 history (`consumed` holds this window's
+                // commit, outv[a] is its row 0) - the drafts extend it on the device as the verify rows will
+                if (hist_n > 0 && mtp.coupled() && !eos && produced_n < max_new)
+                    mtp.set_draft_history(consumed.data(), (int64_t) consumed.size(), outv[(size_t) a]);
                 const bool drafted = eos || produced_n >= max_new ||
                                      mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
                 {
@@ -4734,6 +4739,7 @@ int main(int argc, char** argv) {
         }
         mem_mark("the verifier and the drafter's binding");
         ver.set_sampling(sp);   // the CLI's own sampling (until 0.1.19 this loop was always greedy); no penalties here
+        if (use_mtp) mtp.set_draft_sampling(sp);   // STRATA_SPEC_COUPLED=1: sampled drafts (a no-op otherwise)
         ver.set_split(o.spec_split);
         // auto: the copy kernel for every pack.  DMA (the native packs' default until 0.1.13) has the host call
         // cudaMemcpyAsync + cudaLaunchHostFunc inside a verify window while the GPU spins on the flag they raise;
