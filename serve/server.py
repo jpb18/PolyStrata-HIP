@@ -54,6 +54,8 @@ from serve.winjob import contain  # noqa: E402
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_START = "<|vision_start|>"
+# #123: what closes the thinking when it reaches reasoning_budget_tokens (the model's own end-of-thinking tag after it)
+REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
 CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
 # The live tok/s is a rate over a window, not a mean since the first token: a mean reads ~1/elapsed at the first
 # token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.
@@ -601,6 +603,12 @@ class Detokenizer:
         self.tok, self.ids, self.sent = tok, [], 0
         self.inc = codecs.getincrementaldecoder("utf-8")(errors="replace") if hasattr(tok, "token_bytes") else None
 
+    def pending(self) -> bool:
+        """A character is split across the tokens so far: its first bytes are held."""
+        if self.inc is not None:
+            return bool(self.inc.getstate()[0])
+        return self.tok.decode(self.ids).endswith("\ufffd")
+
     def push(self, t: int) -> str:
         if self.inc is not None:
             return self.inc.decode(self.tok.token_bytes(t))
@@ -641,11 +649,25 @@ class Service:
         self.idle_unload_s = 0
         self.min_free_vram_mib = 0
         self.before_load = None
+        self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
+
+    def reasoning_budget(self, req) -> int | None:
+        """#123: the most tokens this request may think, or None: the request's `reasoning_budget_tokens`, else the
+        config's.  0 (or less) means no budget, so a request can turn a configured one off.  ValueError (a 400) for
+        anything that is not a whole number."""
+        value = (req or {}).get("reasoning_budget_tokens") if isinstance(req, dict) else None
+        if value is None:
+            value = self.reasoning_budget_tokens
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"reasoning_budget_tokens={value!r}: expected a whole number of tokens (0: no budget)")
+        return value if value > 0 else None
 
     def _vision_down(self) -> bool:
         return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
@@ -977,6 +999,7 @@ class Service:
 
     def run(self, ids, thinking, tools, max_new, sampling, cancel) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..})."""
+        budget = self.reasoning_budget(sampling) if thinking else None   # #123: opt-in, off by default
         defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
@@ -1006,42 +1029,71 @@ class Service:
                         self.rate.clear()               # the previous request's samples must not leak into this one
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
-                    gen = self.engine.generate(ids, max_new, sampling, cancel, embeddings=emb) if emb else \
-                        self.engine.generate(ids, max_new, sampling, cancel)
-                    try:
-                        for t in gen:
-                            if t is None:                   # heartbeat while the engine is quiet
-                                last_print = self._progress(last_print)
-                                yield "ping", None
-                                continue
-                            n += 1
-                            if t in self.stop_ids:
-                                finish = "stop"
+                    prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
+                    while True:
+                        gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
+                            else self.engine.generate(prompt, max_new - n, sampling, cancel)
+                        seg, wrap = [], False           # this pass's tokens; the budget is reached
+                        try:
+                            for t in gen:
+                                if t is None:               # heartbeat while the engine is quiet
+                                    last_print = self._progress(last_print)
+                                    yield "ping", None
+                                    continue
+                                n += 1
+                                if t in self.stop_ids:
+                                    finish = "stop"
+                                    raw_ids.append(t)
+                                    break
                                 raw_ids.append(t)
-                                break
+                                seg.append(t)
+                                evs = parser.feed(detok.push(t))
+                                self._note(n, evs)
+                                last_print = self._progress(last_print)
+                                for ev in evs:
+                                    yield "event", ev
+                                if budget and parser.state == "reasoning":
+                                    thought += 1
+                                    # at a clean point: no tag held back, no character split across tokens
+                                    if thought >= budget and not parser.buf and not detok.pending():
+                                        wrap = True
+                                        break
+                        except EngineDied as e:
+                            finish = "error"
+                            note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
+                            log = getattr(self.engine, "log_path", None)
+                            print(f"[strata] {e}. {note} The next request starts the engine again."
+                                  f"{' Its log: ' + log if log else ''}", flush=True)
+                            raise
+                        except ValueError as e:             # the engine's ERR line (it may have ended after it)
+                            finish = "error"
+                            print(f"[strata] the engine reported an error: {e}", flush=True)
+                            raise
+                        finally:
+                            gen.close()                 # STOP+drain to THIS request's DONE while still holding the
+                            #                             fifo, so a stop-token break can't leave the shared engine
+                            #                             queue mid-drain for the next request to read as its own DONE
+                        if not wrap or cancel.is_set():
+                            break
+                        # #123: the thinking reached reasoning_budget_tokens.  Close it the way the model would (a
+                        # short wrap-up and </think>) and let it answer: the next pass's prompt is this one plus what
+                        # was generated plus the wrap-up, so the engine continues from the prefix it already holds.
+                        budget = None
+                        extra = self.tok.encode(REASONING_WRAP_UP, parse_special=True)
+                        if max_new - n - len(extra) < 1:
+                            break                       # no room left to answer: "length", as without a budget
+                        print(f"[strata] thinking budget reached ({thought} tokens): wrapping up the thinking",
+                              flush=True)
+                        for t in extra:
+                            n += 1
                             raw_ids.append(t)
                             evs = parser.feed(detok.push(t))
                             self._note(n, evs)
-                            last_print = self._progress(last_print)
                             for ev in evs:
                                 yield "event", ev
-                        if cancel.is_set():
-                            finish = "cancel"
-                    except EngineDied as e:
-                        finish = "error"
-                        note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
-                        log = getattr(self.engine, "log_path", None)
-                        print(f"[strata] {e}. {note} The next request starts the engine again."
-                              f"{' Its log: ' + log if log else ''}", flush=True)
-                        raise
-                    except ValueError as e:                 # the engine's ERR line (it may have ended after it)
-                        finish = "error"
-                        print(f"[strata] the engine reported an error: {e}", flush=True)
-                        raise
-                    finally:
-                        gen.close()                     # STOP+drain to THIS request's DONE while still holding the
-                        #                                 fifo, so a stop-token break can't leave the shared engine
-                        #                                 queue mid-drain for the next request to read as its own DONE
+                        prompt = prompt + seg + extra
+                    if cancel.is_set():
+                        finish = "cancel"
                 except GeneratorExit:                   # the client disconnected mid-stream
                     finish = "disconnect"
                     raise
@@ -1655,6 +1707,7 @@ def make_handler(svc: Service):
                 extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
                 use_mcp = bool(extra)
                 tools = (tools or []) + extra or None
+            svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
@@ -1686,6 +1739,7 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
+            svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
@@ -1967,6 +2021,15 @@ def main() -> int:
     svc.min_free_vram_mib = a.min_free_vram_mib if a.min_free_vram_mib is not None else \
         int(cfg.get("min_free_vram_mib") or 0)
     svc.before_load = a.before_load or cfg.get("before_load") or None
+    if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
+        try:
+            svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]
+            budget = svc.reasoning_budget({})
+        except ValueError as e:
+            raise SystemExit(f"[strata] config {e}")
+        if budget:
+            print(f"[strata] thinking budget: {budget} tokens (reasoning_budget_tokens; a request can set its own)",
+                  flush=True)
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     if a.config:                                        # the Chat settings shared with other apps, from last time

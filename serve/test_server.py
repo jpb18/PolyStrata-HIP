@@ -1180,6 +1180,126 @@ class SharingTheGpu(unittest.TestCase):
         self.assertEqual(self.req("/health")[1]["loaded"], True)
 
 
+class ThinkingEngine(MockEngine):
+    """Thinks THOUGHT, then answers; a prompt that already ends its thinking (the budget's wrap-up) gets the answer
+    at once, the way the model continues after </think>.  Records every prompt it is given."""
+    THOUGHT = "Let me think step by step about two plus two. " * 4          # 184 reasoning tokens (one per byte)
+    ANSWER = "The answer is 4."
+
+    def __init__(self, tok):
+        super().__init__(tok, "x", max_context=CTX)
+        self.prompts = []
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        self.prompts.append(list(ids))
+        done = self.tok.decode(ids).endswith("</think>\n\n")
+        text = self.ANSWER if done else self.THOUGHT + "</think>\n\n" + self.ANSWER
+        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
+            if cancel.is_set():
+                return
+            yield t
+
+
+class ThinkingBudget(unittest.TestCase):
+    """#123: reasoning_budget_tokens (opt-in): at the budget the thinking is wrapped up and the model answers,
+    continuing from the prompt plus what it generated plus the wrap-up (a prefix the engine already holds)."""
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.engine = ThinkingEngine(self.tok)
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), headers={
+            "Content-Type": "application/json", "anthropic-version": "2023-06-01"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                raw = r.read().decode()
+                return r.status, (json.loads(raw) if not body.get("stream") else raw)
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read())
+
+    def openai(self, **extra):
+        return self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "2+2?"}],
+                                                  "max_tokens": 400, **extra})
+
+    def test_off_by_default(self):
+        code, b = self.openai()
+        self.assertEqual(code, 200, b)
+        msg = b["choices"][0]["message"]
+        self.assertEqual((msg["reasoning_content"], msg["content"]), (ThinkingEngine.THOUGHT, ThinkingEngine.ANSWER))
+        self.assertEqual(len(self.engine.prompts), 1)
+
+    def test_the_budget_wraps_up_the_thinking(self):
+        from serve.server import REASONING_WRAP_UP
+        code, b = self.openai(reasoning_budget_tokens=20)
+        self.assertEqual(code, 200, b)
+        msg = b["choices"][0]["message"]
+        wrap = REASONING_WRAP_UP.split("</think>")[0]
+        self.assertEqual(msg["reasoning_content"], ThinkingEngine.THOUGHT[:20] + wrap)
+        self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
+        self.assertEqual(b["choices"][0]["finish_reason"], "stop")
+        first, second = self.engine.prompts
+        extra = self.tok.encode(REASONING_WRAP_UP, parse_special=True)
+        self.assertEqual(second, first + self.tok.encode(ThinkingEngine.THOUGHT[:20]) + extra)   # a prefix + more
+        self.assertEqual(b["usage"]["completion_tokens"], 20 + len(extra) + len(ThinkingEngine.ANSWER) + 1)
+        self.assertEqual(b["usage"]["prompt_tokens"], len(first))
+
+    def test_anthropic_stream(self):
+        from serve.server import REASONING_WRAP_UP
+        code, raw = self.post("/v1/messages", {"model": "m", "max_tokens": 400, "stream": True,
+                                               "reasoning_budget_tokens": 30,
+                                               "messages": [{"role": "user", "content": "2+2?"}]})
+        self.assertEqual(code, 200)
+        evs = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
+        thinking = "".join(e["delta"].get("thinking", "") for e in evs if e["type"] == "content_block_delta")
+        text = "".join(e["delta"].get("text", "") for e in evs if e["type"] == "content_block_delta")
+        self.assertEqual(thinking, ThinkingEngine.THOUGHT[:30] + REASONING_WRAP_UP.split("</think>")[0])
+        self.assertEqual(text, ThinkingEngine.ANSWER)
+        self.assertEqual(evs[-2]["delta"]["stop_reason"], "end_turn")
+
+    def test_a_budget_the_thinking_stays_under(self):
+        code, b = self.openai(reasoning_budget_tokens=10_000)
+        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
+        self.assertEqual(len(self.engine.prompts), 1)
+
+    def test_the_config_default_and_a_request_that_turns_it_off(self):
+        self.svc.reasoning_budget_tokens = 20
+        code, b = self.openai()
+        self.assertEqual(len(self.engine.prompts), 2)
+        self.assertTrue(b["choices"][0]["message"]["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:20] + "\n"))
+        code, b = self.openai(reasoning_budget_tokens=0)
+        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
+        self.assertEqual(len(self.engine.prompts), 3)
+
+    def test_without_thinking_there_is_nothing_to_limit(self):
+        self.engine.THOUGHT = ""
+        code, b = self.openai(reasoning_budget_tokens=5, reasoning_effort="none")
+        self.assertEqual(code, 200, b)
+        self.assertEqual(len(self.engine.prompts), 1)
+
+    def test_no_room_left_to_answer(self):
+        code, b = self.openai(reasoning_budget_tokens=20, max_tokens=40)    # 20 thought + the wrap-up > 40
+        self.assertEqual(b["choices"][0]["finish_reason"], "length")
+        self.assertEqual(len(self.engine.prompts), 1)
+        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT[:20])
+
+    def test_a_bad_value_is_a_400(self):
+        for bad in ("lots", 2.5, True, [1]):
+            with self.subTest(value=bad):
+                code, b = self.openai(reasoning_budget_tokens=bad)
+                self.assertEqual(code, 400)
+                self.assertIn("reasoning_budget_tokens", b["error"]["message"])
+        self.assertEqual(self.engine.prompts, [])
+
+
 class StatusHandover(unittest.TestCase):
     """#266: a stream aborted mid-way and the next request, which was waiting for the fifo.  The aborted request's
     status/history block ran after the fifo was released, so the waiting request could start in that gap: the old
