@@ -4106,6 +4106,7 @@ int main(int argc, char** argv) {
                                              "the engine so the server starts it again (issue #29)\n",
                                      limit, p.where.load(), (long long) p.detail.load());
                         stall_report(stderr, p.ticks.load() - ticks_at);
+                        strata::core::release_gpu_waits(stderr);   // #267: no spin kernel outlives the process
                         std::fflush(stderr);
                         std::abort();
                     }

@@ -30,6 +30,7 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -59,6 +60,12 @@ public:
 
     /// The watchdog's view of the window in flight (issue #31): the layer, the GPU's sequence, the flags.
     void diag(std::FILE* f) const;
+
+    /// #267: raise every flag the window's spin kernels wait on past any ring (UINT32_MAX), so a window the GPU
+    /// cannot finish drains instead of staying resident, then wait up to `timeout_ms` for its streams.  For the
+    /// paths that give up on the engine (a timed-out window, the serve watchdog): the window then ran on whatever
+    /// the flags guarded, so this verifier refuses every later window.  True when the streams finished.
+    bool release_gpu_waits(int timeout_ms);
 
     /// `max_t` <= kVerifyMaxT.  `head` may be null (the canonical head is then run per token).
     bool init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
@@ -145,6 +152,7 @@ private:
     int hist_len_ = 0;
     bool head_sampling_ = true;          ///< set_head_sampling
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
+    std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
     bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device

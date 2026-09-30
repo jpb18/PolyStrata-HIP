@@ -39,6 +39,7 @@
 #include <atomic>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 #include <chrono>
 #include <cmath>
@@ -105,7 +106,53 @@ std::atomic<const Verifier*> g_diag_verifier{nullptr};
 void diag_active_verifier(std::FILE* f) {
     if (const Verifier* v = g_diag_verifier.load()) v->diag(f);
 }
+// #267: every live verifier (a layer split has one per stage), for the release before the engine ends
+constexpr int kLiveMax = 16;
+std::atomic<Verifier*> g_live[kLiveMax];
+void release_live_verifiers(std::FILE* f) {
+    for (auto& slot : g_live)
+        if (Verifier* v = slot.load()) {
+            const Clock::time_point t0 = Clock::now();
+            const bool done = v->release_gpu_waits(5000);
+            if (f != nullptr)
+                std::fprintf(f, "strata: released the verify window's GPU waits (#267): the GPU %s\n",
+                             done ? ("finished in " + std::to_string((long long) ms_since(t0)) + " ms").c_str()
+                                  : "did not finish within 5 s");
+        }
+    if (f != nullptr) std::fflush(f);
+}
+std::string released_note(bool drained) {
+    return drained ? "; its GPU waits were released and the GPU finished (#267)"
+                   : "; its GPU waits were released but the GPU did not finish within 5 s (#267)";
+}
+// #267 test hook: STRATA_TEST_VERIFY_STALL=N withholds the last layer's flag in the N-th window (1-based), so the
+// GPU spins on a flag nobody raises - the bounded window wait and the release are then what ends it.  Unset: never.
+const int64_t g_test_stall = [] {
+    const char* e = std::getenv("STRATA_TEST_VERIFY_STALL");
+    return e != nullptr ? (int64_t) std::atoll(e) : (int64_t) 0;
+}();
 }  // namespace
+
+bool Verifier::release_gpu_waits(int timeout_ms) {
+    released_.store(true);
+    // the words the spin kernels read (wait_flag_ge, wait_flag_ge_or) are mapped host memory, so a store here
+    // reaches them with no API call; UINT32_MAX is past every ring.  (E-6's skip words are device memory, but
+    // wait_flag_ge_or also returns on its flag.)  A host function raising flag B later only raises.
+    for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_})
+        if (p != nullptr) *(volatile uint32_t*) p = UINT32_MAX;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    _mm_sfence();
+    const OnDevice on_device(device_);
+    const Clock::time_point t0 = Clock::now();
+    for (cudaStream_t s : {cs_, copy_}) {
+        if (s == nullptr) continue;
+        while (cudaStreamQuery(s) == cudaErrorNotReady) {
+            if (ms_since(t0) > timeout_ms) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    return true;
+}
 
 void Verifier::diag(std::FILE* f) const {
     auto rd = [](const uint32_t* p) { return p ? *(const volatile uint32_t*) p : 0u; };
@@ -117,6 +164,10 @@ void Verifier::diag(std::FILE* f) const {
 Verifier::~Verifier() {
     const Verifier* self = this;
     g_diag_verifier.compare_exchange_strong(self, nullptr);
+    for (auto& slot : g_live) {
+        Verifier* me = this;
+        slot.compare_exchange_strong(me, nullptr);
+    }
     if (cs_) cudaStreamSynchronize(cs_);
     for (auto& e : exec_)
         if (e) cudaGraphExecDestroy(e);
@@ -134,6 +185,11 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                     const NativeHead* head, int max_t, std::string& err) {
     g_diag_verifier.store(this);
     diag_verify_fn().store(&diag_active_verifier);
+    for (auto& slot : g_live) {
+        Verifier* none = nullptr;
+        if (slot.load() == this || slot.compare_exchange_strong(none, this)) break;
+    }
+    release_gpu_fn().store(&release_live_verifiers);
     cudaGetDevice(&device_);   // a layer split's stage on another GPU: its streams, graphs and buffers live there
     wt_ = &wt;
     g_ = &g;
@@ -952,6 +1008,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     using namespace strata::kernels;
     const OnDevice on_device(device_);
     if (T < 1 || T > max_t_) { err = "verify: window size out of range"; return false; }
+    if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
     if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
@@ -996,7 +1053,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     volatile uint32_t* const flag = h_flag_;
     const int G = groups_[T] > 0 ? groups_[T] : 1;
     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
-    for (int64_t k = 0; k < (le_ - lb_) * G; ++k) {
+    const int64_t steps = (le_ - lb_) * G;
+    const bool test_stall = g_test_stall > 0 && windows + 1 == g_test_stall;   // #267 test hook (off: false)
+    for (int64_t k = 0; k < steps; ++k) {
         const int64_t l = lb_ + k / G;
         const int grp = (int) (k % G);
         const uint32_t want = (uint32_t) (k + 1);
@@ -1017,7 +1076,11 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                     return false;
                 }
             }
-            if (now - a > std::chrono::seconds(20)) { err = "verify: timed out at layer " + std::to_string(l); return false; }
+            if (now - a > std::chrono::seconds(20)) {
+                // #267: the caller ends the engine; no spin kernel may outlive it
+                err = "verify: timed out at layer " + std::to_string(l) + released_note(release_gpu_waits(5000));
+                return false;
+            }
         }
         const Clock::time_point b = Clock::now();
         VDBG("layer %lld rang\n", (long long) l);
@@ -1042,12 +1105,28 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             *(volatile uint32_t*) h_flagA_ = want;
             raise_flag(h_flagB_, want);
         }
-        *flag = want;
+        if (!(test_stall && k + 1 == steps)) *flag = want;
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
         ms_pool += ms_since(b);
     }
     progress_at("verify window: waiting for the GPU to finish the window (flags A/B/M raised)", (int64_t) T);
-    const cudaError_t se = cudaStreamSynchronize(cs_);
+    // #267: polled with a bound instead of cudaStreamSynchronize.  A window the GPU never finishes (a spin kernel
+    // that never sees its flag) held the host here for good, and the process then ended with that kernel still
+    // resident - on Windows the GPU was left "lost" until a power cycle.  Until then it is the same wait: the
+    // stream idle, or its error.
+    cudaError_t se;
+    {
+        const Clock::time_point a = Clock::now();
+        uint32_t spins = 0;
+        while ((se = cudaStreamQuery(cs_)) == cudaErrorNotReady) {
+            _mm_pause();
+            if ((++spins & 1023u) != 0 || Clock::now() - a <= std::chrono::seconds(20)) continue;
+            const bool drained = release_gpu_waits(5000);
+            err = "verify: timed out waiting for the GPU to finish the window (layer steps " + std::to_string(steps) +
+                  ", the GPU rang " + std::to_string(*seq) + ")" + released_note(drained);
+            return false;
+        }
+    }
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
