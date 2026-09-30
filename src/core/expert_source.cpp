@@ -39,6 +39,15 @@
 #include <unistd.h>
 #endif
 
+// a 64-bit seek (as in pinned.cu): the 32-bit `fseek` wraps past 4 GiB, and the spelling differs per platform
+#ifndef STRATA_FSEEK64
+#ifdef _WIN32
+#define STRATA_FSEEK64(f, o) _fseeki64((f), (long long) (o), SEEK_SET)
+#else
+#define STRATA_FSEEK64(f, o) fseeko((f), (off_t) (o), SEEK_SET)
+#endif
+#endif
+
 namespace strata::core {
 
 namespace detail {
@@ -1418,7 +1427,13 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
         return dir + lay.gguf_file[(size_t) l];
     };
     auto worker = [&]() {
-        std::ifstream f;
+        // #230: `fread` on a `FILE*`, as load_experts_ranges (#89): MSVC's `std::ifstream::read` splits a request
+        // into 4095-byte freads, which took this path to 0.02 GiB/s on a Windows install without experts.bin.
+        // The guard closes the handle on every return.
+        struct Closer {
+            FILE* f = nullptr;
+            ~Closer() { if (f != nullptr) std::fclose(f); }
+        } file;
         std::string open_name;
         std::vector<uint8_t> buf;
         for (;;) {
@@ -1426,12 +1441,12 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
             if (l >= lay.n_layers || bad) break;
             const std::string name = file_of(l);
             if (name != open_name) {
-                f.close();
-                f.clear();
-                f.open(name, std::ios::binary);
-                if (!f) { bad = true; return; }
+                if (file.f != nullptr) std::fclose(file.f);
+                file.f = std::fopen(name.c_str(), "rb");
+                if (file.f == nullptr) { bad = true; return; }
                 open_name = name;
             }
+            FILE* const f = file.f;
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
@@ -1443,9 +1458,9 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
                 buf.resize((size_t) chunk);
                 for (uint64_t done = 0; done < total; done += chunk) {
                     const uint64_t n = std::min<uint64_t>(chunk, total - done);
-                    f.seekg((std::streamoff) (src + done));
-                    f.read((char*) buf.data(), (std::streamsize) n);
-                    if ((uint64_t) f.gcount() != n) { bad = true; return; }
+                    // 64-bit seek: a shard is tens of GB
+                    if (STRATA_FSEEK64(f, src + done) != 0) { bad = true; return; }
+                    if (std::fread(buf.data(), 1, (size_t) n, f) != (size_t) n) { bad = true; return; }
                     for (uint64_t k = 0; k < n / per[r]; ++k) {
                         const uint64_t e = done / per[r] + k;
                         std::memcpy(dst + lay.blob_offset(l, (int64_t) e) + at[r], buf.data() + k * per[r], (size_t) per[r]);
