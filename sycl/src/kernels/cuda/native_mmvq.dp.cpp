@@ -41,6 +41,9 @@
 namespace strata::kernels {
 namespace {
 
+#ifndef STRATA_MMVQ_UNROLL
+#define STRATA_MMVQ_UNROLL 2
+#endif
 constexpr int QK = 256;
 constexpr int Q8K = 32;
 constexpr int QI = 32;
@@ -1198,6 +1201,7 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
     const int blocks_per_row = n_in / F::DIV;
     const int x_stride = n_in / Q8K;                   // Q8_1 blocks per activation column
     float tmp[NCOLS][ROWS] = {};
+#pragma unroll STRATA_MMVQ_UNROLL   // SYCL port: several 256-blocks' loads in flight per warp (bytes in flight, not ALU)
     for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += BPI) {
         const int kby = kbx * F::KBY;
         const int kqs = F::kqs(tid);
@@ -1297,6 +1301,104 @@ void native_mmvq_rowwarp_kernel(const typename F::Block* __restrict__ w, const Q
             if (lane == 0 && row0 + r < n_out) y[std::size_t(j) * n_out + row0 + r] = v;
         }
 }
+
+// ---------------------------------------------------------------- SYCL port: Q6_K with 16-byte loads
+//
+// bw probe on the B70: 4-byte loads per lane stream at 395 GB/s, 16-byte at 596; the shared kernel above does
+// 4-byte loads and measures 130-140 GB/s on the 8192-wide Q6_K projections. Here 8 lanes share a 256-block:
+// lane g takes positions iqs = 4g..4g+3, so its ql (16 B), qh (16 B) and each column's q8 ints (16 B) are one
+// vector load each; a 32-lane sub-group has four blocks in flight. One row per warp, WARPS rows per group.
+template <int NCOLS, int RPW>
+void native_mmvq_q6k_wide_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ x,
+                                 float* __restrict__ y, int n_in, int n_out) {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int lane = int(item.get_local_id(2)), warp = int(item.get_local_id(1));
+    const int row0 = (int(item.get_group(2)) * WARPS + warp) * RPW;
+    if (row0 >= n_out) return;
+    const int blocks_per_row = n_in / QK, x_stride = n_in / Q8K;
+    const int g = lane & 7, sub = lane >> 3;            // position group within the block, block within the iteration
+    const int vh_shift = 2 * ((g & 3) >> 1);
+    const int qh4_idx = 2 * (g >> 2) + (g & 1);
+    const int scale_offset = 8 * (g >> 2) + (g & 3);
+    const int bq8_offset = 4 * (g >> 2) + ((g & 3) >> 1);
+    const int u_int4 = g & 1;                           // ints 4(g%2)..+3 of the q8 block = one int4
+    float acc[RPW][NCOLS] = {};
+    for (int kbx = sub; kbx < blocks_per_row; kbx += 4) {
+        const int kby = kbx * (QK / Q8K);
+        sycl::int4 ql4[RPW], qh4[RPW]; float dsc0[RPW], dsc1[RPW];
+#pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const Q6KBlock* b = w + std::size_t(row0 + (row0 + r < n_out ? r : 0)) * blocks_per_row + kbx;
+            ql4[r] = reinterpret_cast<const sycl::int4*>(b->ql)[g];
+            qh4[r] = reinterpret_cast<const sycl::int4*>(b->qh)[qh4_idx];
+            const float d = b->d;
+            dsc0[r] = d * (float) b->scales[scale_offset]; dsc1[r] = d * (float) b->scales[scale_offset + 4];
+        }
+        // the activations once per column, shared by the RPW rows
+        sycl::int4 u0[NCOLS], u1[NCOLS];
+        float ds0[NCOLS], ds1[NCOLS];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            const Q81Block* xb = x + std::size_t(j) * x_stride + kby + bq8_offset;
+            u0[j] = reinterpret_cast<const sycl::int4*>(xb[0].qs)[u_int4];
+            u1[j] = reinterpret_cast<const sycl::int4*>(xb[2].qs)[u_int4];
+            ds0[j] = xb[0].ds[0]; ds1[j] = xb[2].ds[0];
+        }
+#pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int vl[4] = {ql4[r].x(), ql4[r].y(), ql4[r].z(), ql4[r].w()};
+            const int vh[4] = {qh4[r].x() >> vh_shift, qh4[r].y() >> vh_shift, qh4[r].z() >> vh_shift, qh4[r].w() >> vh_shift};
+            int vi0[4], vi1[4];
+#pragma unroll
+            for (int p = 0; p < 4; ++p) {
+                vi0[p] = dpct::vectorized_binary<sycl::char4>((vl[p] & 0x0f0f0f0f) | ((vh[p] << 4) & 0x30303030), 0x20202020, dpct::sub_sat());
+                vi1[p] = dpct::vectorized_binary<sycl::char4>(((vl[p] >> 4) & 0x0f0f0f0f) | (((vh[p] >> 4) << 4) & 0x30303030), 0x20202020, dpct::sub_sat());
+            }
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+                int s0 = 0, s1 = 0;
+                s0 = strata::dp4a(vi0[0], u0[j].x(), s0); s0 = strata::dp4a(vi0[1], u0[j].y(), s0);
+                s0 = strata::dp4a(vi0[2], u0[j].z(), s0); s0 = strata::dp4a(vi0[3], u0[j].w(), s0);
+                s1 = strata::dp4a(vi1[0], u1[j].x(), s1); s1 = strata::dp4a(vi1[1], u1[j].y(), s1);
+                s1 = strata::dp4a(vi1[2], u1[j].z(), s1); s1 = strata::dp4a(vi1[3], u1[j].w(), s1);
+                acc[r][j] += ds0[j] * dsc0[r] * (float) s0 + ds1[j] * dsc1[r] * (float) s1;
+            }
+        }
+    }
+    auto sg = item.get_sub_group();
+#pragma unroll
+    for (int r = 0; r < RPW; ++r)
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            float v = acc[r][j];
+#pragma unroll
+            for (int o = WARP / 2; o > 0; o >>= 1) v += dpct::experimental::permute_sub_group_by_xor(0xffffffffu, sg, v, o);
+            if (lane == 0 && row0 + r < n_out) y[std::size_t(j) * n_out + row0 + r] = v;
+        }
+}
+inline int q6k_wide_rpw() {
+    static const int v = std::getenv("STRATA_MMVQ_WIDE_RPW") ? std::atoi(std::getenv("STRATA_MMVQ_WIDE_RPW")) : 1;
+    return v;
+}
+template <int NCOLS>
+void launch_q6k_wide(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, dpct::queue_ptr s) {
+    const auto* w = static_cast<const Q6KBlock*>(weights);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const int rpw = q6k_wide_rpw();
+#define STRATA_Q6W(RP) if (rpw == RP) { \
+        const unsigned blocks = unsigned((std::size_t(n_out) + WARPS * RP - 1) / (WARPS * RP)); \
+        s->parallel_for<dpct_kernel_name<class native_mmvq_q6k_wide, dpct_kernel_scalar<NCOLS>, dpct_kernel_scalar<RP>>>( \
+            sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)), \
+            [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_q6k_wide_kernel<NCOLS, RP>(w, x, y, n_in, n_out); }); \
+        return; }
+    STRATA_Q6W(1) STRATA_Q6W(2) STRATA_Q6W(4)
+#undef STRATA_Q6W
+    const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
+    s->parallel_for<dpct_kernel_name<class native_mmvq_q6k_wide1, dpct_kernel_scalar<NCOLS>>>(
+        sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
+        [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_q6k_wide_kernel<NCOLS, 1>(w, x, y, n_in, n_out); });
+}
+bool g_q6k_wide = std::getenv("STRATA_MMVQ_WIDE") == nullptr || std::atoi(std::getenv("STRATA_MMVQ_WIDE")) != 0;
 
 template <typename F, int NCOLS, int RPW>
 void launch_rowwarp(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, dpct::queue_ptr s) {
@@ -1544,6 +1646,7 @@ void small_f32(const void* weights, const float* x, void* scratch_q8_1,
 } // namespace
 
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
+void native_mmvq_set_q6k_wide(bool on) { g_q6k_wide = on; }
 bool native_mmvq_multi_exact() { return g_multi_exact; }
 
 std::size_t native_q8_1_bytes(int n_in, int ncols) {
@@ -1964,6 +2067,16 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
+    // SYCL port: 16-byte-load kernel for the decode shapes (ncols <= 4)
+    if (g_q6k_wide && ncols >= 1 && ncols <= 4 && n_in % 256 == 0 && n_out >= 4096) {   // measured: wins only on the wide projections
+        dpct::queue_ptr s = strata::q_of(stream);
+        switch (ncols) {
+            case 1: launch_q6k_wide<1>(weights, x_q8_1, y, n_in, n_out, s); return;
+            case 2: launch_q6k_wide<2>(weights, x_q8_1, y, n_in, n_out, s); return;
+            case 3: launch_q6k_wide<3>(weights, x_q8_1, y, n_in, n_out, s); return;
+            default: launch_q6k_wide<4>(weights, x_q8_1, y, n_in, n_out, s); return;
+        }
+    }
     // SYCL port: the row-blocked kernel for the decode shapes (ncols <= 4)
     if (ncols >= 1 && ncols <= 4 && rowwarp_rpw() > 0 && n_in % 256 == 0) {
         dpct::queue_ptr s = strata::q_of(stream);
