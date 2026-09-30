@@ -701,13 +701,22 @@ def cuda_lib_dirs():
 
 
 # ------------------------------------------------------------------------------------------------ AMD (experimental)
-# The RX 7900 XT / XTX (gfx1100) on Linux, through the HIP backend (docs/AMD_HIP.md).  There is no ready-made AMD
-# engine: ROCm comes from AMD's TheRock Python wheels into .venv (no sudo; a system ROCm in /opt/rocm is used when it
-# has hipcc and hipBLAS) and the engine is compiled here.  One GPU, no images yet.
-ROCM_INDEX = os.environ.get("STRATA_ROCM_INDEX", "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/")
+# The RX 7900 XT / XTX (gfx1100) and the RX 9070 series / Radeon AI PRO R9700 (gfx1201) on Linux, through the HIP
+# backend (docs/AMD_HIP.md).  There is no ready-made AMD engine: ROCm comes from AMD's TheRock Python wheels into .venv
+# (no sudo; a system ROCm 7 in /opt/rocm is used when it has hipcc and hipBLAS) and the engine is compiled here for
+# the card.  One GPU, no images yet.
+ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   # TheRock's wheels per GPU family
+                "gfx1201": "https://rocm.nightlies.amd.com/v2/gfx120X-all/"}
 ROCM_VERSION = os.environ.get("STRATA_ROCM_VERSION", "7.10.0a20251120")   # what Strata's HIP build was tested with
+ROCM_SYSTEM_MIN = (7, 0)       # an older system ROCm is passed over for the wheels (gfx1201 needs ROCm 6.4 or newer)
 AMD_ARCHS = ("gfx1100", "gfx1201")
-AMD_NAMES = {"gfx1100": "AMD Radeon RX 7900 series (gfx1100)", "gfx1201": "AMD Radeon RX 9070 / AI PRO R9700 (gfx1201)"}   # when sysfs has no product name
+AMD_NAMES = {"gfx1100": "AMD Radeon RX 7900 series (gfx1100)",   # when sysfs has no product name
+             "gfx1201": "AMD Radeon RX 9070 series / AI PRO R9700 (gfx1201)"}
+AMD_CARDS = "the RX 7900 XT / XTX (gfx1100) and the RX 9070 / 9070 XT / Radeon AI PRO R9700 (gfx1201)"
+
+
+def rocm_index(arch):
+    return os.environ.get("STRATA_ROCM_INDEX") or ROCM_INDEXES[arch]
 
 
 def amd_gpus():
@@ -747,33 +756,86 @@ def amd_gpus():
 
 def amd_problem(g):
     if g["arch"] not in AMD_ARCHS:
-        return (f"not supported - Strata's AMD backend runs on the RX 7900 XT / XTX ({', '.join(AMD_ARCHS)}) only, "
-                f"this is {g['arch']}")
+        return f"not supported - Strata's AMD backend runs on {AMD_CARDS} only, this is {g['arch']}"
     return None
 
 
-def rocm_root():
-    """ROCm for compiling and running the HIP engine: (root, library folders).  A system ROCm with hipcc and hipBLAS,
-    else AMD's TheRock wheels (ROCM_VERSION, from ROCM_INDEX) installed into .venv."""
+def rocm_version(root):
+    """(major, minor) of a ROCm install, from rocm-core's header; None when it has none."""
+    try:
+        text = (Path(root) / "include" / "rocm-core" / "rocm_version.h").read_text()
+        return tuple(int(re.search(rf"#define\s+ROCM_VERSION_{k}\s+(\d+)", text).group(1)) for k in ("MAJOR", "MINOR"))
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def rocm_root(arch):
+    """ROCm for compiling and running the HIP engine for `arch`: (root, library folders).  A system ROCm 7 with hipcc
+    and hipBLAS, else AMD's TheRock wheels (ROCM_VERSION, from the card family's index) installed into .venv."""
     sysroot = Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
     if (sysroot / "bin" / "hipcc").exists() and list((sysroot / "lib").glob("libhipblas.so*")):
-        return sysroot, [str(sysroot / "lib")]
+        ver = rocm_version(sysroot)
+        if ver is None or ver >= ROCM_SYSTEM_MIN:
+            return sysroot, [str(sysroot / "lib")]
+        warn(f"the ROCm in {sysroot} is {ver[0]}.{ver[1]}; Strata needs {ROCM_SYSTEM_MIN[0]}.{ROCM_SYSTEM_MIN[1]} or "
+             "newer: using AMD's wheels in .venv instead")
+    index = rocm_index(arch)
     stamp = Path(sys.prefix) / ".strata-rocm.json"
-    if not stamp.exists() or json.loads(stamp.read_text()).get("version") != ROCM_VERSION:
+    have = json.loads(stamp.read_text()) if stamp.exists() else {}
+    if have.get("version") != ROCM_VERSION or have.get("index") != index:
         say(f"  Installing ROCm {ROCM_VERSION} for AMD GPUs into .venv (AMD's TheRock wheels, ~10 GB, no sudo) ...")
-        run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--index-url",
-             ROCM_INDEX, f"rocm[libraries,devel]=={ROCM_VERSION}"])
-        stamp.write_text(json.dumps({"version": ROCM_VERSION, "index": ROCM_INDEX}))
+        pip = [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--index-url", index]
+        if have.get("version") == ROCM_VERSION:        # the same version for another GPU family: its own libraries
+            run(pip + ["--force-reinstall", "--no-deps", f"rocm=={ROCM_VERSION}"])
+        run(pip + [f"rocm[libraries,devel]=={ROCM_VERSION}"])
+        stamp.write_text(json.dumps({"version": ROCM_VERSION, "index": index}))
     sdk = Path(sys.executable).parent / "rocm-sdk"
     root = Path(out([str(sdk), "path", "--root"]).strip())
     if not (root / "llvm" / "bin" / "clang++").exists():
         fail(f"ROCm was installed but its compiler is missing ({root})",
              f"remove {stamp} and run this again; or install ROCm 7 system-wide")
+    # the card family's libraries only (gfx120X-all -> _rocm_sdk_libraries_gfx120X_all): another family's
+    # libhipblaslt.so first on the path would have no kernels for this card
+    family = "_rocm_sdk_libraries_" + index.rstrip("/").rsplit("/", 1)[-1].replace("-", "_")
     dirs = [str(root / "lib")]
     for sp in {Path(p) for p in sys.path if p.endswith("site-packages")}:
-        dirs += [str(d / "lib") for d in sorted(sp.glob("_rocm_sdk_libraries_*")) if (d / "lib").is_dir()]
+        libs = sorted(sp.glob("_rocm_sdk_libraries_*"))
+        libs = [d for d in libs if d.name.lower() == family.lower()] or libs
+        dirs += [str(d / "lib") for d in libs if (d / "lib").is_dir()]
     ok(f"ROCm: {root}")
     return root, list(dict.fromkeys(dirs))
+
+
+def hipblaslt_version(lib_dirs):
+    """The installed hipBLASLt's version as the engine reads it (hipblasLtGetVersion: 1.4.1 -> 100401), from the
+    header of the ROCm whose libraries the engine loads; None when not found."""
+    for d in lib_dirs:
+        try:
+            text = (Path(d).parent / "include" / "hipblaslt" / "hipblaslt-version.h").read_text()
+            v = [int(re.search(rf"#define\s+HIPBLASLT_VERSION_{k}\s+(\d+)", text).group(1))
+                 for k in ("MAJOR", "MINOR", "PATCH")]
+        except (OSError, AttributeError, ValueError):
+            continue
+        return v[0] * 100000 + v[1] * 100 + v[2]
+    return None
+
+
+def hipblaslt_table(arch, lib_dirs):
+    """tools/hip/<arch>-hipblaslt-<version>.txt for this card AND the installed hipBLASLt, else None: its solution
+    ids are valid only for that pair (the engine refuses any other table and uses plain hipBLAS)."""
+    ver = hipblaslt_version(lib_dirs)
+    table = ROOT / "tools" / "hip" / f"{arch}-hipblaslt-{ver}.txt"
+    if ver is not None and table.exists():
+        head = table.read_text().split("\n", 2)[:2]
+        if f"STRATA_HIPBLASLT_TUNING_V1 {arch} {ver}" in (h.strip() for h in head):
+            ok(f"hipBLASLt tuning table: {table.name} (faster prompts)")
+            return table
+    have = sorted(p.name for p in (ROOT / "tools" / "hip").glob(f"{arch}-hipblaslt-*.txt"))
+    warn(f"no hipBLASLt tuning table for {arch} with hipBLASLt {ver or '(version unknown)'}"
+       + (f" (have: {', '.join(have)})" if have else "")
+       + ": the prompt's dense matrix products use plain hipBLAS (tools/hip/tune_hipblaslt makes a table, "
+         "docs/AMD_HIP_PERFORMANCE.md)")
+    return None
 
 
 def build_engine_hip(gpu, llama) -> Path:
@@ -783,13 +845,13 @@ def build_engine_hip(gpu, llama) -> Path:
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
     src = source_hash(ENGINE_SOURCES)
-    if meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src:
+    if meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and             gpu["arch"] in meta.get("archs", []):
         ok("engine already built for this PC")
         return eng
     if not (shutil.which("c++") or shutil.which("g++")) or not shutil.which("git"):
         fail("a C++ compiler and git are needed to compile the AMD engine",
              "Ubuntu/Debian: sudo apt install build-essential git   Fedora: sudo dnf install gcc-c++ git")
-    root, dirs = rocm_root()
+    root, dirs = rocm_root(gpu["arch"])
     libs = [str(Path(d).parent) for d in dirs[1:]]
     bitcode = next((p for p in (root / "lib" / "llvm" / "amdgcn" / "bitcode", root / "amdgcn" / "bitcode") if p.is_dir()),
                    root / "amdgcn" / "bitcode")
@@ -798,7 +860,7 @@ def build_engine_hip(gpu, llama) -> Path:
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(dirs + [os.environ.get("LD_LIBRARY_PATH", "")]).rstrip(os.pathsep)
     os.environ["PATH"] = os.pathsep.join([str(root / "bin"), str(root / "llvm" / "bin"), os.environ.get("PATH", "")])
     say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
-        if meta.get("backend") == "hip" and (eng / EXE).exists()
+        if meta.get("backend") == "hip" and (eng / EXE).exists() and gpu["arch"] in meta.get("archs", [])
         else "  Compiling the Strata engine for your AMD GPU (10-20 minutes, once) ...")
     cmake_build(ROOT, ROOT / "build-hip", "strata",
                 ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
@@ -912,7 +974,8 @@ def update_installed_engine(url_base) -> None:
     if meta.get("backend") == "hip":                   # AMD: compiled here, again when its source changed
         if meta.get("src") != source_hash(ENGINE_SOURCES):
             try:
-                g = next((x for x in amd_gpus() if amd_problem(x) is None), None)
+                usable = [x for x in amd_gpus() if amd_problem(x) is None]
+                g = next((x for x in usable if x["arch"] in meta.get("archs", [])), usable[0] if usable else None)
                 if g is None:
                     raise RuntimeError("no supported AMD GPU found")
                 build_engine_hip(g, get_llama_cpp())
@@ -1725,7 +1788,7 @@ def main() -> int:
             say(f"    GPU {g['index']}: {g['name']}, {g['vram_gb']:.0f} GB VRAM - " + (amd_problem(g) or "can be used"))
         usable = [g for g in amd if amd_problem(g) is None]
         if not usable:
-            fail("no AMD GPU Strata can use", "the AMD backend runs on the RX 7900 XT / XTX (gfx1100) on Linux")
+            fail("no AMD GPU Strata can use", f"the AMD backend runs on {AMD_CARDS} on Linux")
         if a.gpus:
             fail("several GPUs sharing one model: NVIDIA only for now", "use one AMD card (--gpu N)")
         if a.gpu is not None:
@@ -2057,10 +2120,11 @@ def main() -> int:
     if hip:
         cfg["backend"] = "hip"
         # the dense prompt GEMMs through hipBLASLt with kernels measured on this GPU generation (tools/hip; +40-60%
-        # prompt speed on the 7900 XTX); the engine refuses a table made for another hipBLASLt version and falls back
-        tables = sorted((ROOT / "tools" / "hip").glob(f"{gpu['arch']}-hipblaslt-*.txt"))
-        if tables:
-            cfg["env"] = {"STRATA_HIPBLASLT_TUNING": str(tables[-1])}
+        # prompt speed on the 7900 XTX): only a table for this card's arch AND the installed hipBLASLt version (the
+        # engine refuses any other one and falls back to plain hipBLAS)
+        table = hipblaslt_table(gpu["arch"], lib_dirs)
+        if table:
+            cfg["env"] = {"STRATA_HIPBLASLT_TUNING": str(table)}
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start
