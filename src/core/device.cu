@@ -92,6 +92,15 @@ std::string gpu_arch_problem(int ordinal) {
 #endif
 }
 
+std::string device_code_error() {
+    // every .cu of the engine is compiled for the same CMAKE_CUDA_ARCHITECTURES, so this kernel stands for all
+    cudaFuncAttributes a{};
+    const cudaError_t e = cudaFuncGetAttributes(&a, poison_kernel);
+    if (e == cudaSuccess) return {};
+    cudaGetLastError();
+    return cudaGetErrorString(e);
+}
+
 DeviceInfo device_info(int ordinal) {
     int count = 0;
     check(cudaGetDeviceCount(&count), "cudaGetDeviceCount");
