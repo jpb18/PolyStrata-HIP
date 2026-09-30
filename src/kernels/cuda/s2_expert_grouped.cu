@@ -254,7 +254,7 @@ __device__ __forceinline__ int load_x_chunk(const uint8_t* __restrict__ xb, int 
         // natural word j: x[4j .. 4j+3]; a 64-bit shift (sh is 0, 8, 16 or 24) rather than __funnelshift_r, so the same
         // source needs no CUDA-only intrinsic.
         n[j] = (unsigned) ((((unsigned long long) v[j + 1] << 32) | v[j]) >> sh);
-        hx = __dp4a(0x01010101, (int) n[j], hx);
+        hx = STRATA_DP4A(0x01010101, (int) n[j], hx);
     }
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
@@ -274,7 +274,7 @@ __device__ __forceinline__ int load_x_chunk(const uint8_t* __restrict__ xb, int 
 __device__ __forceinline__ int chunk_s(const int m[8], const int X[8]) {
     int s = 0;
 #pragma unroll
-    for (int j = 0; j < 8; ++j) s = __dp4a(m[j], X[j], s);
+    for (int j = 0; j < 8; ++j) s = STRATA_DP4A(m[j], X[j], s);
     return s;
 }
 
