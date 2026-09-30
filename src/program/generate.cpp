@@ -2320,6 +2320,8 @@ int main(int argc, char** argv) {
         // CS-T: a native pack without experts.bin maps the model's GGUF shards instead (native_experts.txt's spans,
         // checked against the files first) - no 30-77 GB copy of the experts on the disk
         src.set_gguf(o.native_preset);
+        if (const char* v = std::getenv("STRATA_FETCH_THREADS"); v != nullptr && std::atoi(v) > 0)
+            src.set_fetch_threads(std::atoi(v));
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -5477,6 +5479,10 @@ int main(int argc, char** argv) {
         if (drive.d.pcie_num < 0) drive.d.pcie_num = 0;
         if (drive.d.pcie_num > 256) drive.d.pcie_num = 256;
         const int64_t pcie0 = drive.d.pcie_experts;
+        // CS-T: the file tier since the decode began (the prompt path's copies are before this)
+        const int64_t files0 = src.file_reads(), ram0 = src.ram_reads();
+        const uint64_t fbytes0 = src.file_blob_bytes(), fall0 = src.file_read_bytes();
+        const double fms0 = src.file_ms();
         if (o.adapt_every > 0 && o.adapt_swaps > 0) drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         int64_t swaps_total = 0;
         double ms_adapt = 0;
@@ -5716,12 +5722,15 @@ int main(int argc, char** argv) {
             std::printf("%-24s %.2f GiB of experts in RAM, %lld exchanged with the VRAM tier, %lld blob reads from "
                         "the file\n", "resident RAM", (double) src.resident_bytes() / 1073741824.0,
                         (long long) src.exchanges(), (long long) src.file_reads());
-        if (srcp == &src)   // CS-T: the RAM and file tiers (the GPU cache's share is the hit rate above)
-            std::printf("%-24s RAM %lld blobs, files %lld blobs, %.1f MB read from the files (%.2f MB/round)%s\n",
-                        "expert tiers", (long long) src.ram_reads(), (long long) src.file_reads(),
-                        (double) src.file_read_bytes() / 1e6,
-                        rounds > 0 ? (double) src.file_read_bytes() / 1e6 / rounds : 0.0,
-                        src.gguf_mode() ? " (the GGUF in place)" : "");
+        if (srcp == &src) {  // CS-T: the RAM and file tiers (the GPU cache's share is the hit rate above)
+            const double fms = src.file_ms() - fms0, fmb = (double) (src.file_blob_bytes() - fbytes0) / 1e6;
+            std::printf("%-24s decode: RAM %lld blobs, files %lld blobs, %.1f MB read from the files (%.2f MB/round, "
+                        "%.1f ms/round of reading, %.2f GB/s per reading thread)%s; prompt copies %.1f MB\n",
+                        "expert tiers", (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
+                        fmb, rounds > 0 ? fmb / rounds : 0.0, rounds > 0 ? fms / rounds : 0.0,
+                        fms > 0 ? fmb / fms : 0.0, src.gguf_mode() ? " (the GGUF in place)" : "",
+                        (double) (fall0 - fbytes0) / 1e6);
+        }
         if (rounds > 0 && drive.d.pcie_num > 0)
             std::printf("%-24s %.2f distinct experts per layer read over PCIe (share %d/256 of the misses)\n",
                         "pcie experts", (double) (drive.d.pcie_experts - pcie0) / (double) (rounds * g.n_layers),

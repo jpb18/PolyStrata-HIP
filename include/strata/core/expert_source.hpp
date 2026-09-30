@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -132,6 +133,9 @@ public:
     /// The blob's bytes into `dst` (blob_bytes(layer) of them).  Safe from several threads for a source whose
     /// `transient` can be true.
     virtual bool copy_blob(int64_t layer, int64_t expert, uint8_t* dst);
+    /// The `n` experts of `layer` the CPU is about to ask `blob` for, all at once: a source that reads a file may
+    /// fetch them in parallel.  The bytes `blob` then returns are the same.  Default: nothing.
+    virtual void prefetch(int64_t layer, const int64_t* experts, int64_t n) { (void) layer; (void) experts; (void) n; }
 };
 
 /// Plan v0.3 P6: what the GPU computes in a verify window's layer, written by the pool (mapped host memory) right
@@ -381,7 +385,7 @@ public:
 
     bool mapped() const { return base_ != nullptr; }
     int64_t blobs() const { return blobs_; }
-    uint64_t pinned_bytes() const { return complement_pinned_ ? complement_bytes_ : 0; }
+    uint64_t pinned_bytes() const { return complement_pinned_ ? complement_pin_limit_ : 0; }
     uint64_t resident_bytes() const { return complement_bytes_; }
     bool complement_pinned() const { return complement_pinned_; }
     bool complement_ready() const { return complement_ready_; }
@@ -412,6 +416,12 @@ public:
     /// `file_reads` counts, plus the prompt path's copies of them).
     int64_t ram_reads() const { return ram_reads_.load(std::memory_order_relaxed); }
     uint64_t file_read_bytes() const { return file_read_bytes_.load(std::memory_order_relaxed); }
+    /// Of those, the bytes `blob` read (decode windows, adaptive swaps; the rest are the prompt path's copies), and
+    /// the time spent reading the files, summed over threads.
+    uint64_t file_blob_bytes() const { return file_blob_bytes_.load(std::memory_order_relaxed); }
+    double file_ms() const { return (double) file_us_.load(std::memory_order_relaxed) / 1000.0; }
+    /// Threads `prefetch` reads the GGUF with (STRATA_FETCH_THREADS, default 8).
+    void set_fetch_threads(int n) { fetch_threads_ = n < 1 ? 1 : n; }
 
     const uint8_t* blob(int64_t layer, int64_t expert) override;
     bool pinned(int64_t layer, int64_t expert) const override;
@@ -421,6 +431,8 @@ public:
     bool copy_blob(int64_t layer, int64_t expert, uint8_t* dst) override;
     /// CS-T: advances the assembled blobs' age (see staged_blob).
     void begin_layer(int64_t layer, const int32_t* ids, int64_t k) override;
+    /// CS-T: the GGUF in place assembles the missed experts on `fetch_threads_` threads.
+    void prefetch(int64_t layer, const int64_t* experts, int64_t n) override;
 
     /// Blobs touched, for the driver to report.  With `h = 0` this is `48 * k` per token and the number is only
     /// interesting once Phase 3 makes it not so.
@@ -432,6 +444,8 @@ private:
     bool copy_from_files(int64_t layer, int64_t expert, uint8_t* dst) const;
     bool open_gguf(std::string& err);
     const uint8_t* staged_blob(int64_t layer, int64_t expert);
+    bool claim_stage(int64_t key, size_t& v, bool& fill);
+    bool fill_stage(size_t v, int64_t layer, int64_t expert, uint8_t* dst);
     static constexpr uint64_t kNoComplement = detail::kNoCacheComplement;
     // ---- CS-T: the GGUF shards in place
     std::string gguf_;
@@ -456,6 +470,10 @@ private:
     std::vector<std::unique_ptr<uint8_t[]>> stage_buf_;
     std::vector<int64_t> stage_key_;
     std::vector<uint64_t> stage_epoch_, stage_used_;
+    std::vector<char> stage_busy_;            ///< being filled (outside stage_mu_): never a victim
+    std::condition_variable stage_cv_;
+    int fetch_threads_ = 8;
+    std::atomic<uint64_t> file_blob_bytes_{0}, file_us_{0};
     std::unordered_map<int64_t, size_t> stage_of_;
     uint64_t stage_blob_ = 0;
     uint64_t stage_seq_ = 0;
@@ -476,6 +494,8 @@ private:
     uint64_t complement_bytes_ = 0;
     std::vector<uint64_t> complement_offsets_;
     bool complement_pinned_ = false;
+    bool complement_partial_ = false;         ///< CS-T: only the first complement_pin_limit_ bytes are registered
+    uint64_t complement_pin_limit_ = 0;
     bool complement_ready_ = false;
     uint64_t complement_locked_ = 0;          ///< bytes held in the working set (pin refused)
     int64_t complement_lent_slots_ = 0;

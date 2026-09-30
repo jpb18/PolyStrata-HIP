@@ -240,6 +240,24 @@ void arena() {
             check(p == q && std::memcmp(p, dst.data() + L.blob_offset(0, 1), (size_t) L.blob_bytes(0)) == 0,
                   "an assembled blob stays put while it is in use");
             check(fs.file_read_bytes() > 0, "the file tier counts its bytes (" + std::to_string(fs.file_read_bytes()) + ")");
+            // prefetch: a layer's experts fetched together on several threads, then the same bytes from blob()
+            bool pre = true;
+            for (int round = 0; round < 3; ++round)
+                for (int64_t l = 0; l < 2; ++l) {
+                    fs.begin_layer(l, nullptr, 0);
+                    fs.begin_layer(l == 0 ? 1 : 0, nullptr, 0);   // age the buffers so the prefetch refills them
+                    fs.begin_layer(l, nullptr, 0);
+                    const int64_t both[2] = {1, 0};
+                    fs.set_fetch_threads(2);
+                    fs.prefetch(l, both, 2);
+                    for (int64_t e = 0; e < NE; ++e) {
+                        const uint8_t* b = fs.blob(l, e);
+                        pre = pre && b != nullptr &&
+                              std::memcmp(b, dst.data() + L.blob_offset(l, e), (size_t) L.blob_bytes(l)) == 0;
+                    }
+                }
+            check(pre && fs.file_blob_bytes() > 0 && fs.file_ms() >= 0.0,
+                  "prefetch on 2 threads, then blob(): the same bytes");
         }
         fs.close();
         // with experts.bin present, the pack's file is mapped as before, whatever set_gguf says

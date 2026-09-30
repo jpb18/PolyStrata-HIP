@@ -15,6 +15,7 @@
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/iq_avx512.hpp"
 #include "strata/kernels/cpu/iq_avx2.hpp"
+#include "strata/kernels/cpu/kq_avx2.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "ggml-cpu.h"
 #include "strata/kernels/iq_kernels.hpp"
@@ -171,6 +172,53 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             std::printf("          width invariance (1 vs %d tokens): gate/up %zu, down %zu rows differ\n", NT,
                         gu_diff, dn_diff);
             if (gu_diff || dn_diff) ++failures;
+        }
+        // UD-Q4_K_XL's formats: the multi-token AVX2 kernels (kq_avx2.cpp) against ggml-cpu's vec_dot per token,
+        // BIT FOR BIT, for 1..8 tokens; then the time of 4 tokens (a verify window) both ways
+        for (int role = 0; role < 2; ++role) {
+            const int type = role == 0 ? f.gu_type : f.d_type;
+            if (!cpu::kq256_supported(type) || (role == 0 && type != 12)) continue;
+            const int n = role == 0 ? (int) H : (int) FF, rows = role == 0 ? (int) FF : (int) H;
+            const size_t rb = role == 0 ? f.gu_row : f.d_row;
+            const uint8_t* w = blob.data() + (role == 0 ? 0 : f.down_off);
+            const auto* tc = ggml_get_type_traits_cpu((ggml_type) type);
+            const ggml_type at = tc->vec_dot_type;
+            std::vector<std::vector<uint8_t>> acts(8, std::vector<uint8_t>(ggml_row_size(at, n)));
+            std::mt19937 arng(77 + seed);
+            std::normal_distribution<float> and_(0.f, 1.f);
+            std::vector<float> xs((size_t) n);
+            const void* ap[8];
+            for (int t = 0; t < 8; ++t) {
+                for (auto& v : xs) v = and_(arng);
+                ggml_get_type_traits_cpu(at)->from_float(xs.data(), acts[t].data(), n);
+                ap[t] = acts[t].data();
+            }
+            std::vector<float> ref((size_t) 8 * rows), got((size_t) 8 * rows);
+            for (int t = 0; t < 8; ++t)
+                for (int r = 0; r < rows; ++r) tc->vec_dot(n, &ref[(size_t) t * rows + r], 0, w + (size_t) r * rb, 0, ap[t], 0, 1);
+            size_t differ = 0;
+            for (int nt = 1; nt <= 8; ++nt) {
+                float* op[8];
+                for (int t = 0; t < nt; ++t) op[t] = got.data() + (size_t) t * rows;
+                cpu::kq256_rows(type, w, rb, n, ap, nt, op, 0, rows);
+                for (int t = 0; t < nt; ++t)
+                    differ += std::memcmp(op[t], ref.data() + (size_t) t * rows, (size_t) rows * 4) != 0;
+            }
+            const int it = 30;
+            float* op4[4] = {got.data(), got.data() + rows, got.data() + 2 * rows, got.data() + 3 * rows};
+            auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < it; ++i) cpu::kq256_rows(type, w, rb, n, ap, 4, op4, 0, rows);
+            auto t1 = std::chrono::steady_clock::now();
+            for (int i = 0; i < it; ++i)
+                for (int r = 0; r < rows; ++r)
+                    for (int t = 0; t < 4; ++t) tc->vec_dot(n, op4[t] + r, 0, w + (size_t) r * rb, 0, ap[t], 0, 1);
+            auto t2 = std::chrono::steady_clock::now();
+            const double us_k = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
+            const double us_g = std::chrono::duration<double, std::micro>(t2 - t1).count() / it;
+            std::printf("          %s %s rows, AVX2 multi-token vs ggml vec_dot: %zu of 36 token-sets differ in any bit; "
+                        "4 tokens one thread %.0f us vs ggml %.0f us (%.2fx)\n", ggml_type_name((ggml_type) type),
+                        role == 0 ? "gate" : "down", differ, us_k, us_g, us_g / us_k);
+            if (differ) ++failures;
         }
         if (f.d_type == 42) {
             // (b2) the GGUF-layout Q2_0 kernel the pool uses for Q2_0 down projections - the AVX-512 one
