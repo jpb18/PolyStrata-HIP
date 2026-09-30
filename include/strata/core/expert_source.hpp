@@ -32,9 +32,14 @@
 #include <string>
 #include <vector>
 
+namespace strata::kernels::cpu {
+struct ExpertLayout;
+}
+
 namespace strata::core {
 
 class RemoteExperts;
+struct LoadStats;
 
 namespace detail {
 
@@ -450,8 +455,9 @@ public:
     /// rate, because those are the two numbers that say whether the arena is the one that was asked for.
     bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads, std::string& err,
               uint64_t max_pinned_bytes = 0, const std::string& shared_arena_file = {});
-    /// Plan v0.3 P6: a native pack without experts.bin takes its experts from the model's shard 1.
-    void set_gguf(const std::string& shard1) { gguf_ = shard1; }
+    /// Plan v0.3 P6: a native pack without experts.bin takes its experts from the model's GGUF: `native` is the
+    /// --native shard, and native_experts.txt names the other shards beside it (per layer, or per role in v4).
+    void set_gguf(const std::string& native) { gguf_ = native; }
     void close();
 
     bool mapped() const { return base_ != nullptr; }
@@ -488,5 +494,13 @@ private:
     uint64_t pinned_bytes_ = 0;
     std::string gguf_;
 };
+
+/// Plan v0.3 P6: checks native_experts.txt's GGUF spans against the files, before anything is read: each layer's
+/// gate/up/down at its recorded (file, offset) must be that tensor (`blk.L.ffn_<role>_exps.weight`), of the
+/// layout's type and dimensions, and inside the file.  `native` is the --native shard (see set_gguf).
+bool check_experts_gguf(const std::string& native, const strata::kernels::cpu::ExpertLayout& lay, std::string& err);
+/// Fills `dst` (lay.total bytes, the experts.bin layout) from the GGUF files, one role at a time.
+LoadStats load_experts_gguf(const std::string& native, uint8_t* dst, const strata::kernels::cpu::ExpertLayout& lay,
+                            int threads);
 
 }  // namespace strata::core

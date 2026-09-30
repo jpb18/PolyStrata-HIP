@@ -2,6 +2,7 @@
 #include "strata/core/expert_source.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/artifact/gguf_reader.hpp"
 
 #include "strata/core/pinned.hpp"
 #include "strata/platform/memory.hpp"
@@ -21,6 +22,8 @@
 #include <filesystem>
 #include <sstream>
 #include <limits>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -1400,9 +1403,75 @@ bool shared_arena_pack_hash(const std::string& pack_dir, const std::string& expe
 
 }  // namespace
 
-// Plan v0.3 P6: the arena from the model's shard 1.  Each layer's gate, up and down tensors hold the 512 experts
-// one after another; they are read in chunks and each expert's slice lands at its place in the blob
-// [gate rows | up rows | down rows] - the layout tools/iq_pack.py would have written to experts.bin.
+namespace {
+/// The GGUF file that holds role `r` (0 gate, 1 up, 2 down) of layer `l`: a name beside the --native shard
+/// (native_experts.txt v3 per layer, v4 per role), or the --native shard itself.
+std::string expert_gguf_file(const std::string& gguf, const strata::kernels::cpu::ExpertLayout& lay, int64_t l, int r) {
+    const size_t i = (size_t) (3 * l + r);
+    if (lay.gguf_file.size() <= i || lay.gguf_file[i].empty()) return gguf;
+    const size_t cut = gguf.find_last_of("/\\");
+    return (cut == std::string::npos ? std::string() : gguf.substr(0, cut + 1)) + lay.gguf_file[i];
+}
+}  // namespace
+
+bool check_experts_gguf(const std::string& gguf, const strata::kernels::cpu::ExpertLayout& lay, std::string& err) {
+    static const char* roles[3] = {"gate", "up", "down"};
+    if (lay.gguf_off.size() != (size_t) (3 * lay.n_layers)) {
+        err = "native_experts.txt has no GGUF offsets (a pack older than v2): repack it with tools/iq_pack.py";
+        return false;
+    }
+    try {
+        std::map<std::string, std::unique_ptr<strata::GgufFile>> files;
+        for (int64_t l = 0; l < lay.n_layers; ++l) {
+            const auto& fm = lay.fmt[(size_t) l];
+            const uint64_t blob = lay.bytes[(size_t) l];
+            const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
+            for (int r = 0; r < 3; ++r) {
+                const std::string path = expert_gguf_file(gguf, lay, l, r);
+                auto& f = files[path];
+                if (!f) f = std::make_unique<strata::GgufFile>(path);
+                const std::string name = "blk." + std::to_string(l) + ".ffn_" + roles[r] + "_exps.weight";
+                const strata::TensorInfo* t = f->find(name);
+                const uint64_t want_type = (uint64_t) (r < 2 ? fm.gu_type : fm.d_type);
+                // GGUF order: dim 0 is the row (the input), dim 1 the rows, dim 2 the experts
+                const uint64_t cols = (uint64_t) (r < 2 ? fm.n_embd : fm.n_ff);
+                const uint64_t rows = (uint64_t) (r < 2 ? fm.n_ff : fm.n_embd);
+                const uint64_t bytes = per[r] * (uint64_t) lay.n_expert;
+                const uint64_t payload = f->file_size() - f->data_start();
+                std::string why;
+                if (t == nullptr) why = "is not in it";
+                else if (t->type != want_type)
+                    why = std::string("is ") + t->type_name() + ", the pack says type " + std::to_string(want_type);
+                else if (t->shape.size() != 3 || t->shape[0] != cols || t->shape[1] != rows ||
+                         t->shape[2] != (uint64_t) lay.n_expert)
+                    why = "is not [" + std::to_string(cols) + ", " + std::to_string(rows) + ", " +
+                          std::to_string(lay.n_expert) + "]";
+                else if (strata::tensor_payload_bytes(*t) != bytes)
+                    why = "is not " + std::to_string(per[r]) + " B per expert";
+                else if (f->data_start() + t->offset != lay.gguf_off[(size_t) (3 * l + r)])
+                    why = "starts at byte " + std::to_string(f->data_start() + t->offset) + ", the pack says " +
+                          std::to_string(lay.gguf_off[(size_t) (3 * l + r)]);
+                else if (t->offset > payload || bytes > payload - t->offset)
+                    why = "runs past the end of the file (a truncated shard?)";
+                if (!why.empty()) {
+                    err = "the pack's native_experts.txt does not match the model: " + name + " in " + path + " " +
+                          why + " - repack with tools/iq_pack.py from this model's shards";
+                    return false;
+                }
+            }
+        }
+        return true;
+    } catch (const std::exception& e) {
+        err = std::string("native experts from the GGUF: ") + e.what();
+        return false;
+    }
+}
+
+// Plan v0.3 P6: the arena from the model's GGUF shards.  Each layer's gate, up and down tensors hold the 512
+// experts one after another; they are read in chunks and each expert's slice lands at its place in the blob
+// [gate rows | up rows | down rows] - the layout tools/iq_pack.py would have written to experts.bin.  Each role
+// is read from its own file (native_experts.txt v4: a shard boundary can fall inside a layer; per role as in
+// #255, gopinath87607).  The caller checks the spans first (check_experts_gguf).
 LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata::kernels::cpu::ExpertLayout& lay,
                             int threads) {
     LoadStats st;
@@ -1410,13 +1479,6 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
     const auto t0 = std::chrono::steady_clock::now();
     std::atomic<int64_t> next{0};
     std::atomic<bool> bad{false};
-    // a layer's experts may sit in another shard of the model (native_experts.txt v3): a name beside `gguf`
-    const size_t cut = gguf.find_last_of("/\\");
-    const std::string dir = cut == std::string::npos ? std::string() : gguf.substr(0, cut + 1);
-    auto file_of = [&](int64_t l) -> std::string {
-        if (lay.gguf_file.empty() || lay.gguf_file[(size_t) l].empty()) return gguf;
-        return dir + lay.gguf_file[(size_t) l];
-    };
     auto worker = [&]() {
         std::ifstream f;
         std::string open_name;
@@ -1424,19 +1486,20 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
-            const std::string name = file_of(l);
-            if (name != open_name) {
-                f.close();
-                f.clear();
-                f.open(name, std::ios::binary);
-                if (!f) { bad = true; return; }
-                open_name = name;
-            }
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
             const uint64_t at[3] = {0, fm.up_off, fm.down_off};
             for (int r = 0; r < 3; ++r) {
+                // the handle is kept while consecutive roles share a file (every layer of a v3 pack)
+                const std::string name = expert_gguf_file(gguf, lay, l, r);
+                if (name != open_name) {
+                    f.close();
+                    f.clear();
+                    f.open(name, std::ios::binary);
+                    if (!f) { bad = true; return; }
+                    open_name = name;
+                }
                 const uint64_t src = lay.gguf_off[(size_t) (3 * l + r)];
                 const uint64_t total = per[r] * (uint64_t) lay.n_expert;
                 const uint64_t chunk = per[r] * 16;           // 16 experts per read
@@ -1489,7 +1552,12 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     const bool from_gguf = !std::ifstream(path, std::ios::binary) && lay.native && !lay.gguf_off.empty() && !gguf_.empty();
     // SIZE CHECK BEFORE THE ALLOCATION, not after.  A wrong pack should name the two numbers rather than spend
     // 34 GB and a minute of loading first.
-    if (!from_gguf) {
+    if (from_gguf) {
+        // every (file, offset) of native_experts.txt must be the tensor it claims, of the pack's type and
+        // dimensions and inside its file - before the allocation, so a pack of another model or a truncated
+        // shard is a message rather than an arena of plausible wrong experts
+        if (!check_experts_gguf(gguf_, lay, err)) { err = "ArenaExpertSource: " + err; return false; }
+    } else {
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { err = "ArenaExpertSource: cannot open " + path; return false; }
         const uint64_t got = (uint64_t) f.tellg();
