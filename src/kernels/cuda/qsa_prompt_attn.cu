@@ -14,9 +14,6 @@
 namespace strata::kernels {
 namespace {
 
-// Set by qsa_prompt_attn_batch's capability probe: the device has no cp.async (Turing), so the v1 MMA kernel runs.
-bool g_turing = false;
-
 constexpr int HD = 256;           // head_dim
 constexpr int G = 12;             // query heads per KV head
 #ifndef D1_CH
@@ -43,7 +40,9 @@ constexpr int QS = HD + 8;        // q row stride in halves (bank-conflict-free 
 // products then add into the same FP32 C registers in the order hi-part-0, hi-part-1, which is the order the k16
 // instruction accumulates in as well - but the sum now rounds twice, so the two paths do not agree bit for bit.
 __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, const uint32_t* b) {
-#if !STRATA_PA_SM80
+#if !STRATA_PA_SM80 && (defined(__HIPCC__) || !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 750)
+    __trap();   // AMD and pre-Turing builds: no mma.sync (the host keeps the old kernel there)
+#elif !STRATA_PA_SM80
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a[0]), "r"(a[1]), "r"(b[0]));
@@ -691,6 +690,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
 bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* attn, int64_t n_q, void* stream) {
     if (n_q <= 0) return true;
+    bool turing = false;   // per call, from the CURRENT device (a layer split can mix Turing with newer cards)
     {   // sm_75 or newer: the MMA above compiles for both.  sm_80+ runs the cp.async kernel (launch_i8); Turing has
         // no cp.async, so it runs the v1 kernel (launch<1>, same accuracy, another summation order).  An older card
         // keeps the old kernel.
@@ -706,7 +706,7 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             cc_major[dev] = major;
         }
         if (cc_major[dev] < 7) return false;
-        g_turing = cc_major[dev] < 8;
+        turing = cc_major[dev] < 8;
     }
 #if defined(__HIPCC__)
     return false;   // the tensor-core kernel is compiled out on AMD (its major version is not a CUDA sm)
@@ -725,7 +725,7 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         // for how far the model amplifies an FP32-level change.  Turing always takes it: v2's cp.async does not
         // exist before sm_80.
         static const bool v1 = std::getenv("STRATA_PROMPT_ATTN_V1") != nullptr;
-        if (v1 || g_turing) return launch<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
+        if (v1 || turing) return launch<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
         return launch_i8(q, pools, ids, steps, cap, s, attn, n_q, st);
     }
     if (!pools.k_pool || !pools.v_pool) return false;
