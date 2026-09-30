@@ -23,7 +23,8 @@ namespace strata::core {
 enum class PageBacking { LargePages, NormalPages, PinnedByCuda };
 
 /// #243: STRATA_ARENA_PIN_GIB, the cap on the expert arena's CUDA registration in GiB.  -1 when unset (the engine
-/// decides), 0 = no cap (the whole arena, or as many slices as the driver takes), N > 0 = at most N GiB.
+/// decides, as in 0.1.30), 0 = no cap (the whole arena, or as many slices as the driver takes), N > 0 = at most N GiB,
+/// -2 for "auto" (Windows: the sliced pin stays below the GPU's shared-memory budget).
 int arena_pin_cap_gib();
 
 struct PinnedArena {

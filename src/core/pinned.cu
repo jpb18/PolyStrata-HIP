@@ -241,6 +241,7 @@ bool clear_error() { (void) cudaGetLastError(); return true; }
 int arena_pin_cap_gib() {
     const char* e = std::getenv("STRATA_ARENA_PIN_GIB");
     if (e == nullptr || *e == '\0') return -1;
+    if (std::string(e) == "auto") return -2;   // #243: the Windows shared-memory budget sets the sliced pin's cap
     const int v = std::atoi(e);
     return v < 0 ? -1 : v;
 }
@@ -327,9 +328,10 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             uint64_t limit = cap;
             std::string limit_why;
 #ifdef _WIN32
-            // #243: not up to the driver's refusal - that leaves WDDM refusing every later allocation (unless
-            // STRATA_ARENA_PIN_GIB says otherwise; 0 is the old behaviour)
-            if (!capped && env_gib < 0) limited = sliced_pin_limit(limit, limit_why);
+            // #243 (opt-in, STRATA_ARENA_PIN_GIB=auto): not up to the driver's refusal but below the shared-memory
+            // budget, for a PC where the full sliced pin leaves WDDM refusing later allocations.  Not the default: a
+            // 64 GB PC pins 30 GiB past that budget without trouble, and capping it at 26 cost ~20% prompt speed.
+            if (!capped && env_gib == -2) limited = sliced_pin_limit(limit, limit_why);
 #endif
             for (size_t i = 0; i + 1 < bounds.size(); ++i) {
                 const uint64_t off = bounds[i], n = bounds[i + 1] - bounds[i];
@@ -347,7 +349,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             note = (capped ? "cudaHostRegister limited to " + std::to_string(cap >> 30) + " GiB " + cap_why + "; " :
                              "cudaHostRegister of the whole arena FAILED (" + std::string(cudaGetErrorString(e)) + "); " +
                              (limited ? "slices capped at " + std::string(gib) + " GiB (" + limit_why +
-                                        "; STRATA_ARENA_PIN_GIB=N sets it, 0 = none; #243); " : std::string())) +
+                                        "; STRATA_ARENA_PIN_GIB=auto; N sets a cap; #243); " : std::string())) +
                    std::to_string(registered_slices) + " slices pinned (" + std::to_string(registered_bytes >> 30) +
                    " GiB); " + note;
             if (registered_bytes < bytes) {
