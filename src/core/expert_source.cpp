@@ -751,6 +751,30 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
         }
     }
     if (todo.empty()) return;
+#if defined(_WIN32)
+    // One PrefetchVirtualMemory call for every slice about to be copied: the memory manager reads them in large
+    // requests, all queued at once, where the copies' page faults would read a few clusters each.  The copies below
+    // then find the pages resident (or in flight).  STRATA_FETCH_PVM=0 is the A/B arm.
+    {
+        using Pvm = BOOL(WINAPI*)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+        static const Pvm pvm = [] {
+            const char* v = std::getenv("STRATA_FETCH_PVM");
+            if (v != nullptr && std::atoi(v) == 0) return (Pvm) nullptr;
+            return (Pvm) (void*) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
+        }();
+        if (pvm != nullptr) {
+            std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+            ranges.reserve(todo.size() * 3);
+            for (const Fill& f : todo)
+                for (int r = 0; r < 3; ++r) {
+                    const size_t i = (size_t) (3 * layer + r);
+                    ranges.push_back({(PVOID) (role_ptr_[i] + (size_t) ((uint64_t) f.e * role_bytes_[i])),
+                                      (SIZE_T) role_bytes_[i]});
+                }
+            (void) pvm(GetCurrentProcess(), (ULONG_PTR) ranges.size(), ranges.data(), 0);
+        }
+    }
+#endif
     // the page faults of a mapped read are one outstanding request each: several threads keep the SSD's queue full
     std::atomic<size_t> next{0};
     auto work = [&] {
