@@ -66,7 +66,7 @@ DeviceInfo device_info(int ordinal) {
     // to a machine with an older card and would otherwise silently take whatever path the driver chose.  The HIP
     // backend is validated on gfx1100 (wave32) only.
 #if defined(STRATA_USE_HIP)
-    if (std::strncmp(p.gcnArchName, "gfx1100", 7) != 0 || p.warpSize != 32) {
+    if ((std::strncmp(p.gcnArchName, "gfx1100", 7) != 0 && std::strncmp(p.gcnArchName, "gfx1201", 7) != 0) || p.warpSize != 32) {
         throw CudaError("HIP backend requires validated gfx1100 wave32 hardware", -1);
     }
 #else
