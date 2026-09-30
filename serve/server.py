@@ -249,8 +249,13 @@ class StrataEngine:
         """Stop the engine process so its VRAM and RAM go back to the system (idle unload, POST /unload); the next
         request starts it again with restart().  Only between requests: the caller holds the service's fifo."""
         try:
-            self.proc.terminate()
-            self.proc.wait(timeout=20)
+            try:                                        # QUIT first, as close() does: the engine frees its memory
+                self.proc.stdin.write("QUIT\n")
+                self.proc.stdin.flush()
+                self.proc.wait(timeout=20)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                self.proc.terminate()
+                self.proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=20)
@@ -695,6 +700,8 @@ class Service:
 
     def load(self):
         """POST /load and every generation request: start the engine now if it is unloaded (raises GpuBusy)."""
+        # a request is on its way: the idle thread must not unload between this and the request's own start
+        self.last_request_at = time.time()
         if self.loaded() and not self._vision_down():
             return
         with self.fifo:

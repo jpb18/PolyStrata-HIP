@@ -486,7 +486,7 @@ class LiveRate(unittest.TestCase):
         import queue
         from types import SimpleNamespace
         engine = StrataEngine.__new__(StrataEngine)
-        engine.proc = SimpleNamespace(stdin=io.StringIO())
+        engine.proc = SimpleNamespace(stdin=io.StringIO(), poll=lambda: None)   # alive() asks it (#208)
         engine.lines = queue.Queue()
         engine.can_stop = False
         engine.max_context = 262144
