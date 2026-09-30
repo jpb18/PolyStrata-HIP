@@ -86,6 +86,24 @@ On the Coder the engine's committed memory drops from 36 to ~13 GB, with the sam
 experts come from the SSD and it is much slower (setup says so). `START-HERE.bat --setup --low-ram on|off` overrides
 the choice.
 
+**Low-RAM mode, resident (engine 0.1.30):** when the experts the GPU does not hold fit the RAM (with the same ~10 GB
+beside them), setup picks the resident variant instead (`--resident-experts`): at start the engine copies exactly those
+experts from `experts.bin` into RAM (page-locked when the driver allows, else locked in RAM), so while it answers
+nothing is read from the SSD, however little RAM the OS leaves for its file cache. Examples with setup's context: a
+32 GB PC with a 24 GB GPU runs Q2_0, IQ2_XS and the Coder this way (~16-18 GB of experts in RAM, the GPU holds the
+other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC stays mapped. The details:
+- The prompt path borrows room in the GPU's expert cache for its buffers and puts those experts back after the prompt;
+  as far as the RAM allows, their experts are kept in RAM too (so a prompt reads nothing from the SSD either).
+- The cache still follows the conversation (`--adapt-every`): a swap copies the evicted expert back from VRAM into the
+  RAM place of the one that replaces it, so the RAM copy keeps holding exactly what the GPU does not.
+- The answers are the plain mapped mode's for the same expert placement: the bytes are the file's. With a page-locked
+  copy the GPU also takes its usual share of the misses over PCIe (`--pcie-frac`), as with enough RAM; `--pcie-frac 0`
+  (or `STRATA_RESIDENT_PIN=0`) gives the mapped mode's exact tokens.
+- The engine leaves 4 GB of the RAM it finds free (`STRATA_RESIDENT_HEADROOM_GIB`); when even the experts the GPU does
+  not hold do not fit, it says so and runs the plain mapped mode. The server log shows, per request, how many expert
+  reads went to the file (`resident RAM: ... blob reads from the file`: 0 in steady use).
+- `--low-ram resident|mmap` forces one variant (also on a PC with enough RAM, e.g. to try it).
+
 Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
 and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
 
