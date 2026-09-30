@@ -94,7 +94,7 @@ times slower than the sizes above, and long prompts are slow. It needs 48 GB of 
 NVIDIA GPU (no images yet). Details and measurements: [UD-Q4_K_XL](docs/UNSLOTH_Q4.md).
 
 An **AMD Radeon RX 7900 XT / XTX, RX 9070 / 9070 XT or Radeon AI PRO R9700 on Linux** works too (experimental; the
-RX 7800 XT / 7700 XT and RX 9060 XT were validated by their owners):
+RX 7800 XT / 7700 XT and RX 9060 XT were validated by their owners; the RX 6800 / 6900 series, gfx1030, is community-reported):
 `./setup.sh --backend hip`, chosen by itself on a PC with no NVIDIA card Strata can use. It installs ROCm without sudo
 and compiles the engine (no images yet; several cards with `--gpus`). Details: [AMD HIP](docs/AMD_HIP.md).
 
