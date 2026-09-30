@@ -280,8 +280,12 @@ output tokens between paths, never only timings.
   dequant 12.7 s, QSA block selection 9.3 s (0.2 s at 8k: it scans every block of the context per query), gate/up
   GEMM 8.9 s, gather 6.1 s, the per-layer grouping sync 5.2 s, GDN recurrence 4.8 s. The PLE rows are free at this
   scale (97.6% row-cache hits).
-- **Open: decode after such a prompt runs at 2-3 tok/s**, because the experts the reserve pushed out of the cache
-  stay out; the prompt buffers should give their VRAM back to the cache when the prompt ends.
+- **Decode after such a prompt, and the fix.** Without lending cache slots to the prompt path (`--no-prefill-borrow`,
+  which the port used from the start) the reserve evicts ~1,900 experts for good and decode after the prompt runs at
+  2 tok/s. Borrowing lends ~940 slots to the prompt path and refills them in about a second afterwards: 80,000
+  tokens in 75 s = **1,062 tok/s, decode 35-40 tok/s** after it, at `--vram-reserve-mib 2048 --prefill 4096`.
+  It costs ~1 s on short prompts (2,184 tokens: 610 vs 792 tok/s), so the port borrows by default only above a
+  32K context (`--prefill-borrow` / `--no-prefill-borrow` decide explicitly).
 
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for

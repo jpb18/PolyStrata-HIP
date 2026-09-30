@@ -981,6 +981,7 @@ int main(int argc, char** argv) {
 #endif
     }
     Options o;
+    bool borrow_explicit = false;   // SYCL port: --prefill-borrow / --no-prefill-borrow given (else chosen by context)
     bool have_tokens = false;
     bool have_logits_stride = false;
     for (int i = 1; i < argc; ++i) {
@@ -1082,7 +1083,8 @@ int main(int argc, char** argv) {
             o.prefill_chunk = o.prefill_auto ? 8192 : std::atoll(v.c_str());
         }
         else if (a == "--no-split-rows") o.no_split_rows = true;
-        else if (a == "--no-prefill-borrow") o.no_prefill_borrow = true;
+        else if (a == "--no-prefill-borrow") { o.no_prefill_borrow = true; borrow_explicit = true; }
+        else if (a == "--prefill-borrow") { o.no_prefill_borrow = false; borrow_explicit = true; }
         else if (a == "--prefill-until") o.prefill_until = std::atoll(next("--prefill-until"));
         else if (a == "--dump-final-r") o.dump_final_r = next("--dump-final-r");
         else if (a == "--spec") o.spec = std::atoi(next("--spec"));
@@ -1245,6 +1247,7 @@ int main(int argc, char** argv) {
             return 2;
         }
         o.no_prefill_borrow = true;   // each stage's prompt path has its own buffers
+        borrow_explicit = true;
         int n_vis = 1;
         if (DPCT_CHECK_ERROR(n_vis = dpct::device_count()) != 0 || n_vis < 1)
             n_vis = 1;
@@ -1269,6 +1272,11 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
                      split_devs.size() + 1, devs.c_str(), o.layer_split.c_str());
     }
+    // SYCL port (the B70, 2026-09-30): lending cache slots to the prompt path costs ~1 s per prompt (2,184 tokens:
+    // 610 vs 792 tok/s) but is what keeps every expert in VRAM at a long context - 80,000 tokens without it: the
+    // reserve for the KV and the chunk buffers evicts ~1,900 experts, prompt 790 tok/s and decode 2 tok/s after it;
+    // with it: 1,062 tok/s and 39.5 tok/s. So by default only above a 32K context; the flags still decide.
+    if (!borrow_explicit) o.no_prefill_borrow = o.max_context <= 32768;
     if (o.prefill_auto && (o.no_prefill_borrow || o.expert_profile.empty())) {
         o.prefill_auto = false;       // nothing to lend from: the buffers are reserved for the session, so keep them small
         o.prefill_chunk = 2048;
