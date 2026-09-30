@@ -76,7 +76,7 @@ def main():
     if not a.run:
         print('Dry run: paired full/incremental captures; growth, interruption, rewind and branch; no model loaded.')
         return
-    cfg = json.loads(a.config.read_text())
+    cfg = json.loads(a.config.read_text(encoding='utf-8'))
     tok_path = Path(cfg['tokenizer'])
     tok = load_tokenizer(tok_path)
     template = ChatTemplate(tok_path / 'chat_template.jinja')
@@ -147,7 +147,7 @@ def main():
             engine.close()
             engine.proc.wait(timeout=30)
             engine.log.close()
-        log_text = log.read_text()
+        log_text = log.read_text(encoding='utf-8')
         hashes = state_hashes(log_text)
         require(len(hashes) == len(arm['records']), 'missing state fingerprints')
         for record, state in zip(arm['records'], hashes):

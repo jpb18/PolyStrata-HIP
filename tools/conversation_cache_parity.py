@@ -15,7 +15,8 @@ from serve.server import StrataEngine, child_env
 from serve.frontend import ChatTemplate
 import strata_tokenizer as ST
 
-STATE_KEYS = ('L', 'gdn', 'ple', 'tail', 'dead', 'pooled', 'kv', 'ple_prev')
+# pooled: the completed indexer rows (the 0.1.29 extent); pooled_full: those plus the spare row
+STATE_KEYS = ('L', 'gdn', 'ple', 'tail', 'dead', 'pooled', 'pooled_full', 'kv', 'ple_prev')
 
 def require(condition, message):
     if not condition:
@@ -23,12 +24,12 @@ def require(condition, message):
 
 
 def load_tokenizer(path):
-    vocab = json.loads((path / 'vocab.json').read_text())
+    vocab = json.loads((path / 'vocab.json').read_text(encoding='utf-8'))
     tokens = [None] * len(vocab)
     for token, index in vocab.items():
         tokens[index] = token
-    return ST.Tokenizer(tokens, (path / 'merges.txt').read_text().split('\n'),
-                        json.loads((path / 'token_type.json').read_text()))
+    return ST.Tokenizer(tokens, (path / 'merges.txt').read_text(encoding='utf-8').split('\n'),
+                        json.loads((path / 'token_type.json').read_text(encoding='utf-8')))
 
 
 def state_hashes(text):
@@ -170,7 +171,7 @@ def main():
         print(f'Dry run: {a.scenario}; paired baseline/candidate; fixed residency, greedy output.')
         print('No model loaded. Use --run only with a separately available GPU/test window.')
         return
-    cfg = json.loads(a.config.read_text())
+    cfg = json.loads(a.config.read_text(encoding='utf-8'))
     p = Path(cfg['tokenizer'])
     tok = load_tokenizer(p)
     tpl = ChatTemplate(p / 'chat_template.jinja')
@@ -217,13 +218,13 @@ def main():
                     generate(continuation, 8, 'A+-checkpoint')
         finally:
             engine.close()
-        hashes = state_hashes(log.read_text())
+        hashes = state_hashes(log.read_text(encoding='utf-8'))
         require(len(hashes) == len(records), 'missing state hashes')
         for record, fingerprint in zip(records, hashes):
             record['state'] = fingerprint
         results[label] = records
         if label == 'candidate' and a.scenario != 'reuse':
-            log_text = log.read_text()
+            log_text = log.read_text(encoding='utf-8')
             parks = re.findall(r'conversation cache: parked \d+ tokens .*?parked=(\d+) bytes=(\d+) evictions=(\d+)(?: snapshot_bytes=(\d+))?', log_text)
             results['pressure'] = {
                 'parks': [dict(zip(('parked', 'bytes', 'evictions', 'snapshot_bytes'),

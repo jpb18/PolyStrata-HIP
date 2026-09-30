@@ -35,8 +35,10 @@ class DisabledCacheGateTest(unittest.TestCase):
         line = 'strata serve: STATE_HASH L=2 gdn=ab ple=cd tail=ef pooled=12 kv=34 mtp=56 stale=78 ple_prev=1,2'
         self.assertEqual(set(state_hashes(line)[0]), set(STATE_KEYS))
         self.assertEqual(state_hashes(line), state_hashes(line + ' dead=99'))
-        self.assertEqual(state_hashes(line), state_hashes(line.replace('pooled=12', 'pooled=ff') +
-                                                        ' pooled_complete=12', candidate=True))
+        # the candidate's pooled= is the upstream extent; pooled_full= (with the spare row) is not compared
+        self.assertEqual(state_hashes(line), state_hashes(line + ' dead=99 pooled_full=ff', candidate=True))
+        self.assertNotEqual(state_hashes(line), state_hashes(line.replace('pooled=12', 'pooled=ff') +
+                                                           ' pooled_full=12', candidate=True))
         with self.assertRaises(AssertionError):
             state_hashes(line, candidate=True)
         with self.assertRaises(AssertionError):

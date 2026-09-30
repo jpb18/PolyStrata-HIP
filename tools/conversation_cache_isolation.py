@@ -75,10 +75,12 @@ def main():
     ap.add_argument('--scenario', choices=('image', 'add', 'project'), required=True)
     ap.add_argument('--run', action='store_true')
     args = ap.parse_args()
+    # the fixtures are passed to an engine that runs in the config's cwd, not this shell's
+    args.output = args.output.resolve()
     if not args.run:
         print(f'Dry run: {args.scenario} isolation; no model loaded or files created.')
         return
-    cfg = json.loads(args.config.read_text())
+    cfg = json.loads(args.config.read_text(encoding='utf-8'))
     native = cfg['args'][cfg['args'].index('--native') + 1]
     geometry = GGUFFile(native).metadata
     width = geometry['qwen4exp.embedding_length']
@@ -130,7 +132,7 @@ def main():
                 generate('off-again', A, steering=False)
         finally:
             engine.close()
-        hashes = state_hashes(log.read_text())
+        hashes = state_hashes(log.read_text(encoding='utf-8'))
         require(len(hashes) == len(records), 'missing isolation state hashes')
         for record, state in zip(records, hashes):
             record['state'] = state

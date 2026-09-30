@@ -22,7 +22,8 @@ from serve.server import StrataEngine, child_env
 NAMES = ('short', 'A', 'A-live', 'A-checkpoint', 'B', 'A-return', 'B-return', 'A-return-again')
 SETTINGS = ('version', 'context', 'kv', 'kv_resident', 'expert_slots', 'spec',
             'mtp_max', 'lookup', 'cvec', 'pcie_frac', 'spec_min_p', 'pool_workers')
-# Untouched 0.1.27 does not emit the indexer `dead` field added by this PR.
+# Untouched upstream does not emit the indexer `dead` and `pooled_full` fields
+# added by this PR; `pooled` is the completed-row extent in both engines.
 # Draft scratch and unused page padding are not comparable authoritative state.
 STATE_KEYS = ('L', 'gdn', 'ple', 'tail', 'pooled', 'kv', 'ple_prev')
 
@@ -34,10 +35,9 @@ def state_hashes(text, *, candidate=False):
             fields = dict(re.findall(r'(\w+)=([0-9a-f,-]+)', line))
             require(set(STATE_KEYS) <= fields.keys(), 'missing upstream-compatible state fields')
             if candidate:
-                # The PR's pooled hash includes the spare row. Require the
-                # separately emitted upstream extent instead of comparing unlike bytes.
-                require('pooled_complete' in fields, 'candidate lacks completed-row fingerprint')
-                fields['pooled'] = fields['pooled_complete']
+                # Evidence that the candidate is a build with this change: it
+                # also fingerprints the spare row (compared by the cache-on gates).
+                require('pooled_full' in fields, 'candidate lacks the pooled_full fingerprint')
             hashes.append({key: fields[key] for key in STATE_KEYS})
     return hashes
 
@@ -109,7 +109,7 @@ def main():
     if not a.run:
         print('Dry run: upstream and disabled candidates; identical inputs/settings, known answers and state parity.')
         return
-    cfg = json.loads(a.config.read_text())
+    cfg = json.loads(a.config.read_text(encoding='utf-8'))
     tok_path = Path(cfg['tokenizer'])
     tok = load_tokenizer(tok_path)
     tpl_path = tok_path / 'chat_template.jinja'
@@ -176,7 +176,7 @@ def main():
             engine.proc.wait(timeout=30)
             engine.log.close()
         arm['request_digest'] = hashlib.sha256(json.dumps(results['requests'], sort_keys=True).encode()).hexdigest()
-        log_text = log.read_text()
+        log_text = log.read_text(encoding='utf-8')
         hashes = state_hashes(log_text, candidate=index != 0)
         require(len(hashes) == len(arm['records']), f'{name}: missing state hashes')
         for record, fingerprint in zip(arm['records'], hashes):
