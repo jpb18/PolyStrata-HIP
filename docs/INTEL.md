@@ -224,6 +224,11 @@ the engine plus `sycl/rank_kernels.py` gives device time per kernel. `mmvq_bench
 NATIVE_BENCH=1` time the two hot kernel families in isolation (warm the clocks first: a 5 ms run measures
 the ramp, not the kernel).
 
+**After the 0.1.25-0.1.27 merge (2026-09-30, same card, same flags, AOT).** Fibonacci prompt (19 tokens),
+64 greedy tokens: decode 46.5 tok/s (85% of drafts accepted). The 2,184-token prompt: 566 tok/s prompt,
+38.3 tok/s decode (77% accepted on that text); the draft layer's prompt pass is now upstream's batched one
+(38.6 ms for 2,184 tokens, from 105 ms for 19 before it). Parity: 19 of 22, byte-exact `quantize_act` back.
+
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
 0.1.25-0.1.27, 2026-09-30):
