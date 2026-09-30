@@ -2103,6 +2103,8 @@ def main() -> int:
         tables = sorted((ROOT / "tools" / "hip").glob(f"{gpu['arch']}-hipblaslt-*.txt"))
         if tables:
             cfg["env"] = {"STRATA_HIPBLASLT_TUNING": str(tables[-1])}
+        if resident:   # ROCm: large page-locked host allocations can fail or be slow for the CPU; keep the copy pageable
+            cfg.setdefault("env", {})["STRATA_RESIDENT_PIN"] = "0"
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start
