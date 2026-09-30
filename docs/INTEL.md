@@ -287,6 +287,30 @@ output tokens between paths, never only timings.
   It costs ~1 s on short prompts (2,184 tokens: 610 vs 792 tok/s), so the port borrows by default only above a
   32K context (`--prefill-borrow` / `--no-prefill-borrow` decide explicitly).
 
+**Long contexts by KV type (2026-09-30, borrowing on, `--vram-reserve-mib 2048 --prefill 4096`).** Same text
+repeated to length, 64 greedy tokens after it:
+
+| context | KV | prompt | decode after | peak VRAM | experts in VRAM (of 12,288) |
+|---|---|---|---|---|---|
+| 128K | int8 | 960 tok/s | 8.5 tok/s | 30.9 GB | 12,002 |
+| 128K | q4_0 | 951 tok/s | 32.7 tok/s | 30.4 GB | 12,288 |
+| 128K | k8v4 | 983 tok/s | 23.4 tok/s | 30.7 GB | 12,241 |
+| 256K | q4_0 | 778 tok/s | 5.0 tok/s | 30.9 GB | 11,814 |
+| 256K | k8v4 | 752 tok/s | 3.8 tok/s | 30.7 GB | 11,294 |
+| 256K | int8 | 718 tok/s | 3.7 tok/s | 30.7 GB | 10,923 |
+
+Every configuration completes and answers coherently; decode after the prompt is set by how many experts the KV
+leaves room for. At 128K use `--kv q4_0`. At 256K all three evict 470-1,400 experts; KV streaming
+(`--kv-resident`) is the next thing to try there. k8v4 works through the FP32 attention fallback; its dedicated
+prompt kernel is the XMX one below.
+
+**XMX prompt attention v2.** 64-cell chunks, vector-packed K^T and V, hi+lo Q in one accumulator per scale group,
+one accumulator update per chunk: 1.4-1.5x faster than v1 and correct in all modes (`qsa_prompt_attn_parity`,
+and `kv_hybrid_parity` passes completely with it), but still ~2x slower than the FP32 fallback (13.4 vs 5.5 ms per
+chunk, INT8, 32K context). This attention is gather-bound: each query position selects its own ~2,000 cells, so
+the K/V fetch dominates and only 12 of the 16 matrix rows are real heads. Opt-in: `STRATA_PROMPT_ATTN_XMX=1`
+(64-cell chunks, 120 KB of local memory) or `=32`.
+
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
 0.1.25-0.1.27, 2026-09-30):
