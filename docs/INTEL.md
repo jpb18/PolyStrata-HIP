@@ -261,6 +261,27 @@ A trap worth knowing: with a native pack `--prefill-until N` does not feed the r
 token loop (it is skipped for native packs), so the tokens after N are dropped and the model free-runs. Compare
 output tokens between paths, never only timings.
 
+**An 80,000-token prompt (2026-09-30).** Where the time goes changes completely at this scale, and the first
+attempt did not finish at all:
+
+- **The VRAM plan.** `--expert-cache auto` fills the card down to `--vram-reserve-mib` *before* the KV state
+  (about 1 GB in INT8 at 81,920 cells) and the prompt chunk buffers (about 2 GB at `--prefill 8192`) exist. With
+  the 1,536 MiB default that put 30.95 of the B70's 32.6 GB in use, the driver started migrating buffers, the GPU
+  read 100% busy at 2,800 MHz with nothing finishing, and the rig's watchdog killed the run after 25 minutes
+  (one copy-engine reset, the GT recovered by itself). For long contexts pass a reserve that covers both:
+  `--max-context 81920 --kv int8 --vram-reserve-mib 3072 --prefill 4096` peaks at 28.8 GB. Until the auto
+  formula accounts for them itself, watch `vram_used_mb` on such runs. (80k ids also exceed Linux's 128 KB
+  single-argument limit: `--tokens-file`.)
+- **Expert streaming decides the speed.** The reserve costs cache slots (10,348 of 12,288 at 3 GB), and the
+  prompt path streams every non-resident expert from the GGUF *once per chunk*. 2,048-token chunks: 40 chunks,
+  62,942 blob reads (~125 GB), 278 s = 288 tok/s, the GPU idle 75% of the time. 4,096-token chunks: 21 chunks,
+  37,678 reads, **77 s = 1,037 tok/s**, close to the 8k-token rate. The bigger chunk costs 0.5 GB more VRAM; the
+  host copy threads (`STRATA_STAGER_THREADS`, default 4) are being measured next.
+- **Compute at 80k** (of the 77 s): attention 14.0 s, QSA block selection 9.9 s (it was 0.2 s at 8k: it scans
+  every block of the context per query), GDN recurrence 6.1 s, the streaming's remaining wait 17 s + 5.6 s, the
+  per-layer grouping sync 4.9 s, GEMMs 4.6 s, dequant 1.4 s. The PLE rows are no longer a cost: 1.28 M row
+  lookups with a 97.6% row-cache hit rate, 90 ms.
+
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
 0.1.25-0.1.27, 2026-09-30):
