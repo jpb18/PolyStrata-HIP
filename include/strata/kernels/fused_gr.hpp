@@ -49,4 +49,15 @@ constexpr int kFusedGrMaxT = 8;
 void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
                          unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
 
+/// The multi read's variants, all computing every output with v1's operations in v1's order, so bitwise v1's and the
+/// single-token read's: v1 (the norm one block per token, the down projection on 41 blocks), v2 (the norm one block
+/// per token and stream, then v1's down projection) and v3 (v2's norm, and the down projection's activations staged
+/// ahead by cp.async, two half-stream tiles in flight, bank-conflict-free).  `fused_gr_check` runs all of them and
+/// the single-token read on the current card with random weights and inputs (1..8 tokens, with and without the
+/// pending write) and from then on uses there the newest one that agrees with v1 bit for bit; STRATA_HC_V2=0 keeps
+/// v1, =2 stops at v2.  It runs once per card (Verifier::init calls it) and prints which one runs.  On a card it
+/// has not checked, `fused_gr_variant` is v1 unless STRATA_HC_V2=2 or 3 names a variant.
+void fused_gr_check();
+int fused_gr_variant();
+
 }  // namespace strata::kernels
