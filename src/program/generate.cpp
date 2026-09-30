@@ -1993,12 +1993,20 @@ int main(int argc, char** argv) {
         // (with borrowing - the default with a profile - the prompt path lends cache slots instead)
         const bool borrow = !o.no_prefill_borrow && !o.expert_profile.empty();
         const int64_t prefill_mib = (o.prefill_chunk > 0 && !borrow) ? 160 + (o.prefill_chunk * 680) / 1024 : 0;
-        const int64_t reserve = ((int64_t) o.vram_reserve_mib + prefill_mib) << 20;
+        // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
+        // ~110-180 MiB larger, and out of the reserve they left 16 GB cards below the stall line (#199)
+        const int64_t mtp_bind = (!o.mtp.empty() && native_head.loaded())
+                                     ? (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) : 0;
+        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind;
         int64_t slots = ((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
-        std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved -> %d slots\n",
-                     (double) free_b / 1073741824.0, o.vram_reserve_mib, o.expert_cache);
+        std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved (+%lld MiB for the "
+                             "draft head) -> %d slots\n",
+                     (double) free_b / 1073741824.0, o.vram_reserve_mib, (long long) (mtp_bind >> 20), o.expert_cache);
+        if (o.expert_cache == 0)   // the verify window cannot start without it (#174): say what makes room
+            std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: lower --max-context, use "
+                                 "--kv k8v4, run images on the CPU, or close other programs that use the GPU\n");
     } else if (multi_gpu && o.expert_cache > 0) {
         // a layer split's prompt path has its own buffers (it borrows no slots): an explicit cache size leaves room
         // for them and the reserve, or the first prompt fails with "device buffers ... do not fit"
@@ -3848,6 +3856,7 @@ int main(int argc, char** argv) {
             };
             // tokens [a, b) through the windows: commit all of them, then give the draft layer their residuals
             auto read_windows = [&](int64_t a, int64_t b, std::string& e) -> bool {
+                strata::core::progress_at("reading the prompt (verify windows), from token", a);   // #217: not "batched"
                 // every token is committed and the picks are discarded: no head sampling (see set_head_sampling)
                 struct NoHeadSampling {
                     strata::core::Verifier& v;
