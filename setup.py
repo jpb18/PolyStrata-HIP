@@ -710,27 +710,34 @@ def cuda_lib_dirs():
 
 # ------------------------------------------------------------------------------------------------ AMD (experimental)
 # The RX 7900 XT / XTX (gfx1100) and the RX 9070 series / Radeon AI PRO R9700 (gfx1201) on Linux, through the HIP
-# backend (docs/AMD_HIP.md).  There is no ready-made AMD engine: ROCm comes from AMD's TheRock Python wheels into .venv
-# (no sudo; a system ROCm 7 in /opt/rocm is used when it has hipcc and hipBLAS) and the engine is compiled here for
-# the card.  One GPU, no images yet.
+# backend (docs/AMD_HIP.md); the RX 7800 XT / 7700 XT (gfx1101, #254) and the RX 9060 XT (gfx1200, #256) were run by
+# their owners.  There is no ready-made AMD engine: ROCm comes from AMD's TheRock Python wheels into .venv (no sudo;
+# a system ROCm 7 in /opt/rocm is used when it has hipcc and hipBLAS) and the engine is compiled here for the cards.
+# No images yet.
 ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   # TheRock's wheels per GPU family
+                "gfx1101": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",
+                "gfx1200": "https://rocm.nightlies.amd.com/v2/gfx120X-all/",
                 "gfx1201": "https://rocm.nightlies.amd.com/v2/gfx120X-all/"}
 ROCM_VERSION = os.environ.get("STRATA_ROCM_VERSION", "7.10.0a20251120")   # what Strata's HIP build was tested with
 ROCM_SYSTEM_MIN = (7, 0)       # an older system ROCm is passed over for the wheels (gfx1201 needs ROCm 6.4 or newer)
-AMD_ARCHS = ("gfx1100", "gfx1201")
+AMD_ARCHS = ("gfx1100", "gfx1101", "gfx1200", "gfx1201")
 AMD_NAMES = {"gfx1100": "AMD Radeon RX 7900 series (gfx1100)",   # when sysfs has no product name
+             "gfx1101": "AMD Radeon RX 7800 XT / 7700 XT (gfx1101)",
+             "gfx1200": "AMD Radeon RX 9060 series (gfx1200)",
              "gfx1201": "AMD Radeon RX 9070 series / AI PRO R9700 (gfx1201)"}
-AMD_CARDS = "the RX 7900 XT / XTX (gfx1100) and the RX 9070 / 9070 XT / Radeon AI PRO R9700 (gfx1201)"
+AMD_CARDS = ("the RX 7900 XT / XTX (gfx1100), RX 7800 XT / 7700 XT (gfx1101), RX 9060 XT (gfx1200) and "
+             "RX 9070 / 9070 XT / Radeon AI PRO R9700 (gfx1201)")
 
 
 def rocm_index(arch):
     return os.environ.get("STRATA_ROCM_INDEX") or ROCM_INDEXES[arch]
 
 
-def amd_gpus():
+def amd_gpus(sysfs="/sys"):
     """AMD GPUs from the kernel's KFD topology (the amdgpu driver; no ROCm needed), numbered as HIP numbers them:
-    the GPU nodes in order, the CPU nodes skipped.  Integrated GPUs are listed too (not supported)."""
-    base = Path("/sys/class/kfd/kfd/topology/nodes")
+    the GPU nodes in order, the CPU nodes skipped.  Integrated GPUs are listed too (not supported).
+    sysfs: the tree to read (tools/test_setup_amd.py passes a mocked one)."""
+    base = Path(sysfs) / "class/kfd/kfd/topology/nodes"
     found = []
     if WIN or not base.is_dir():
         return found
@@ -746,7 +753,7 @@ def amd_gpus():
         except (OSError, ValueError):
             continue
         arch = f"gfx{ver // 10000}{(ver // 100) % 100:x}{ver % 100:x}"
-        dev = Path(f"/sys/class/drm/renderD{props.get('drm_render_minor', '')}/device")
+        dev = Path(sysfs) / f"class/drm/renderD{props.get('drm_render_minor', '')}/device"
         try:
             vram = int((dev / "mem_info_vram_total").read_text()) / 2 ** 30
         except (OSError, ValueError):
@@ -1767,8 +1774,8 @@ def main() -> int:
                          "this mode the experts the GPU does not hold are copied into RAM once when they fit (resident), "
                          "else read through the OS file cache (mmap); resident / mmap force one of the two")
     ap.add_argument("--backend", choices=["cuda", "hip"],
-                    help="cuda = NVIDIA (default), hip = AMD RX 7900 XT/XTX or RX 9070 / AI PRO R9700 on Linux (experimental; chosen by itself "
-                         "when the PC has no NVIDIA card Strata can use)")
+                    help="cuda = NVIDIA (default), hip = AMD RX 7900 / 7800 / 7700 XT, RX 9060 XT / 9070 / AI PRO R9700 on "
+                         "Linux (experimental; chosen by itself when the PC has no NVIDIA card Strata can use)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.gpu is not None:                              # --gpu 0,2 means --gpus 0,2 (a user tried it: issue report)
@@ -1882,7 +1889,7 @@ def main() -> int:
         if not found:
             fail("no NVIDIA GPU found (nvidia-smi did not answer)",
                  "install the NVIDIA driver from https://www.nvidia.com/drivers and restart the PC"
-                 + ("; an AMD RX 7900 XT/XTX or RX 9070 / AI PRO R9700: --backend hip" if amd else ""))
+                 + (f"; AMD ({', '.join(AMD_ARCHS)}): --backend hip" if amd else ""))
         if len(found) > 1 or gpu_problem(found[0]) is not None:
             gpu_table(found)
         sel = choose_gpus(a, found)                    # asked when two or more cards can share the model
