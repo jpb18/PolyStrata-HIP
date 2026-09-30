@@ -1105,8 +1105,16 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                            (ss.ple.w.key_bf16 != nullptr || ss.ple.w.key_native_data != nullptr) &&
                            m.region_bytes / ((uint64_t) (3 * strata::kernels::NG_HC_DIM + N + 4) * 4 + (uint64_t) N * 2 + 4096) >= 64;
     const int32_t prev0[2] = {prev[0], prev[1]};
-    auto ple_gather = [&m, &ss, tokens, n, prev0](int64_t c0, int buf, std::string& e) -> bool {
-        const int64_t T = std::min(m.T, n - c0);
+    // SYCL port: a short first chunk so the GPU starts while the rest of the prompt's PLE rows are still being read
+    // (27k random 4 KB reads per 2k tokens, 330 ms at the drive's ~85k IOPS, otherwise all before the first kernel).
+    // STRATA_PREFILL_FIRST=<tokens> (0: off), default 256 when the prompt is longer than twice that.
+    static const int64_t first_chunk = [] { const char* v = std::getenv("STRATA_PREFILL_FIRST"); return v ? std::atoll(v) : 256; }();
+    auto chunk_len = [&](int64_t c0) {
+        if (c0 == 0 && first_chunk > 0 && first_chunk < m.T && n > 2 * first_chunk) return first_chunk;
+        return std::min(m.T, n - c0);
+    };
+    auto ple_gather = [&m, &ss, tokens, n, prev0, &chunk_len](int64_t c0, int buf, std::string& e) -> bool {
+        const int64_t T = chunk_len(c0);
         auto at = [&](int64_t i) { return i < 2 ? prev0[i] : (int32_t) tokens[i - 2]; };   // prev0, then the tokens
         int32_t pv[2] = {at(c0), at(c0 + 1)};
         for (int64_t t = 0; t < T; ++t) {
@@ -1122,10 +1130,10 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
     std::future<bool> ple_next;             // declared after everything it reads: an early return waits for it
     int ple_buf = 0;
 
-    for (int64_t c0 = 0; c0 < n; c0 += m.T) {
+    for (int64_t c0 = 0; c0 < n; c0 += chunk_len(c0)) {
         if (should_stop && should_stop()) { err = "cancelled"; return false; }
         if (std::getenv("STRATA_TRACE")) { std::fprintf(stderr, "strata trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
-        const int64_t T = std::min(m.T, n - c0), p0 = pos0 + c0;
+        const int64_t T = chunk_len(c0), p0 = pos0 + c0;
         ++stats_.chunks;
         pt.mark(kPfStart, cs);
         const auto tsetup = Clock::now();
@@ -1229,11 +1237,11 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             */
             m.cs->memcpy(m.ple_emb, m.ple_emb_host[ple_buf], (size_t)T * N * 4);
             dpct::sync_barrier(m.ple_copied[ple_buf], m.cs);
-            if (c0 + m.T < n) {
+            if (c0 + T < n) {
                 m.ple_copied[ple_buf ^ 1]
                     ->wait_and_throw(); // the other buffer's upload (a chunk
                                         // ago) is done
-                ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c1 = c0 + m.T, b = ple_buf ^ 1] {
+                ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c1 = c0 + T, b = ple_buf ^ 1] {
                     return ple_gather(c1, b, ple_next_err);
                 });
             }
