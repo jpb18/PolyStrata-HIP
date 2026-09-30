@@ -159,14 +159,25 @@ that returns the n-th Fibonacci number", greedy, 64 tokens:
 > options: 1. **Recursive approach** - Simple but O(2^n) time complexity, very slow for large n. 2.
 > **Iterative approach** - O(n) time, O(1) ...
 
-Measured, ahead-of-time build (`-DSTRATA_SYCL_AOT=bmg-g31`): **15.2 tok/s decode** (32 tokens in 2.1 s,
-1.23 tokens per speculative round of 6), **28.8 tok/s prompt reading**, first token 0.85 s after the
-prompt. A window of 4 tokens through all 48 layers takes 73 ms on the card. llama.cpp's SYCL build does
-23-25 tok/s on the same card; Strata's kernels have had no tuning for Xe2 yet and its tensor-core paths
-are still the scalar fallbacks. Without AOT the runtime JIT-compiles every kernel on first use, ~47 s the
-first time a process runs; `SYCL_CACHE_PERSISTENT=1 SYCL_CACHE_DIR=<dir>` keeps that across runs (15 MB,
-second start 15.6 tok/s from the first token) - the segfault llama.cpp's build has with the persistent
-cache did not show up here.
+Measured on the same card, same 2,185-token prompt, 64 greedy tokens (AOT build, `--spec 2`,
+`--no-prefill-borrow`), against llama.cpp's SYCL build serving the same GGUF:
+
+| | llama.cpp SYCL | Strata SYCL port |
+|---|---|---|
+| prompt reading | 138-319 tok/s | **560 tok/s** (693 at 2,000 tokens, 180 at 300) |
+| decode | 24.2-26.0 tok/s | 20.2-20.8 tok/s |
+
+Prompt reading is where Strata's design pays (oneMKL GEMM over dequantised experts, the whole model on
+the card). Decode is at ~80%: a speculative round costs ~53 ms whatever its size and the suffix drafter
+is accepted 9% of the time, so nearly every round yields one token; `--spec 4` (16.9 tok/s) was worse
+than `--spec 2` (20.8) for that reason. The kernels themselves run at 130-160 GB/s of weights on a card
+that streams 600 GB/s (`sycl/probe/bw.cpp`, incompressible data) - the same class llama.cpp reaches -
+and five variants of the hot Q6_K matvec (lanes per row, rows per warp, unroll, 16-byte loads, software
+pipelining; `mmvq_bench`) all landed in that band. The lever left for decode is the draft source: the
+base model's MTP layer (`tools/mtp_fetch.py` + `mtp_pack.py`) is being tried.
+
+Without AOT the runtime JIT-compiles every kernel on first use, ~47 s the first time a process runs;
+`SYCL_CACHE_PERSISTENT=1 SYCL_CACHE_DIR=<dir>` keeps that across runs (15 MB).
 
 How to run it (all of this is what `coderiq1/sycl/run-engine-test.sh` does):
 
@@ -183,6 +194,8 @@ build-sycl/strata --pack <iq pack> --native <shard1> --ple-gguf <shard2> \
 - `STRATA_VERIFY_DEVICE_PLAN=1`: the GPU plans each layer itself (upstream's E-6; off by default there).
 - `STRATA_VERIFY_NO_HOST=1` (this port): the host waits for the whole window graph instead of per-layer
   rings. Only valid with every expert resident, which is the case on a 32 GB card.
+- `--no-prefill-borrow`: the prompt path must not lend expert slots (a lent expert is served from the host
+  behind a flag the GPU does not see reliably here; long prompts hung without it).
 
 What the port had to get right beyond compiling (each is an entry in `sycl/tools/fixups.py` or a flag):
 
@@ -201,7 +214,10 @@ What the port had to get right beyond compiling (each is an entry in `sycl/tools
 - `native_expert_parity` hand-ported: the GPU native expert kernel matches ggml's float reference on real
   IQ1_M rows (rel 1.1e-2, the same class as the CPU path).
 
-Known: the process segfaults at exit (teardown order; the output is complete by then).
+Profiling: `sycl/tools/Dockerfile.unitrace` builds the dev image with Intel's unitrace; `unitrace -d` around
+the engine plus `sycl/rank_kernels.py` gives device time per kernel. `mmvq_bench` and `native_expert_parity
+NATIVE_BENCH=1` time the two hot kernel families in isolation (warm the clocks first: a 5 ms run measures
+the ramp, not the kernel).
 
 **Not ported yet.**
 
