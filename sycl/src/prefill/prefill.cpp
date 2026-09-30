@@ -1762,6 +1762,25 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                     // decode kernel, 32 queries at a time (K8V4 runs the tensor kernel's mode 3: INT8 K,
                     // V dequantized from its q4_0 blocks to fp16 at gather)
                     static const bool old_attn = std::getenv("STRATA_PROMPT_ATTN_OLD") != nullptr;
+                    // STRATA_DUMP_SEL=<file>: the selected cells of every prompt position of the first QSA layer of the
+                    // last chunk (int32 T, cap, then T*cap ids and T widths) - the input to the grouped-gather study
+                    if (static const char* dsel = std::getenv("STRATA_DUMP_SEL"); dsel && c0 + T >= n && qsa_index == 0) {
+                        m.cs->wait();
+                        std::vector<int32_t> ids_h((size_t) T * m.cap), st_h((size_t) T * strata::kernels::kStepCount);
+                        m.cs->memcpy(ids_h.data(), m.sel_ids, ids_h.size() * 4).wait();
+                        m.cs->memcpy(st_h.data(), m.steps_dev, st_h.size() * 4).wait();
+                        if (FILE* f = std::fopen(dsel, "wb")) {
+                            const int32_t hdr[2] = {(int32_t) T, (int32_t) m.cap};
+                            std::fwrite(hdr, 4, 2, f);
+                            std::fwrite(ids_h.data(), 4, ids_h.size(), f);
+                            for (int64_t t = 0; t < T; ++t) {
+                                const int32_t w = st_h[(size_t) t * strata::kernels::kStepCount + strata::kernels::kStepWidth];
+                                std::fwrite(&w, 4, 1, f);
+                            }
+                            std::fclose(f);
+                            std::fprintf(stderr, "strata: selection of %lld positions dumped to %s\n", (long long) T, dsel);
+                        }
+                    }
                     if (old_attn || !strata::kernels::qsa_prompt_attn_batch(m.q, pools, m.sel_ids, m.steps_dev, m.cap, s,
                                                                             m.attn, T, m.cs))
                         for (int64_t t0 = 0; t0 < T; t0 += m.attn_batch) {
