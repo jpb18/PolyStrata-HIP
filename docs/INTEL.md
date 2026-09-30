@@ -319,6 +319,26 @@ Measured on the last chunk of an 80K prompt (first QSA layer, `STRATA_DUMP_SEL=<
 positions is 3.3x one position's 2,051 cells (16: 5.1x), and only 12% of a selection is shared by all 8. Grouping
 would cut the K/V gather to ~40% but multiply the arithmetic by 3-5x: at best 5-8 s of an 80K prompt. Not built.
 
+**Serving the port (2026-09-30).** `serve/server.py --engine strata` runs the SYCL engine unchanged through
+`sycl/serve/strata-sycl.sh`, an `exe` that starts the binary inside the oneAPI runtime image with the serve pipes
+attached (paths in the config's `args` are the container's, the data root mounted at `/work`). A config:
+
+```json
+{"engine": "strata", "exe": "<repo>/sycl/serve/strata-sycl.sh",
+ "args": ["--pack", "/work/pack", "--native", "<shard 1>", "--ple-gguf", "<shard 2>",
+          "--expert-profile", "data/expert-profile-coder.bin", "--expert-cache", "auto", "--stream-experts",
+          "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5", "--mtp", "/work/mtp/rt",
+          "--max-context", "32768", "--kv", "int8", "--vram-reserve-mib", "1024"],
+ "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "repetition_penalty": 1.05}, ...}
+```
+
+Measured through the OpenAI API with those sampling defaults: 36 tok/s decode on a first turn, 33 on a follow-up
+(which reuses the conversation's cached prompt), against 24-26 for llama.cpp on the same card. The reserve matters:
+with `--stream-experts` there is no host copy of the experts, so any expert left out of VRAM is read from the SSD
+and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
+5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free. `setup.py` still writes the llama.cpp config
+for Intel cards; generating this one is the next step.
+
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
 0.1.25-0.1.27, 2026-09-30):
