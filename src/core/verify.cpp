@@ -1113,23 +1113,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         ms_pool += ms_since(b);
     }
     progress_at("verify window: waiting for the GPU to finish the window (flags A/B/M raised)", (int64_t) T);
-    // #267: polled with a bound instead of cudaStreamSynchronize.  A window the GPU never finishes (a spin kernel
-    // that never sees its flag) held the host here for good, and the process then ended with that kernel still
-    // resident - on Windows the GPU was left "lost" until a power cycle.  Until then it is the same wait: the
-    // stream idle, or its error.
-    cudaError_t se;
-    {
-        const Clock::time_point a = Clock::now();
-        uint32_t spins = 0;
-        while ((se = cudaStreamQuery(cs_)) == cudaErrorNotReady) {
-            _mm_pause();
-            if ((++spins & 1023u) != 0 || Clock::now() - a <= std::chrono::seconds(20)) continue;
-            const bool drained = release_gpu_waits(5000);
-            err = "verify: timed out waiting for the GPU to finish the window (layer steps " + std::to_string(steps) +
-                  ", the GPU rang " + std::to_string(*seq) + ")" + released_note(drained);
-            return false;
-        }
-    }
+    // #267: a window the GPU never finishes (a spin kernel that never sees its flag) holds the host here; the stall
+    // watchdog then releases every verifier's GPU waits (release_live_verifiers) before it ends the engine, so no
+    // spin kernel outlives the process - the case that left Windows GPUs "lost" until a power cycle.  The wait
+    // itself stays a blocking sync: a cudaStreamQuery poll here cost IQ3_S ~3% decode (a core calling the driver
+    // beside the expert workers).
+    const cudaError_t se = cudaStreamSynchronize(cs_);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
