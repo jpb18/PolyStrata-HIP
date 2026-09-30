@@ -1,6 +1,6 @@
 # Rope scaling: needle recall past the trained 262K
 
-The feature (engine 0.1.18): `--rope-scaling none|linear|yarn` extends the context past the model's
+The feature (PR #84, experimental): `--rope-scaling none|linear|yarn` extends the context past the model's
 trained 262,144 positions by rescaling the rotary angles - llama.cpp's types, ggml's `rope_yarn`
 arithmetic, one process config applied at the cos/sin table (default path) and as kernel constants
 (`--native-rope`, the native indexer, prefill). The three tables here are the first end-to-end check

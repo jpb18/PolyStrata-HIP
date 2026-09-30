@@ -1904,7 +1904,7 @@ def main() -> int:
         say("  Longer needs more VRAM for it, so fewer experts fit on the GPU:")
         for i, c in enumerate(CONTEXTS, 1):
             note = ("   (recommended for your GPU)" if c == rec_ctx else "") + \
-                   ("   (setup adds rope scaling)" if c > 262144 else "")
+                   ("   (experimental: setup adds rope scaling)" if c > 262144 else "")
             say(f"  {i}) {c // 1024}K tokens{note}")
         ctx = CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(CONTEXTS) + 1)],
                                str(CONTEXTS.index(rec_ctx) + 1), a.yes)) - 1]
