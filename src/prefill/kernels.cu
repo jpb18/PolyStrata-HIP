@@ -763,18 +763,17 @@ void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, 
 }
 void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t pos0,
           const strata::kernels::RopeScaling& scaling, void* stream) {
-    const double fs = scaling.freq_scale();
-    if (!(fs > 0.0) || scaling.freq_base <= 1.0) {
-        std::fprintf(stderr, "prefill rope: invalid scaling (freq_base %.6g, freq_scale %.6g)\n",
-                     scaling.freq_base, fs);
+    // The engine validates the resolved config at startup with the same rule (generate.cpp), so this only
+    // fires for a caller that bypassed it; the prompt path has no error return here, so it stops the process.
+    if (const char* why = strata::kernels::rope_scaling_invalid(scaling)) {
+        std::fprintf(stderr, "prefill rope: invalid rope scaling: %s\n", why);
         std::exit(1);
     }
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / 64.0f);
-    double corr[2];
-    scaling.corr_dims(64, corr);
+    const strata::kernels::RopeKernelArgs k = scaling.kernel_args(64);   // none: the identity constants
     rope_kernel<<<(unsigned) (T * heads), 32, 0, (cudaStream_t) stream>>>(
-        x, heads, dim, ld, pos0, theta_scale, (float) fs, (float) corr[0], (float) corr[1],
-        (float) scaling.ext_factor, (float) scaling.attn_factor, strata::kernels::mrope_table());
+        x, heads, dim, ld, pos0, theta_scale, k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor,
+        strata::kernels::mrope_table());
     check("rope");
 }
 void split_q(const float* q_full, float* q, int64_t T, void* stream) {

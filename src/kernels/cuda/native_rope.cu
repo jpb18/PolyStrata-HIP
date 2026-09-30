@@ -76,16 +76,9 @@ void native_rope_set_enabled(bool value) { enabled.store(value, std::memory_orde
 bool native_rope_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_rope_apply(const float* x, float* out, int rows, int head_dim,
                        int n_rot, const RopeScaling& scaling, const int* positions, void* stream) {
-    const double fs = scaling.freq_scale();
     if (!x || !out || !positions || !stream || rows < 1 || rows > 65535 ||
         (head_dim != 128 && head_dim != 256) || n_rot != 64 ||
-        !std::isfinite(scaling.freq_base) || scaling.freq_base <= 1.0 ||
-        !std::isfinite(fs) || fs <= 0.0 ||
-        !std::isfinite(scaling.ext_factor) || scaling.ext_factor < 0.0 ||
-        !std::isfinite(scaling.attn_factor) || scaling.attn_factor <= 0.0 ||
-        !std::isfinite(scaling.orig_ctx) || scaling.orig_ctx < 1.0 ||
-        !std::isfinite(scaling.beta_fast) || scaling.beta_fast <= 0.0 ||
-        !std::isfinite(scaling.beta_slow) || scaling.beta_slow <= 0.0 ||
+        rope_scaling_invalid(scaling) != nullptr ||
         reinterpret_cast<uintptr_t>(x) % 4 || reinterpret_cast<uintptr_t>(out) % 4 ||
         reinterpret_cast<uintptr_t>(positions) % 4) {
         throw std::invalid_argument("native RoPE requires aligned F32 rows, width 128/256, rotation 64, valid base/scaling and explicit stream");
@@ -98,13 +91,11 @@ void native_rope_apply(const float* x, float* out, int rows, int head_dim,
     }
     // Match pinned host-side float powf before device fast powf/trigonometry.
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / n_rot);
-    double corr[2];
-    scaling.corr_dims(n_rot, corr);
+    const RopeKernelArgs k = scaling.kernel_args(n_rot);   // none: the identity constants
     apply<<<dim3((head_dim / 2 + 127) / 128, rows), 128, 0,
               static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
-                                                   (float) fs, (float) corr[0], (float) corr[1],
-                                                   (float) scaling.ext_factor, (float) scaling.attn_factor,
-                                                   positions, mrope_table());
+                                                   k.freq_scale, k.corr_low, k.corr_high, k.ext_factor,
+                                                   k.attn_factor, positions, mrope_table());
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

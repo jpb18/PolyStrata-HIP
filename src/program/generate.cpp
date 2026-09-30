@@ -1329,8 +1329,15 @@ int main(int argc, char** argv) {
                          o.rope_scaling.c_str());
             return 2;
         }
+        // every knob FINITE first: `atof("nan")` is NaN, and a NaN passes every range comparison below
+        for (const double v : {o.rope_scale, o.rope_freq_base, o.rope_freq_scale, o.yarn_orig_ctx, o.yarn_ext_factor,
+                               o.yarn_attn_factor, o.yarn_beta_fast, o.yarn_beta_slow})
+            if (!std::isfinite(v)) {
+                std::fprintf(stderr, "strata generate: a rope scaling knob is not a finite number (%g)\n", v);
+                return 2;
+            }
         // 0 is the absent default; an explicit factor must extend, not shrink
-        if (o.rope_scale > 0 && o.rope_scale < 1.0) {
+        if (o.rope_scale != 0 && o.rope_scale < 1.0) {
             std::fprintf(stderr, "strata generate: --rope-scale %g must be >= 1 (it extends the context, not shrinks it)\n",
                          o.rope_scale);
             return 2;
@@ -1499,6 +1506,29 @@ int main(int argc, char** argv) {
         rope_cfg.attn_factor = o.yarn_attn_factor;
         rope_cfg.beta_fast = o.yarn_beta_fast;
         rope_cfg.beta_slow = o.yarn_beta_slow;
+        if (rope_cfg.type == RST::None) {
+            // none is the trained rotation, exactly: the scaling knobs are inert (the table builder and
+            // `kernel_args` ignore them), and resetting them keeps the logged/queried config honest.  Only the
+            // frequency base survives - it is the rotation itself, not a scaling knob.
+            const bool knobs = o.rope_scale > 1.0 || o.rope_freq_scale > 0 || o.yarn_ext_factor > 0 ||
+                               o.yarn_attn_factor != 1.0;
+            const double base = rope_cfg.freq_base;
+            rope_cfg = strata::kernels::RopeScaling{};
+            rope_cfg.freq_base = base;
+            if (knobs)
+                std::fprintf(stderr, "strata generate: note: no rope scaling is active (none), so --rope-scale, "
+                                     "--rope-freq-scale and the --yarn-* knobs have no effect\n");
+        }
+        // THE RESOLVED CONFIG IS VALIDATED AS A WHOLE, with the one rule every rotation site also applies
+        // (rope_scaling.hpp): the CLI ranges above cannot see a model-file value, nor a combination such as a
+        // --rope-freq-scale that turns the resolved factor non-finite.
+        if (const char* why = strata::kernels::rope_scaling_invalid(rope_cfg)) {
+            std::fprintf(stderr, "strata generate: invalid rope scaling configuration: %s (type %s, factor %g, "
+                                 "freq_scale %g, base %g, original context %g)\n",
+                         why, rope_cfg.type == RST::YaRN ? "yarn" : rope_cfg.type == RST::Linear ? "linear" : "none",
+                         rope_cfg.factor, rope_cfg.freq_scale(), rope_cfg.freq_base, rope_cfg.orig_ctx);
+            return 2;
+        }
         strata::kernels::rope_scaling_set(rope_cfg);
         if (rope_cfg.type != RST::None) {
             const char* tn = rope_cfg.type == RST::YaRN ? "yarn" : "linear";
@@ -1512,11 +1542,13 @@ int main(int argc, char** argv) {
                              "strata generate: note: the context is within the trained %.0f - no position needs the "
                              "extension, and the resolved scaling still applies to every angle\n",
                              rope_cfg.orig_ctx);
-            if (rope_cfg.type == RST::YaRN && rope_cfg.mscale() != 1.0)
+            // only when there IS a magnitude correction: YaRN's log term (ext_factor != 0) or an explicit
+            // --yarn-attn-factor; plain linear (mscale 1) has none, and saying otherwise was TODO 22
+            if (rope_cfg.mscale() != 1.0)
                 std::fprintf(stderr,
-                             "strata generate: note: YaRN's magnitude correction scales cos and sin by %.6f "
+                             "strata generate: note: the %s magnitude correction scales cos and sin by %.6f "
                              "at every position\n",
-                             rope_cfg.mscale());
+                             rope_cfg.type == RST::YaRN ? "YaRN" : "--yarn-attn-factor", rope_cfg.mscale());
         }
     }
     strata::core::NativeEmbed native_embed;

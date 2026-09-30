@@ -216,17 +216,10 @@ bool native_qsa_indexer_enabled() { return enabled.load(std::memory_order_relaxe
 void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_device, int32_t pos_base,
                                const float* gamma, float epsilon, const QsaIndexerBuffers& b,
                                const QsaShapes& s, int64_t max_cells, const RopeScaling& scaling, void* stream) {
-    const double fs = scaling.freq_scale();
     if (!stream || s.idx_dim != D || s.idx_block != R || s.n_rot != ROT ||
         max_cells < 1 || max_cells > INT32_MAX || pos_base < 0 || pos_base % R ||
         int64_t(pos_base) + max_cells > INT32_MAX || !std::isfinite(epsilon) || epsilon <= 0.0f ||
-        !std::isfinite(scaling.freq_base) || scaling.freq_base <= 1.0 ||
-        !std::isfinite(fs) || fs <= 0.0 ||
-        !std::isfinite(scaling.ext_factor) || scaling.ext_factor < 0.0 ||
-        !std::isfinite(scaling.attn_factor) || scaling.attn_factor <= 0.0 ||
-        !std::isfinite(scaling.orig_ctx) || scaling.orig_ctx < 1.0 ||
-        !std::isfinite(scaling.beta_fast) || scaling.beta_fast <= 0.0 ||
-        !std::isfinite(scaling.beta_slow) || scaling.beta_slow <= 0.0)
+        rope_scaling_invalid(scaling) != nullptr)
         throw std::invalid_argument("native QSA indexer requires fixed geometry, aligned position base, positive capacity/epsilon, valid frequency/scaling and explicit stream");
     const Span spans[] = {{raw,D*4},{relative_pos_device,4},{gamma,D*4},{b.tail,(R-1)*D*4},
         {b.dead,D*4},{b.pooled,std::size_t(max_cells/R+1)*D*4},{b.block_pos,4}};
@@ -234,35 +227,24 @@ void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_dev
     for (int i = 0; i < 7; ++i) for (int j = i + 1; j < 7; ++j)
         if (overlaps(spans[i], spans[j])) throw std::invalid_argument("native QSA indexer buffers overlap");
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
-    double corr[2];
-    scaling.corr_dims(ROT, corr);
+    const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
     append<<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_base,gamma,epsilon,
-        b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,(float) fs,
-        (float) corr[0],(float) corr[1],(float) scaling.ext_factor,(float) scaling.attn_factor,mrope_table());
+        b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
+        k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table());
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, int32_t pos_base, const float* gamma,
                                      float epsilon, const QsaIndexerBuffers& b, const QsaShapes& s, int64_t max_cells,
                                      const RopeScaling& scaling, void* stream) {
-    const double fs = scaling.freq_scale();
     if (n <= 0) return;
     if (!stream || s.idx_dim != D || s.idx_block != R || s.n_rot != ROT || p0 < 0 || p0 + n > max_cells ||
         max_cells > INT32_MAX || pos_base < 0 || pos_base % R || int64_t(pos_base) + max_cells > INT32_MAX ||
-        !std::isfinite(epsilon) || epsilon <= 0.0f ||
-        !std::isfinite(scaling.freq_base) || scaling.freq_base <= 1.0 ||
-        !std::isfinite(fs) || fs <= 0.0 ||
-        !std::isfinite(scaling.ext_factor) || scaling.ext_factor < 0.0 ||
-        !std::isfinite(scaling.attn_factor) || scaling.attn_factor <= 0.0 ||
-        !std::isfinite(scaling.orig_ctx) || scaling.orig_ctx < 1.0 ||
-        !std::isfinite(scaling.beta_fast) || scaling.beta_fast <= 0.0 ||
-        !std::isfinite(scaling.beta_slow) || scaling.beta_slow <= 0.0)
+        !std::isfinite(epsilon) || epsilon <= 0.0f || rope_scaling_invalid(scaling) != nullptr)
         throw std::invalid_argument("native QSA indexer (batch): bad geometry, positions, parameters or scaling");
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
-    double corr[2];
-    scaling.corr_dims(ROT, corr);
-    const float fsf = (float) fs, cl = (float) corr[0], ch = (float) corr[1];
-    const float ef = (float) scaling.ext_factor, ms = (float) scaling.attn_factor;
+    const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
+    const float fsf = k.freq_scale, cl = k.corr_low, ch = k.corr_high, ef = k.ext_factor, ms = k.attn_factor;
     const cudaStream_t st = static_cast<cudaStream_t>(stream);
     const int32_t* mtab = mrope_table();
     if (p0 == 0) append_first<<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,

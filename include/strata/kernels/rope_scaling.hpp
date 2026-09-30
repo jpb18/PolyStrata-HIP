@@ -47,6 +47,17 @@ namespace strata::kernels {
 
 enum class RopeScalingType { None, Linear, YaRN };
 
+/// The float32 constants the ANALYTIC rotation kernels take (`rope_scaled_angle`'s arguments).  The defaults are
+/// the identity: freq_scale 1, no correction, magnitude 1 - with them the helper computes `cosf(theta) * 1.0f`
+/// on `1.0f * theta`, which is exactly today's unscaled `cosf(theta)` bit for bit.
+struct RopeKernelArgs {
+    float freq_scale = 1.0f;
+    float corr_low = 0.0f;
+    float corr_high = 0.0f;
+    float ext_factor = 0.0f;
+    float attn_factor = 1.0f;
+};
+
 /// The one rope configuration, as the CLI flag family and the (future) GGUF rope keys resolve to.
 ///
 /// Default-constructed this is EXACTLY today's engine: freq_scale 1, mscale 1, no correction.  That
@@ -86,6 +97,23 @@ struct RopeScaling {
         const double end = std::ceil(rope_yarn_corr_dim(n_rot, orig_ctx, beta_slow, freq_base));
         out[0] = start < 0 ? 0 : start;
         out[1] = end > (double) (n_rot - 1) ? (double) (n_rot - 1) : end;
+    }
+
+    /// The analytic kernels' constants.  `none` returns the identity constants WHATEVER the other knobs hold -
+    /// the table builder ignores them for `none` too, so the two rotation forms cannot disagree there, and an
+    /// unscaled run computes exactly what it computed before scaling existed.  Linear/YaRN: ggml's `rope_yarn`
+    /// arguments (`attn_factor` is the raw knob; the helper applies the log term when correcting).
+    RopeKernelArgs kernel_args(int n_rot) const {
+        RopeKernelArgs a;
+        if (type == RopeScalingType::None) return a;
+        double cd[2];
+        corr_dims(n_rot, cd);
+        a.freq_scale = (float) freq_scale();
+        a.corr_low = (float) cd[0];
+        a.corr_high = (float) cd[1];
+        a.ext_factor = (float) ext_factor;
+        a.attn_factor = (float) attn_factor;
+        return a;
     }
 
 private:
@@ -131,6 +159,28 @@ STRATA_ROPE_SCALING_HD inline void rope_scaled_angle(float theta_extrap, float f
     }
     cos_out = cosf(theta) * mscale;
     sin_out = sinf(theta) * mscale;
+}
+
+/// The ONE validity rule for a resolved configuration, shared by the engine's startup check and every rotation
+/// site that takes the struct, so a bad knob cannot pass one site and trip (or silently NaN) another.  Returns
+/// nullptr when the configuration is usable, else what is wrong.  Every value is tested with `std::isfinite`
+/// FIRST: a NaN passes every `<`/`<=` range comparison, which is how a `--rope-scale nan` would otherwise slip
+/// through.  `none` passes with any knob values - the knobs are inert there (the resolution resets them).
+inline const char* rope_scaling_invalid(const RopeScaling& s) {
+    if (!std::isfinite(s.freq_base) || s.freq_base <= 1.0) return "the frequency base must be a finite value above 1";
+    if (s.type == RopeScalingType::None) return nullptr;
+    if (!std::isfinite(s.factor) || s.factor < 1.0) return "the scaling factor must be a finite value >= 1";
+    if (!std::isfinite(s.freq_scale_in) || s.freq_scale_in < 0.0)
+        return "the frequency scale must be finite and positive (0 = 1/factor)";
+    const double fs = s.freq_scale();
+    if (!std::isfinite(fs) || fs <= 0.0) return "the resolved frequency scale must be a finite positive value";
+    if (!std::isfinite(s.orig_ctx) || s.orig_ctx < 1.0) return "the original (trained) context must be finite and > 0";
+    if (!std::isfinite(s.ext_factor) || s.ext_factor < 0.0) return "the YaRN ext factor must be finite and >= 0";
+    if (!std::isfinite(s.attn_factor) || s.attn_factor <= 0.0) return "the attention factor must be finite and > 0";
+    if (!std::isfinite(s.beta_fast) || s.beta_fast <= 0.0 || !std::isfinite(s.beta_slow) || s.beta_slow <= 0.0)
+        return "the YaRN betas must be finite and > 0";
+    if (!std::isfinite(s.mscale()) || s.mscale() <= 0.0) return "the resolved magnitude correction must be finite and > 0";
+    return nullptr;
 }
 
 /// The process's one rope configuration.  Set it ONCE at startup, after the CLI and the model file
