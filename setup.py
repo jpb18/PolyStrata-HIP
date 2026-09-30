@@ -833,8 +833,8 @@ def hipblaslt_table(arch, lib_dirs):
     have = sorted(p.name for p in (ROOT / "tools" / "hip").glob(f"{arch}-hipblaslt-*.txt"))
     warn(f"no hipBLASLt tuning table for {arch} with hipBLASLt {ver or '(version unknown)'}"
        + (f" (have: {', '.join(have)})" if have else "")
-       + ": the prompt's dense matrix products use plain hipBLAS (tools/hip/tune_hipblaslt makes a table, "
-         "docs/AMD_HIP_PERFORMANCE.md)")
+       + ": the prompt's dense matrix products use plain hipBLAS (tools/hip/tune_hipblaslt makes a table: "
+         "docs/AMD_HIP.md, Tuning table)")
     return None
 
 
@@ -1690,7 +1690,7 @@ def main() -> int:
                     help="map the model's experts from its folder instead of copying them into RAM (for a PC with a big "
                          "GPU and little RAM); auto: when the experts would not fit the RAM")
     ap.add_argument("--backend", choices=["cuda", "hip"],
-                    help="cuda = NVIDIA (default), hip = AMD RX 7900 XT/XTX on Linux (experimental; chosen by itself "
+                    help="cuda = NVIDIA (default), hip = AMD RX 7900 XT/XTX or RX 9070 / AI PRO R9700 on Linux (experimental; chosen by itself "
                          "when the PC has no NVIDIA card Strata can use)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -1805,7 +1805,7 @@ def main() -> int:
         if not found:
             fail("no NVIDIA GPU found (nvidia-smi did not answer)",
                  "install the NVIDIA driver from https://www.nvidia.com/drivers and restart the PC"
-                 + ("; an AMD RX 7900 XT/XTX: --backend hip" if amd else ""))
+                 + ("; an AMD RX 7900 XT/XTX or RX 9070 / AI PRO R9700: --backend hip" if amd else ""))
         if len(found) > 1 or gpu_problem(found[0]) is not None:
             gpu_table(found)
         sel = choose_gpus(a, found)                    # asked when two or more cards can share the model
