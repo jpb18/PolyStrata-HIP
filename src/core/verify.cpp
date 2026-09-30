@@ -156,9 +156,12 @@ bool Verifier::release_gpu_waits(int timeout_ms) {
 
 void Verifier::diag(std::FILE* f) const {
     auto rd = [](const uint32_t* p) { return p ? *(const volatile uint32_t*) p : 0u; };
-    std::fprintf(f, "  verify window: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
-                    "served %u, plan (A) %u, copies (B) %u\n", last_t_, (long long) last_pos0_, cur_layer_ + 1,
-                 rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
+    // #251: outside a verify stage these are the LAST window's numbers (it finished), not the stalled work's
+    const char* where = progress().where.load();
+    const bool current = where != nullptr && std::strncmp(where, "verify window", 13) == 0;
+    std::fprintf(f, "  verify window%s: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
+                    "served %u, plan (A) %u, copies (B) %u\n", current ? "" : " (last window, not the current stage)",
+                 last_t_, (long long) last_pos0_, cur_layer_ + 1, rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
 }
 
 Verifier::~Verifier() {
