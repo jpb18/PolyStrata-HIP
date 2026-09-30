@@ -20,7 +20,8 @@ from serve.frontend import ChatTemplate
 from serve.server import StrataEngine, child_env
 
 NAMES = ('short', 'A', 'A-live', 'A-checkpoint', 'B', 'A-return', 'B-return', 'A-return-again')
-SETTINGS = ('version', 'context', 'kv', 'kv_resident', 'expert_slots', 'spec',
+# (not 'version': the gate also compares a new release with the previous one, where only the version differs)
+SETTINGS = ('context', 'kv', 'kv_resident', 'expert_slots', 'spec',
             'mtp_max', 'lookup', 'cvec', 'pcie_frac', 'spec_min_p', 'pool_workers')
 # Untouched upstream does not emit the indexer `dead` and `pooled_full` fields
 # added by this PR; `pooled` is the completed-row extent in both engines.
