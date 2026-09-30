@@ -1079,6 +1079,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
     std::future<bool> next_run;
     int hand_buf = 0;
     double host_sync_ms = 0, host_chunk_ms = 0, host_setup_ms = 0;   // STRATA_PREFILL_TIMING: the host's share
+    double grp_wait_ms = 0, grp_cpu_ms = 0;   // the per-layer grouping: the drain wait, the host's loops
     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
     s.idx_dim = g.idx_key_dim;
@@ -1762,6 +1763,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                     pt.mark(kPfHostGroup, cs);
                     // (the sync below also orders this layer's writes of slot/src/bounds after the previous
                     // layer's kernels that read them)
+                    const auto tg0 = Clock::now();
                     const bool grp_mapped = m.grp_host != nullptr;
                     int32_t* ids_h = grp_mapped ? m.grp_host : m.ids_host.data();
                     int32_t* slot_h = grp_mapped ? m.grp_host + m.grp_tk : m.slot_host.data();
@@ -1778,6 +1780,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                                       (size_t)T * K * 4);
                     m.cs->wait();
                     pt.fold();
+                    const auto tg1 = Clock::now();
                     std::fill(m.cnt.begin(), m.cnt.end(), 0);
                     for (int64_t i = 0; i < T * K; ++i) {
                         const int32_t e = ids_h[(size_t) i];
@@ -1816,6 +1819,8 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                         m.cs->memcpy(m.src_dev, m.src_host.data(),
                                      (size_t)T * K * 4);
                     }
+                    grp_wait_ms += std::chrono::duration<double, std::milli>(tg1 - tg0).count();
+                    grp_cpu_ms += std::chrono::duration<double, std::milli>(Clock::now() - tg1).count();
                     // the experts, in id order: resident ones from VRAM, the others through the staging ring
                     std::vector<int32_t> order;
                     for (int32_t e = 0; e < m.g->n_expert; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
@@ -2285,7 +2290,8 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                      (long long) n, total, ms_since(t_start), stats_.ms_experts_host, line.c_str());
         std::fprintf(stderr, "strata prefill timing: host: chunk setup (PLE rows, the expert stream plan) %.0f ms, "
                              "waiting for each chunk %.0f ms, after each chunk (the draft layer, progress) %.0f ms, "
-                             "PLE %.0f ms\n", host_setup_ms, host_sync_ms, host_chunk_ms, stats_.ms_ple);
+                             "PLE %.0f ms; grouping: drain wait %.0f ms, host loops + uploads %.0f ms\n", host_setup_ms, host_sync_ms,
+                     host_chunk_ms, stats_.ms_ple, grp_wait_ms, grp_cpu_ms);
     }
     if (std::getenv("STRATA_STATE_HASH_GDN") != nullptr) {   // debug: the GDN states as the prompt path leaves them
         m.cs->wait();

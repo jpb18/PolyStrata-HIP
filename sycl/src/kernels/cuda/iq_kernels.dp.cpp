@@ -923,18 +923,21 @@ inline void dq_iq1_m(const void *vx, int64_t ibs, dst_t *yy, int tid) {
 template <typename dst_t>
 inline void dq_iq4_nl(const void *vx, int64_t ibs, dst_t *yy, int tid) {
     const block_iq4_nl* x = (const block_iq4_nl*) vx + ibs * (QK_K / QK4_NL);
+    // SYCL port: thread (ib, il) writes the block's values [8 il, 8 il + 8) as one run: il < 2 the low nibbles of
+    // qs[8 il ..], il >= 2 the high nibbles of qs[8 (il - 2) ..] (the same values as llama.cpp's 4 + 4 split)
     const int64_t il = tid / 8, ib = tid % 8;
-    dst_t* y = yy + 32 * ib + 4 * il;
-    const uint8_t* q4 = x[ib].qs + 4 * il;
+    dst_t* y = yy + 32 * ib + 8 * il;
+    const uint8_t* q4 = x[ib].qs + 8 * (il & 1);
     const float d = (float) x[ib].d;
-    float lo[4], hi[4];
+    float v[8];
+    if (il < 2) {
 #pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        lo[j] = d * kvalues_iq4nl[q4[j] & 0xf];
-        hi[j] = d * kvalues_iq4nl[q4[j] >> 4];
+        for (int j = 0; j < 8; ++j) v[j] = d * kvalues_iq4nl[q4[j] & 0xf];
+    } else {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) v[j] = d * kvalues_iq4nl[q4[j] >> 4];
     }
-    store_run<dst_t, 4>(y, lo);
-    store_run<dst_t, 4>(y + 16, hi);
+    store_run<dst_t, 8>(y, v);
 }
 // Q3_K (the Q2_0 file's token_embd): llama.cpp's dequantize_block_q3_K, its 64 threads folded onto 32
 template <typename dst_t>
