@@ -2038,8 +2038,7 @@ def main() -> int:
         ctx = 131072
     ok(f"context: {ctx} tokens")
     # the KV cache (the model's memory of the conversation): 8-bit, or 4-bit after a Hadamard rotation (PR #21)
-    kv = "fp16" if ctx <= 8192 else (a.kv or ("q4_0" if backend == "sycl" and ctx > 65536 else "int8"))
-    # (the B70 at 128K: only 4-bit KV leaves every expert in VRAM - decode 33 vs 8.5 tok/s with INT8, docs/INTEL.md)
+    kv = "fp16" if ctx <= 8192 else (a.kv or "int8")
     if ctx > 8192 and not a.kv and not a.yes:
         say()
         say("  KV cache precision (the model's memory of the conversation):")
@@ -2253,10 +2252,13 @@ def main() -> int:
                      "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     if backend == "sycl":
         # the container's paths, experts read from the GGUF (no host copy: every expert must fit VRAM, so the reserve
-        # is the smallest that leaves the KV and the prompt buffers room - docs/INTEL.md), no KV streaming (untested)
-        if "--kv-resident" in args:
-            i = args.index("--kv-resident")
-            del args[i:i + 2]
+        # is the smallest that leaves the KV and the prompt buffers room - docs/INTEL.md). KV streaming from 64K up
+        # keeps them all there: the B70 at 256K decodes at 31 tok/s with it, 4-5 without. Its RAM check above is the
+        # CUDA engine's (experts in RAM); here the experts are in VRAM, so only the KV copy and the engine count.
+        kv_ram = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9
+        if kv != "k8v4" and ctx >= 65536 and "--kv-resident" not in args and ram >= kv_ram + 6:
+            args += ["--kv-resident", "32768"]
+            ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram:.1f} GB), every expert stays in VRAM")
         for flag in ("--pack", "--native", "--ple-gguf", "--expert-profile", "--mtp"):
             if flag in args:
                 args[args.index(flag) + 1] = sycl_path(args[args.index(flag) + 1])

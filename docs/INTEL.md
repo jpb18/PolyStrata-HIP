@@ -300,8 +300,10 @@ repeated to length, 64 greedy tokens after it:
 | 256K | int8 | 718 tok/s | 3.7 tok/s | 30.7 GB | 10,923 |
 
 Every configuration completes and answers coherently; decode after the prompt is set by how many experts the KV
-leaves room for. At 128K use `--kv q4_0`. At 256K all three evict 470-1,400 experts; KV streaming
-(`--kv-resident`) is the next thing to try there. k8v4 works through the FP32 attention fallback; its dedicated
+leaves room for. **KV streaming fixes it** (`--kv-resident 32768`: the whole KV in pinned host memory, only the
+attended window in VRAM): every expert stays in VRAM and decode after the prompt is 38.7 tok/s at 128K int8
+(from 8.5), 35.3 at 128K q4_0, 31.3 at 256K int8 (from 3.7) and 31.5 at 256K q4_0 (from 5.0); the prompt pays
+5-13% (725-860 tok/s). setup.py turns it on from 64K up for the SYCL engine and keeps INT8. k8v4 works through the FP32 attention fallback; its dedicated
 prompt kernel is the XMX one below.
 
 **XMX prompt attention v2.** 64-cell chunks, vector-packed K^T and V, hi+lo Q in one accumulator per scale group,
@@ -348,6 +350,19 @@ The served engine at 32K context: 45-51 tok/s on the rig's test prompt (continui
 of drafts accepted), 30-39 tok/s on a chat answer with prose (55-72%); sampling and the repetition penalty cost
 nothing measurable. The engine used to abort at exit in serve mode (a queue wait in a destructor after the
 runtime's teardown began); it now exits directly once its requests are done.
+
+**Planned (2026-09-30), in order.** Ranked by payoff on this card; the first three are in progress.
+
+1. Expert dot products on XMX in integer mode: a decode window (up to 6 tokens) fits one INT8 DPAS (1-8 rows), the
+   i-quant grids decode to small integers, the activations are already INT8. Today: scalar dp4a, ALU-bound (77%).
+2. Experts missing from VRAM read from pinned host memory over PCIe instead of the SSD (the 256K decode collapse).
+3. KV streaming (`--kv-resident`) from 64K up: only the attended window of the KV in VRAM. **Done**: 256K decodes at
+   31 tok/s (from 4-5).
+4. QSA block selection on XMX: every query against every pooled block, a dense product that grows with the context.
+5. The hot decode kernels re-tuned for Xe2's native 16-wide sub-groups (twice the registers per thread).
+6. INT8 prompt GEMMs: experts dequantized to INT8, oneMKL/oneDNN INT8 on XMX (half the dequant bytes, 2x rate).
+7. Fewer graph nodes per decode round (~2,500 at ~5 us): norm+rope, scores+top-k, gate+quantize fused.
+8. Wider speculation (two draft branches per verify window): the kernels are latency-bound, so it is nearly free.
 
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
