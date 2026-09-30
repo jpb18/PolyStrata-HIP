@@ -9,14 +9,14 @@
 namespace strata::core {
 
 namespace {
-constexpr size_t kRing = 8;   // blobs alive at once: the fill holds one, verify_slot a second; the rest is slack
+constexpr size_t kRing = 512;   // blobs alive at once: the prompt path holds a layer's worth of streamed experts
 }
 
 GgufExpertSource::~GgufExpertSource() { close(); }
 
 void GgufExpertSource::close() {
     for (int fd : fds_) if (fd >= 0) ::close(fd);
-    fds_.clear(); names_.clear(); layer_fd_.clear(); ring_.clear();
+    fds_.clear(); names_.clear(); layer_fd_.clear(); ring_.clear(); ring_key_.clear(); where_.clear();
     ring_next_ = 0;
 }
 
@@ -43,6 +43,7 @@ bool GgufExpertSource::open(const std::string& shard1, int64_t n_layers, int64_t
         if (fd_of(l, err) < 0) { close(); return false; }
     ring_.resize(kRing);
     for (auto& b : ring_) b.resize((size_t) lay.max_blob);
+    ring_key_.assign(kRing, -1);
     return true;
 }
 
@@ -70,14 +71,25 @@ const uint8_t* GgufExpertSource::blob(int64_t layer, int64_t expert) {
     const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
     const uint64_t at[3] = {0, fm.up_off, fm.down_off};
     const int fd = fds_[(size_t) layer_fd_[(size_t) layer]];
-    std::vector<uint8_t>& buf = ring_[ring_next_];
-    ring_next_ = (ring_next_ + 1) % ring_.size();
+    const int64_t key = ((int64_t) layer << 20) | expert;
+    size_t slot;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = where_.find(key);
+        if (it != where_.end()) { ++reads_; return ring_[it->second].data(); }   // still resident
+        slot = ring_next_;
+        ring_next_ = (ring_next_ + 1) % ring_.size();
+        if (ring_key_[slot] >= 0) where_.erase(ring_key_[slot]);
+        ring_key_[slot] = key;
+        where_[key] = slot;
+    }
+    std::vector<uint8_t>& buf = ring_[slot];
     for (int r = 0; r < 3; ++r) {
         const uint64_t src = lay.gguf_off[(size_t) (3 * layer + r)] + per[r] * (uint64_t) expert;
         uint64_t done = 0;
         while (done < per[r]) {
             const ssize_t n = ::pread(fd, buf.data() + at[r] + done, (size_t) (per[r] - done), (off_t) (src + done));
-            if (n <= 0) return nullptr;
+            if (n <= 0) { std::lock_guard<std::mutex> lk(mu_); where_.erase(key); ring_key_[slot] = -1; return nullptr; }
             done += (uint64_t) n;
         }
     }
