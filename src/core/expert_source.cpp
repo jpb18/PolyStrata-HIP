@@ -4,6 +4,7 @@
 #include "strata/kernels/cpu/expert_layout.hpp"
 
 #include "strata/core/pinned.hpp"
+#include "strata/platform/memory.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
@@ -20,6 +21,7 @@
 #include <filesystem>
 #include <sstream>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -136,10 +138,33 @@ const uint8_t* cache_complement_blob_or_fallback(
     return mapped_fallback;
 }
 
+int64_t choose_resident_keep_from(const std::vector<uint64_t>& slot_bytes, uint64_t base_bytes, uint64_t budget,
+                                  int64_t lend_from) {
+    if (base_bytes > budget) return -1;
+    const int64_t slots = (int64_t) slot_bytes.size();
+    if (lend_from < 0 || lend_from > slots) lend_from = slots;   // no lend region: only the experts no slot holds
+    int64_t keep = slots;
+    uint64_t bytes = base_bytes;
+    while (keep > lend_from) {
+        const uint64_t b = slot_bytes[(size_t) keep - 1];
+        if (b > budget - bytes) break;
+        bytes += b;
+        --keep;
+    }
+    return keep;
+}
+
+bool exchange_cache_complement(std::vector<uint64_t>& offsets, size_t in, size_t out) {
+    if (in == out || in >= offsets.size() || out >= offsets.size() || offsets[in] == kNoCacheComplement ||
+        offsets[out] != kNoCacheComplement) return false;
+    offsets[out] = offsets[in];
+    offsets[in] = kNoCacheComplement;
+    return true;
+}
+
 }  // namespace detail
 
 namespace {
-constexpr uint64_t kPinnedMemoryHeadroom = 8ull << 30;
 
 #if defined(__linux__)
 bool read_cgroup_memory_stat(const std::filesystem::path& path, uint64_t current,
@@ -411,8 +436,23 @@ bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64
 void FileExpertSource::close() {
     if (complement_arena_ != nullptr) {
         if (complement_pinned_) (void) cudaFreeHost(complement_arena_);
-        else std::free(complement_arena_);
+        else {
+            if (complement_locked_ > 0) strata::platform::unlock_resident(complement_arena_, complement_locked_);
+            std::free(complement_arena_);
+        }
     }
+    if (xstage_ != nullptr) {
+        if (xstage_pinned_) (void) cudaFreeHost(xstage_);
+        else std::free(xstage_);
+    }
+    xstage_ = nullptr;
+    xstage_pinned_ = false;
+    xstage_cap_ = 0;
+    xstage_blob_ = 0;
+    override_.clear();
+    staged_.clear();
+    exchanges_ = 0;
+    file_reads_.store(0);
     complement_arena_ = nullptr;
     complement_host_ = nullptr;
     complement_device_ = nullptr;
@@ -420,6 +460,8 @@ void FileExpertSource::close() {
     complement_offsets_.clear();
     complement_pinned_ = false;
     complement_ready_ = false;
+    complement_locked_ = 0;
+    complement_lent_slots_ = 0;
 #if defined(_WIN32)
     if (base_ != nullptr) UnmapViewOfFile((LPCVOID) base_);
     if (mapping_ != nullptr) CloseHandle((HANDLE) mapping_);
@@ -457,7 +499,8 @@ const uint8_t* FileExpertSource::mapped_blob(int64_t layer, int64_t expert) cons
 
 bool FileExpertSource::pin_cache_complement(
     const ExpertCache& cache, std::string& err, bool pin,
-    const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs) {
+    const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,
+    uint64_t headroom_bytes) {
     err.clear();
     if (base_ == nullptr) { err = "FileExpertSource: open the mapped experts before pinning a complement"; return false; }
     if (complement_ready_) { err = "FileExpertSource: the cache complement is already pinned"; return false; }
@@ -473,12 +516,20 @@ bool FileExpertSource::pin_cache_complement(
         return false;
     }
 
+    // The GPU cache's experts, and the bytes each slot's expert takes here (for the lend region below).
+    const int64_t n_slots = cache.slots();
     std::vector<std::pair<int32_t, int32_t>> primary_gpu_pairs;
+    std::vector<int32_t> pair_slot;
+    std::vector<uint64_t> slot_bytes((size_t) std::max<int64_t>(n_slots, 0), 0);
     primary_gpu_pairs.reserve((size_t) cache.resident());
+    pair_slot.reserve((size_t) cache.resident());
     for (int64_t layer = 0; layer < n_layers_; ++layer) {
         for (int64_t expert = 0; expert < n_expert_; ++expert) {
-            if (cache.slot_of(layer, expert) != kNotResident)
-                primary_gpu_pairs.emplace_back((int32_t) layer, (int32_t) expert);
+            const int32_t slot = cache.slot_of(layer, expert);
+            if (slot == kNotResident) continue;
+            primary_gpu_pairs.emplace_back((int32_t) layer, (int32_t) expert);
+            pair_slot.push_back(slot);
+            if (slot >= 0 && slot < n_slots) slot_bytes[(size_t) slot] = layer_blob_bytes_[(size_t) layer];
         }
     }
     std::vector<uint64_t> offsets;
@@ -486,136 +537,199 @@ bool FileExpertSource::pin_cache_complement(
     if (!detail::make_cache_complement_plan(n_layers_, n_expert_, layer_blob_bytes_, primary_gpu_pairs,
                                             additional_gpu_pairs, offsets, bytes, err)) return false;
 
-    if (bytes > 0) {
+    const bool lend = lend_from_slot >= 0 && lend_from_slot < n_slots && additional_gpu_pairs.empty();
+    uint64_t budget = std::numeric_limits<uint64_t>::max();
+    if (bytes > 0 || lend) {
         uint64_t physical = 0;
         if (!available_memory_bytes(physical)) {
             err = "FileExpertSource: cannot determine available RAM for the resident-memory safety check";
             return false;
         }
-        if (physical <= kPinnedMemoryHeadroom || bytes > physical - kPinnedMemoryHeadroom) {
-            char message[256];
+        budget = physical > headroom_bytes ? physical - headroom_bytes : 0;
+        if (bytes > budget) {
+            char message[320];
             std::snprintf(message, sizeof message,
-                          "FileExpertSource: resident complement %.2f GiB exceeds available RAM minus the 8 GiB safety headroom",
-                          (double) bytes / 1073741824.0);
+                          "FileExpertSource: resident complement %.2f GiB exceeds available RAM (%.2f GiB) minus the "
+                          "%.0f GiB safety headroom",
+                          (double) bytes / 1073741824.0, (double) physical / 1073741824.0,
+                          (double) headroom_bytes / 1073741824.0);
             err = message;
             return false;
+        }
+    }
+    // The prompt path's lend region: its slots' experts are streamed from here during a prompt and copied back into
+    // their slots after it, so the ones that fit are kept here too (from the last slot down: a short prompt lends
+    // only the last few).  The rest keep the mapped-file fallback.
+    int64_t keep_from = n_slots;
+    if (lend) {
+        keep_from = detail::choose_resident_keep_from(slot_bytes, bytes, budget, lend_from_slot);
+        if (keep_from < 0) keep_from = n_slots;
+        if (keep_from < n_slots) {
+            std::vector<std::pair<int32_t, int32_t>> core;
+            core.reserve(primary_gpu_pairs.size());
+            for (size_t i = 0; i < primary_gpu_pairs.size(); ++i)
+                if (pair_slot[i] < keep_from) core.push_back(primary_gpu_pairs[i]);
+            if (!detail::make_cache_complement_plan(n_layers_, n_expert_, layer_blob_bytes_, core,
+                                                    additional_gpu_pairs, offsets, bytes, err)) return false;
         }
     }
 
     void* arena = nullptr;
     const uint8_t* host = nullptr;
     const uint8_t* device = nullptr;
+    bool pinned_ok = false;
+    uint64_t locked = 0;
+    std::string note;
+    auto release = [&]() {
+        if (arena == nullptr) return;
+        if (pinned_ok) (void) cudaFreeHost(arena);
+        else {
+            if (locked > 0) strata::platform::unlock_resident(arena, locked);
+            std::free(arena);
+        }
+        arena = nullptr;
+    };
     if (bytes > 0) {
         std::fprintf(stderr, "FileExpertSource: allocating %.2f GiB %s cache complement\n",
-                     (double) bytes / 1073741824.0, pin ? "mapped pinned" : "pageable resident");
+                     (double) bytes / 1073741824.0, pin ? "page-locked" : "pageable resident");
         std::fflush(stderr);
         if (pin) {
             const cudaError_t allocated = cudaHostAlloc(&arena, (size_t) bytes,
                                                          cudaHostAllocMapped | cudaHostAllocPortable);
-            if (allocated != cudaSuccess) {
-                err = std::string("FileExpertSource: mapped pinned complement allocation failed: ") +
-                      cudaGetErrorString(allocated);
-                std::fprintf(stderr, "%s\n", err.c_str());
-                std::fflush(stderr);
+            if (allocated == cudaSuccess) {
+                void* alias = nullptr;
+                const cudaError_t aliased = cudaHostGetDevicePointer(&alias, arena, 0);
+                if (aliased == cudaSuccess && alias != nullptr) {
+                    device = (const uint8_t*) alias;
+                    pinned_ok = true;
+                    note = "page-locked and mapped";
+                } else {
+                    note = std::string("no device alias (") + cudaGetErrorString(aliased) + ")";
+                    (void) cudaGetLastError();
+                    (void) cudaFreeHost(arena);
+                    arena = nullptr;
+                }
+            } else {
+                // Refused (the driver's page-locked limit): the same bytes in ordinary memory, locked in the working
+                // set instead, as the arena does - resident either way, only copied by the CPU instead of by DMA.
+                note = std::string("page-locking refused (") + cudaGetErrorString(allocated) + ")";
                 (void) cudaGetLastError();
-                return false;
+                arena = nullptr;
             }
-            host = (const uint8_t*) arena;
-            void* alias = nullptr;
-            const cudaError_t aliased = cudaHostGetDevicePointer(&alias, arena, 0);
-            if (aliased != cudaSuccess || alias == nullptr) {
-                err = std::string("FileExpertSource: mapped pinned complement device alias failed: ") +
-                      cudaGetErrorString(aliased);
-                std::fprintf(stderr, "%s\n", err.c_str());
-                std::fflush(stderr);
-                (void) cudaGetLastError();
-                (void) cudaFreeHost(arena);
-                return false;
-            }
-            device = (const uint8_t*) alias;
-        } else {
+        }
+        if (arena == nullptr) {
             arena = std::malloc((size_t) bytes);
             if (arena == nullptr) {
                 err = "FileExpertSource: pageable resident complement allocation failed";
                 return false;
             }
-            host = (const uint8_t*) arena;
+            if (pin) {
+                const strata::platform::LockResult lr = strata::platform::lock_resident(arena, bytes);
+                locked = lr.locked_bytes;
+                note += (note.empty() ? "" : "; ") + lr.note;
+            }
         }
+        host = (const uint8_t*) arena;
     }
 
-    uint64_t copied = 0;
-    for (int64_t layer = 0; layer < n_layers_; ++layer) {
-        const uint64_t blob_bytes = layer_blob_bytes_[(size_t) layer];
-        for (int64_t expert = 0; expert < n_expert_; ++expert) {
-            const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
-            const uint64_t offset = offsets[index];
-            if (offset == kNoComplement) continue;
-            const uint8_t* source = mapped_blob(layer, expert);
-            if (source == nullptr || offset > bytes || blob_bytes > bytes - offset) {
-                err = "FileExpertSource: invalid blob bounds while building the cache complement";
-                if (arena != nullptr) {
-                    if (pin) (void) cudaFreeHost(arena);
-                    else std::free(arena);
-                }
-                return false;
-            }
-            std::memcpy((uint8_t*) host + (size_t) offset, source, (size_t) blob_bytes);
-            copied += blob_bytes;
-        }
+    // Copied layer by layer on a few threads: the page faults of the mapped file are the cost, and they overlap.
 #if !defined(_WIN32)
-        const uint64_t layer_offset = layer_offsets_[(size_t) layer];
-        const uint64_t layer_bytes = blob_bytes * (uint64_t) n_expert_;
-        const uint64_t layer_end = layer_offset + layer_bytes;
-        const long page_bytes = sysconf(_SC_PAGESIZE);
-        if (page_bytes <= 0) {
-            err = "FileExpertSource: cannot determine page size for mapped-page release";
-            if (arena != nullptr) {
-                if (pin) (void) cudaFreeHost(arena);
-                else std::free(arena);
-            }
-            return false;
-        }
-        const uint64_t page = (uint64_t) page_bytes;
-        const uint64_t advice_start = layer_offset - layer_offset % page;
-        const uint64_t end_remainder = layer_end % page;
-        const uint64_t extra = end_remainder == 0 ? 0 : page - end_remainder;
-        const uint64_t advice_end = extra > mapped_bytes_ - layer_end ? mapped_bytes_ : layer_end + extra;
-        if (advice_end > advice_start &&
-            madvise((void*) (base_ + (size_t) advice_start), (size_t) (advice_end - advice_start), MADV_DONTNEED) != 0) {
-            err = "FileExpertSource: madvise could not release mapped expert layer " + std::to_string(layer);
-            if (arena != nullptr) {
-                if (pin) (void) cudaFreeHost(arena);
-                else std::free(arena);
-            }
-            return false;
-        }
-        const int advice = posix_fadvise(fd_, (off_t) layer_offset, (off_t) layer_bytes, POSIX_FADV_DONTNEED);
-        if (advice != 0) {
-            err = "FileExpertSource: posix_fadvise could not release expert layer " + std::to_string(layer);
-            if (arena != nullptr) {
-                if (pin) (void) cudaFreeHost(arena);
-                else std::free(arena);
-            }
-            return false;
-        }
-#endif
-        if ((layer + 1) % 8 == 0 || layer + 1 == n_layers_) {
-            std::fprintf(stderr, "FileExpertSource: copied cache complement through layer %lld/%lld (%.2f GiB)\n",
-                         (long long) (layer + 1), (long long) n_layers_, (double) copied / 1073741824.0);
-            std::fflush(stderr);
-        }
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        err = "FileExpertSource: cannot determine page size for mapped-page release";
+        release();
+        return false;
     }
+#endif
+    std::atomic<int64_t> next_layer{0}, layers_done{0};
+    std::atomic<uint64_t> copied{0};
+    std::atomic<bool> failed{false};
+    std::mutex fail_mu;
+    std::string fail_msg;
+    auto fail = [&](const std::string& m) {
+        std::lock_guard<std::mutex> lock(fail_mu);
+        if (fail_msg.empty()) fail_msg = m;
+        failed.store(true);
+    };
+    auto worker = [&]() {
+        for (;;) {
+            const int64_t layer = next_layer.fetch_add(1);
+            if (layer >= n_layers_ || failed.load()) return;
+            const uint64_t blob_bytes = layer_blob_bytes_[(size_t) layer];
+            for (int64_t expert = 0; expert < n_expert_; ++expert) {
+                const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
+                const uint64_t offset = offsets[index];
+                if (offset == kNoComplement) continue;
+                const uint8_t* source = mapped_blob(layer, expert);
+                if (source == nullptr || offset > bytes || blob_bytes > bytes - offset) {
+                    fail("FileExpertSource: invalid blob bounds while building the cache complement");
+                    return;
+                }
+                std::memcpy((uint8_t*) host + (size_t) offset, source, (size_t) blob_bytes);
+                copied.fetch_add(blob_bytes);
+            }
+#if !defined(_WIN32)
+            const uint64_t layer_offset = layer_offsets_[(size_t) layer];
+            const uint64_t layer_bytes = blob_bytes * (uint64_t) n_expert_;
+            const uint64_t layer_end = layer_offset + layer_bytes;
+            const uint64_t page = (uint64_t) page_size;
+            const uint64_t advice_start = layer_offset - layer_offset % page;
+            const uint64_t end_remainder = layer_end % page;
+            const uint64_t extra = end_remainder == 0 ? 0 : page - end_remainder;
+            const uint64_t advice_end = extra > mapped_bytes_ - layer_end ? mapped_bytes_ : layer_end + extra;
+            if (advice_end > advice_start &&
+                madvise((void*) (base_ + (size_t) advice_start), (size_t) (advice_end - advice_start), MADV_DONTNEED) != 0) {
+                fail("FileExpertSource: madvise could not release mapped expert layer " + std::to_string(layer));
+                return;
+            }
+            if (posix_fadvise(fd_, (off_t) layer_offset, (off_t) layer_bytes, POSIX_FADV_DONTNEED) != 0) {
+                fail("FileExpertSource: posix_fadvise could not release expert layer " + std::to_string(layer));
+                return;
+            }
+#endif
+            const int64_t done = layers_done.fetch_add(1) + 1;
+            if (done % 8 == 0 || done == n_layers_)
+                std::fprintf(stderr, "FileExpertSource: copied cache complement through layer %lld/%lld (%.2f GiB)\n",
+                             (long long) done, (long long) n_layers_, (double) copied.load() / 1073741824.0);
+        }
+    };
+    {
+        const int threads = (int) std::max<int64_t>(1, std::min<int64_t>(6, n_layers_));
+        std::vector<std::thread> pool;
+        for (int i = 1; i < threads; ++i) pool.emplace_back(worker);
+        worker();
+        for (auto& t : pool) t.join();
+    }
+    std::fflush(stderr);
+    if (failed.load()) {
+        err = fail_msg;
+        release();
+        return false;
+    }
+#if defined(_WIN32)
+    // The mapped pages this process touched (the GPU cache's fill and this copy) leave its working set for the
+    // standby list: VirtualUnlock on pages that are not locked does exactly that (it then reports ERROR_NOT_LOCKED).
+    (void) VirtualUnlock((LPVOID) base_, (SIZE_T) mapped_bytes_);
+#endif
 
     complement_arena_ = arena;
     complement_host_ = host;
     complement_device_ = device;
     complement_bytes_ = bytes;
     complement_offsets_ = std::move(offsets);
-    complement_pinned_ = pin && bytes > 0;
+    complement_pinned_ = pinned_ok && bytes > 0;
+    complement_locked_ = locked;
+    complement_lent_slots_ = lend ? n_slots - keep_from : 0;
     complement_ready_ = true;
-    std::fprintf(stderr, "FileExpertSource: %s cache complement ready: resident %.2f GiB, pinned %.2f GiB\n",
-                 complement_pinned_ ? "mapped pinned" : "pageable resident",
-                 (double) resident_bytes() / 1073741824.0, (double) pinned_bytes() / 1073741824.0);
+    std::fprintf(stderr, "FileExpertSource: %s cache complement ready: resident %.2f GiB, pinned %.2f GiB%s%s\n",
+                 complement_pinned_ ? "mapped pinned" : pin ? "locked resident" : "pageable resident",
+                 (double) resident_bytes() / 1073741824.0, (double) pinned_bytes() / 1073741824.0,
+                 note.empty() ? "" : "; ", note.c_str());
+    if (lend)
+        std::fprintf(stderr, "FileExpertSource: %lld of the prompt path's %lld lendable slots keep their experts in RAM "
+                             "too%s\n", (long long) complement_lent_slots_, (long long) (n_slots - lend_from_slot),
+                     complement_lent_slots_ < n_slots - lend_from_slot
+                         ? " (the others are read from the file when lent: not enough RAM for them)" : "");
     if (!additional_gpu_pairs.empty()) {
         std::fprintf(stderr, "FileExpertSource: %zu verified additional-GPU experts remain on the mmap fallback\n",
                      additional_gpu_pairs.size());
@@ -624,13 +738,88 @@ bool FileExpertSource::pin_cache_complement(
     return true;
 }
 
+bool FileExpertSource::has_resident(int64_t layer, int64_t expert) const {
+    if (!complement_ready_ || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return false;
+    const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
+    return index < complement_offsets_.size() && complement_offsets_[index] != kNoComplement;
+}
+
+bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err) {
+    err.clear();
+    if (n <= xstage_cap_) return true;
+    if (!staged_.empty()) { err = "FileExpertSource: exchange buffers are in use"; return false; }
+    uint64_t blob = 0;
+    for (const uint64_t b : layer_blob_bytes_) blob = std::max(blob, b);
+    if (blob == 0 || n <= 0) { err = "FileExpertSource: no expert geometry for the exchange buffers"; return false; }
+    if (xstage_ != nullptr) {
+        if (xstage_pinned_) (void) cudaFreeHost(xstage_);
+        else std::free(xstage_);
+        xstage_ = nullptr;
+        xstage_cap_ = 0;
+    }
+    const size_t total = (size_t) n * (size_t) blob;
+    void* p = nullptr;
+    if (cudaHostAlloc(&p, total, cudaHostAllocDefault) == cudaSuccess && p != nullptr) {
+        xstage_pinned_ = true;
+    } else {
+        (void) cudaGetLastError();
+        p = std::malloc(total);
+        xstage_pinned_ = false;
+        if (p == nullptr) { err = "FileExpertSource: cannot allocate the exchange buffers"; return false; }
+    }
+    xstage_ = (uint8_t*) p;
+    xstage_cap_ = n;
+    xstage_blob_ = blob;
+    return true;
+}
+
+uint8_t* FileExpertSource::exchange_buffer(int64_t q) const {
+    if (xstage_ == nullptr || q < 0 || q >= xstage_cap_) return nullptr;
+    return xstage_ + (size_t) q * (size_t) xstage_blob_;
+}
+
+bool FileExpertSource::stage_exchange(int64_t layer, int64_t in, int64_t out, int64_t q) {
+    if (!has_resident(layer, in) || has_resident(layer, out) || exchange_buffer(q) == nullptr) return false;
+    const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
+    const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
+    if (override_.empty()) override_.assign((size_t) blobs_, nullptr);
+    if (override_[i_out] != nullptr) return false;
+    for (const Exchange& x : staged_)
+        if (x.in == i_in || x.q == q) return false;
+    override_[i_out] = exchange_buffer(q);
+    staged_.push_back({i_in, i_out, q, layer_blob_bytes_[(size_t) layer]});
+    return true;
+}
+
+int64_t FileExpertSource::commit_exchanges() {
+    int64_t n = 0;
+    for (const Exchange& x : staged_) {
+        const uint8_t* src = override_[x.out];
+        const uint64_t at = complement_offsets_[x.in];
+        if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
+            complement_host_ != nullptr) {
+            std::memcpy((uint8_t*) complement_host_ + (size_t) at, src, (size_t) x.bytes);
+            if (detail::exchange_cache_complement(complement_offsets_, x.in, x.out)) ++n;
+        }
+        override_[x.out] = nullptr;
+    }
+    staged_.clear();
+    exchanges_ += n;
+    return n;
+}
+
 const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
     if (base_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     const uint8_t* mapped_fallback = mapped_blob(layer, expert);
-    const uint8_t* result = complement_ready_
-        ? detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, mapped_fallback)
-        : mapped_fallback;
+    const uint8_t* result = mapped_fallback;
+    if (complement_ready_) {
+        result = detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, nullptr);
+        if (result == nullptr) {
+            result = !override_.empty() && override_[index] != nullptr ? override_[index] : mapped_fallback;
+            if (result == mapped_fallback && result != nullptr) file_reads_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     if (result != nullptr) ++reads_;
     return result;
 }
@@ -646,6 +835,12 @@ const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) con
     if (!pinned(layer, expert) || complement_device_ == nullptr) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     return complement_device_ + (size_t) complement_offsets_[index];
+}
+
+bool FileExpertSource::pcie_layer(int64_t layer) const {
+    if (complement_ready_ && complement_pinned_ && complement_device_ != nullptr)
+        return layer >= 0 && layer < n_layers_;
+    return device_alias(layer, 0) != nullptr;
 }
 
 // ================================ THE ADAPTER ================================
@@ -830,7 +1025,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 if (e >= 0 && e < d.n_expert && d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] < 0) ++nmiss;
             }
         }
-        const bool pcie_ok = d.pcie_num > 0 && d.src->device_alias(d.layers, 0) != nullptr;
+        const bool pcie_ok = d.pcie_num > 0 && d.src->pcie_layer(d.layers);
         const int m = pcie_ok ? (nmiss * d.pcie_num) >> 8 : 0;
         int miss_rank = 0, groups = 0, entries = 0, fetches = 0;
         GpuPlanSink& P = *d.plan;

@@ -97,6 +97,44 @@ bool refill_blocking() {
 
 using Clock = std::chrono::steady_clock;
 
+// The resident RAM mode and the adaptive tier.  A swap copies `in` (held in RAM) into the slot of `out` (held only
+// by that slot).  Before the slot is overwritten, `out`'s bytes are copied back from it into an exchange buffer, so
+// the CPU computes `out` from RAM while the swap is in flight; when the swap has landed, `commit_exchanges` moves
+// them into `in`'s place in RAM.  The RAM copy then again holds exactly the experts no core slot does, and no swap
+// reads the file.  Swaps that need no exchange (`out` in the lend region is held in RAM already; or `in` is not) go
+// on as before; ones beyond the buffers' room wait for a later round.  Runs on the adaptive tier's thread while the
+// GPU commits and drafts: the copies back are on its stream, and waited for before the refills are queued.
+template <class Swap>
+bool resident_stage_swaps(strata::core::FileExpertSource& src, strata::core::ExpertCache& cache,
+                          const std::vector<int32_t>& host_res, int64_t n_expert, std::vector<Swap>& swaps,
+                          cudaStream_t stream) {
+    if (!src.complement_ready() || swaps.empty()) return true;
+    struct Staged { int32_t layer, in, out; int64_t q; };
+    std::vector<Staged> staged;
+    std::vector<Swap> kept;
+    kept.reserve(swaps.size());
+    for (const Swap& s : swaps) {
+        if (!src.has_resident(s.layer, s.in) || src.has_resident(s.layer, s.out)) { kept.push_back(s); continue; }
+        const int64_t q = (int64_t) staged.size();
+        if (q >= src.exchange_capacity()) continue;
+        const int32_t slot = host_res[(size_t) s.layer * (size_t) n_expert + (size_t) s.out];
+        if (slot < 0) continue;
+        if (cudaMemcpyAsync(src.exchange_buffer(q), cache.device_slot(slot),
+                            (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer), cudaMemcpyDeviceToHost,
+                            stream) != cudaSuccess)
+            return false;
+        staged.push_back({s.layer, s.in, s.out, q});
+        kept.push_back(s);
+    }
+    if (!staged.empty()) {
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        for (const Staged& x : staged)
+            if (!src.stage_exchange(x.layer, x.in, x.out, x.q)) return false;
+    }
+    swaps.swap(kept);
+    return true;
+}
+
 struct Options {
     std::string pack = "pack/full";
     std::vector<int64_t> tokens;      // the prompt, PRE-TOKENIZED
@@ -183,6 +221,12 @@ struct Options {
     bool no_host_worker = false;
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     bool resident_cpu_experts = false; ///< mmap-backed static-cache misses copied into ordinary RAM
+    /// `--resident-experts` (the low-RAM PC's resident mode, chosen by setup): `--resident-cpu-experts` with the copy
+    /// page-locked when the driver allows (else locked in the working set), 4 GiB of RAM headroom, and plain mmap
+    /// (with a warning) when even the experts no slot holds do not fit.
+    bool resident_pin = false;
+    uint64_t resident_headroom = 8ull << 30;
+    bool resident_soft = false;
     /// R4: slots of VRAM-resident experts.  **0 = off, and off is the default.**
     /// **THE COMMENT THAT USED TO BE HERE WAS FALSE AND ROUND 328 MEASURED IT.**  It said "the cache has no
     /// consumer yet - `moe_hit_grouped_s2` does not exist - so switching it on costs the fill traffic and
@@ -436,8 +480,12 @@ void usage() {
                  "  --mmap-experts       R2.1: opt OUT of the resident expert arena, back to MapViewOfFile.\n"
                  "                       The A/B arm: the mmap's rate depends on the OS page cache holding\n"
                  "                       34 GB, and measured 71.97 vs 34.78 ms/token cold vs warm.\n"
-                 "  --resident-cpu-experts  with mmap and a static profile, keep CPU misses resident in ordinary RAM.\n"
-                 "                       Borrowed GPU-cache entries may read from mmap during prompt prefill.\n");
+                 "  --resident-cpu-experts  with mmap and a static profile, keep the experts the GPU cache does not\n"
+                 "                       hold resident in ordinary RAM (and the prompt path's lend region as far as\n"
+                 "                       RAM allows); adaptive swaps exchange them, so none is read from the file again.\n"
+                 "  --resident-experts   the low-RAM PC's resident mode (setup): --mmap-experts --resident-cpu-experts\n"
+                 "                       with the copy page-locked when possible, 4 GiB headroom, plain mmap if it\n"
+                 "                       does not fit.  Same answers as --mmap-experts for the same placement.\n");
 }
 
 /// All shards of a split GGUF, from shard 1's path ("...-00001-of-00002.gguf"); just the path when it is not split.
@@ -1072,6 +1120,16 @@ int main(int argc, char** argv) {
         else if (a == "--gpu-stages") o.gpu_stages = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
         else if (a == "--resident-cpu-experts") o.resident_cpu_experts = true;
+        else if (a == "--resident-experts") {
+            o.mmap_experts = o.resident_cpu_experts = o.resident_pin = o.resident_soft = true;
+            o.resident_headroom = 4ull << 30;
+            // A/B arms: STRATA_RESIDENT_PIN=0 keeps the copy pageable (the --resident-cpu-experts form);
+            // STRATA_RESIDENT_HEADROOM_GIB=N leaves N GiB of the available RAM free instead of 4
+            if (const char* v = std::getenv("STRATA_RESIDENT_PIN"); v != nullptr && std::string(v) == "0")
+                o.resident_pin = false;
+            if (const char* v = std::getenv("STRATA_RESIDENT_HEADROOM_GIB"); v != nullptr && std::atof(v) >= 0.0)
+                o.resident_headroom = (uint64_t) (std::atof(v) * 1073741824.0);
+        }
         else if (a == "--stats") o.stats = true;
         else if (a == "--shared-late") o.shared_late = true;
         else if (a == "--keep-canonical") o.keep_canonical = true;
@@ -1140,8 +1198,8 @@ int main(int argc, char** argv) {
         }
     }
     const bool multi_gpu = !split_devs.empty() && !split_same;
-    if (o.resident_cpu_experts && (!o.mmap_experts || o.expert_profile.empty() || o.adapt_every != 0)) {
-        std::fprintf(stderr, "strata generate: --resident-cpu-experts requires --mmap-experts, a static --expert-profile and --adapt-every 0\n");
+    if (o.resident_cpu_experts && (!o.mmap_experts || o.expert_profile.empty())) {
+        std::fprintf(stderr, "strata generate: --resident-cpu-experts requires --mmap-experts and a static --expert-profile\n");
         return 2;
     }
     if (o.resident_cpu_experts &&
@@ -2224,14 +2282,6 @@ int main(int argc, char** argv) {
                      (long long) prefilled, (long long) want);
     }
 
-    if (o.resident_cpu_experts) {
-        if (!src.pin_cache_complement(xcache, err, /*pin=*/false)) {
-            std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
-            return 1;
-        }
-        std::fprintf(stderr, "strata generate: steady-state CPU cache misses are resident in ordinary RAM; borrowed cache entries may use mmap during prompt prefill\n");
-    }
-
     for (auto& stp : stages) {
         GpuStage& st = *stp;
         const auto& lay = strata::kernels::cpu::expert_layout();
@@ -3083,6 +3133,42 @@ int main(int argc, char** argv) {
         }
         return 0;
     };
+    // ---- the resident RAM mode (--resident-experts / --resident-cpu-experts): the experts the GPU cache does not
+    // hold are copied from experts.bin into RAM once, so no decode or prompt step reads the file (the plain mmap
+    // mode reads them through the OS file cache, which a small-RAM PC keeps giving back to the SSD).  Built here,
+    // after the prompt path's lend plan is known: the slots it may lend (the cache's last ones) have their experts
+    // streamed during a prompt and copied back after it, so those are kept in RAM too as far as RAM allows.  The
+    // bytes are the file's bytes and the placement is the same, so the answers are the plain mmap mode's; the
+    // share-of-pinned figure above (which sizes the prompt path) is left as the mmap mode's for the same reason.
+    if (o.resident_cpu_experts) {
+        int64_t lend_from = -1;
+        if (o.prefill_chunk > 0 && !o.no_prefill_borrow && d_res != nullptr && xcache.slots() > 0) {
+            int64_t chunk = o.prefill_chunk;
+            const int64_t k = plan_lend(chunk);
+            if (k > 0) lend_from = xcache.slots() - k;
+        }
+        if (src.pin_cache_complement(xcache, err, o.resident_pin, {}, lend_from, o.resident_headroom)) {
+            if (o.adapt_every > 0 && o.adapt_swaps > 0 &&
+                !src.reserve_exchanges(std::min<int64_t>(o.adapt_swaps, 96), err)) {
+                std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
+                return 1;
+            }
+            std::fprintf(stderr, "strata generate: resident RAM mode: %.2f GiB of experts in RAM (%s), %lld in the GPU "
+                                 "cache; adaptive swaps %s\n",
+                         (double) src.resident_bytes() / 1073741824.0,
+                         src.complement_pinned() ? "page-locked" : src.locked_bytes() > 0 ? "locked" : "pageable",
+                         (long long) xcache.resident(),
+                         o.adapt_every > 0 && o.adapt_swaps > 0 ? "exchange them with the GPU cache (no file reads)"
+                                                                : "off");
+        } else if (o.resident_soft) {
+            std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode does not fit (%s); the experts the "
+                                 "GPU does not hold are read from the model folder through the OS file cache "
+                                 "(--mmap-experts), which is slower when the RAM cannot keep them\n", err.c_str());
+        } else {
+            std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
+            return 1;
+        }
+    }
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
             (graph_hits && (thits.d_res == nullptr || host_res.empty()))) {
@@ -3398,6 +3484,7 @@ int main(int argc, char** argv) {
                     else if (cudaEventQuery(st->adapt_ev) != cudaSuccess) return;
                 }
             for (auto& st : stages) st->adapt_live = false;
+            src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
             for (const auto& [i, slot] : pending) host_res[(size_t) i] = slot;
             pending.clear();
             res_upload();
@@ -3429,6 +3516,7 @@ int main(int argc, char** argv) {
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
+            if (!resident_stage_swaps(src, xcache, host_res, g.n_expert, swaps, adapt_stream)) return false;
             bool main_live = false;
             for (const Swap& s : swaps) {
                 const size_t in = (size_t) s.layer * g.n_expert + s.in, out = (size_t) s.layer * g.n_expert + s.out;
@@ -3548,7 +3636,8 @@ int main(int argc, char** argv) {
                                          ? ss.qsa_states[0].n_slots * 4 : 0),
                         (long long) xcache.slots(), (long long) (xcache.bytes() >> 20), o.spec, o.mtp_max_t,
                         o.suffix_draft, (long long) (free_b >> 20), cvec_summary.c_str(),
-                        (long long) (strata::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
+                        (long long) ((o.mmap_experts ? src.resident_bytes() : strata::kernels::cpu::expert_layout().total) >> 20),
+                        pool.workers(), o.pcie_frac,
                         o.spec_min_p);
         }
         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
@@ -4332,6 +4421,13 @@ int main(int argc, char** argv) {
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look);
             }
+            // the resident RAM mode, cumulative: experts read from experts.bin since the copy was made (what the plain
+            // mmap mode reads through the OS file cache, from the SSD when the RAM could not keep it)
+            if (src.complement_ready())
+                std::fprintf(stderr, "strata serve: resident RAM: %.2f GiB of experts in RAM, %lld exchanged with the "
+                                     "VRAM tier, %lld blob reads from the file\n",
+                             (double) src.resident_bytes() / 1073741824.0, (long long) src.exchanges(),
+                             (long long) src.file_reads());
             // STRATA_SPLIT_TIMING: where each verify stage's host time went, cumulative per window since the start
             // (waiting for its GPU to ring a layer, the CPU pool and plan per layer, staging the window)
             if (static const bool st_timing = std::getenv("STRATA_SPLIT_TIMING") != nullptr; st_timing)
@@ -4761,6 +4857,7 @@ int main(int argc, char** argv) {
             if (pending.empty()) return;
             if (wait) cudaEventSynchronize(adapt_ev);
             else if (cudaEventQuery(adapt_ev) != cudaSuccess) return;
+            src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
             for (const auto& [i, slot] : pending) host_res[(size_t) i] = slot;
             pending.clear();
             if (d_res != nullptr)
@@ -4796,6 +4893,10 @@ int main(int argc, char** argv) {
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
+            if (!resident_stage_swaps(src, xcache, host_res, g.n_expert, swaps, adapt_stream)) {
+                std::fprintf(stderr, "strata generate: an adaptive refill failed (copying evicted experts back)\n");
+                return false;
+            }
             for (const Swap& s : swaps) {
                 const size_t in = (size_t) s.layer * g.n_expert + s.in, out = (size_t) s.layer * g.n_expert + s.out;
                 const int32_t slot = host_res[out];
@@ -4975,6 +5076,10 @@ int main(int argc, char** argv) {
         if (rounds > 0 && !drive.d.usage.empty())
             std::printf("%-24s %lld experts swapped into the VRAM tier (every %d rounds, %.3f ms/round)\n", "adaptive tier",
                         (long long) swaps_total, o.adapt_every, ms_adapt / rounds);
+        if (src.complement_ready())
+            std::printf("%-24s %.2f GiB of experts in RAM, %lld exchanged with the VRAM tier, %lld blob reads from "
+                        "the file\n", "resident RAM", (double) src.resident_bytes() / 1073741824.0,
+                        (long long) src.exchanges(), (long long) src.file_reads());
         if (rounds > 0 && drive.d.pcie_num > 0)
             std::printf("%-24s %.2f distinct experts per layer read over PCIe (share %d/256 of the misses)\n",
                         "pcie experts", (double) (drive.d.pcie_experts - pcie0) / (double) (rounds * g.n_layers),

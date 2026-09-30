@@ -25,6 +25,7 @@
 #include "strata/core/hit_hook.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <utility>
@@ -66,6 +67,18 @@ const uint8_t* cache_complement_blob_or_fallback(
     size_t index, const std::vector<uint64_t>& offsets, const uint8_t* complement_host,
     const uint8_t* mapped_fallback);
 
+/// The resident RAM mode: which GPU-cache slots' experts are kept in RAM too.  The prompt path lends the cache's
+/// LAST slots (from `lend_from` on; a short prompt lends only the last few), and a lent slot's expert is streamed
+/// from RAM during the prompt and copied back into its slot after it.  `base_bytes` (every expert no slot holds)
+/// must fit `budget`; slots are then added from the end down to `lend_from` while they still fit.  Returns the
+/// first slot kept in RAM (`slot_bytes.size()` = none), or -1 when `base_bytes` alone exceeds `budget`.
+int64_t choose_resident_keep_from(const std::vector<uint64_t>& slot_bytes, uint64_t base_bytes, uint64_t budget,
+                                  int64_t lend_from);
+
+/// The adaptive tier swapped `in` into a GPU slot and `out` out of it: `out` takes `in`'s place in the compact copy
+/// (the caller copies out's bytes there).  False, and nothing changed, unless `in` is in the copy and `out` is not.
+bool exchange_cache_complement(std::vector<uint64_t>& offsets, size_t in, size_t out);
+
 }  // namespace detail
 
 
@@ -98,6 +111,10 @@ public:
     virtual void begin_layer(int64_t layer, const int32_t* ids, int64_t k) { (void) layer; (void) ids; (void) k; }
     /// Plan v0.3 P6: the DEVICE address of a pinned, mapped blob (the GPU can read it over PCIe), or null.
     virtual const uint8_t* device_alias(int64_t layer, int64_t expert) const { (void) layer; (void) expert; return nullptr; }
+    /// Whether the verify window may give the GPU a PCIe share of this layer's misses at all (each expert is still
+    /// checked with `pinned`).  The arena answers per layer through its expert 0; the resident RAM mode's compact
+    /// copy has no expert 0 when the GPU cache holds it, so it answers for the whole copy.
+    virtual bool pcie_layer(int64_t layer) const { return device_alias(layer, 0) != nullptr; }
 };
 
 /// Plan v0.3 P6: what the GPU computes in a verify window's layer, written by the pool (mapped host memory) right
@@ -315,9 +332,20 @@ public:
     bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err);
     /// Pin a compact host mirror of experts absent from a fully filled static GPU cache. The mmap remains open
     /// as a fallback for later cache reloads. This is opt-in because the complement may still be a large allocation.
+    ///
+    /// The resident RAM mode (`--resident-experts`, `--resident-cpu-experts`):
+    ///   - `pin`: page-locked and mapped (`cudaHostAlloc`), so the prompt path copies it by DMA and the verify
+    ///     window may read a share of the misses over PCIe; when the driver refuses, ordinary memory locked in the
+    ///     working set instead.  `pin = false` is ordinary pageable memory (the ROCm arm: large pinned allocations
+    ///     can fail there, and it is what the HIP measurements used).
+    ///   - `lend_from_slot` >= 0: the GPU-cache slots from there to the end are the prompt path's lend region; their
+    ///     experts are kept in RAM too, from the last slot down, as far as `available RAM - headroom_bytes` allows
+    ///     (a lent slot's expert is streamed during the prompt and copied back after it).
+    ///   - the rest (the experts no slot holds) must fit that budget, or nothing is allocated and this returns false.
     bool pin_cache_complement(
         const ExpertCache& cache, std::string& err, bool pin = true,
-        const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs = {});
+        const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs = {}, int64_t lend_from_slot = -1,
+        uint64_t headroom_bytes = 8ull << 30);
     void close();
 
     bool mapped() const { return base_ != nullptr; }
@@ -325,10 +353,35 @@ public:
     uint64_t pinned_bytes() const { return complement_pinned_ ? complement_bytes_ : 0; }
     uint64_t resident_bytes() const { return complement_bytes_; }
     bool complement_pinned() const { return complement_pinned_; }
+    bool complement_ready() const { return complement_ready_; }
+    uint64_t locked_bytes() const { return complement_locked_; }
+    /// Lend-region slots whose experts the compact copy holds (the last ones of the cache).
+    int64_t resident_lent_slots() const { return complement_lent_slots_; }
+
+    // ---- the resident RAM mode and the adaptive tier.  A swap puts `in` (held here) into a GPU slot and evicts
+    // `out` (held only by that slot).  Before the slot is overwritten the caller copies it back into an exchange
+    // buffer and calls `stage_exchange`: `out` is then read from that buffer, and `in` still from here (the CPU
+    // computes both until the swap lands).  Once the slot copy has landed, `commit_exchanges` moves `out` into
+    // `in`'s place, so the copy keeps holding exactly the experts the GPU does not - with no read of the file.
+    /// Whether the compact copy holds `(layer, expert)`.
+    bool has_resident(int64_t layer, int64_t expert) const;
+    /// Host room for `n` evicted blobs (page-locked when possible).  Idempotent for the same or a smaller `n`.
+    bool reserve_exchanges(int64_t n, std::string& err);
+    int64_t exchange_capacity() const { return xstage_cap_; }
+    uint8_t* exchange_buffer(int64_t q) const;
+    /// Requires `has_resident(layer, in)`, `!has_resident(layer, out)` and `exchange_buffer(q)` holding out's blob.
+    bool stage_exchange(int64_t layer, int64_t in, int64_t out, int64_t q);
+    /// After the GPU copies of every staged swap have landed.  Returns how many exchanges were applied.
+    int64_t commit_exchanges();
+    int64_t exchanges() const { return exchanges_; }
+    /// With the compact copy ready: blobs read from the mapped file since (what the plain mmap mode may read from
+    /// the SSD).  0 in a steady resident mode; lend-region experts that did not fit the RAM count here.
+    int64_t file_reads() const { return file_reads_.load(std::memory_order_relaxed); }
 
     const uint8_t* blob(int64_t layer, int64_t expert) override;
     bool pinned(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
+    bool pcie_layer(int64_t layer) const override;
 
     /// Blobs touched, for the driver to report.  With `h = 0` this is `48 * k` per token and the number is only
     /// interesting once Phase 3 makes it not so.
@@ -350,6 +403,17 @@ private:
     std::vector<uint64_t> complement_offsets_;
     bool complement_pinned_ = false;
     bool complement_ready_ = false;
+    uint64_t complement_locked_ = 0;          ///< bytes held in the working set (pin refused)
+    int64_t complement_lent_slots_ = 0;
+    std::vector<const uint8_t*> override_;    ///< staged exchanges: an evicted expert read from its exchange buffer
+    struct Exchange { size_t in, out; int64_t q; uint64_t bytes; };
+    std::vector<Exchange> staged_;
+    uint8_t* xstage_ = nullptr;               ///< exchange buffers, `xstage_cap_ x xstage_blob_`
+    bool xstage_pinned_ = false;
+    int64_t xstage_cap_ = 0;
+    uint64_t xstage_blob_ = 0;
+    int64_t exchanges_ = 0;
+    std::atomic<int64_t> file_reads_{0};
     int64_t reads_ = 0;
 #if defined(_WIN32)
     void* file_ = nullptr;
