@@ -414,6 +414,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       add_test(NAME hip_prefill_native_batch COMMAND hip_prefill_native_batch)
       list(APPEND _strata_hip_tests hip_prefill_native_batch)
     endif()
+    # S6: the AMD fast router against the portable kernel, bitwise
+    add_executable(hip_router_fast tests/hip/router_fast.cpp)
+    target_link_libraries(hip_router_fast PRIVATE strata_kernels strata_hip_runtime)
+    add_test(NAME hip_router_fast COMMAND hip_router_fast)
+    list(APPEND _strata_hip_tests hip_router_fast)
     # S6: the RDNA4 matrix-core prompt attention (STRATA_HIP_WMMA) against the FP32 kernel and FP64; skips off gfx12
     add_executable(hip_prompt_attn_wmma src/kernels/qsa_prompt_attn_parity.cpp)
     target_link_libraries(hip_prompt_attn_wmma PRIVATE strata_kernels strata_hip_runtime)
