@@ -2690,8 +2690,10 @@ int main(int argc, char** argv) {
     }
     // plan v0.3 P6: a native pack's blobs differ per layer, so with a profile its slots are sized per pair: the
     // same VRAM holds ~30% more IQ3_XXS experts than slots of the largest blob would
+    // #369: not with --expert-cache-per-layer - its per-layer slot ranges ignore the profile rank a sized slot was cut
+    // for, so a layer's larger blob could land in a smaller slot: that mode keeps slots of the largest blob
     std::vector<int64_t> sized_slots;
-    if (native_pack && o.expert_cache > 0 && !profile.empty()) {
+    if (native_pack && o.expert_cache > 0 && !profile.empty() && !o.expert_cache_per_layer) {
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
         const auto& lay = strata::kernels::cpu::expert_layout();
@@ -2830,10 +2832,17 @@ int main(int argc, char** argv) {
     // the policy rather than a hint.
     int64_t prefilled = 0;
     if (!profile.empty() && srcp != nullptr) {
-        const int64_t want = std::min<int64_t>((int64_t) profile.size(), xcache.slots());
+        // #369 (dag08): per layer, a full layer skips only its own pairs - each layer takes its hottest experts until
+        // its range is full (one full layer used to end the whole fill, leaving most layers empty)
+        const bool per_layer = xcache.per_layer_admission();
+        const int64_t want = per_layer ? (int64_t) profile.size()
+                                       : std::min<int64_t>((int64_t) profile.size(), xcache.slots());
         for (int64_t i = 0; i < want; ++i) {
             const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
-            if (slot == strata::core::kNotResident) break;
+            if (slot == strata::core::kNotResident) {
+                if (per_layer) continue;
+                break;
+            }
             const uint8_t* b = srcp->blob(profile[(size_t) i].first, profile[(size_t) i].second);
             if (b == nullptr || !xcache.fill_slot_blocking(slot, b, err,
                     (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))) {
@@ -2854,7 +2863,7 @@ int main(int argc, char** argv) {
         }
         mem_mark("the profile fill");
         std::fprintf(stderr, "strata generate: pre-filled %lld of %lld slots from the profile; slot 0 verified\n",
-                     (long long) prefilled, (long long) want);
+                     (long long) prefilled, (long long) (per_layer ? xcache.slots() : want));
     }
 
     for (auto& stp : stages) {
