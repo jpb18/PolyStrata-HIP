@@ -2,11 +2,11 @@
 
 This path uses the three original `orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF` Q4_K_S shards without rewriting their expert, embedding or PLE table bytes. It is separate from the installer model menu. Keep all three shard filenames together.
 
-The ordinary GGUF quantizes some small projections which Strata reads as BF16. `--compat-bf16` dequantizes and rounds those projections to BF16 in the separate pack; it does not restore their original precision. The Q5_0 PLE table remains in the source GGUF and currently uses the mapped reader (`--ple-io mmap`). The Q4_K gate/up experts and Q5_0/Q5_1 down experts remain in GGUF form, including layers whose three tensors cross shard boundaries.
+The ordinary GGUF quantizes some small projections which Strata reads as BF16. `--compat-bf16` dequantizes and rounds those projections to BF16 in the separate pack; it does not restore their original precision. The Q5_0 PLE table remains in the source GGUF and currently uses the mapped reader (`--ple-io mmap`). The Q4_K gate/up experts and Q5_0/Q5_1 down experts remain in GGUF form, including layers whose three tensors cross shard boundaries (each role is read from its own shard). The GPU expert kernels take Q4_K with Q5_1 (or Q8_0) downs; Q5_0 downs are not among them yet, and the engine refuses to start on a pack with such a layer (it names the layer).
 
 ## Build and prepare
 
-Build Strata with CUDA, native experts and `STRATA_ORCA_Q4KS_MMQ=ON`. This opt-in compiles the Q4_K, Q5_0 and Q5_1 GGML MMQ instances for CUDA or HIP; the usual Q8_0 draft-layer instance remains in both builds. HIP also needs `STRATA_PREFILL_MMQ=ON`. Select your card's compute capability, for example `89` on an L40S. On Windows with Ninja and CUDA 12.6, use the Visual Studio developer environment and `-DCMAKE_CUDA_RUNTIME_LIBRARY=Shared` to keep the CUDA runtime linkage consistent. The default pinned ggml checkout is supported by the project build.
+Build Strata with CUDA, native experts, `STRATA_ORCA_Q4KS_MMQ=ON` (and `STRATA_BUILD_TESTS=ON` for the two parity programs below). This opt-in compiles the Q4_K, Q5_0 and Q5_1 GGML MMQ instances for CUDA or HIP; the usual Q8_0 draft-layer instance remains in both builds. HIP also needs `STRATA_PREFILL_MMQ=ON`. Select your card's compute capability, for example `89` on an L40S. On Windows with Ninja and CUDA 12.6, use the Visual Studio developer environment and `-DCMAKE_CUDA_RUNTIME_LIBRARY=Shared` to keep the CUDA runtime linkage consistent. The default pinned ggml checkout is supported by the project build.
 
 ```sh
 cmake -S . -B build -G Ninja -DSTRATA_ENABLE_CUDA=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_ORCA_Q4KS_MMQ=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared -DCMAKE_BUILD_TYPE=Release
