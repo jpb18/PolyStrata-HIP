@@ -631,12 +631,28 @@ def engine_args(cfg: dict) -> list[str]:
     return args
 
 
+def hip_visible(cfg: dict) -> list[int]:
+    """AMD: the devices the engine should see, as the HIP runtime numbers them (HIP_VISIBLE_DEVICES).
+
+    On Linux setup's KFD order is HIP's order, so the config's "gpu" is it.  On Windows setup finds the cards in the
+    display-adapter order, and an integrated Radeon that HIP also enumerates takes ordinal 0 and pushes the discrete
+    card to 1 (#325): setup records the ordinal `strata-device --list-devices` gave the card as "hip_ordinal", which
+    wins for a one-card config.  Without it (a config from before), the config's "gpu"."""
+    ordinal = cfg.get("hip_ordinal")
+    if ordinal is not None and str(ordinal).strip() != "" and len(gpu_list(cfg)) <= 1:
+        try:
+            return [int(str(ordinal).strip())]
+        except ValueError:
+            pass
+    return gpu_list(cfg)
+
+
 def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
     env = dict(os.environ)
-    if gpu_list(cfg) and cfg.get("backend") == "hip":   # AMD: numbered as HIP numbers them (setup's KFD order)
-        env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
+    if hip_visible(cfg) and cfg.get("backend") == "hip":   # AMD: numbered as HIP numbers them (hip_visible)
+        env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in hip_visible(cfg))
     elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
