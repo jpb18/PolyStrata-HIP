@@ -231,7 +231,7 @@ class StrataEngine:
             self.info["version"] = None
         if lazy:
             return
-        self.ended, self.unloaded = False, False
+        self.unloaded = False            # `ended` stays True until READY (below): not alive while starting (#344)
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
         if log:
