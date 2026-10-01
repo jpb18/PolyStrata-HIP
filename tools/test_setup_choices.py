@@ -1,5 +1,6 @@
 """Tests for setup.py's choices that depend on the PC (no GPU, no network, nothing installed): the image encoder of a
-ready-made engine that has no code for the card (#331), --gguf-dir's shard count (#305).
+ready-made engine that has no code for the card (#331), --gguf-dir's shard count (#305), the experimental
+Pascal/Volta build (#295).
 
     python -m unittest tools.test_setup_choices
 """
@@ -7,10 +8,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -86,6 +89,71 @@ class GgufDirShards(unittest.TestCase):
                 "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf"]
         self.assertEqual(self.shards([]), want)
         self.assertEqual(self.shards(["a-00001-of-00002.gguf", "b-00001-of-00002.gguf"]), want)   # ambiguous
+
+
+class ExperimentalSm60(unittest.TestCase):
+    """#295: Pascal (6.x) and Volta (7.0) only with STRATA_EXPERIMENTAL_SM60=1, built with -DSTRATA_EXPERIMENTAL_SM60=ON
+    and a CUDA 12.x toolkit; nothing changes without the variable."""
+
+    def card(self, arch):
+        return {"arch": arch, "vram_gb": 11.0, "index": 0, "name": "card"}
+
+    def test_the_gate(self):
+        with mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": ""}):
+            for arch in ("60", "61", "70"):
+                p = setup.gpu_problem(self.card(arch))
+                self.assertIn("not supported", p)
+                self.assertIn("STRATA_EXPERIMENTAL_SM60=1", p)
+            self.assertNotIn("STRATA_EXPERIMENTAL_SM60", setup.gpu_problem(self.card("52")))
+            self.assertIsNone(setup.gpu_problem(self.card("75")))
+        with mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": "1"}):
+            for arch in ("60", "61", "70", "75", "120"):
+                self.assertIsNone(setup.gpu_problem(self.card(arch)), arch)
+            for arch in ("52", "72"):
+                self.assertIsNotNone(setup.gpu_problem(self.card(arch)), arch)
+
+    def test_the_build_flag(self):
+        self.assertEqual(setup.engine_defs([61]), ["-DSTRATA_EXPERIMENTAL_SM60=ON"])
+        self.assertEqual(setup.engine_defs([70, 86]), ["-DSTRATA_EXPERIMENTAL_SM60=ON"])
+        self.assertEqual(setup.engine_defs([75, 86, 120]), [])
+
+    def test_find_nvcc_below(self):
+        with tempfile.TemporaryDirectory() as d:
+            new, old = Path(d) / "13" / "nvcc", Path(d) / "12" / "bin" / "nvcc"
+            for p in (new, old):
+                p.parent.mkdir(parents=True)
+                p.write_bytes(b"")
+            versions = {str(new): "Cuda compilation tools, release 13.0, V13.0.88",
+                        str(old): "Cuda compilation tools, release 12.9, V12.9.86"}
+            with mock.patch.object(setup, "WIN", False), mock.patch.object(setup.shutil, "which", lambda n: str(new)), \
+                    mock.patch.dict(os.environ, {"CUDA_PATH": str(Path(d) / "12")}), \
+                    mock.patch.object(setup, "out", lambda cmd: versions[cmd[0]]):
+                self.assertEqual(setup.find_nvcc(), (str(new), (13, 0)))
+                self.assertEqual(setup.find_nvcc(below=(13, 0)), (str(old), (12, 9)))
+
+    def tools(self, archs, nvcc):
+        seen = []
+
+        def find(below=None):
+            seen.append(below)
+            return nvcc(below)
+
+        with mock.patch.object(setup, "find_nvcc", find), mock.patch.object(setup, "find_vcvars", lambda: "vcvars"), \
+                mock.patch.object(setup.shutil, "which", lambda n: "/usr/bin/" + n):
+            got, _ = quiet(setup.install_build_tools, {"arch": str(archs[0]), "archs": archs}, True)
+        return got, seen
+
+    def test_pascal_takes_cuda_12(self):
+        got, seen = self.tools([61], lambda below: ("nvcc12", (12, 9)) if below == (13, 0) else ("nvcc13", (13, 0)))
+        self.assertEqual(got[0], "nvcc12")
+        self.assertEqual(seen, [(13, 0)])
+        got, seen = self.tools([86, 120], lambda below: ("nvcc13", (13, 0)))
+        self.assertEqual((got[0], seen), ("nvcc13", [None]))           # the default: unchanged
+
+    def test_pascal_without_cuda_12_stops(self):
+        for archs in ([61], [70, 120]):
+            with self.subTest(archs=archs), self.assertRaises(SystemExit):
+                self.tools(archs, lambda below: (None, None) if below else ("nvcc13", (13, 0)))
 
 
 if __name__ == "__main__":

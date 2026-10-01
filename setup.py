@@ -359,11 +359,22 @@ def cc(g) -> str:
     return f"{g['arch'][:-1]}.{g['arch'][-1]}"
 
 
+def experimental_sm60() -> bool:
+    """#295: STRATA_EXPERIMENTAL_SM60=1 admits Pascal (6.x) and Volta (7.0) cards: the community build
+    (-DSTRATA_EXPERIMENTAL_SM60=ON, compiled here with a CUDA 12.x toolkit), not the ready-made engine."""
+    return os.environ.get("STRATA_EXPERIMENTAL_SM60", "").strip() == "1"
+
+
+def sm60_card(arch) -> bool:
+    return 60 <= int(arch) <= 70
+
+
 def gpu_problem(g, together=False):
     """Why Strata cannot use this card, in plain words (None: it can)."""
-    if int(g["arch"]) < 75:
+    if int(g["arch"]) < 75 and not (sm60_card(g["arch"]) and experimental_sm60()):
         return (f"not supported - older than the RTX 20 series (compute capability {cc(g)}; Strata needs 7.5 or "
-                "newer)")
+                "newer" + ("; STRATA_EXPERIMENTAL_SM60=1 tries the community build for it" if sm60_card(g["arch"])
+                          else "") + ")")
     if together and g["vram_gb"] < SPLIT_MIN_VRAM_GB - 0.5:
         return (f"not supported together with other GPUs - {g['vram_gb']:.0f} GB of VRAM (a card sharing the model "
                 f"needs {SPLIT_MIN_VRAM_GB} GB or more)")
@@ -546,7 +557,8 @@ def gpu_info(pick=None):
     return {**g, "count": len(found)}
 
 
-def find_nvcc():
+def find_nvcc(below=None):
+    """The newest CUDA toolkit's nvcc and its (major, minor); with `below`, the newest older than that version."""
     cands = [shutil.which("nvcc")]
     if os.environ.get("CUDA_PATH"):
         cands.append(str(Path(os.environ["CUDA_PATH"]) / "bin" / ("nvcc.exe" if WIN else "nvcc")))
@@ -561,8 +573,9 @@ def find_nvcc():
     for c in dict.fromkeys(cands):                     # every toolkit found; the newest wins
         if c and Path(c).exists():
             v = re.search(r"release (\d+)\.(\d+)", out([c, "--version"]))
-            if v and (best[1] is None or (int(v.group(1)), int(v.group(2))) > best[1]):
-                best = (c, (int(v.group(1)), int(v.group(2))))
+            ver = (int(v.group(1)), int(v.group(2))) if v else None
+            if ver and (below is None or ver < below) and (best[1] is None or ver > best[1]):
+                best = (c, ver)
     return best
 
 
@@ -1209,9 +1222,20 @@ def update_installed_engine(url_base) -> None:
 
 def install_build_tools(gpu, yes):
     """The compiler and the CUDA toolkit, installed for the user (asks once).  Returns (nvcc, vcvars)."""
-    nvcc, cuda_v = find_nvcc()
+    archs = [int(x) for x in gpu.get("archs", [gpu["arch"]])]
+    # #295: Pascal / Volta (STRATA_EXPERIMENTAL_SM60=1) need a CUDA 12.x toolkit - CUDA 13 cannot build sm_60/sm_70
+    old = min(archs) < 75
+    if old and max(archs) >= 120:
+        fail("one engine cannot be built for both an RTX 50 card (CUDA 13) and a Pascal/Volta card (CUDA 12.x)",
+             "choose the cards of one kind with --gpu / --gpus")
+    nvcc, cuda_v = find_nvcc(below=(13, 0)) if old else find_nvcc()
+    if old and (nvcc is None or cuda_v < (12, 0)):
+        fail("the experimental Pascal/Volta build (STRATA_EXPERIMENTAL_SM60=1) needs the NVIDIA CUDA Toolkit 12.x "
+             "(CUDA 13 cannot compile for these cards)",
+             "install CUDA 12.9 (or another 12.x; it can sit next to a newer one) from "
+             "https://developer.nvidia.com/cuda-toolkit-archive and run it again")
     # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220)
-    need_cuda = (13, 0) if max(int(x) for x in gpu.get("archs", [gpu["arch"]])) >= 120 else (12, 0)
+    need_cuda = (13, 0) if max(archs) >= 120 else (12, 0)
     vcvars = find_vcvars() if WIN else None
     have_cc = vcvars is not None if WIN else shutil.which("g++") is not None
     missing = []
@@ -1260,7 +1284,7 @@ def install_build_tools(gpu, yes):
             run(["sudo", "dpkg", "-i", str(deb)])
             run(["sudo", "apt-get", "update"])
             run(["sudo", "apt-get", "install", "-y", "cuda-toolkit-13-0"])
-    nvcc, cuda_v = find_nvcc()
+    nvcc, cuda_v = find_nvcc(below=(13, 0)) if old else find_nvcc()
     if (WIN and find_vcvars() is None) or (not WIN and shutil.which("g++") is None):
         fail("the C++ build tools did not install", "install them by hand (README.md) and run it again")
     if nvcc is None or cuda_v < need_cuda:
@@ -1305,6 +1329,11 @@ def source_hash(parts) -> str:
         for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file()):
             h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
+
+
+def engine_defs(archs) -> list:
+    """Extra CMake definitions for the engine: the experimental Pascal/Volta build (#295) for cards below sm_75."""
+    return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 else []
 
 
 def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
@@ -1352,7 +1381,8 @@ def build_engine(gpu, vision, yes, llama) -> Path:
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, ROOT / "build", "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
-                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata.bat")
+                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}", *engine_defs(archs)],
+                    vcvars, "build-strata.bat")
         shutil.copy2(ROOT / "build" / EXE, eng / EXE)
     if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
