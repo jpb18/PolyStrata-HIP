@@ -1814,6 +1814,16 @@ OLD_DRAFT_VOCABS = {"369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced959
 DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin", "cyrillic": "draft_vocab_cyrillic.bin"}
 
 
+def saved_draft_vocab(cfg_path: Path) -> str | None:
+    """The draft subset a model's config chose earlier (--draft-vocab), or None: a setup run again without the flag
+    rewrites the config, and would otherwise put the default subset back."""
+    try:
+        v = json.loads(cfg_path.read_text(encoding="utf-8-sig")).get("draft_vocab")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return v if v in DRAFT_VOCABS else None
+
+
 def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
     """The draft layer's token subset in the MTP folder: `cjk` (data/draft_vocab.bin, since 0.1.27, #137), `en`
     (data/draft_vocab_en.bin, the English/code subset before it: ~110 MiB less VRAM, English answers 1-2% faster) or
@@ -2393,7 +2403,9 @@ def main() -> int:
              "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
         run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
             env=env)
-    refresh_draft_vocab(rt, a.draft_vocab or "cjk")
+    # a setup run again without --draft-vocab keeps the subset this model's config chose before (cyrillic, en)
+    draft_vocab = a.draft_vocab or saved_draft_vocab(ROOT / f"strata-{tag.lower()}.json")
+    refresh_draft_vocab(rt, draft_vocab or "cjk")
     ok(f"MTP draft layer: {rt}")
 
     # ---- 7. the start script
@@ -2463,8 +2475,8 @@ def main() -> int:
         cfg["host"] = a.host
     if a.api_key:
         cfg["api_key"] = a.api_key
-    if a.draft_vocab:
-        cfg["draft_vocab"] = a.draft_vocab
+    if draft_vocab:
+        cfg["draft_vocab"] = draft_vocab
     if vision != "none":
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
                          "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
