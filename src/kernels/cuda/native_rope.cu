@@ -87,13 +87,22 @@ bool same_scaling(const RopeScaling& a, const RopeScaling& b) {
            a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor && a.attn_factor == b.attn_factor &&
            a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
 }
+// opt-in: STRATA_ROPE_TABLE=1 (the table's angles differ from the fast-math ones in the last bits, so outputs move)
 bool rope_table_enabled() {
-    static const bool on = std::getenv("STRATA_ROPE_LEGACY") == nullptr;   // STRATA_ROPE_LEGACY=1: the A/B arm
+    static const bool on = [] {
+        const char* e = std::getenv("STRATA_ROPE_TABLE");
+        return e != nullptr && e[0] == '1';
+    }();
     return on;
 }
 }  // namespace
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling) {
     rope_tab[mrope_dev()] = RopeReg{RopeTab{cos_tab, sin_tab, max_pos}, scaling};
+}
+void rope_table_release(const float* cos_tab) {
+    // every device's entry that points at it (the caller may free it from another current device)
+    for (RopeReg& r : rope_tab)
+        if (cos_tab != nullptr && r.tab.cos == cos_tab) r = RopeReg{};
 }
 RopeTab rope_table_for(const RopeScaling& scaling) {
     if (!rope_table_enabled()) return {};
