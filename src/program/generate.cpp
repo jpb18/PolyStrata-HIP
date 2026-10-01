@@ -4780,8 +4780,8 @@ int main(int argc, char** argv) {
             // the arena, the residency table is restored, and one upload puts it on every device.  A stage refills
             // through its own cache and its own device - a slot refilled into the wrong cache would leave that
             // stage's cache holding an expert it does not own, which is silent and produces plausible tokens.
-            auto refill_one = [&](PfPart& p, std::string& e) -> bool {
-                if (p.lent.empty()) return true;
+            // (split in two halves so a layer split can queue every stage's copies before it waits for any: #340)
+            auto refill_issue = [&](PfPart& p, std::string& e) -> bool {
                 tr("refill start", (long long) p.lent.size());
                 const strata::core::OnDevice on(p.dev);
                 for (const auto& [i, slot] : p.lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
@@ -4792,16 +4792,44 @@ int main(int argc, char** argv) {
                         return false;
                     host_res[(size_t) i] = slot;
                 }
+                return true;
+            };
+            auto refill_wait = [&](PfPart& p, std::string& e) -> bool {
+                const strata::core::OnDevice on(p.dev);
                 if (!p.cache->sync_queued(e)) return false;
                 p.lent.clear();
                 p.lent_chunk = 0;
                 return true;
             };
+            auto refill_one = [&](PfPart& p, std::string& e) -> bool {
+                if (p.lent.empty()) return true;
+                return refill_issue(p, e) && refill_wait(p, e);
+            };
+            // #340: with several stages every stage's copies go out first (each card on its own link), then each is
+            // waited for - the same copies into the same slots, so the same cache; one stage: refill_one exactly.
+            // STRATA_REFILL_SERIAL=1: stage after stage, as 0.1.30/0.1.31.
+            static const bool refill_serial = std::getenv("STRATA_REFILL_SERIAL") != nullptr;
             auto refill = [&](std::string& e) -> bool {
-                bool any = false;
+                const auto t_rf = Clock::now();
+                int64_t n_lent = 0, n_parts = 0;
                 for (PfPart& p : pf_parts)
-                    if (!p.lent.empty()) { any = true; if (!refill_one(p, e)) return false; }
-                if (any) res_upload();
+                    if (!p.lent.empty()) { n_lent += (int64_t) p.lent.size(); ++n_parts; }
+                if (n_parts > 1 && !refill_serial) {
+                    for (PfPart& p : pf_parts)
+                        if (!p.lent.empty() && !refill_issue(p, e)) return false;
+                    for (PfPart& p : pf_parts)
+                        if (!p.lent.empty() && !refill_wait(p, e)) return false;
+                } else {
+                    for (PfPart& p : pf_parts)
+                        if (!p.lent.empty() && !refill_one(p, e)) return false;
+                }
+                if (n_parts > 0) res_upload();
+                if (trace && n_parts > 0) {
+                    std::fprintf(stderr, "strata trace: refilled %lld slots on %lld stage(s) in %.1f ms\n",
+                                 (long long) n_lent, (long long) n_parts,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - t_rf).count());
+                    std::fflush(stderr);
+                }
                 return true;
             };
             // lend the slots `tokens` batched prompt tokens need: the prompt path's buffers for min(chunk, tokens
@@ -4809,6 +4837,7 @@ int main(int argc, char** argv) {
             // participant's own cache, and marking only that participant's own layers
             auto lend = [&](int64_t tokens, std::string& e) -> bool {
                 if (pf_parts.empty()) return true;                     // its own buffers: nothing to lend
+                const auto t_ln = Clock::now();
                 // what this segment needs, capped by the configured chunk: a request lends only what its own
                 // prompt needs, so a large chunk costs a short prompt nothing
                 const int64_t want = request_chunk(tokens, o.prefill_chunk);
@@ -4844,6 +4873,13 @@ int main(int argc, char** argv) {
                     p.lent_chunk = want;
                 }
                 if (any) res_upload();
+                if (trace) {
+                    int64_t n_lent = 0;
+                    for (const PfPart& p : pf_parts) n_lent += (int64_t) p.lent.size();
+                    std::fprintf(stderr, "strata trace: lent %lld slots for %lld tokens in %.1f ms\n", (long long) n_lent,
+                                 (long long) want, std::chrono::duration<double, std::milli>(Clock::now() - t_ln).count());
+                    std::fflush(stderr);
+                }
                 return true;
             };
             apply_pending(true);
