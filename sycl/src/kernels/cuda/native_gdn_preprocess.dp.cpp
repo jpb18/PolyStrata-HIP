@@ -147,8 +147,10 @@ __dpct_inline__ void gate_softplus(const float *__restrict__ alpha,
     OpenCL C 1.2 standard.
     */
     const float value = alpha[i] + dt[i];
-    const float softplus =
-        value > 20.0f ? value : sycl::log(1.0f + sycl::native::exp(value));
+    const float softplus = value > 20.0f
+                               ? value
+                               : sycl::log1p(sycl::native::exp(
+                                     value)); // 1 + e^v loses e^v below ~1e-7
     gate[i] = softplus * ssm_a[i];
 }
 

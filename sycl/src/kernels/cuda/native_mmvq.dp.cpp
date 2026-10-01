@@ -223,10 +223,10 @@ q5_q8_dot_impl(const int *__restrict__ vl, const int *__restrict__ vh,
 }
 
 /*
-DPCT1110: The total declared local variable size in device function q5_q8_dot
-exceeds 128 bytes and may cause high register pressure. Consult with your
-hardware vendor to find the total register size available and adjust the code,
-or use smaller sub-group size to avoid high register pressure.
+DPCT1110: The total declared local variable size in device function
+q5_q8_dot exceeds 128 bytes and may cause high register pressure. Consult with
+your hardware vendor to find the total register size available and adjust the
+code, or use smaller sub-group size to avoid high register pressure.
 */
 __dpct_inline__ float q5_q8_dot(const Q5KBlock *__restrict__ bq5,
                                 const Q81Block *__restrict__ bq8, int iqs) {
@@ -2643,7 +2643,7 @@ void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
 }
 
 bool native_mmvq_supported(int ggml_type) noexcept {
-    return ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 11 ||
+    return ggml_type == 2 || ggml_type == 6 || ggml_type == 7 || ggml_type == 8 || ggml_type == 11 ||
            ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 20 ||
            ggml_type == 23 || ggml_type == 42 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 ||
            ggml_type == 21 || ggml_type == 22 || ggml_type == 29;
@@ -2654,6 +2654,7 @@ std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out) {
     switch (ggml_type) {
     case 2: block_elems = 32; block_bytes = 18; break;
     case 6: block_elems = 32; block_bytes = 22; break;
+    case 7: block_elems = 32; block_bytes = 24; break;
     case 8: block_elems = 32; block_bytes = 34; break;
     case 20: block_elems = 32; block_bytes = 18; break;
     case 11: block_elems = 256; block_bytes = 110; break;
@@ -2680,6 +2681,7 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
     switch (ggml_type) {
     case 2: native_q4_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 6: native_q5_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
+    case 7: iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 8: native_q8_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 20: native_iq4_nl_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 11: native_q3_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;

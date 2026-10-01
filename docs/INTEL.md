@@ -28,7 +28,7 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
 on the text"). The SYCL numbers are greedy runs of the engine (as in "How to run it by hand" below, 256 new
-tokens) on engine 0.1.31-sycl (2026-10-01);
+tokens) on engine 0.1.31-sycl (2026-10-01; 0.1.32-sycl reproduces them exactly);
 "Decode round 2" below lists what each change bought.
 
 ## Setup
@@ -489,6 +489,23 @@ part of the procedure now: it caught a dropped mirror hook and four doorbell wai
 - **Still failing:** `iq_multi_parity` on IQ2_XS (type 17: the port's mmvq disagrees with the reference, old and new
   kernel alike; no model here uses it), `s2_expert_grouped_parity` (the s2 path), `kv_hybrid_parity`'s last step
   (needs the unported tensor-core prompt kernel). `ple_parity` and `native_expert_parity` need model files.
+
+**The 0.1.32 merge (2026-10-01).** Upstream 0.1.31 -> 0.1.32 (89 commits) by the same steps; the hash-only
+differences are now canonicalized before `git merge-file` (the port's kernel-name hashes are kept), which left 10
+files with real conflicts. What it needed:
+
+- **Upstream's async commit** (`set_commit_async` / `wait_commit`) maps onto the port's own deferred commit
+  (`commit(n, err, false)` + `commit_finish`); `wait_commit` is `commit_finish`.
+- **Upstream's new hyper-connection read variants** (split / staged, chosen per card by a bit-for-bit self-test at
+  start) are not used by the port, which keeps its sliced down / split norm read; the self-test segfaulted on the
+  B70, so on SYCL it runs only with `STRATA_HC_CHECK=1` (open). The port's split-norm kernel was renamed
+  (`gr_norm_split_port_kernel`): upstream now has one of the same name.
+- Two kernel names collided after hash canonicalization (renamed), and fused_gr's per-block shared-memory query is
+  a fixup now.
+- **Result:** every output identical to 0.1.31 (Coder 19 / 2,184-token prompts and IQ2_XS, 256 greedy tokens),
+  same speeds (Coder 77.7-78.1 / 75.7 tok/s, IQ2_XS 58.5), 40K prompt 1,201 tok/s then 65.1 tok/s decode.
+  `kv_hybrid_parity` and `qsa_prompt_attn_parity` pass (the tests now turn on the XMX prompt attention they
+  check); `iq_multi_parity` (IQ2_XS) and `s2_expert_grouped_parity` as before.
 
 **Not ported yet (2026-10-01).**
 

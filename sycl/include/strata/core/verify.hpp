@@ -75,6 +75,9 @@ public:
     /// One window: `tokens[0..T)` at positions pos0.., the pool served per layer; `out[t]` = argmax after token t.
     /// The PLE rows are gathered here from `ss.ple_prev` and the tokens.  Captures the T-token graph on first use.
     bool run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool, void* user, int32_t* out, std::string& err);
+    /// Diagnostics: row `t` of the last window's head logits (n_vocab floats) to the host. Valid after run().
+    bool copy_logits(int t, float* host) const;
+    int64_t vocab() const { return next_ ? next_->vocab() : n_vocab_; }
     /// The sampling the verify window's head applies (temperature / top_p / top_k / seed).  Set per
     /// request; greedy by default.  The sampling itself runs OUTSIDE the captured graph - its
     /// parameters would otherwise be baked forever - so this can change between requests freely.
@@ -123,6 +126,14 @@ public:
     /// SYCL port: capture every window graph now (one per window size) instead of on first use, so the first
     /// request does not pay for them (a 2,400-node graph takes tens of ms to finalize on this backend).
     bool warm(std::string& err);
+    /// (upstream 0.1.32; the port maps it onto commit_finish, verify.cpp) commit() returns without waiting for its graph (a single-GPU session sets it): the next window follows it on
+    /// the same stream and the drafter reads nothing it writes, so it overlaps the draft. Whoever reads or writes
+    /// the session from another stream or the host afterwards (a new request, a checkpoint, a snapshot, the prompt
+    /// path, the end of a run) calls wait_commit() first.  STRATA_COMMIT_SYNC=1 keeps the wait.
+    static void set_commit_async(bool on);
+    /// Waits for the last commit graph when commit() did not (an event recorded after it, not the whole device);
+    /// false with `err` when it failed.  Free when nothing is pending.
+    bool wait_commit(std::string& err);
 
     /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
@@ -182,7 +193,8 @@ private:
     int pending_commit_ = 0;                  ///< n_keep of a launched, unfinished commit (0: none)
     std::chrono::steady_clock::time_point pending_commit_t0_{};
     bool record_window(int T, dpct::queue_ptr cs, std::string &err);
-    static constexpr int kProfPer = 32;              // stamps per layer
+    static constexpr int kProfPer = 33;              // stamps per layer (32 left the hc-read second
+                                      // half's up-stamp at slot 32 = the next layer's slot 0: D8)
     bool prof_on_ = false;
     unsigned long long* prof_ = nullptr;              // device: n_layers * kProfPer + 4 stamps
     std::vector<unsigned long long> prof_h_;
@@ -219,6 +231,10 @@ private:
     uint32_t* h_flag_ = nullptr; uint32_t* m_flag_ = nullptr;
     uint32_t* h_flagA_ = nullptr; uint32_t* m_flagA_ = nullptr;  // the GPU plan is in place
     uint32_t* h_flagB_ = nullptr; uint32_t* m_flagB_ = nullptr;  // the PCIe share's DMA copies have landed
+    dpct::event_ptr commit_done_ =
+        nullptr; // recorded after an async commit (set_commit_async); see
+                 // wait_commit
+    bool commit_pending_ = false;
     dpct::queue_ptr copy_ =
         &dpct::get_in_order_queue(); // the copy engine's stream (DMA of missed
                                      // experts)

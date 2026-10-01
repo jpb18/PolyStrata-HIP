@@ -1278,7 +1278,7 @@ namespace {
     __dpct_inline__ void gpu_stamp_kernel(unsigned long long *buf, int i) {
     unsigned long long t;
 #if defined(__HIPCC__)
-    t = wall_clock64() * 10ull;   // gfx11 / gfx12: a constant 100 MHz counter, in ns
+    t = wall_clock64() * 10ull;   // gfx10.3 / gfx11 / gfx12: a constant 100 MHz counter, in ns
 #else
     /*
     DPCT1053: Migration of device assembly code is not supported.

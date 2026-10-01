@@ -247,36 +247,36 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
                                (size_t)n_out, dpct::get_in_order_queue())),
           "cudaMalloc y");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "copy x");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "copy scales");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
@@ -367,27 +367,27 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
                                (size_t)n_out, dpct::get_in_order_queue())),
           "bench y");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "bench copy x");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_codes, codes.data(), codes.size()).wait()),
           "bench copy codes");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(

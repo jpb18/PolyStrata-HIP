@@ -99,6 +99,10 @@ def doorbell(s):
 # 0.1.31: dp4a.hpp's spin pause is __nanosleep, which SYCL lacks: the bounded spin (kSpinMax) is the backoff
 edit("include/strata/kernels/dp4a.hpp", lambda s: s.replace("    __nanosleep(100);\n",
      "    // SYCL port: no __nanosleep; the doorbell waits are bounded by strata::kSpinMax instead\n"))
+# 0.1.31/0.1.32: fused_gr's per-block shared-memory query stays CUDA (dpct leaves the attribute untranslated)
+edit("src/kernels/cuda/fused_gr.dp.cpp", lambda s: s.replace(
+    "        cudaDeviceGetAttribute(&per_block, cudaDevAttrMaxSharedMemoryPerBlock, dev);\n",
+    "        per_block = (int) dpct::get_device(dev).get_local_mem_size();   // SYCL: the work-group local memory\n"))
 edit("src/kernels/cuda/elementwise.dp.cpp", doorbell)
 edit("src/kernels/cuda/verify_kernels.dp.cpp", doorbell)
 

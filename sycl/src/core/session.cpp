@@ -4,6 +4,7 @@
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/core/session.hpp"
+#include "strata/kernels/mrope.hpp"
 #include "strata/core/progress.hpp"
 
 #include "strata/kernels/qsa.hpp"
@@ -127,6 +128,14 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     s.ple_hist = (float*) take(ple_hist_bytes());
     s.R = s.block.R;
     return used;
+}
+
+void session_release(SessionState& s) {
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
+        if (s.qsa_states[j].owns_rope) {
+            strata::kernels::rope_table_release(s.qsa_states[j].cos_tab);
+            s.qsa_states[j].owns_rope = false;
+        }
 }
 
 void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, void* stream) {

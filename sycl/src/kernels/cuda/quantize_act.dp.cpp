@@ -221,10 +221,10 @@ __dpct_inline__ void quantize_q8_K_kernel(const float *__restrict__ x,
         // from the reference in 1 element of 524,288 for exactly this reason, and `__fmul_rn` pins the
         // rounding step the source actually performs.
         /*
-        DPCT1013: The rounding mode could not be specified and the
-        generated code may have different accuracy than the original code.
-        Verify the correctness. SYCL math built-in function rounding mode is
-        aligned with OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the generated
+        code may have different accuracy than the original code. Verify the
+        correctness. SYCL math built-in function rounding mode is aligned with
+        OpenCL C 1.2 standard.
         */
         const int v = nearest_int_dev(iscale * xb[j]);
         qs[j] = (int8_t)sycl::min(

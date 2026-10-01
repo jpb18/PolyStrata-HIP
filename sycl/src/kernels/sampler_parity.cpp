@@ -109,9 +109,9 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
                                (size_t)n_tokens, dpct::get_in_order_queue())),
           "malloc out");
     /*
-    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming in
-    the original code the source host memory is pageable memory. If the memory
-    is not pageable, call wait() on event return by memcpy API to ensure
+    DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
+    in the original code the source host memory is pageable memory. If the
+    memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
     check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(

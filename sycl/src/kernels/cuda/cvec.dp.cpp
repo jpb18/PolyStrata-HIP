@@ -194,8 +194,8 @@ bool cvec_upload(const std::vector<float>& dir, const std::vector<float>& s, int
     for (int d = 0; d < kDevices; ++d) {
         if (g_dev[d].dir == nullptr) continue;
         /*
-        DPCT1093: The "d" device may be not the one intended for use. Adjust
-        the selected device if needed.
+        DPCT1093: The "d" device may be not the one intended for use.
+        Adjust the selected device if needed.
         */
         dpct::select_device(d);
         dpct::get_current_device().queues_wait_and_throw();
@@ -237,8 +237,8 @@ void cvec_set_enabled(bool on) {
     for (int d = 0; d < kDevices; ++d) {
         if (g_dev[d].on == nullptr) continue;
         /*
-        DPCT1093: The "d" device may be not the one intended for use. Adjust
-        the selected device if needed.
+        DPCT1093: The "d" device may be not the one intended for use.
+        Adjust the selected device if needed.
         */
         dpct::select_device(d);
         dpct::get_current_device()

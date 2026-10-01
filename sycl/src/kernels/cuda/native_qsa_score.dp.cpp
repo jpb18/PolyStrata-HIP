@@ -189,32 +189,32 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
             h[j] = sycl::fmax(v, 0.0f);
         }
         /*
-        DPCT1013: The rounding mode could not be specified and the generated
-        code may have different accuracy than the original code. Verify the
-        correctness. SYCL math built-in function rounding mode is aligned with
-        OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the
+        generated code may have different accuracy than the original code.
+        Verify the correctness. SYCL math built-in function rounding mode is
+        aligned with OpenCL C 1.2 standard.
         */
         float sum = h[0] + h[1] + h[2] + h[3];
         /*
-        DPCT1013: The rounding mode could not be specified and the generated
-        code may have different accuracy than the original code. Verify the
-        correctness. SYCL math built-in function rounding mode is aligned with
-        OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the
+        generated code may have different accuracy than the original code.
+        Verify the correctness. SYCL math built-in function rounding mode is
+        aligned with OpenCL C 1.2 standard.
         */
         if (bias) sum = sum + bias[row];
         /*
-        DPCT1013: The rounding mode could not be specified and the generated
-        code may have different accuracy than the original code. Verify the
-        correctness. SYCL math built-in function rounding mode is aligned with
-        OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the
+        generated code may have different accuracy than the original code.
+        Verify the correctness. SYCL math built-in function rounding mode is
+        aligned with OpenCL C 1.2 standard.
         */
         sum = sum + (row == full && n % R ? 1e9f : 0.0f);
         // The live causal mask is +0. Invalid/padded cells are never exported.
         /*
-        DPCT1013: The rounding mode could not be specified and the generated
-        code may have different accuracy than the original code. Verify the
-        correctness. SYCL math built-in function rounding mode is aligned with
-        OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the
+        generated code may have different accuracy than the original code.
+        Verify the correctness. SYCL math built-in function rounding mode is
+        aligned with OpenCL C 1.2 standard.
         */
         sum = sum + 0.0f;
 #pragma unroll

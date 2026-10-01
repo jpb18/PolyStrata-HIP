@@ -49,6 +49,11 @@ __dpct_inline__ uint16_t bf(float f) {
     u += 0x7fffu + ((u >> 16) & 1u);
     return (uint16_t) (u >> 16);
 }
+// The BF16 GEMMs' second operand (STRATA_PREFILL_BF16X2): what the BF16 image `hi` left out of f, itself in BF16.
+// W.hi + W.lo carries ~16 mantissa bits of the activation - the decode path's FP32 x to within ~1e-5.
+__dpct_inline__ uint16_t bf_lo(float f, uint16_t hi) {
+    return bf(f - sycl::bit_cast<float>((uint32_t)hi << 16));
+}
 __dpct_inline__ float sigm(float x) {
     return 1.0f / (1.0f + sycl::native::exp(-x));
 }
@@ -56,6 +61,13 @@ __dpct_inline__ uint16_t hf(float f) {
     return sycl::bit_cast<unsigned short, sycl::half>(
                sycl::vec<float, 1>(f)
                    .convert<sycl::half, sycl::rounding_mode::rte>()[0]);
+}
+// A SwiGLU product for an FP16 GEMM: saturated, so a token with a massive activation cannot turn into inf and then
+// NaN in the down projection (decode's q8_1 has room to ~8e6; FP16 ends at 65504).  A NaN stays NaN (fminf/fmaxf
+// would make it -65504 and hide where it came from); finite values below 65504 round exactly as before.
+__dpct_inline__ uint16_t hf_sat(float f) {
+    return hf(sycl::isnan(f) ? f
+                             : sycl::fmin(sycl::fmax(f, -65504.0f), 65504.0f));
 }
 // block-wide sum for blockDim.x <= 1024, result broadcast
 inline float block_sum(float v, float *sh) {
@@ -108,7 +120,8 @@ unsigned blocks_for(int64_t n, int t = 256) { return (unsigned) ((n + t - 1) / t
 __dpct_inline__ void gr_norm_kernel(const float *__restrict__ R,
                                     const float *__restrict__ w, float eps,
                                     float *__restrict__ xn,
-                                    uint16_t *__restrict__ xn16) {
+                                    uint16_t *__restrict__ xn16,
+                                    uint16_t *__restrict__ xn16_lo) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     sycl::ext::oneapi::this_work_item::get_work_group<3>());
@@ -124,7 +137,9 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
          d += item_ct1.get_local_range(2)) {
         const float v = r[d] * rs * w[c * N + d];
         xn[row * N + d] = v;
-        xn16[row * N + d] = bf(v);
+        const uint16_t h = bf(v);
+        xn16[row * N + d] = h;
+        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);
     }
 }
 // F-1: the row scale only (and the BF16 image); gr_mix_r_kernel recomputes r * rs * w itself, in the same order,
@@ -132,7 +147,8 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
 __dpct_inline__ void gr_norm_rs_kernel(const float *__restrict__ R,
                                        const float *__restrict__ w, float eps,
                                        float *__restrict__ rs_out,
-                                       uint16_t *__restrict__ xn16) {
+                                       uint16_t *__restrict__ xn16,
+                                       uint16_t *__restrict__ xn16_lo) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     sycl::ext::oneapi::this_work_item::get_work_group<3>());
@@ -145,16 +161,20 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
          d += item_ct1.get_local_range(2)) ss += r[d] * r[d];
     const float rs = sycl::rsqrt(block_sum(ss, sh) / (float)N + eps);
     if (item_ct1.get_local_id(2) == 0) rs_out[row] = rs;
-#pragma unroll
     for (int d = item_ct1.get_local_id(2); d < N;
-         d += item_ct1.get_local_range(2))
-        xn16[row * N + d] = bf(r[d] * rs * w[c * N + d]);
+         d += item_ct1.get_local_range(2)) {
+        const float v = r[d] * rs * w[c * N + d];
+        const uint16_t h = bf(v);
+        xn16[row * N + d] = h;
+        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);
+    }
 }
 __dpct_inline__ void
 gr_mix_r_kernel(const float *__restrict__ R, const float *__restrict__ rs,
                 const float *__restrict__ w, const float *__restrict__ g,
                 float *__restrict__ mixed, uint16_t *__restrict__ mixed16,
-                int64_t T, uint16_t *__restrict__ mixed_h) {
+                int64_t T, uint16_t *__restrict__ mixed_h,
+                uint16_t *__restrict__ mixed16_lo) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
@@ -170,17 +190,23 @@ gr_mix_r_kernel(const float *__restrict__ R, const float *__restrict__ rs,
     }
     s /= (float) HC;
     mixed[i] = s;
-    if (mixed16) mixed16[i] = bf(s);
+    if (mixed16) {
+        const uint16_t h = bf(s);
+        mixed16[i] = h;
+        if (mixed16_lo) mixed16_lo[i] = bf_lo(s, h);
+    }
     if (mixed_h) mixed_h[i] = hf(s);
 }
 // F-2: gr_write_kernel for one row (t, c), then gr_norm_rs_kernel's reduction over it with the next half's norm
 // weights - the same thread-to-element mapping (256 threads, stride 256) and block_sum, so rs and the BF16 image are
 // the same bits, and R is not read back
 constexpr int GRW_PER = (N + 255) / 256;
-__dpct_inline__ void gr_write_norm_rs_kernel(
-    float *__restrict__ R, const float *__restrict__ bo,
-    const float *__restrict__ inj, int64_t inj_ld, const float *__restrict__ w,
-    float eps, float *__restrict__ rs_out, uint16_t *__restrict__ xn16) {
+__dpct_inline__ void
+gr_write_norm_rs_kernel(float *__restrict__ R, const float *__restrict__ bo,
+                        const float *__restrict__ inj, int64_t inj_ld,
+                        const float *__restrict__ w, float eps,
+                        float *__restrict__ rs_out, uint16_t *__restrict__ xn16,
+                        uint16_t *__restrict__ xn16_lo) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     sycl::ext::oneapi::this_work_item::get_work_group<3>());
@@ -203,24 +229,33 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     if (item_ct1.get_local_id(2) == 0) rs_out[row] = rs;
     k = 0;
 #pragma unroll
-    for (int d = item_ct1.get_local_id(2); d < N; d += 256, ++k)
-        xn16[row * N + d] = bf(v[k] * rs * w[c * N + d]);
+    for (int d = item_ct1.get_local_id(2); d < N; d += 256, ++k) {
+        const float x = v[k] * rs * w[c * N + d];
+        const uint16_t h = bf(x);
+        xn16[row * N + d] = h;
+        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(x, h);
+    }
 }
 __dpct_inline__ void gr_silu_kernel(const float *__restrict__ lo,
-                                    uint16_t *__restrict__ lo16, int64_t n) {
+                                    uint16_t *__restrict__ lo16,
+                                    uint16_t *__restrict__ lo16_lo, int64_t n) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
         item_ct1.get_local_id(2);
     if (i >= n) return;
     const float x = lo[i] / (float) HC;
-    lo16[i] = bf(x / (1.0f + sycl::native::exp(-x)));
+    const float v = x / (1.0f + sycl::native::exp(-x));
+    const uint16_t h = bf(v);
+    lo16[i] = h;
+    if (lo16_lo) lo16_lo[i] = bf_lo(v, h);
 }
 __dpct_inline__ void gr_mix_kernel(const float *__restrict__ xn,
                                    const float *__restrict__ g,
                                    float *__restrict__ mixed,
                                    uint16_t *__restrict__ mixed16, int64_t T,
-                                   uint16_t *__restrict__ mixed_h) {
+                                   uint16_t *__restrict__ mixed_h,
+                                   uint16_t *__restrict__ mixed16_lo) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
@@ -235,7 +270,11 @@ __dpct_inline__ void gr_mix_kernel(const float *__restrict__ xn,
     }
     s /= (float) HC;
     mixed[i] = s;
-    if (mixed16) mixed16[i] = bf(s);
+    if (mixed16) {
+        const uint16_t h = bf(s);
+        mixed16[i] = h;
+        if (mixed16_lo) mixed16_lo[i] = bf_lo(s, h);
+    }
     if (mixed_h) mixed_h[i] = hf(s);
 }
 __dpct_inline__ void gr_write_kernel(float *__restrict__ R,
@@ -870,7 +909,7 @@ __dpct_inline__ void swiglu_il_kernel(const float *__restrict__ gu,
     if (i >= n * 640) return;
     const int64_t r = i / 640, k = i % 640;
     const float g = gu[r * 1280 + 2 * k], u = gu[r * 1280 + 2 * k + 1];
-    h16[i] = hf(g / (1.0f + sycl::native::exp(-g)) * u);
+    h16[i] = hf_sat(g / (1.0f + sycl::native::exp(-g)) * u);
 }
 __dpct_inline__ void swiglu_pair_kernel(const float *__restrict__ g,
                                         const float *__restrict__ u,
@@ -881,7 +920,7 @@ __dpct_inline__ void swiglu_pair_kernel(const float *__restrict__ g,
         item_ct1.get_local_id(2);
     if (i >= n * 640) return;
     const float a = g[i];
-    h16[i] = hf(a / (1.0f + sycl::native::exp(-a)) * u[i]);
+    h16[i] = hf_sat(a / (1.0f + sycl::native::exp(-a)) * u[i]);
 }
 __dpct_inline__ void gather_rows16_kernel(const uint16_t *__restrict__ x,
                                           const int32_t *__restrict__ src,
@@ -940,23 +979,29 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
     for (int64_t c = item_ct1.get_local_id(2); c < cols;
          c += item_ct1.get_local_range(2)) r[c] = s * r[c] * w[c];
 }
-__dpct_inline__ void rope_kernel(float *__restrict__ x, int64_t heads,
-                                 int64_t dim, int64_t ld, int64_t pos0,
-                                 float theta_scale, float freq_scale,
-                                 float corr_low, float corr_high,
-                                 float ext_factor, float mscale,
-                                 const int32_t *__restrict__ mtab) {
+// TAB (#280, STRATA_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
+// no table applies - the default - so the default kernel is 0.1.31's code exactly (the table read is not in it;
+// with it merely skipped at run time, the compiled default path changed its results).
+template <bool TAB>
+__dpct_inline__ void
+rope_kernel(float *__restrict__ x, int64_t heads, int64_t dim, int64_t ld,
+            int64_t pos0, float theta_scale, float freq_scale, float corr_low,
+            float corr_high, float ext_factor, float mscale,
+            const int32_t *__restrict__ mtab, strata::kernels::RopeTab rt) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int64_t row = item_ct1.get_group(2); // t * heads + h
     const int pair = item_ct1.get_local_id(2); // 0..31
     const int64_t t = row / heads, h = row % heads;
     float* p = x + t * ld + h * dim;
-    const float theta_extrap =
-        (float)strata::kernels::mrope_pos(mtab, (int)(pos0 + t), pair) *
-        dpct::pow(theta_scale, (float)pair);
     float c, s;
-    strata::kernels::rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale,
-                                       pair, c, s);
+    if (!(TAB && strata::kernels::rope_tab_cs(rt, strata::kernels::mrope_pos(mtab, (int) (pos0 + t), pair), pair, c,
+                                              s))) {
+        const float theta_extrap =
+            (float)strata::kernels::mrope_pos(mtab, (int)(pos0 + t), pair) *
+            dpct::pow(theta_scale, (float)pair);
+        strata::kernels::rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale,
+                                           pair, c, s);
+    }
     const float a = p[pair], b = p[pair + 32];
     p[pair] = a * c - b * s;
     p[pair + 32] = a * s + b * c;
@@ -1085,15 +1130,18 @@ __dpct_inline__ void round_f16_kernel(const float *__restrict__ x,
                    .convert<float, sycl::rounding_mode::automatic>()[0];
 }
 __dpct_inline__ void to_bf16_kernel(const float *__restrict__ x,
-                                    uint16_t *__restrict__ y, int64_t n) {
+                                    uint16_t *__restrict__ y,
+                                    uint16_t *__restrict__ ylo, int64_t n) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-#pragma unroll
     for (int64_t i =
              (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
              item_ct1.get_local_id(2);
          i < n; i += (int64_t)item_ct1.get_group_range(2) *
-                     item_ct1.get_local_range(2))
-        y[i] = bf(x[i]);
+                     item_ct1.get_local_range(2)) {
+        const uint16_t h = bf(x[i]);
+        y[i] = h;
+        if (ylo) ylo[i] = bf_lo(x[i], h);
+    }
 }
 
 }  // namespace
@@ -1173,7 +1221,7 @@ void round_f16(const float* x, float* y, int64_t n, void* stream) {
     }
     check("round_f16");
 }
-void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream) {
+void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo) {
     if (n <= 0) return;
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
@@ -1188,13 +1236,14 @@ void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream) {
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
-                    to_bf16_kernel(x, y, n);
+                    to_bf16_kernel(x, y, ylo, n);
                 });
     }
     check("to_bf16");
 }
 
-void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream) {
+void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream,
+             uint16_t* xn16_lo) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1207,12 +1256,13 @@ void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t
                 exp_props,
                 [=](sycl::nd_item<3> item_ct1)
                     [[sycl::reqd_sub_group_size(32)]] {
-                        gr_norm_kernel(R, w_norm, eps, xn, xn16);
+                        gr_norm_kernel(R, w_norm, eps, xn, xn16, xn16_lo);
                     });
     }
     check("gr_norm");
 }
-void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream) {
+void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream,
+                uint16_t* xn16_lo) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1225,13 +1275,13 @@ void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint1
                 exp_props,
                 [=](sycl::nd_item<3> item_ct1)
                     [[sycl::reqd_sub_group_size(32)]] {
-                        gr_norm_rs_kernel(R, w_norm, eps, rs, xn16);
+                        gr_norm_rs_kernel(R, w_norm, eps, rs, xn16, xn16_lo);
                     });
     }
     check("gr_norm_rs");
 }
 void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
-              int64_t T, void* stream, uint16_t* mixed_h) {
+              int64_t T, void* stream, uint16_t* mixed_h, uint16_t* mixed16_lo) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1243,13 +1293,13 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
                                   sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
                     gr_mix_r_kernel(R, rs, w_norm, gated, mixed, mixed16, T,
-                                    mixed_h);
+                                    mixed_h, mixed16_lo);
                 });
     }
     check("gr_mix_r");
 }
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
-                      float* rs, uint16_t* xn16, int64_t T, void* stream) {
+                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1264,33 +1314,33 @@ void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_l
                 [=](sycl::nd_item<3> item_ct1)
                     [[sycl::reqd_sub_group_size(32)]] {
                         gr_write_norm_rs_kernel(R, bo, inj, inj_ld, w_norm_next,
-                                                eps, rs, xn16);
+                                                eps, rs, xn16, xn16_lo);
                     });
     }
     check("gr_write_norm_rs");
 }
-void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream) {
+void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16_lo) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
             ->submit([&](sycl::handler &cgh) {
-                auto T_LR_ct2 = T * LR;
+                auto T_LR_ct3 = T * LR;
 
                 cgh.parallel_for<dpct_kernel_name<class gr_silu_kernel_f26d34>>(
                     sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * LR)) *
                                           sycl::range(1, 1, 256),
                                       sycl::range(1, 1, 256)),
                     exp_props, [=](sycl::nd_item<3> item_ct1) {
-                        gr_silu_kernel(lo, lo16, T_LR_ct2);
+                        gr_silu_kernel(lo, lo16, lo16_lo, T_LR_ct3);
                     });
             });
     }
     check("gr_silu");
 }
 void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16, int64_t T, void* stream,
-            uint16_t* mixed_h) {
+            uint16_t* mixed_h, uint16_t* mixed16_lo) {
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1301,7 +1351,8 @@ void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
-                    gr_mix_kernel(xn, gated, mixed, mixed16, T, mixed_h);
+                    gr_mix_kernel(xn, gated, mixed, mixed16, T, mixed_h,
+                                  mixed16_lo);
                 });
     }
     check("gr_mix");
@@ -1692,6 +1743,8 @@ void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t p
     }
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / 64.0f);
     const strata::kernels::RopeKernelArgs k = scaling.kernel_args(64);   // none: the identity constants
+    const strata::kernels::RopeTab rt = strata::kernels::rope_table_for(scaling);
+    if (rt.cos != nullptr)
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
@@ -1701,15 +1754,37 @@ void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t p
                 auto strata_kernels_mrope_table_ct11 =
                     strata::kernels::mrope_table();
 
-                cgh.parallel_for<dpct_kernel_name<class rope_kernel_4d58b9>>(
+                cgh.parallel_for<dpct_kernel_name<class rope_kernel_4d58b9,
+                                                  dpct_kernel_scalar<true>>>(
                     sycl::nd_range<3>(sycl::range(1, 1, (unsigned)(T * heads)) *
                                           sycl::range(1, 1, 32),
                                       sycl::range(1, 1, 32)),
                     exp_props, [=](sycl::nd_item<3> item_ct1) {
-                        rope_kernel(x, heads, dim, ld, pos0, theta_scale,
-                                    k.freq_scale, k.corr_low, k.corr_high,
-                                    k.ext_factor, k.attn_factor,
-                                    strata_kernels_mrope_table_ct11);
+                        rope_kernel<true>(x, heads, dim, ld, pos0, theta_scale,
+                                          k.freq_scale, k.corr_low, k.corr_high,
+                                          k.ext_factor, k.attn_factor,
+                                          strata_kernels_mrope_table_ct11, rt);
+                    });
+            });
+    } else {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->submit([&](sycl::handler &cgh) {
+                auto strata_kernels_mrope_table_ct11 =
+                    strata::kernels::mrope_table();
+
+                cgh.parallel_for<dpct_kernel_name<class rope_kernel_4d58b9,
+                                                  dpct_kernel_scalar<false>>>(
+                    sycl::nd_range<3>(sycl::range(1, 1, (unsigned)(T * heads)) *
+                                          sycl::range(1, 1, 32),
+                                      sycl::range(1, 1, 32)),
+                    exp_props, [=](sycl::nd_item<3> item_ct1) {
+                        rope_kernel<false>(
+                            x, heads, dim, ld, pos0, theta_scale, k.freq_scale,
+                            k.corr_low, k.corr_high, k.ext_factor,
+                            k.attn_factor, strata_kernels_mrope_table_ct11, rt);
                     });
             });
     }

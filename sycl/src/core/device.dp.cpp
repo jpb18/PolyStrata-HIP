@@ -109,6 +109,33 @@ std::string gpu_arch_problem(int ordinal) {
 #endif
 }
 
+std::string device_code_error() try {
+#if defined(STRATA_USE_HIP)
+    return "";   // gpu_arch_problem() checks the HIP architectures against STRATA_HIP_ARCHS, before this point
+#else
+    // every .cu of the engine is compiled for the same CMAKE_CUDA_ARCHITECTURES, so this kernel stands for all
+    dpct::kernel_function_info a{};
+    const dpct::err0 e = DPCT_CHECK_ERROR(
+        dpct::get_kernel_function_info(&a, (const void *)poison_kernel));
+    if (e == 0) return {};
+    /*
+    DPCT1026: The call to cudaGetLastError was removed because this
+    functionality is redundant in SYCL.
+    */
+    /*
+    DPCT1009: SYCL reports errors using exceptions and does not use error
+    codes. Please replace the "get_error_string_dummy(...)" with a real
+    error-handling function.
+    */
+    return dpct::get_error_string_dummy(e);
+#endif
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
 DeviceInfo device_info(int ordinal) {
     int count = 0;
     check(DPCT_CHECK_ERROR(count = dpct::device_count()), "cudaGetDeviceCount");
@@ -245,8 +272,8 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
                 });
             }
             /*
-            DPCT1010: SYCL uses exceptions to report errors and does not
-            use the error codes. The cudaGetLastError function call was replaced
+            DPCT1010: SYCL uses exceptions to report errors and does not use
+            the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
             check(0, "poison_kernel");

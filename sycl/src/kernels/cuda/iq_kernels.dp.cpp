@@ -1816,7 +1816,17 @@ inline void dq_q8_0(const void *vx, int64_t ibs, dst_t *yy, int tid) {
         y[j] = cvt<dst_t>((float)x[ib].qs[8 * il + j] * d);
 }
 
-// Every type below must also be in is_iq(): the host entry points refuse the others, so the default is unreachable.
+// BF16 (the token embedding as the checkpoint ships it, tools/embd_bf16_pack.py): 8 values per thread.
+template <typename dst_t>
+inline void dq_bf16(const void *vx, int64_t ibs, dst_t *yy, int tid) {
+    const uint16_t* x = (const uint16_t*) vx + ibs * 256 + tid * 8;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) yy[tid * 8 + j] =
+        cvt<dst_t>(sycl::bit_cast<float>((uint32_t)x[j] << 16));
+}
+
+// Every type below must also be in is_iq() (BF16: embed_type_supported): the host entry points refuse the others,
+// so the default is unreachable.
 template <typename dst_t>
 __dpct_inline__ void
 dq_dispatch(int ty, const void *vx, int64_t ibs, dst_t *y, int tid) {
@@ -1838,6 +1848,7 @@ dq_dispatch(int ty, const void *vx, int64_t ibs, dst_t *y, int tid) {
         case 13: dq_q5_k(vx, ibs, y, tid); break;
         case 7: dq_q5_1(vx, ibs, y, tid); break;
         case 8: dq_q8_0(vx, ibs, y, tid); break;
+        case 30: dq_bf16(vx, ibs, y, tid); break;
         default: break;
     }
 }
@@ -2170,6 +2181,7 @@ void iq_set_old_kernels(bool old) { g_old_kernels = old; }
 bool iq_old_kernels() { return g_old_kernels; }
 
 bool iq_supported(int t) noexcept { return is_iq(t); }
+bool embed_type_supported(int t) noexcept { return is_iq(t) || t == 30; }
 
 size_t iq_row_bytes(int t, int64_t n) noexcept {
     switch (t) {
@@ -2187,6 +2199,7 @@ size_t iq_row_bytes(int t, int64_t n) noexcept {
         case 13: return (size_t) (n / 256) * sizeof(block_q5_K);
         case 7: return (size_t) (n / 32) * sizeof(block_q5_1);
         case 8: return (size_t) (n / 32) * sizeof(block_q8_0);
+        case 30: return (size_t) n * 2;   // BF16: the token embedding only (iq_embed_rows, iq_dequant_f32)
         default: return 0;
     }
 }
@@ -2270,7 +2283,7 @@ __dpct_inline__ void embed_rows_kernel(
 void iq_embed_rows(int t, const void* table, size_t row_bytes, const int32_t* tokens, int64_t n_tok, int64_t n_embd,
                    float* out, void* stream) {
     if (n_tok <= 0) return;
-    if (n_embd % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_embed_rows: bad arguments\n"); std::exit(1); }
+    if (n_embd % 256 != 0 || !embed_type_supported(t)) { std::fprintf(stderr, "iq_embed_rows: bad arguments\n"); std::exit(1); }
     {
 
         auto exp_props = sycl::ext::oneapi::experimental::properties{
@@ -2299,7 +2312,7 @@ void iq_embed_rows(int t, const void* table, size_t row_bytes, const int32_t* to
 }
 
 void iq_dequant_f32(int t, const void* src, int64_t n, float* dst, void* stream) {
-    if (n % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_f32: bad arguments\n"); std::exit(1); }
+    if (n % 256 != 0 || !embed_type_supported(t)) { std::fprintf(stderr, "iq_dequant_f32: bad arguments\n"); std::exit(1); }
     {
 
         auto exp_props = sycl::ext::oneapi::experimental::properties{

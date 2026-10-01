@@ -44,6 +44,7 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
+#include "strata/core/emulate.hpp"
 #include "strata/kernels/qsa.hpp"
 
 #include "strata/kernels/f16_bits.hpp"
@@ -1019,6 +1020,7 @@ void qsa_attend_step(const float *q, const uint16_t *k_scratch,
         the code.
         */
         max_shared = dpct::get_device(dev).get_local_mem_size();
+        max_shared = strata::smem_optin_of(max_shared);
         if ((int) smem > max_shared) {
             std::fprintf(stderr, "qsa: qsa_attend: max_ids %lld needs %zu B of shared, over the %d B limit\n",
                          (long long) max_ids, smem, max_shared);

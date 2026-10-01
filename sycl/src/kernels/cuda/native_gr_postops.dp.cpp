@@ -74,25 +74,25 @@ pre_gated(const float *__restrict__ xn, float *__restrict__ gate,
         const std::size_t i = std::size_t(c) * n_embd + d;
         const float x = xn[i], w = sigmoid(gate[i]);
         /*
-        DPCT1013: The rounding mode could not be specified and the
-        generated code may have different accuracy than the original code.
-        Verify the correctness. SYCL math built-in function rounding mode is
-        aligned with OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the generated
+        code may have different accuracy than the original code. Verify the
+        correctness. SYCL math built-in function rounding mode is aligned with
+        OpenCL C 1.2 standard.
         */
         const float product = x * w;
         gate[i] = product;
         /*
-        DPCT1013: The rounding mode could not be specified and the
-        generated code may have different accuracy than the original code.
-        Verify the correctness. SYCL math built-in function rounding mode is
-        aligned with OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the generated
+        code may have different accuracy than the original code. Verify the
+        correctness. SYCL math built-in function rounding mode is aligned with
+        OpenCL C 1.2 standard.
         */
         if constexpr (Fused) sum = sycl::fma(x, w, sum);
         /*
-        DPCT1013: The rounding mode could not be specified and the
-        generated code may have different accuracy than the original code.
-        Verify the correctness. SYCL math built-in function rounding mode is
-        aligned with OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the generated
+        code may have different accuracy than the original code. Verify the
+        correctness. SYCL math built-in function rounding mode is aligned with
+        OpenCL C 1.2 standard.
         */
         else sum = c == 0 ? product : sum + product;
     }

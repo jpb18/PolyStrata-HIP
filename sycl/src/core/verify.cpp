@@ -220,6 +220,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
     device_ = dpct::get_current_device_id(); // a layer split's stage on another
                                              // GPU: its streams, graphs and
                                              // buffers live there
+    strata::kernels::fused_gr_check();   // once per card: which bitwise-equal hyper-connection read runs there
     wt_ = &wt;
     g_ = &g;
     ss_ = &ss;
@@ -643,7 +644,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 native_mmvq(wv->native_type, wv->native_data, xq_, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD), n, cs);
                 if (qb) norm_rope(kcur_ + tb * NKV * HD, wkn, (int) (n * NKV), (int) HD, pos_k + tb * NKV);
                 else for (int t = tb; t < te; ++t) norm_rope(kcur_ + t * NKV * HD, wkn, (int) NKV, (int) HD, pos_ + t * NH);
-                if (st.kv_q4) {   // Q4_0 KV (kv_q4.hpp): K and V rotated before they are stored
+                if (st.kv_rot) {   // K and V rotated before they are stored (kv_q4.hpp)
                     fwht256_inplace_cuda(kcur_ + tb * NKV * HD, (int64_t) n * NKV, cs);
                     fwht256_inplace_cuda(vcur_ + tb * NKV * HD, (int64_t) n * NKV, cs);
                 } else if (st.kv_hybrid) {   // K8V4: only V is rotated
@@ -693,6 +694,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                         return false;
                     }
                     norm_rope(qcur_ + tb * NH * HD, wqn, (int) (n * NH), (int) HD, pos_ + tb * NH);
+                    if (st.kv_rot) fwht256_inplace_cuda(qcur_ + tb * NH * HD, (int64_t) n * NH, cs);   // <Hq, Hk> = <q, k>
                     bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wiq->data, qidx_ + tb * IQ * ID, IQ * ID,
                                               N, IQ * ID, n, cs);
                     norm_rope(qidx_ + tb * IQ * ID, wiqn, (int) (n * IQ), (int) ID, pos_i + tb * IQ);
@@ -714,7 +716,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                         return false;
                     }
                     norm_rope(qc, wqn, (int) NH, (int) HD, pos_ + t * NH);
-                    if (st.kv_q4) fwht256_inplace_cuda(qc, NH, cs);   // <Hq, Hk> = <q, k>
+                    if (st.kv_rot) fwht256_inplace_cuda(qc, NH, cs);   // <Hq, Hk> = <q, k>
                 }
                 for (int t = tb; t < te; ++t) {
                     float* qx = qidx_ + t * IQ * ID;
@@ -735,7 +737,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 qsa_decode_attn_batch(qcur_ + tb * NH * HD, pools, sel_ + (size_t) tb * cap_, step_ + tb * kStepCount, cap_,
                                       s, attn_scratch_ + (size_t) tb * attn_scratch_floats_, attn_ + tb * NH * HD, n, cs);
                 stamp(l, 13, grp);
-                if (st.kv_q4 || st.kv_hybrid) fwht256_inplace_cuda(attn_ + tb * NH * HD, (int64_t) n * NH, cs);   // back: H^-1 = H
+                if (st.kv_rot || st.kv_hybrid) fwht256_inplace_cuda(attn_ + tb * NH * HD, (int64_t) n * NH, cs);   // back: H^-1 = H
                 if (qb) native_qsa_gate_apply(attn_ + tb * NH * HD, qfull_ + tb * NH * 2 * HD, attn32_ + tb * NH * HD,
                                               (int) (n * NH), (int) HD, cs);
                 else
@@ -956,7 +958,7 @@ std::string Verifier::profile_report() {
                                           "k/v+norm-rope", "kv+idx append", "q+q-idx", "scores+topk", "kv-resolve",
                                           "attention", "gate", "", "out-proj", "hc-read1+router", "shared+quant",
                                           "waitA", "VRAM hits", "waitB", "PCIe grp", "waitCPU", "copy+combine",
-                                          "(gap)", "head", "  hc0 norm", "  hc0 down", "  hc0 up", "", ""};
+                                          "(gap)", "head", "  hc0 norm", "  hc0 down", "  hc0 up", "", "", ""};
     std::string out;
     char b[80];
     double total = 0;
@@ -1397,6 +1399,13 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
                 .wait();
         const int64_t L = g.n_layers;
         auto at = [&](int64_t l, int i) { return prof_h_[(size_t) (l * kProfPer + i)]; };
+        // D8: the derived columns below read stamps the hc-read kernels write themselves or the next
+        // layer's first.  A slot no kernel stamped is 0 and its unsigned difference wrapped to ~1e19 ns -
+        // which is why (gap)/head/hc0 printed ~1e14 ms per window.  A missing or out-of-order stamp now
+        // contributes nothing.
+        const auto gap = [](unsigned long long to, unsigned long long from) {
+            return (from != 0 && to != 0 && to >= from) ? (double) (to - from) : 0.0;
+        };
         for (int64_t l = 0; l < L; ++l) {
             const int kind = is_qsa_layer(g, l) ? 1 : 0;
             unsigned long long prev = at(l, 0);
@@ -1406,13 +1415,16 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
                 prof_sum_[kind][i] += (double) (x - prev);
                 prev = x;
             }
-            if (l + 1 < L) prof_sum_[kind][25] += (double) (at(l + 1, 0) - at(l, 24));
-            prof_sum_[kind][27] += (double) (at(l, 27) - at(l, 0));    // hc-read0: norm
-            prof_sum_[kind][28] += (double) (at(l, 28) - at(l, 27));   //           down
-            prof_sum_[kind][29] += (double) (at(l, 1) - at(l, 28));    //           up
-            prof_sum_[kind][1] -= (double) (at(l, 1) - at(l, 0));      // (hc-read0 shown split)
+            if (l + 1 < L) prof_sum_[kind][25] += gap(at(l + 1, 0), at(l, 24));
+            const double dn = gap(at(l, 27), at(l, 0)), dd = gap(at(l, 28), at(l, 27)), du = gap(at(l, 1), at(l, 28));
+            if (dn > 0 && dd > 0 && du > 0) {   // the split exists: show it split, not twice
+                prof_sum_[kind][27] += dn;      // hc-read0: norm
+                prof_sum_[kind][28] += dd;      //           down
+                prof_sum_[kind][29] += du;      //           up (through both halves, as before)
+                prof_sum_[kind][1] -= gap(at(l, 1), at(l, 0));   // (hc-read0 shown split)
+            }
         }
-        prof_sum_[0][26] += (double) (at(L, 1) - at(L, 0));
+        prof_sum_[0][26] += gap(at(L, 1), at(L, 0));
         ++prof_windows_;
         if (std::getenv("STRATA_VERIFY_EAGER") != nullptr)   // SYCL port: the stage table per window, host-clocked
             std::fprintf(stderr, "verify stages T=%d (ms/window):%s\n", T, profile_report().c_str());
@@ -1562,9 +1574,24 @@ bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int3
         const double extra = has_extra ? (double) row[extra_id] - lse : NAN;
         const double without = has_extra && tgt != extra_id && sum_without > 0.0
                                    ? (double) row[tgt] - (maxv + std::log(sum_without)) : NAN;
-        std::fprintf(out, "%lld\t%d\t%.9f\t%lld\t%.9f\t%d\t%.9f\t%.9f\n", (long long) (pos0 + t), (int) tgt,
+        std::fprintf(out, "%lld\t%d\t%.9f\t%lld\t%.9f\t%d\t%.9f\t%.9f", (long long) (pos0 + t), (int) tgt,
                      (double) row[tgt] - lse, (long long) top, maxv - lse, (int) (top == (int64_t) tgt), extra,
                      without);
+        // STRATA_LOGPOS_TOPK=K: the K most likely tokens and their log-probabilities too (`id:logprob`), for a
+        // top-k comparison with another engine on the same tokens (docs/UNSLOTH_Q4.md)
+        static const int topk = [] {
+            const char* v = std::getenv("STRATA_LOGPOS_TOPK");
+            return v != nullptr ? std::max(0, std::min(256, std::atoi(v))) : 0;
+        }();
+        if (topk > 0) {
+            std::vector<int32_t> order((size_t) n_vocab_);
+            for (int64_t v = 0; v < n_vocab_; ++v) order[(size_t) v] = (int32_t) v;
+            std::partial_sort(order.begin(), order.begin() + topk, order.end(),
+                              [&](int32_t a, int32_t b) { return row[a] > row[b]; });
+            for (int j = 0; j < topk; ++j)
+                std::fprintf(out, "\t%d:%.6f", order[(size_t) j], (double) row[order[(size_t) j]] - lse);
+        }
+        std::fprintf(out, "\n");
     }
     std::fflush(out);
     return true;
@@ -1572,6 +1599,12 @@ bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int3
     err = std::string("window_logprobs: ") + e.what();
     return false;
 }
+
+// Upstream's set_commit_async/wait_commit (0.1.32) on the port's own deferred commit: commit(n, err, false) leaves
+// the graph running and commit_finish() collects it (it also advances ss.ple_prev, so a pending commit must be
+// finished before the next window). The flag is kept for the API; the port decides per call site (generate.cpp).
+namespace { bool g_commit_async = false; }
+void Verifier::set_commit_async(bool on) { g_commit_async = on && std::getenv("STRATA_COMMIT_SYNC") == nullptr; }
 
 bool Verifier::commit(int n_keep, std::string &err, bool wait) try {
     const OnDevice on_device(device_);
@@ -1644,6 +1677,22 @@ catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
             << ", line:" << __LINE__ << std::endl;
   std::exit(1);
+}
+
+bool Verifier::wait_commit(std::string& err) {
+    if (!commit_finish(err)) return false;
+    return next_ == nullptr || next_->wait_commit(err);
+}
+
+bool Verifier::copy_logits(int t, float* host) const {
+    if (next_ != nullptr) return next_->copy_logits(t, host);   // a layer split: the head is on the last stage
+    if (head_logits_ == nullptr || host == nullptr || t < 0 || n_vocab_ <= 0) return false;
+    try {
+        cs_->memcpy(host, head_logits_ + (size_t) t * (size_t) n_vocab_, (size_t) n_vocab_ * sizeof(float)).wait();
+    } catch (sycl::exception const&) {
+        return false;
+    }
+    return true;
 }
 
 }  // namespace strata::core
