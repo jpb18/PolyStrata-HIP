@@ -146,8 +146,15 @@ low-RAM mode; `STRATA_RESIDENT_PIN=0` keeps the budget locked only (the CPU then
 | 40 GiB | **7-8.5 tok/s** (6 runs: 6.7-8.6, mean 7.9) | 1.1 GB read from the SSD per verify round, ~0.33 GB per token |
 
 - The first answer comes about 60 s after the engine starts (mostly loading: the RAM budget is copied from the GGUF
-  files at start). A 30-token prompt then took 5-6 s. Longer prompts have not been measured and will be slow: the
-  prompt path dequantizes these formats to FP16 (fast prompt kernels for Q4_K/Q5_K/Q5_1 are future work).
+  files at start). A 30-token prompt then took 5-6 s.
+- Long prompts (engine 0.1.32): a 16K prompt is read at **160 tokens/s** (15,873 tokens in 99 s; 0.1.31: 57 tokens/s,
+  273-282 s). Reading a prompt streams every expert once per 4K chunk, and the third of them outside the RAM budget
+  come from the SSD (~35 GB per chunk), so the prompt path now reads them with 32 threads and up to 128 blobs in
+  flight when the experts are read from the GGUF in place (`STRATA_STAGER_THREADS` / `STRATA_STAGER_RING` override
+  it; 4 and 16 before, still the default for every other model). The experts' products go through llama.cpp's MMQ
+  kernels for Q4_K / Q5_K / Q5_1 / Q8_0 (as for the other models' formats; `STRATA_PREFILL_MMQ=0` for FP16): 4x less
+  GPU time for them, but on this PC the prompt waits for the SSD either way (the same 29 s per 4K chunk with or
+  without). Between the chunks, the 28.8 GB PLE table's rows take ~5 s per chunk.
 - The speed varies from run to run (6.7-8.6 tok/s at 40 GiB for the same prompt), with what the OS file cache holds.
 - For comparison, IQ3_S (all its experts in RAM) writes ~53 tok/s on the same PC ([the speed tables](DETAILS.md#speed-measured)).
 - Where the time goes (`--stats` on the command line): at 40 GiB about 550-750 ms of each verify round (3.5 tokens) is
@@ -183,7 +190,9 @@ code answer's 400), which is why its agreement is lower. It is not the long cont
 positions after only 512 tokens agree a little less (89.2%), and the perplexities match within 3% in every set. For
 scale, Strata's own greedy run and its teacher-forced rerun of the continuation pick different tokens at 6% of the
 positions (93.8% the same: other window sizes, other experts in VRAM), the same kind of near-tie flips. The 16K
-prompts were read by Strata's batched prompt path (15,872 tokens), the rest through the verify windows.
+prompts were read by Strata's batched prompt path (15,872 tokens), the rest through the verify windows. These numbers
+are engine 0.1.31's prompt path (FP16 products); with 0.1.32's MMQ prompt path the continuation after the 16K prompt
+agrees at 92.2% (KL 0.029, three runs, identical).
 
 To repeat it: Strata's side is `STRATA_LOGPOS=<file>` with `STRATA_LOGPOS_TOPK=20` (engine 0.1.32) on a serve
 engine with `--short-read` covering the positions to compare; llama.cpp's side was a short program over
@@ -196,7 +205,7 @@ engine with `--short-read` covering the positions to compare; llama.cpp's side w
 | `STRATA_LOOKAHEAD=0` | Turns off the routing-aware prefetch (on by default in this mode): while the CPU works on a layer, a thread applies the next layer's router to this layer's input and asks the OS to read the predicted experts' pages. Pages only, the answers are the same. About half of the SSD reads were predicted; mean +14% (6.9 -> 7.9 tok/s). `STRATA_LOOKAHEAD_K` sets the experts per token (default 10). |
 | `STRATA_KQ256=1` | Multi-token AVX2 kernels for the Q4_K / Q5_1 / Q8_0 experts. Bit-exact with ggml's, but measured no faster, so off. |
 | `STRATA_PARTIAL_PIN=1` | Registers the hottest part of the RAM budget (up to `STRATA_PARTIAL_PIN_GIB`, default 24) with the GPU driver, so the GPU computes a share of the misses over PCIe (`--pcie-frac`). Measured no faster on this PC, and it changes the numerics of those experts (GPU kernels instead of the CPU's), so off. |
-| `STRATA_FETCH_THREADS=N` | Threads that read the experts from the GGUF (default 8; 16 was no faster). |
+| `STRATA_FETCH_THREADS=N` | Threads that read the experts from the GGUF while it answers (default 8; 16 was no faster). The prompt path has its own: `STRATA_STAGER_THREADS` (default 32 here) and `STRATA_STAGER_RING` (128). |
 
 ## Scope and validation
 
@@ -204,7 +213,8 @@ engine with `--short-read` covering the positions to compare; llama.cpp's side w
   have kernels for; the engine checks every layer's formats at start and refuses an unsupported one by name.
 - Tests: the packer's synthetic 4-shard and conversion tests (`.venv/bin/python -m unittest discover -s tools -p
   test_iq_pack.py`); CTests `gguf_split_test`, `expert_layout_test`, `native_expert_parity_*` (the three real expert
-  format pairs against ggml-cpu, the Q5_1 min term, Q8_0 rows); the in-place mode against `experts.bin` on the Coder
+  format pairs against ggml-cpu, the Q5_1 min term, Q8_0 rows), `prefill_mmq_kquant_test` (the prompt path's MMQ
+  products for Q4_K / Q5_K / Q5_1 / Q8_0 against ggml's dequantized weights); the in-place mode against `experts.bin` on the Coder
   (identical tokens and logits).
 - Real runs: greedy answers to a coding prompt (correct) at every budget and setting above, identical across them;
   the same tokens as llama.cpp at 97.5-99% of the positions of short greedy answers and 90-91% after a 16K prompt,
