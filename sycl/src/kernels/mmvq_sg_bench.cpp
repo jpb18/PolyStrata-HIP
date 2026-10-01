@@ -10,14 +10,16 @@
 #include <vector>
 int main() {
     sycl::queue* s = &dpct::get_in_order_queue();
-    struct T { const char* name; int type, bytes; };   // ggml type, bytes per 256 weights
-    const T types[] = {{"q6_k", 14, 210}, {"q5_k", 13, 176}, {"q4_k", 12, 144}, {"iq4_xs", 23, 136}};
-    const int shapes[][2] = {{2560, 10240}, {2560, 12288}, {6144, 2560}, {2560, 640}};
+    struct T { const char* name; int type, bytes, elems; };   // ggml type, bytes per block of `elems` weights
+    const T types[] = {{"q6_k", 14, 210, 256}, {"q5_k", 13, 176, 256}, {"q4_k", 12, 144, 256}, {"iq4_xs", 23, 136, 256},
+                        {"q8_0", 8, 34, 32}, {"iq4_nl", 20, 18, 32}};
+    const int shapes[][2] = {{2560, 10240}, {2560, 12288}, {6144, 2560}, {2560, 640}, {640, 2560}, {2560, 2560}};
     const int cols[] = {2, 4, 6};
     for (const T& t : types)
         for (auto& sh : shapes) {
             const int n_in = sh[0], n_out = sh[1];
-            const size_t wbytes = (size_t) n_out * (n_in / 256) * t.bytes;
+            if (n_in % t.elems != 0) continue;   // 640 wide: the 32-element formats only
+            const size_t wbytes = (size_t) n_out * (n_in / t.elems) * t.bytes;
             std::vector<uint8_t> hw(wbytes);
             for (size_t i = 0; i < wbytes; ++i) hw[i] = (uint8_t) (i * 2654435761u >> 13) & 0x3b;   // keeps fp16 fields finite
             void* w = sycl::malloc_device(wbytes, *s);

@@ -1337,7 +1337,9 @@ __dpct_inline__ sycl::int4 load16_a2(const void* p) {
     const sycl::int4* q = reinterpret_cast<const sycl::int4*>(a & ~uintptr_t(15));
     const int k = int(a >> 2) & 3;          // dword offset within the first aligned chunk
     const bool half = (a & 2) != 0;          // and a 2-byte shift (the address is always 2-byte aligned)
-    const sycl::int4 lo = q[0], hi = q[1];
+    // the second chunk only when the address is unaligned: then it holds needed bytes, so (16-byte chunks never
+    // straddle a page) it cannot fault even at the very end of an allocation
+    const sycl::int4 lo = q[0], hi = (a & 15) ? q[1] : lo;
     const uint32_t d[8] = {(uint32_t) lo.x(), (uint32_t) lo.y(), (uint32_t) lo.z(), (uint32_t) lo.w(),
                            (uint32_t) hi.x(), (uint32_t) hi.y(), (uint32_t) hi.z(), (uint32_t) hi.w()};
     uint32_t w[5];
@@ -1393,8 +1395,15 @@ void native_mmvq_q6k_wide_kernel(const Q6KBlock* __restrict__ w, const Q81Block*
 #pragma unroll
         for (int j = 0; j < NCOLS; ++j) {
             const Q81Block* xb = x + std::size_t(j) * x_stride + kby + bq8_offset;
-            u0[j] = reinterpret_cast<const sycl::int4*>(xb[0].qs)[u_int4];
-            u1[j] = reinterpret_cast<const sycl::int4*>(xb[2].qs)[u_int4];
+            if constexpr (A2) {   // Q8_1 qs sits at offset 4 of a 36-byte block: 4-byte aligned, so four int loads
+                const int* p0 = reinterpret_cast<const int*>(xb[0].qs) + 4 * u_int4;
+                const int* p1 = reinterpret_cast<const int*>(xb[2].qs) + 4 * u_int4;
+                u0[j] = sycl::int4(p0[0], p0[1], p0[2], p0[3]);
+                u1[j] = sycl::int4(p1[0], p1[1], p1[2], p1[3]);
+            } else {
+                u0[j] = reinterpret_cast<const sycl::int4*>(xb[0].qs)[u_int4];
+                u1[j] = reinterpret_cast<const sycl::int4*>(xb[2].qs)[u_int4];
+            }
             ds0[j] = xb[0].ds[0]; ds1[j] = xb[2].ds[0];
         }
 #pragma unroll
@@ -1695,6 +1704,95 @@ bool try_wide(const void* weights, const void* x_q8_1, float* y, int n_in, int n
         case 6: launch_wide<F, 6>(weights, x_q8_1, y, n_in, n_out, s); return true;
         case 7: launch_wide<F, 7>(weights, x_q8_1, y, n_in, n_out, s); return true;
         default: launch_wide<F, 8>(weights, x_q8_1, y, n_in, n_out, s); return true;
+    }
+}
+
+// SYCL port: wide kernels for the 32-element formats Q8_0 (34-byte blocks) and IQ4_NL (18). Both are only 2-byte
+// aligned, so the weights come through load16_a2 (page-safe). Q8_0: 2 lanes per block (16 quants each), 16 blocks
+// per sub-group step; IQ4_NL: 1 lane per block (its 16 bytes = 32 nibbles), 32 blocks per step. One row per
+// sub-group. The multi/small kernels these replace measured 26 GB/s (IQ4_NL 640 -> 2560) to ~300 GB/s.
+struct Wide32Q8 {
+    using Block = Q80Block;
+    static constexpr int LPB = 2;
+    struct W { sycl::int4 q; float d; int half; };
+    static W load(const Block* b, int l) {
+        W r; r.half = l; r.q = load16_a2(b->qs + 16 * l); r.d = (float) b->d; return r;
+    }
+    static float apply(const W& r, const Q81Block* xb) {
+        return r.d * (float) xb->ds[0] * (float) dp4a4(r.q, ld_q8_16(xb, r.half), 0);
+    }
+};
+struct Wide32IQ4NL {
+    using Block = IQ4NLBlock;
+    static constexpr int LPB = 1;
+    struct W { sycl::int4 lo, hi; float d; };
+    static W load(const Block* b, int) {
+        W r;
+        const sycl::int4 q = load16_a2(b->qs);
+        const uint32_t v[4] = {(uint32_t) q.x(), (uint32_t) q.y(), (uint32_t) q.z(), (uint32_t) q.w()};
+        int lo[4], hi[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { lo[i] = (int) iq4_lut4(v[i] & 0x0f0f0f0f); hi[i] = (int) iq4_lut4((v[i] >> 4) & 0x0f0f0f0f); }
+        r.lo = sycl::int4(lo[0], lo[1], lo[2], lo[3]); r.hi = sycl::int4(hi[0], hi[1], hi[2], hi[3]);
+        r.d = (float) b->d;
+        return r;
+    }
+    static float apply(const W& r, const Q81Block* xb) {
+        return r.d * (float) xb->ds[0] * (float) dp4a4(r.hi, ld_q8_16(xb, 1), dp4a4(r.lo, ld_q8_16(xb, 0), 0));
+    }
+};
+template <typename F, int NCOLS>
+void native_mmvq_wide32_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
+                               float* __restrict__ y, int n_in, int n_out) {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int lane = int(item.get_local_id(2)), warp = int(item.get_local_id(1));
+    const int row = int(item.get_group(2)) * WARPS + warp;
+    if (row >= n_out) return;
+    constexpr int BPS = WARP / F::LPB;                  // blocks per sub-group step
+    const int blocks_per_row = n_in / 32;
+    const int l = lane % F::LPB, sub = lane / F::LPB;
+    const typename F::Block* wr = w + std::size_t(row) * blocks_per_row;
+    float acc[NCOLS] = {};
+    for (int kb = sub; kb < blocks_per_row; kb += BPS) {
+        const typename F::W wv = F::load(wr + kb, l);
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) acc[j] += F::apply(wv, x + std::size_t(j) * blocks_per_row + kb);
+    }
+    auto sg = item.get_sub_group();
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j) {
+        float v = acc[j];
+#pragma unroll
+        for (int o = WARP / 2; o > 0; o >>= 1) v += sycl::permute_group_by_xor(sg, v, o);
+        if (lane == 0) y[std::size_t(j) * n_out + row] = v;
+    }
+}
+template <typename F, int NCOLS>
+void launch_wide32(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, dpct::queue_ptr s) {
+    const auto* w = static_cast<const typename F::Block*>(weights);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
+    s->parallel_for<dpct_kernel_name<class native_mmvq_wide32, F, dpct_kernel_scalar<NCOLS>>>(
+        sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, WARPS, WARP), sycl::range(1, WARPS, WARP)),
+        [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { native_mmvq_wide32_kernel<F, NCOLS>(w, x, y, n_in, n_out); });
+}
+inline bool wide_32() {   // STRATA_MMVQ_WIDE_32=0: Q8_0/IQ4_NL through the small/multi kernels (the old path)
+    static const bool v = std::getenv("STRATA_MMVQ_WIDE_32") == nullptr || std::atoi(std::getenv("STRATA_MMVQ_WIDE_32")) != 0;
+    return v;
+}
+template <typename F>
+bool try_wide32(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
+    if (!wide_32() || ncols < 1 || ncols > 8 || n_in % 32 != 0) return false;
+    const auto s = strata::q_of(stream);
+    switch (ncols) {
+        case 1: launch_wide32<F, 1>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        case 2: launch_wide32<F, 2>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        case 3: launch_wide32<F, 3>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        case 4: launch_wide32<F, 4>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        case 5: launch_wide32<F, 5>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        case 6: launch_wide32<F, 6>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        case 7: launch_wide32<F, 7>(weights, x_q8_1, y, n_in, n_out, s); return true;
+        default: launch_wide32<F, 8>(weights, x_q8_1, y, n_in, n_out, s); return true;
     }
 }
 
@@ -2531,6 +2629,7 @@ void native_q5_0_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
+    if (try_wide32<Wide32Q8>(weights, x_q8_1, y, n_in, n_out, ncols, stream)) { launch_check(); return; }
     small_mmvq<Q80Block, 8>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }
 
@@ -2541,6 +2640,7 @@ void native_q8_0_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
+    if (try_wide32<Wide32IQ4NL>(weights, x_q8_1, y, n_in, n_out, ncols, stream)) { launch_check(); return; }
     small_mmvq<IQ4NLBlock, 4>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }
 
