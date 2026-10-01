@@ -1284,6 +1284,20 @@ def source_hash(parts) -> str:
     return h.hexdigest()[:16]
 
 
+def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
+    """The image encoder to use with a ready-made engine (`meta`: its BUILD.json).  The encoder can cover fewer cards
+    than the engine (0.1.30/0.1.31: no RTX 20 code, #331): such a card gets the CPU encoder - the same program - instead
+    of compiling one, which fails on most Windows PCs (no Visual Studio / CUDA toolkit); --build compiles it."""
+    if vision != "gpu":
+        return vision
+    va = [int(x) for x in meta.get("vision_archs", meta.get("archs", []))]
+    if va and int(gpu["arch"]) not in va and not (meta.get("ptx") and int(gpu["arch"]) > max(va)):
+        warn(f"the ready-made image encoder has no code for your GPU (sm_{gpu['arch']}): it runs on the CPU instead "
+             "(images take longer; setup --build compiles one for your GPU)")
+        return "cpu"
+    return vision
+
+
 def build_engine(gpu, vision, yes, llama) -> Path:
     """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
     engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes."""
@@ -2334,12 +2348,8 @@ def main() -> int:
         if vision != "none" and not (eng / VEXE).exists():
             warn("the ready-made engine has no image encoder: compiling it")
             eng = None
-        elif vision == "gpu":                          # the encoder can cover fewer cards than the engine (RTX 20)
-            m = json.loads((eng / "BUILD.json").read_text())
-            va = [int(x) for x in m.get("vision_archs", m.get("archs", []))]
-            if va and int(gpu["arch"]) not in va and not (m.get("ptx") and int(gpu["arch"]) > max(va)):
-                warn(f"the ready-made image encoder has no code for your GPU (sm_{gpu['arch']}): compiling it")
-                eng = None
+        else:
+            vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text()), gpu, vision)
     if eng is None:
         eng = build_engine_hip(gpu, llama) if hip else build_engine(gpu, vision, a.yes, llama)
     meta = json.loads((eng / "BUILD.json").read_text())
