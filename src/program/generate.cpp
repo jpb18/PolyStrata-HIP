@@ -3775,6 +3775,12 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode does not fit (%s); the experts the "
                                  "GPU does not hold are read from the model folder through the OS file cache "
                                  "(--mmap-experts), which is slower when the RAM cannot keep them\n", err.c_str());
+        } else if (o.resident_budget > 0) {
+            // #403: a RAM budget that cannot be kept is not a reason to stop - the experts it would have held are
+            // read from the files like the ones outside it (pin_cache_complement leaves nothing half-built)
+            std::fprintf(stderr, "strata generate: WARNING: the RAM budget (--resident-budget-gib) cannot be kept (%s); "
+                                 "every expert the GPU does not hold is read from the model files through the OS file "
+                                 "cache (--mmap-experts), which is slower\n", err.c_str());
         } else {
             std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
             return 1;
