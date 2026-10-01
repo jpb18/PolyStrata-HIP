@@ -2,21 +2,53 @@
 
 The native engine has no grammar decoder. Failed generations are errors, never
 silently retried or returned as successful structured output.
+
+`jsonschema` is optional (no new hard dependency of the server): json_object needs only the standard library, and
+json_schema is checked against its schema when the package is installed - without it, only that the answer is one
+JSON object, and the server says so once.
 """
 import json
-
-from jsonschema import validators
-from jsonschema.exceptions import SchemaError
-from referencing import Registry
-from referencing.exceptions import NoSuchResource
+import threading
 
 
 class StructuredOutputError(RuntimeError):
     pass
 
 
-def _no_remote(uri):
-    raise NoSuchResource(ref=uri)
+class _ObjectOnly:
+    """The validator for json_object, and for json_schema without jsonschema: one JSON object."""
+
+    def iter_errors(self, value):
+        if not isinstance(value, dict):
+            yield _ObjectError()
+
+
+class _ObjectError:
+    absolute_path = ()
+    message = "the answer is not a JSON object"
+
+
+_jsonschema = None                     # (validators, SchemaError, Registry, NoSuchResource), False when not installed
+_jsonschema_lock = threading.Lock()
+
+
+def jsonschema_modules():
+    """jsonschema, imported on first use; None when it is not installed (said once, in the server window)."""
+    global _jsonschema
+    with _jsonschema_lock:
+        if _jsonschema is None:
+            try:
+                from jsonschema import validators
+                from jsonschema.exceptions import SchemaError
+                from referencing import Registry
+                from referencing.exceptions import NoSuchResource
+                _jsonschema = (validators, SchemaError, Registry, NoSuchResource)
+            except ImportError:
+                _jsonschema = False
+                print('[strata] response_format json_schema: the Python package jsonschema is not installed, so '
+                      'answers are only checked to be one JSON object (python -m pip install "jsonschema>=4.23,<5")',
+                      flush=True)
+        return _jsonschema or None
 
 
 def prepare_format(response_format, messages):
@@ -29,6 +61,7 @@ def prepare_format(response_format, messages):
         return messages, None
     if kind == "json_object":
         schema = {"type": "object"}
+        modules = None                 # the standard library is enough for "one JSON object"
     elif kind == "json_schema":
         spec = response_format.get("json_schema")
         if not isinstance(spec, dict) or not isinstance(spec.get("schema"), dict):
@@ -40,6 +73,7 @@ def prepare_format(response_format, messages):
         schema = spec["schema"]
         if schema.get("type") != "object":
             raise ValueError("response_format schema must have type object at its root")
+        modules = jsonschema_modules()
     else:
         raise ValueError("response_format.type must be text, json_object or json_schema")
 
@@ -53,12 +87,20 @@ def prepare_format(response_format, messages):
             for value in node:
                 check_refs(value)
     check_refs(schema)
-    try:
-        cls = validators.validator_for(schema)
-        cls.check_schema(schema)
-        validator = cls(schema, registry=Registry(retrieve=_no_remote))
-    except SchemaError as exc:
-        raise ValueError(f"invalid response_format schema: {exc.message}") from exc
+    if modules is None:
+        validator = _ObjectOnly()
+    else:
+        validators, SchemaError, Registry, NoSuchResource = modules
+
+        def no_remote(uri):
+            raise NoSuchResource(ref=uri)
+
+        try:
+            cls = validators.validator_for(schema)
+            cls.check_schema(schema)
+            validator = cls(schema, registry=Registry(retrieve=no_remote))
+        except SchemaError as exc:
+            raise ValueError(f"invalid response_format schema: {exc.message}") from exc
     directive = ("OUTPUT FORMAT REQUIREMENT: Return exactly one JSON object matching the JSON Schema below. "
                  "No Markdown, headings, code fences, commentary, or text outside the JSON. "
                  "Use every required field, correct types, and only allowed fields. "

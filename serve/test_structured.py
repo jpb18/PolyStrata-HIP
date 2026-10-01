@@ -7,7 +7,14 @@ from pathlib import Path
 from unittest import mock
 
 from serve.frontend import ChatTemplate
+from serve import structured
 from serve.server import ByteTokenizer, MockEngine, Service, serve
+
+try:
+    import jsonschema  # noqa: F401
+    HAVE_JSONSCHEMA = True
+except ImportError:                  # optional: json_schema answers are then only checked to be one object
+    HAVE_JSONSCHEMA = False
 
 
 STORY = {"title": "Photobooth", "sheet": "A single continuous shot.", "cast": [],
@@ -79,6 +86,7 @@ class Structured(unittest.TestCase):
         self.assertIn("reasoning_content", raw)
         self.assertIn("data: [DONE]", raw)
 
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
     def test_invalid_generation_is_an_error_and_never_streams_content(self):
         for script in ("## Film Plan - Photobooth", '{"title":"Only a title"}',
                        json.dumps({**STORY, "extra": True}),
@@ -111,6 +119,7 @@ class Structured(unittest.TestCase):
             self.assertEqual(self.chat()[0], 502)
             self.assertEqual(generate.call_count, 1)
 
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
     def test_invalid_schema_is_400_and_local_refs_work(self):
         for schema in ({"type": "object", "properties": {"x": {"type": "invalid"}}},
                        {"type": "object", "$ref": "https://other.example/schema"}):
@@ -133,6 +142,26 @@ class Structured(unittest.TestCase):
             self.assertEqual(self.chat(strata_mcp=True)[0], 400)
             self.assertEqual(self.request("/v1/chat/completions", [])[0], 400)
             load.assert_not_called()
+
+    def test_without_jsonschema_an_object_is_still_required(self):
+        # jsonschema is optional: without it json_schema answers are checked to be one JSON object, json_object
+        # never needs it, and nothing is imported at server start
+        with mock.patch.object(structured, "_jsonschema", False):
+            self.assertEqual(self.chat()[0], 200)
+            for script in ("## Film Plan - Photobooth", "[1, 2]"):
+                code, reply = self.chat(script)
+                self.assertEqual(code, 502, script)
+                self.assertEqual(reply["error"]["code"], "structured_output_failed")
+            self.assertEqual(self.chat('{"answer":4}', response_format={"type": "json_object"})[0], 200)
+
+    def test_the_server_does_not_import_jsonschema_at_start(self):
+        import subprocess
+        import sys
+        code = ("import sys; import serve.server; "
+                "sys.exit(1 if any(m == 'jsonschema' or m.startswith('jsonschema.') for m in sys.modules) else 0)")
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(Path(__file__).resolve().parents[1]))
+        self.assertEqual(r.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
