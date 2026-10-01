@@ -194,7 +194,8 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
     (bsorensen110) contributed an equivalent gfx12 WMMA kernel of the same speed (within 1%); this one also masks KV
     pages that KV streaming has not made resident, as the decode kernel does.
   - The prompt path's QSA top-k picks its kernel by the blocks a query actually has, not the cache's capacity (#337,
-    bsorensen110): the same ids, so it is on everywhere. `STRATA_SELECT_WMMA=1` (opt-in, gfx12) adds #337's
+    bsorensen110): the same ids, on by default with AMD (NVIDIA keeps its capacity rule: there the 64K prompts read
+    1-3% slower with it). `STRATA_SELECT_WMMA=1` (opt-in, gfx12) adds #337's
     matrix-core block scorer; it selects slightly differently (254 of 256 queries the same) and gained +1.5% on 16K
     prompts at a 262K context on the R9700.
 - **Known:** rarely (about 1 start in 10) a HIP run's greedy output differs from another start's at some token, on
