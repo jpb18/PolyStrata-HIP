@@ -56,3 +56,7 @@ build-vision.bat
 /compile_commands.json
 /sycl-migrate.log
 /sycl/migrate.log
+
+# SYCL port: dpct output that is not part of the port
+sycl/dpct_report.*
+sycl/**/*.yaml

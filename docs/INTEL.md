@@ -27,7 +27,8 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 | context | up to 262K | 256K measured, 54 tok/s decode there (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
-on the text"). The SYCL numbers are greedy runs of the engine test rig on the 2026-10-01 build (commit 6b0d7a9);
+on the text"). The SYCL numbers are greedy runs of the engine (as in "How to run it by hand" below, 256 new
+tokens) on the 2026-10-01 build;
 "Decode round 2" below lists what each change bought.
 
 ## Setup
@@ -193,7 +194,8 @@ under the same flags.
 Without AOT the runtime JIT-compiles every kernel on first use, ~47 s the first time a process runs;
 `SYCL_CACHE_PERSISTENT=1 SYCL_CACHE_DIR=<dir>` keeps that across runs (15 MB).
 
-How to run it (all of this is what `coderiq1/sycl/run-engine-test.sh` does):
+How to run it by hand (a greedy test run, the way every number in this section was measured; inside the
+`strata-sycl-dev` image, AOT build in `build-sycl-aot/`):
 
 ```
 STRATA_VERIFY_DEVICE_PLAN=1 STRATA_VERIFY_NO_HOST=1 \
@@ -352,6 +354,12 @@ with `--stream-experts` there is no host copy of the experts, so any expert left
 and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
 5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free.
 
+**The Monitor tab on Intel.** `serve/telemetry.py` reads the Arc through sysfs (temperature, power and its cap,
+the PCIe link the card trained at) and, for load and VRAM, from `/run/gpustat.json`: xe reports those per client in
+`/proc/*/fdinfo`, which only root can read, so a small root sampler writes them (`tools/intel/gpustat.py`, install
+with its `gpustat.service` as its header says). A run config may also name a `model_switcher` (an RPC taking
+`{"mode": m}`) for a host that swaps models on one card: the web app then shows a Model menu.
+
 `setup.py` writes this config by itself on an Intel card once the SYCL engine is built (`build-sycl-aot/strata`
 and the `strata-sycl-dev` image): a native pack, the MTP draft layer (from an existing `mtp-q2_0.gguf` without the
 5 GB download), the container's paths, the reserve (1,024 MiB up to 32K, 2,048 with 4,096-token chunks above),
@@ -359,7 +367,7 @@ INT8 KV with `--kv-resident 32768` from 64K up (when the RAM holds the KV), and 
 config kept. `--intel-engine llama` keeps llama.cpp.
 
 **Speed depends on the text.** Decode with speculative decoding tracks how often the draft layer guesses right.
-The served engine at 32K context: 45-51 tok/s on the rig's test prompt (continuing a Fibonacci function, 77-85%
+The served engine at 32K context: 45-51 tok/s on the test prompt (continuing a Fibonacci function, 77-85%
 of drafts accepted), 30-39 tok/s on a chat answer with prose (55-72%); sampling and the repetition penalty cost
 nothing measurable. The engine used to abort at exit in serve mode (a queue wait in a destructor after the
 runtime's teardown began); it now exits directly once its requests are done.
