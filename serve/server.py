@@ -110,12 +110,16 @@ ENGINE_REQUEST = re.compile(
     r"(?P<gen>\d+) generated in (?P<gen_ms>[\d.]+) ms \((?P<tg>[\d.]+) tok/s\)")
 
 
+_echoing: set[str] = set()      # the logs echo_requests already follows (restart() runs StrataEngine.__init__ again)
+
+
 def echo_requests(log_path: str, offset: int) -> None:
     """STRATA_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
 
     The engine's stderr goes to the log file (the start narrator reads it), so a supervisor that only sees this
     process's output - a tray, llama-swap - has no per-request numbers. This re-states the engine's line with the
-    total the two times make: `request prompt P cached C output O ttft T ms total S ms prefill X tok/s decode Y tok/s`.
+    total the two times make: `request prompt P cached C output O prompt_read R ms total S ms prefill X tok/s decode Y
+    tok/s` (prompt_read: the time the engine spent reading the prompt's new tokens, not a time to first token).
     """
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         f.seek(offset)
@@ -127,9 +131,9 @@ def echo_requests(log_path: str, offset: int) -> None:
             m = ENGINE_REQUEST.search(line)
             if m:
                 read_ms, gen_ms = float(m["read"]), float(m["gen_ms"])
-                print("[strata] request prompt %s cached %s output %s ttft %.0f ms total %.0f ms prefill %s tok/s "
-                      "decode %s tok/s" % (m["prompt"], m["reused"], m["gen"], read_ms, read_ms + gen_ms, m["pp"], m["tg"]),
-                      flush=True)
+                print("[strata] request prompt %s cached %s output %s prompt_read %.0f ms total %.0f ms prefill %s "
+                      "tok/s decode %s tok/s" % (m["prompt"], m["reused"], m["gen"], read_ms, read_ms + gen_ms, m["pp"],
+                                                 m["tg"]), flush=True)
 
 
 def narrate_start(log_path: str, offset: int, args: list, done: threading.Event, heartbeat=20.0) -> None:
@@ -203,7 +207,9 @@ class StrataEngine:
         if log:
             threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
                              daemon=True).start()
-            if os.environ.get("STRATA_REQUEST_LINES"):
+            # once per log: the follower keeps reading the same (appended) log across restarts and reloads
+            if os.environ.get("STRATA_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
+                _echoing.add(os.path.abspath(log))
                 threading.Thread(target=echo_requests, args=(log, os.path.getsize(log)), daemon=True).start()
         self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
