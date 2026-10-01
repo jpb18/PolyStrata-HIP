@@ -585,10 +585,12 @@ class Vision:
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
             img.write_bytes(data)
-            self.proc.stdin.write(f"ENC {img} {out}\n")
-            self.proc.stdin.flush()
-            line = self.proc.stdout.readline().strip()
-            img.unlink(missing_ok=True)
+            try:
+                self.proc.stdin.write(f"ENC {img} {out}\n")
+                self.proc.stdin.flush()
+                line = self.proc.stdout.readline().strip()
+            finally:                                                   # #352: also when the encoder's pipe is gone
+                img.unlink(missing_ok=True)
             if not line.startswith("OK"):
                 raise ValueError("the image could not be read: " + (line[4:] if line.startswith("ERR") else
                                                                      "the vision encoder stopped"))
