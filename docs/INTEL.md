@@ -19,15 +19,15 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 | model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
 | where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
 | RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
-| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **76.1 tok/s** (19-token prompt, 256 greedy tokens), 63.6 after a 2,184-token prompt (before the IQ4_NL change); ~56 through the API on a chat request | 23-25 tok/s |
-| prompt reading | ~1,870 tok/s | **799 tok/s** at 2,184 tokens, 1,062 at 80K | ~150 tok/s (424 at 105K) |
+| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **77.9 tok/s** (19-token prompt, 256 greedy tokens), **74.2** after a 2,184-token prompt, **66.1** after 128K, 54.1 after 256K | 23-25 tok/s |
+| prompt reading | ~1,870 tok/s | **787 tok/s** at 2,184 tokens, 856 at 128K, 740 at 256K | ~150 tok/s (424 at 105K) |
 | speculative decoding (MTP) | yes | yes (the base checkpoint's draft layer; 70-85% of drafts accepted on code) | no |
 | images | yes | not yet | not yet |
-| context | up to 262K | 256K measured (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
+| context | up to 262K | 256K measured, 54 tok/s decode there (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
-on the text"). The SYCL numbers are greedy runs of the engine test rig on the final 2026-09-30 build (commit
-ccdae3e); "Decode round 2" below lists what each change bought.
+on the text"). The SYCL numbers are greedy runs of the engine test rig on the 2026-10-01 build (commit 6b0d7a9);
+"Decode round 2" below lists what each change bought.
 
 ## Setup
 
@@ -295,25 +295,21 @@ output tokens between paths, never only timings.
   It costs ~1 s on short prompts (2,184 tokens: 610 vs 792 tok/s), so the port borrows by default only above a
   32K context (`--prefill-borrow` / `--no-prefill-borrow` decide explicitly).
 
-**Long contexts by KV type (2026-09-30, borrowing on, `--vram-reserve-mib 2048 --prefill 4096`).** Same text
-repeated to length, 64 greedy tokens after it:
+**Long contexts (2026-10-01, the current build, setup's flags: `--kv-resident 32768 --vram-reserve-mib 2048
+--prefill 4096`, prompt-slot borrowing on).** Same text repeated to length, then 256 greedy tokens:
 
 | context | KV | prompt | decode after | peak VRAM | experts in VRAM (of 12,288) |
 |---|---|---|---|---|---|
-| 128K | int8 | 960 tok/s | 8.5 tok/s | 30.9 GB | 12,002 |
-| 128K | q4_0 | 951 tok/s | 32.7 tok/s | 30.4 GB | 12,288 |
-| 128K | k8v4 | 983 tok/s | 23.4 tok/s | 30.7 GB | 12,241 |
-| 256K | q4_0 | 778 tok/s | 5.0 tok/s | 30.9 GB | 11,814 |
-| 256K | k8v4 | 752 tok/s | 3.8 tok/s | 30.7 GB | 11,294 |
-| 256K | int8 | 718 tok/s | 3.7 tok/s | 30.7 GB | 10,923 |
+| 128K | int8 | 856 tok/s (150 s) | **66.1 tok/s** | 29.9 GB | 12,288 |
+| 128K | q4_0 | 834 tok/s (153 s) | 62.4 tok/s | 29.7 GB | 12,288 |
+| 256K | int8 | 740 tok/s (346 s) | **54.1 tok/s** | 30.2 GB | 12,288 |
+| 256K | q4_0 | 726 tok/s (353 s) | 52.5 tok/s | 29.9 GB | 12,288 |
 
-(Measured before the 2026-09-30 decode work in "Decode round 2"; decode after a long prompt is higher now, not
-re-measured.) Every configuration completes and answers coherently; decode after the prompt is set by how many
-experts the KV leaves room for. **KV streaming fixes it** (`--kv-resident 32768`: the whole KV in pinned host memory, only the
-attended window in VRAM): every expert stays in VRAM and decode after the prompt is 38.7 tok/s at 128K int8
-(from 8.5), 35.3 at 128K q4_0, 31.3 at 256K int8 (from 3.7) and 31.5 at 256K q4_0 (from 5.0); the prompt pays
-5-13% (725-860 tok/s). setup.py turns it on from 64K up for the SYCL engine and keeps INT8. k8v4 works through the FP32 attention fallback; its dedicated
-prompt kernel is the XMX one below.
+KV streaming (`--kv-resident`) keeps the whole KV in pinned host memory and only the attended window in VRAM, so
+every expert stays on the card at any context; setup.py turns it on from 64K up and keeps INT8 (the faster of the
+two at every size here). Without it the KV pushes experts out and decode after the prompt fell to 4-9 tok/s at
+128K-256K (2026-09-30). `--kv k8v4` does not support streaming yet: setup keeps its KV in VRAM, and it works through
+the FP32 attention fallback (its dedicated prompt kernel is the XMX one below).
 
 **XMX prompt attention v2.** 64-cell chunks, vector-packed K^T and V, hi+lo Q in one accumulator per scale group,
 one accumulator update per chunk: 1.4-1.5x faster than v1 and correct in all modes (`qsa_prompt_attn_parity`,
@@ -406,7 +402,8 @@ runtime's teardown began); it now exits directly once its requests are done.
 | + wide 16-byte-load kernels for Q4_K, Q5_K, IQ4_XS (codebook in registers) | 62.6 |
 | + wide kernels for Q8_0 (MTP dense, shexp down of layer 0) and IQ4_NL (shexp down); Q6_K's activation loads aligned | 65.6 |
 | + the GR down projection sliced by columns (each group stages one 128-column slice of xn, 4 lanes per row) + a fixed-order reduce | 70.6 |
-| + IQ4_NL expert dots (the down projection in 39 of 48 layers): codebook in registers, weights as aligned 4-byte loads, bitwise the same ints (2026-10-01) | **76.1** |
+| + IQ4_NL expert dots (the down projection in 39 of 48 layers): codebook in registers, weights as aligned 4-byte loads, bitwise the same ints (2026-10-01) | 76.1 |
+| + GR norm per (token, stream), bitwise the same; aligned weight loads in the IQ3_XXS/IQ3_S/IQ2_S gate/up dots | **77.9** |
 
 The last step changes the output: identical for 146 tokens, then a near-tie after a comma goes the other way (the new
 kernels sum in a different order). Q8_0 kernels 4-6x (189 -> 31 us at 2560 x 10240, 2 columns), IQ4_NL 640 -> 2560
@@ -469,12 +466,12 @@ wherever upstream touched a file they mirror. They are refreshed by re-migration
 - Speculative decoding on the llama.cpp path (the GGUF carries no draft layer llama.cpp can use). The SYCL
   port has it (MTP draft layer, `--mtp`).
 
-## Measured, 2026-09-30, Arc Pro B70, Coder IQ1_M, 32K context, INT8 KV: the SYCL port
+## Measured, 2026-10-01, Arc Pro B70, Coder IQ1_M, 32K context, INT8 KV: the SYCL port
 
 | | |
 |---|---|
-| decode | 76.1 tok/s on a 19-token prompt (2026-10-01); 63.6 after a 2,184-token prompt before the IQ4_NL change (256 greedy tokens, MTP + suffix drafts) |
-| prompt | 799 tok/s on 2,184 tokens |
+| decode | 77.9 tok/s on a 19-token prompt, 74.2 after a 2,184-token prompt (256 greedy tokens, MTP + suffix drafts) |
+| prompt | 787 tok/s on 2,184 tokens; 856 tok/s at 128K, 740 at 256K |
 | through the API | 55.7 tok/s on a 300-token chat answer, prompt included |
 | VRAM | all 12,288 experts resident, ~1.9 GB free with everything loaded (`--vram-reserve-mib 1024`) |
 | RAM | no host copy of the experts (`--stream-experts`) |
