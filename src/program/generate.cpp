@@ -1311,10 +1311,14 @@ int main(int argc, char** argv) {
         // small part of every card - at most 12% of its VRAM (16 GB and larger cards) - and borrows on smaller cards,
         // where the reserve would cost the cache (and the context) the paragraph above is about.  Measured with own
         // buffers on the 9070 XT + R9700: 2K 1588 tok/s, 16K 2006 (0.1.29 1568 / 1935, 0.1.31 993 / 1852).
-        // STRATA_SPLIT_OWN=1: own buffers on any cards; 0: borrow (0.1.30 / 0.1.31).  --split-skip-if-fits keeps the
-        // loans (it can fall back to one GPU, which must stay as it is).
-        if (!o.no_prefill_borrow && !o.split_skip_if_fits) {
-            const char* v = std::getenv("STRATA_SPLIT_OWN");
+        // OPT-IN (the owner's choice for 0.1.32): own buffers change which experts a full card keeps resident, so the
+        // split's output differs from 0.1.31's; the default borrows as 0.1.31 did - with the concurrent refill and the
+        // 96-blob split ring that alone gave 2K +27%, 16K +5% over 0.1.31, decode unchanged, output identical.
+        // STRATA_SPLIT_OWN=auto: the 12% rule above; 1: own buffers on any cards; unset/0: borrow.
+        // --split-skip-if-fits keeps the loans (it can fall back to one GPU, which must stay as it is).
+        const char* own_env = std::getenv("STRATA_SPLIT_OWN");
+        if (!o.no_prefill_borrow && !o.split_skip_if_fits && own_env != nullptr && own_env[0] != '0') {
+            const char* v = std::string(own_env) == "auto" ? nullptr : own_env;
             bool own = v ? v[0] == '1' : true;
             // the buffers of a 2048-token chunk (or the --prefill one) + a 96-blob ring (as split_pf_mib prices them)
             const int64_t own_chunk = o.prefill_auto || o.prefill_chunk <= 0 ? 2048 : o.prefill_chunk;
