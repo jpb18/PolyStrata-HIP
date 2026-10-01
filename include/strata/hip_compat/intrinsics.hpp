@@ -3,6 +3,7 @@
 // CUDA device intrinsics used by Strata kernels on supported wave32 HIP targets.
 // This header is included only from the HIP cuda_runtime compatibility shim.
 #if defined(__HIPCC__)
+#include <hip/hip_version.h>
 
 #include <cstdint>
 
@@ -101,12 +102,14 @@ __device__ __forceinline__ void require_full_wave_mask(uint32_t mask) {
 
 // Older HIP has no __syncwarp. A wave barrier alone does not order memory.
 // Release/acquire fences cover the shared-memory exchange used by attention.
+#if HIP_VERSION_MAJOR < 7
 __device__ __forceinline__ void syncwarp(uint32_t mask = 0xffffffffu) {
     require_full_wave_mask(mask);
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup");
     __builtin_amdgcn_wave_barrier();
     __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup");
 }
+#endif
 
 template <typename T>
 __device__ __forceinline__ T shfl_xor_sync(uint32_t mask, T value, int lane_mask, int width = 32) {
@@ -149,7 +152,9 @@ __device__ __forceinline__ unsigned ballot_sync(uint32_t mask, int predicate) {
 #define __shfl_up_sync(...) (::strata::hip_compat::shfl_up_sync(__VA_ARGS__))
 #define __shfl_sync(...) (::strata::hip_compat::shfl_sync(__VA_ARGS__))
 #define __ballot_sync(mask, predicate) (::strata::hip_compat::ballot_sync((mask), (predicate)))
+#if HIP_VERSION_MAJOR < 7
 #define __syncwarp(...) (::strata::hip_compat::syncwarp(__VA_ARGS__))
+#endif
 // AMD's sleep instruction accepts only 0..15; the synchronization loops use it as a
 // backoff hint, so use its smallest portable delay independently of CUDA cycle counts.
 #define __nanosleep(cycles) __builtin_amdgcn_s_sleep(1)
