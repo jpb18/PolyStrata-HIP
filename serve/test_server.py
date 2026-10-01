@@ -65,6 +65,17 @@ class MaxTokens(unittest.TestCase):
         u = b.get("usage", {})
         return s, b, u.get("input_tokens"), u.get("output_tokens")
 
+    def test_anthropic_thinks_only_when_asked(self):
+        # #278: Anthropic's thinking is opt-in; "thinking", an effort or a reasoning_budget_tokens (#123) asks for it
+        from serve.frontend import anthropic_to_messages
+        msgs = [{"role": "user", "content": "u"}]
+        kw = lambda **r: anthropic_to_messages({"messages": msgs, **r})[2]   # noqa: E731
+        self.assertEqual(kw(), {"enable_thinking": False})
+        self.assertEqual(kw(thinking={"type": "disabled"}), {"enable_thinking": False})
+        self.assertNotIn("enable_thinking", kw(thinking={"type": "enabled", "budget_tokens": 2048}))
+        self.assertNotIn("enable_thinking", kw(output_config={"effort": "high"}))
+        self.assertNotIn("enable_thinking", kw(reasoning_budget_tokens=30))
+
     def test_count_tokens_is_the_prompt_messages_reads(self):
         # /v1/messages/count_tokens renders and tokenizes the same prompt /v1/messages would read, without running it
         msgs = [{"role": "user", "content": "how many tokens is this?"}]
