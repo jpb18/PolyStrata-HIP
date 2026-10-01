@@ -496,6 +496,9 @@ part of the procedure now: it caught a dropped mirror hook and four doorbell wai
 - **Upstream's new kernels against the port's on the B70** (decode tok/s, Coder 19 / 2,184-token prompts, IQ2_XS
   19): port defaults 78.1 / 75.7 / 58.6; `STRATA_EXPERT_SPLIT=1` 65.6-69.5 / 67.2 / 49.1 (-11 to -16%);
   `STRATA_GR_V3=1` 73.2 / 72.4 (-4 to -6%). Both stay opt-in.
+- **Lanes per row of the port's expert kernels** (`STRATA_GU_LANES` / `STRATA_DOWN_LANES`, 4/8/16/32 at run time):
+  gate/up 8 or 16 x down 4 or 8 all decode in 37.7-38.6 ms per verify round (2 runs each, Coder, both prompts); tok/s
+  differences between them are draft acceptance (each split rounds differently). The default (8 / 8) stays.
 - **Speed after the merge:** Coder 78.2 / 75.7 tok/s (as before), IQ2_XS 58.6 / 64.2 (from 50.8 / 60.6).
 - **Still failing:** `iq_multi_parity` on IQ2_XS (type 17: the port's mmvq disagrees with the reference, old and new
   kernel alike; no model here uses it), `s2_expert_grouped_parity` (the s2 path), `kv_hybrid_parity`'s last step
