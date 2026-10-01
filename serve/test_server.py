@@ -540,6 +540,18 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(plain.get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
         self.assertEqual(plain.get("CUDA_DEVICE_ORDER"), os.environ.get("CUDA_DEVICE_ORDER"))
 
+    def test_vision_device(self):
+        # #408: the image encoder on its own card; the engine's environment stays as it was
+        from serve.server import child_env, vision_env
+        cfg = {"gpu": [0, 1], "vision": {"exe": "v", "cuda_device": 2}}
+        env = child_env(cfg)
+        venv = vision_env(cfg, env)
+        self.assertEqual(venv["CUDA_VISIBLE_DEVICES"], "2")
+        self.assertEqual(venv["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
+        plain = {"gpu": [0, 1], "vision": {"exe": "v"}}
+        self.assertIs(vision_env(plain, env), env)          # no cuda_device: the engine's environment, unchanged
+
 
 class RecordingPrompt(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
