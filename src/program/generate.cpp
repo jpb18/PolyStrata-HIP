@@ -1303,6 +1303,46 @@ int main(int argc, char** argv) {
         // more than either 8 GB card had - which is how adding two GPUs to the two 12 GB ones lost 260K.
         // The loan is the tail of the stage's own cache (see `PfPart` in the serve block); outside the prompt
         // that tail is expert cache, so a large chunk costs a stage nothing permanent.
+        // #340 - BUT A LOAN IS NOT FREE PER REQUEST: every stage streams the lent experts during the prompt and
+        // copies them back after it, so on cards that hold (nearly) every expert of their layers a 2K prompt read
+        // 37% slower than 0.1.29's own buffers (2x RX 9070 XT / R9700: 1570 -> 990 tok/s; 2x A5000 in #340: -35%).
+        // So a split keeps 0.1.29's own buffers (2048-token chunks, priced into the split search) when they are a
+        // small part of every card - at most 12% of its VRAM (16 GB and larger cards) - and borrows on smaller cards,
+        // where the reserve would cost the cache (and the context) the paragraph above is about.  Measured with own
+        // buffers on the 9070 XT + R9700: 2K 1588 tok/s, 16K 2006 (0.1.29 1568 / 1935, 0.1.31 993 / 1852).
+        // STRATA_SPLIT_OWN=1: own buffers on any cards; 0: borrow (0.1.30 / 0.1.31).  --split-skip-if-fits keeps the
+        // loans (it can fall back to one GPU, which must stay as it is).
+        if (!o.no_prefill_borrow && !o.split_skip_if_fits) {
+            const char* v = std::getenv("STRATA_SPLIT_OWN");
+            bool own = v ? v[0] == '1' : true;
+            // the buffers of a 2048-token chunk (or the --prefill one) + a 96-blob ring (as split_pf_mib prices them)
+            const int64_t own_chunk = o.prefill_auto || o.prefill_chunk <= 0 ? 2048 : o.prefill_chunk;
+            const int64_t reserve_mib = 160 + (own_chunk * 680) / 1024 + 96 * 4;
+            std::string why;
+            if (!v) {
+                std::vector<int> devs = {0};
+                for (const int d : split_devs) devs.push_back(d);
+                for (const int d : devs) {
+                    cudaDeviceProp prop{};
+                    if (cudaGetDeviceProperties(&prop, d) != cudaSuccess) { cudaGetLastError(); own = false; break; }
+                    const int64_t total_mib = (int64_t) (prop.totalGlobalMem >> 20);
+                    if (reserve_mib * 100 > 12 * total_mib) {
+                        own = false;
+                        why = "CUDA" + std::to_string(d) + " has " + std::to_string(total_mib) + " MiB";
+                        break;
+                    }
+                }
+            }
+            if (own) {
+                o.no_prefill_borrow = true;
+                std::fprintf(stderr, "strata generate: layer split: every stage keeps its own prompt buffers (~%lld MiB "
+                                     "each, %lld-token chunks)%s\n", (long long) reserve_mib, (long long) own_chunk,
+                             v ? " (STRATA_SPLIT_OWN=1)" : "");
+            } else if (!why.empty()) {
+                std::fprintf(stderr, "strata generate: layer split: the prompt paths borrow from the caches (%s)\n",
+                             why.c_str());
+            }
+        }
         int n_vis = 1;
         if (cudaGetDeviceCount(&n_vis) != cudaSuccess || n_vis < 1) n_vis = 1;
         cudaGetLastError();
