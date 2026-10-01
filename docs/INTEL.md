@@ -374,6 +374,22 @@ runtime's teardown began); it now exits directly once its requests are done.
    setting beats SIMD32 beyond run-to-run noise (SIMD32 itself lands at 39 or 45 tok/s). Output tokens identical.
    The same bench shows the real headroom: the dense decode kernels stream 100-280 GB/s of a 608 GB/s card
    (Q6_K, the most common type, ~146 GB/s at 2-4 columns).
+   **Found and fixed: misaligned loads.** A Q6_K block is 210 bytes, so every block's `ql`/`qh` runs start only
+   2-byte aligned, and the B70 splits a misaligned 16-byte load into pieces. The same weights repacked at a
+   224-byte stride ran 2.3-4.7x faster (`q6k_align_bench`). Without changing the layout, the wide Q6_K kernel now
+   does two aligned 16-byte loads and a shift (`load16_a2`; both stay inside the block) and takes every Q6_K
+   shape and window width (it used to be gated to n_out >= 4096, 1-4 columns): 2560->10240 at 1/2/4/6 columns
+   160/145/141/101 -> 493/432/331/273 GB/s, the 248K-row head 150 -> 407 GB/s at 1 column. Output tokens
+   identical. **Coder decode 44.9 -> 54 tok/s** (2k prompt, greedy). `STRATA_MMVQ_A2=0` restores the old path.
+   Still misaligned: IQ4_XS (136 B, 8-aligned, ~100 GB/s), IQ4_NL (18 B), Q8_0 (34 B); Q4_K/Q5_K are aligned
+   but use 4-byte loads in the multi kernel (230-280 GB/s).
+
+**Two-speed runs, explained (2026-09-30).** Identical greedy runs decode at either ~45 or ~39 tok/s. A per-gather
+trace of the PLE reader (`STRATA_PLE_TRACE=1`) shows the slow runs pay one 226 ms PLE read stall in the first
+decode round, after the window graphs are captured; every other read and round matches the fast runs. Prompt time
+plus decode time is the same in both modes (4.95-5.17 s): the stall lands either in the prompt's PLE wait or in the
+first decode round, so it is a once-per-process cost, not lost throughput. Ruled out: NVMe APST, the I/O scheduler
+(`none`), CPU starvation (93% idle during decode), I/O thread count. Compare runs on time to first token + decode.
 6. INT8 prompt GEMMs: experts dequantized to INT8, oneMKL/oneDNN INT8 on XMX (half the dequant bytes, 2x rate).
 7. Fewer graph nodes per decode round (~2,500 at ~5 us): norm+rope, scores+top-k, gate+quantize fused.
 8. Wider speculation (two draft branches per verify window): the kernels are latency-bound, so it is nearly free.
