@@ -39,6 +39,10 @@ bool overlaps(const void* a, size_t an, const void* b, size_t bn) {
     auto x = reinterpret_cast<uintptr_t>(a), y = reinterpret_cast<uintptr_t>(b);
     return x <= y ? y - x < an : x - y < bn;
 }
+// TAB (#280, STRATA_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
+// no table applies - the default - so the default kernel is 0.1.31's code exactly (the table read is not in it;
+// with it merely skipped at run time, the compiled default path changed its results).
+template <bool TAB>
 __global__ void apply(const float* x, float* out, int rows, int width,
                       int n_rot, float theta_scale, float freq_scale, float corr_low, float corr_high,
                       float ext_factor, float mscale, const int* positions, const int32_t* mtab, RopeTab rt) {
@@ -54,7 +58,7 @@ __global__ void apply(const float* x, float* out, int rows, int width,
         return;
     }
     float c, s;
-    if (!rope_tab_cs(rt, mrope_pos(mtab, positions[row], pair), pair, c, s)) {
+    if (!(TAB && rope_tab_cs(rt, mrope_pos(mtab, positions[row], pair), pair, c, s))) {
         const float theta_extrap = mrope_pos(mtab, positions[row], pair) * powf(theta_scale, float(pair));
         rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale, pair, c, s);
     }
@@ -129,10 +133,14 @@ void native_rope_apply(const float* x, float* out, int rows, int head_dim,
     // Match pinned host-side float powf before device fast powf/trigonometry.
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / n_rot);
     const RopeKernelArgs k = scaling.kernel_args(n_rot);   // none: the identity constants
-    apply<<<dim3((head_dim / 2 + 127) / 128, rows), 128, 0,
-              static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
-                                                   k.freq_scale, k.corr_low, k.corr_high, k.ext_factor,
-                                                   k.attn_factor, positions, mrope_table(), rope_table_for(scaling));
+    const RopeTab rt = rope_table_for(scaling);
+    const dim3 grid((head_dim / 2 + 127) / 128, rows);
+    if (rt.cos != nullptr)
+        apply<true><<<grid, 128, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
+            k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
+    else
+        apply<false><<<grid, 128, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
+            k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
