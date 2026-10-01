@@ -1148,9 +1148,12 @@ bool FileExpertSource::pin_cache_complement(
                 // read by the GPU over PCIe (--pcie-frac) and copied by DMA; only the rest is locked in the working
                 // set (the registered prefix is page-locked by the driver already - locking it twice made the next
                 // device allocation fail).
+                // opt-in (STRATA_PARTIAL_PIN=1): on the RTX 5070 PC the GPU's PCIe share of the misses measured no
+                // faster than the CPU computing them (7.30 / 7.44 tok/s with 24 / 16 GiB registered against 7.05-7.74
+                // unpinned at a 40 GiB budget), and registering adds startup time and driver memory pressure
                 static const bool partial_on = [] {
-                    const char* v = std::getenv("STRATA_PARTIAL_PIN");   // 0: the A/B arm without it
-                    return v == nullptr || std::atoi(v) != 0;
+                    const char* v = std::getenv("STRATA_PARTIAL_PIN");
+                    return v != nullptr && std::atoi(v) != 0;
                 }();
                 // at most STRATA_PARTIAL_PIN_GIB (default 24): registering 30 GiB of a 40 GiB arena left the driver
                 // unable to page-lock the prompt path's small buffers afterwards (RTX 5070, WDDM)
