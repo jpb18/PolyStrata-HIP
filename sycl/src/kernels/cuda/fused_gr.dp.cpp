@@ -240,6 +240,8 @@ struct GrMulti {
     float* xn;
     int T;
     float* part;   ///< [DOWN_SPLIT][kFusedGrMaxT][LR] partial row sums of the down kernel
+    int nsplit = DOWN_SPLIT;   ///< SYCL port: splits the up kernel sums (1 after the sliced down kernel's reduce)
+    float* part2 = nullptr;    ///< SYCL port: [GRS_SLICES][kFusedGrMaxT][LR + HC] slice partials of the sliced kernel
 };
 
 // Step 1 of `gr_down_kernel`, one block per token, same threads and reduction order: rs[t] and xn[t] to global.
@@ -448,6 +450,76 @@ __dpct_inline__ void gr_down_multi_direct_kernel(GrMulti m) {
         else m.part[((size_t) split * kFusedGrMaxT + k) * LR + row] = s[k];
     }
 }
+// SYCL port: the down projection sliced by columns. The direct kernel above has each warp read T x 32 bytes of
+// activations (L2) per 16 bytes of weights - 12x the weight traffic at 6 tokens, ~134 GB/s. Here work-group s owns
+// columns [128 s, 128 s + 128) of all 324 rows (320 down + 4 inject): it stages that slice of xn for the T tokens
+// once (<= 4 KB of SLM) and streams the rows through it, 4 lanes per row (one 64-byte line per step), reducing over
+// those 4 lanes once per row. gr_down_reduce then sums the 80 slice partials in a fixed order.
+constexpr int GRS_COLS = 128, GRS_SLICES = D / GRS_COLS, GRS_ROWS = LR + HC;   // 80 slices, 324 rows
+__dpct_inline__ void gr_down_sliced_kernel(GrMulti m, float* tile) {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int t = (int) item.get_local_id(2), lane = t & 31, warp = t >> 5;
+    const int T = m.T, sl = (int) item.get_group(2), c0 = sl * GRS_COLS;
+    for (int i = t; i < T * GRS_COLS; i += THREADS) {
+        const int k = i / GRS_COLS, c = i - k * GRS_COLS;
+        tile[i] = m.xn[(size_t) k * D + c0 + c];
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+    const int rsub = lane >> 2, q = lane & 3;
+    const bool inj = m.a[0].w_inject != nullptr;
+    for (int r0 = 0; r0 < GRS_ROWS; r0 += WARPS * 8) {
+        const int r = r0 + warp * 8 + rsub;
+        const bool ok = r < LR || (r < GRS_ROWS && inj);
+        const uint16_t* wrow = r < LR ? m.a[0].w_down + (size_t) r * D : m.a[0].w_inject + (size_t) (ok ? r - LR : 0) * D;
+        sycl::uint4 wv[4];
+#pragma unroll
+        for (int cc = 0; cc < 4; ++cc)
+            wv[cc] = ok ? reinterpret_cast<const sycl::uint4*>(wrow + c0)[q + 4 * cc] : sycl::uint4(0, 0, 0, 0);
+        float acc[kFusedGrMaxT];
+#pragma unroll
+        for (int k = 0; k < kFusedGrMaxT; ++k) {
+            acc[k] = 0.0f;
+            if (k < T) {
+#pragma unroll
+                for (int cc = 0; cc < 4; ++cc) acc[k] += dot8(wv[cc], tile + k * GRS_COLS + (q + 4 * cc) * 8);
+            }
+        }
+        auto sg = item.get_sub_group();
+#pragma unroll
+        for (int k = 0; k < kFusedGrMaxT; ++k) {
+            if (k >= T) break;
+            float v = acc[k];
+            v += sycl::permute_group_by_xor(sg, v, 1);
+            v += sycl::permute_group_by_xor(sg, v, 2);
+            if (q == 0 && ok) m.part2[((size_t) sl * kFusedGrMaxT + k) * GRS_ROWS + r] = v;
+        }
+    }
+}
+__dpct_inline__ void gr_down_reduce_kernel(GrMulti m) {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int i = (int) item.get_global_id(2);
+    if (i >= m.T * GRS_ROWS) return;
+    const int k = i / GRS_ROWS, r = i - k * GRS_ROWS;
+    if (r >= LR && m.a[0].w_inject == nullptr) return;
+    float x = 0.0f;
+    for (int sl = 0; sl < GRS_SLICES; ++sl) x += m.part2[((size_t) sl * kFusedGrMaxT + k) * GRS_ROWS + r];
+    if (r < LR) m.part[(size_t) k * LR + r] = x;   // split 0
+    else m.a[k].inject_out[r - LR] = x;
+}
+bool gr_down_sliced() {   // default (gr_bench: GR read 108.6 -> 76.5 us at 6 tokens); STRATA_GR_DOWN_SLICED=0: direct
+    static const bool v = std::getenv("STRATA_GR_DOWN_SLICED") == nullptr || std::atoi(std::getenv("STRATA_GR_DOWN_SLICED")) != 0;
+    return v;
+}
+float* slice_partials(sycl::queue* q) {
+    static std::mutex mu;
+    static std::unordered_map<sycl::queue*, float*> bufs;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = bufs.find(q);
+    if (it != bufs.end()) return it->second;
+    float* p = sycl::malloc_device<float>((size_t) GRS_SLICES * kFusedGrMaxT * GRS_ROWS, *q);
+    bufs[q] = p;
+    return p;
+}
 bool gr_down_direct() {   // default; STRATA_GR_DOWN_DIRECT=0: the tiled kernel (gr_bench: 13-19% slower at 3-6 tokens)
     static const bool v = std::getenv("STRATA_GR_DOWN_DIRECT") == nullptr || std::atoi(std::getenv("STRATA_GR_DOWN_DIRECT")) != 0;
     return v;
@@ -480,7 +552,7 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
         const int k = i / LR, r = i % LR;
         float x = 0.0f;
 #pragma unroll
-        for (int sp = 0; sp < DOWN_SPLIT; ++sp) x += m.part[((size_t) sp * kFusedGrMaxT + k) * LR + r];
+        for (int sp = 0; sp < DOWN_SPLIT; ++sp) if (sp < m.nsplit) x += m.part[((size_t) sp * kFusedGrMaxT + k) * LR + r];
         x /= (float) HC;
         const float v = x / (1.0f + sycl::native::exp(-x));
         lo[k][r] = v;
@@ -640,7 +712,22 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         attr[dev] = true;
     }
     const int chunk_tok = (dev >= 0 && dev < 64 && chunk[dev]) ? chunk[dev] : kFusedGrMaxT;
-    if (gr_down_direct()) {
+    if (gr_down_sliced()) {
+        m.part2 = slice_partials(st);
+        m.nsplit = 1;
+        st->submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> tl(sycl::range<1>((size_t) kFusedGrMaxT * GRS_COLS), cgh);
+            cgh.parallel_for<dpct_kernel_name<class gr_down_sliced_k>>(
+                sycl::nd_range<3>(sycl::range(1, 1, GRS_SLICES) * sycl::range(1, 1, THREADS), sycl::range(1, 1, THREADS)),
+                [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] {
+                    gr_down_sliced_kernel(m, tl.get_multi_ptr<sycl::access::decorated::no>().get());
+                });
+        });
+        const unsigned nred = unsigned((n_tok * GRS_ROWS + 127) / 128);
+        st->parallel_for<dpct_kernel_name<class gr_down_reduce_k>>(
+            sycl::nd_range<3>(sycl::range(1, 1, nred) * sycl::range(1, 1, 128), sycl::range(1, 1, 128)),
+            [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { gr_down_reduce_kernel(m); });
+    } else if (gr_down_direct()) {
         st->parallel_for<dpct_kernel_name<class gr_down_multi_direct>>(
             sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS * DOWN_SPLIT + 1) * sycl::range(1, 1, THREADS),
                               sycl::range(1, 1, THREADS)),

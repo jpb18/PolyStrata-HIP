@@ -393,13 +393,15 @@ runtime's teardown began); it now exits directly once its requests are done.
 | + `resident_plan` grouping in parallel (thread 0 alone took 73 us per layer, ~3.5 ms a round) | 57.1 |
 | + the GR down kernel reads the activations directly (the 60 KB SLM tile per group capped occupancy) | 58.7 |
 | + wide 16-byte-load kernels for Q4_K, Q5_K, IQ4_XS (codebook in registers) | 62.6 |
-| + wide kernels for Q8_0 (MTP dense, shexp down of layer 0) and IQ4_NL (shexp down); Q6_K's activation loads aligned | **65.6** |
+| + wide kernels for Q8_0 (MTP dense, shexp down of layer 0) and IQ4_NL (shexp down); Q6_K's activation loads aligned | 65.6 |
+| + the GR down projection sliced by columns (each group stages one 128-column slice of xn, 4 lanes per row) + a fixed-order reduce | **70.6** |
 
 The last step changes the output: identical for 146 tokens, then a near-tie after a comma goes the other way (the new
 kernels sum in a different order). Q8_0 kernels 4-6x (189 -> 31 us at 2560 x 10240, 2 columns), IQ4_NL 640 -> 2560
 28 -> 6.6 us. The aligned-load helper only loads its second chunk when the address is unaligned, so it never reads a
 16-byte chunk without a needed byte and cannot cross a page at the end of an allocation. `STRATA_MMVQ_WIDE_32=0`
-restores the old Q8_0/IQ4_NL kernels.
+restores the old Q8_0/IQ4_NL kernels. The sliced GR down kernel (GR read 108.6 -> 76.5 us at 6 tokens, sums equal to
+~1e-7) flips that near-tie back: its output is the original one. `STRATA_GR_DOWN_SLICED=0` restores the direct kernel.
 
 Kernel level: IQ4_XS 107 -> 323 GB/s at 2 columns (61 -> 212 at 6), Q4_K/Q5_K 1.3-1.6x; the GR read 135 -> 110 us at
 6 tokens (bitwise equal). Switches to the old paths: `STRATA_PLAN_PARALLEL=0`, `STRATA_GR_DOWN_DIRECT=0`,

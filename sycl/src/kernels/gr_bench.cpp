@@ -49,9 +49,10 @@ int main() {
         std::vector<float> h((size_t) T * (LR + HC + HC + N));
         s->memcpy(h.data(), out, h.size() * 4).wait();
         uint64_t cs = 1469598103934665603ull;
-        for (float v : h) { uint32_t u; std::memcpy(&u, &v, 4); cs = (cs ^ u) * 1099511628211ull; }
-        std::printf("fused GR read, %d tokens: %7.1f us (%.0f GB/s of weights)  checksum %016llx\n", T, us,
-                    (wd.size() + wu.size() + wi.size()) * 2.0 / us / 1e3, (unsigned long long) cs);
+        double sum = 0;
+        for (float v : h) { uint32_t u; std::memcpy(&u, &v, 4); cs = (cs ^ u) * 1099511628211ull; sum += v; }
+        std::printf("fused GR read, %d tokens: %7.1f us (%.0f GB/s of weights)  checksum %016llx  sum %.9e\n", T, us,
+                    (wd.size() + wu.size() + wi.size()) * 2.0 / us / 1e3, (unsigned long long) cs, sum);
     }
     return 0;
 }
