@@ -2,7 +2,9 @@
 
 A background thread samples once a second and keeps the last 60 readings of each series for the sparklines:
 - GPU: NVIDIA's own NVML library (nvml.dll / libnvidia-ml.so.1, installed with every driver) through ctypes, so no
-  pip package is needed: load, VRAM, temperature, power, PCIe link and throughput.
+  pip package is needed: load, VRAM, temperature, power, PCIe link and throughput.  On an Intel Arc (xe driver) the
+  same readings come from a root sampler's /run/gpustat.json when one runs (load and VRAM need root: per-client
+  fdinfo), else from sysfs directly (temperature, power, PCIe link).
 - CPU, RAM, disk: `psutil` when it is installed (setup installs it); without it the CPU and RAM readings fall back to
   the OS (Windows GlobalMemoryStatusEx / GetSystemTimes, Linux /proc) and the disk rate is absent.
 Anything that cannot be read is None; nothing here can stop the server.
@@ -103,6 +105,98 @@ class _Nvml:
         return out
 
 
+# ------------------------------------------------------------------------------------------------ Intel Arc (xe)
+class _XeGpu:
+    """The Intel Arc readings in NVML's shape. Load and VRAM come from /run/gpustat.json (a root sampler: the only
+    VRAM accounting xe exposes is per-client fdinfo, readable by root only); temperature, power and the PCIe link are
+    read from sysfs too, so they show without the sampler."""
+    STAT = "/run/gpustat.json"
+
+    def __init__(self):
+        import glob
+        self.dev = None
+        for d in sorted(glob.glob("/sys/class/drm/card[0-9]*/device")):
+            try:
+                if open(f"{d}/vendor").read().strip() == "0x8086" and os.path.isdir(f"{d}/tile0"):
+                    self.dev = os.path.realpath(d)
+                    break
+            except OSError:
+                continue
+        self.hwmon = None
+        for n in glob.glob(f"{self.dev}/hwmon/hwmon*/name") if self.dev else []:
+            self.hwmon = os.path.dirname(n)
+        self._e = None                          # (t, card energy uJ) for power without the sampler
+
+    def ok(self):
+        return self.dev is not None and sys.platform.startswith("linux")
+
+    def name(self):
+        st = self._stat()
+        return (st or {}).get("name") or "Intel Arc GPU"
+
+    def _stat(self):
+        try:
+            import json
+            with open(self.STAT) as f:
+                st = json.load(f)
+            return st if time.time() - float(st.get("ts", 0)) < 15 else None
+        except (OSError, ValueError):
+            return None
+
+    def _rd(self, p):
+        try:
+            return open(p).read().strip()
+        except OSError:
+            return None
+
+    def _link(self):
+        """The link the card trained at: its own functions sit behind an internal x1 switch, so the first port up
+        the path wider than x1; the max is what card AND slot allow (the root port caps it)."""
+        gen = {"2.5": 1, "5.0": 2, "8.0": 3, "16.0": 4, "32.0": 5, "64.0": 6}
+        d, chain = self.dev, []
+        while d and d.startswith("/sys/devices/pci") and os.path.exists(f"{d}/current_link_speed"):
+            chain.append(d)
+            d = os.path.dirname(d)
+        for p in chain:
+            w = int(self._rd(f"{p}/current_link_width") or 0)
+            if w > 1:
+                g = lambda q, k: gen.get((self._rd(f"{q}/{k}_link_speed") or "").split(" ")[0])
+                card, slot = g(p, "max"), g(chain[-1], "max")
+                return g(p, "current"), min(x for x in (card, slot) if x) if (card or slot) else None, w
+        return None, None, None
+
+    def read(self):
+        out = {}
+        st = self._stat()
+        if st:
+            out["util"] = st.get("busy_pct")
+            if st.get("vram_used_mb") is not None:
+                out["mem_used"] = st["vram_used_mb"] * 2**20
+                out["mem_total"] = st.get("vram_total_mb", 0) * 2**20 or None
+            out["temp"] = st.get("temp_pkg")
+            out["power"] = st.get("power_w")
+            out["power_limit"] = st.get("power_cap_w")
+            out["vram_temp"] = st.get("temp_vram_max") or st.get("temp_vram")
+        if self.hwmon:
+            if out.get("temp") is None:
+                for lab in os.listdir(self.hwmon):
+                    if lab.endswith("_label") and self._rd(f"{self.hwmon}/{lab}") == "pkg":
+                        v = self._rd(f"{self.hwmon}/{lab[:-6]}_input")
+                        out["temp"] = int(v) / 1000 if v else None
+            if out.get("power") is None:
+                e, t = self._rd(f"{self.hwmon}/energy1_input"), time.time()
+                if e and e.isdigit():
+                    if self._e and t > self._e[0] and int(e) >= self._e[1]:
+                        out["power"] = (int(e) - self._e[1]) / 1e6 / (t - self._e[0])
+                    self._e = (t, int(e))
+            if out.get("power_limit") is None:
+                cap = self._rd(f"{self.hwmon}/power1_cap")
+                out["power_limit"] = int(cap) / 1e6 if cap and cap.isdigit() and int(cap) > 0 else None
+        out["pcie_gen"], out["pcie_gen_max"], out["pcie_width"] = self._link()
+        out["pcie_rx_mb"] = out["pcie_tx_mb"] = None    # xe exposes no PCIe traffic counters
+        return out
+
+
 # ------------------------------------------------------------------------------------------------ CPU / RAM
 def _cpu_name():
     if os.name == "nt":
@@ -181,6 +275,10 @@ class Telemetry:
         idx = list(gpu_indices) if gpu_indices and len(gpu_indices) > 1 else [gpu_index]
         self.gpus = [(i, _Nvml(i)) for i in idx]
         self.gpus = [(i, g) for i, g in self.gpus if g.ok()] or self.gpus[:1]
+        if not self.gpus[0][1].ok():           # no NVIDIA card: an Intel Arc on the xe driver?
+            xe = _XeGpu()
+            if xe.ok():
+                self.gpus = [(0, xe)]
         self.gpu = self.gpus[0][1]
         try:
             import psutil  # noqa: F401

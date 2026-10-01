@@ -2311,6 +2311,9 @@ def main() -> int:
         if old.get("sampling") and "sampling" not in cfg:
             cfg["sampling"] = old["sampling"]
             ok("kept the sampling defaults of the earlier config: " + ", ".join(f"{k}={v}" for k, v in old["sampling"].items()))
+        if old.get("model_switcher") and "model_switcher" not in cfg:   # the web app's model menu (a host swapping models)
+            cfg["model_switcher"] = old["model_switcher"]
+            ok("kept the model switcher of the earlier config: " + old["model_switcher"])
     except (OSError, ValueError):
         pass
     cal = None if backend in ("llama", "sycl") or hip else saved_calibration(cfg)   # tools/calibrate.py is NVIDIA-only for now

@@ -562,6 +562,28 @@ class Detokenizer:
         return delta
 
 
+def model_switcher(svc, mode: str = "") -> dict:
+    """The host's model swapper (config `model_switcher`, an RPC taking {"mode": m}): the models it serves on THIS
+    port, which one holds the card, whether one is loading. With `mode`, asks for that one first; this server is
+    then usually the one stopped, so the web app waits for /health to name the new model."""
+    url = getattr(svc, "switcher", None)
+    if not url:
+        return {"enabled": False}
+    try:
+        body = json.dumps({"mode": mode} if mode else {}).encode()
+        req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            res = json.load(r)
+        st = res.get("result", res)
+    except (OSError, ValueError) as e:
+        return {"enabled": True, "error": f"the model switcher did not answer ({e})"}
+    port = f":{getattr(svc, 'port', '')}"
+    urls = st.get("urls") or {}
+    mine = {k: v for k, v in (st.get("choices") or {}).items() if not urls or str(urls.get(k, "")).endswith(port)}
+    return {"enabled": True, "mode": st.get("mode"), "up": st.get("up"), "starting": st.get("starting"),
+            "choices": mine, "model": svc.model}
+
+
 class Service:
     def __init__(self, engine: Engine, tokenizer, template: ChatTemplate, model_name: str = "qwen3.8-flash-next",
                  vision: Vision | None = None, sampling_defaults: dict | None = None,
@@ -1316,6 +1338,10 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
                 return
+            if path == "/switcher":
+                if self._authorized():
+                    self._json(200, model_switcher(svc))
+                return
             if path == "/mcp":
                 # the MCP servers, their state and tools (the web app's switch and Monitor card)
                 if self._authorized():
@@ -1375,6 +1401,10 @@ def make_handler(svc: Service):
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
             if path == "/settings":
                 self._settings()
+                return
+            if path == "/switcher":                     # the web app's model menu: ask the host to swap models
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                self._json(200, model_switcher(svc, str(req.get("mode") or "")))
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -1780,6 +1810,10 @@ def main() -> int:
               file=sys.stderr)
         return 2
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    # A host that runs one model at a time and swaps them (a GPU shared with other work) can name the RPC that does
+    # the swap: the web app then offers the models served on this port. {"mode": m} switches, {} only reports.
+    svc.switcher = cfg.get("model_switcher") or None
+    svc.port = a.port
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     if a.config:                                        # the Chat settings shared with other apps, from last time
