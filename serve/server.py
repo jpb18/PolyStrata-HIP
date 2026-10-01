@@ -709,6 +709,8 @@ class Service:
         self.trusted_origins: list[str] = []
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
         self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
+        self.api_requests = collections.deque(maxlen=100)  # bounded I/O in memory; no headers or API keys
+        self.request_trace = threading.local()
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
@@ -802,8 +804,21 @@ class Service:
         self.last_request_at = time.time()
         if self.loaded() and not self._vision_down():
             return
+        trace = getattr(self.request_trace, "record", None)
+        waiting = time.perf_counter()
         with self.fifo:
-            self.ensure_loaded()
+            loading = time.perf_counter()
+            if trace is not None:
+                with self.status_lock:
+                    trace["queue_s"] += round(loading - waiting, 3)
+                    trace["state"] = "loading"
+            try:
+                self.ensure_loaded()
+            finally:
+                if trace is not None:
+                    with self.status_lock:
+                        trace["load_s"] += round(time.perf_counter() - loading, 3)
+                        trace["state"] = "queued"
 
     def unload(self, idle_for: float | None = None) -> str:
         """Stop the engine between requests: "unloaded", "not loaded", "busy" (a request is running or waiting, or
@@ -914,6 +929,34 @@ class Service:
         with self.status_lock:
             reading = self.status.get("busy") and self.status.get("first_token") is None
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
+
+    def begin_request(self, path, req):
+        raw = json.dumps(req, ensure_ascii=False, indent=2)
+        record = {"id": uuid.uuid4().hex[:12], "path": path, "model": req.get("model") or self.model,
+                  "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
+                  "response_format": (req.get("response_format") or {}).get("type")
+                  if isinstance(req.get("response_format"), dict) else None,
+                  "input": raw[:262144], "input_truncated": len(raw) > 262144,
+                  "output": "", "reasoning": "", "output_truncated": False, "reasoning_truncated": False,
+                  "queue_s": 0.0, "load_s": 0.0, "first_token_s": None,
+                  "_clock": time.perf_counter()}
+        with self.status_lock:
+            self.api_requests.append(record)
+        self.request_trace.record = record
+        return record
+
+    def request_records(self, request_id=None):
+        with self.status_lock:
+            records = list(self.api_requests)
+            if request_id:
+                record = next((r for r in records if r["id"] == request_id), None)
+                if record is None:
+                    return None
+                return {k: v for k, v in record.items() if not k.startswith("_")}
+            return [{k: v for k, v in r.items()
+                     if k not in ("input", "output", "reasoning", "response") and not k.startswith("_")}
+                    | {"wallclock_s": r.get("wallclock_s", round(time.perf_counter() - r["_clock"], 3))}
+                    for r in reversed(records)]
 
     def metrics(self, all_requests=False) -> dict:
         """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
@@ -1093,12 +1136,17 @@ class Service:
         # Identity token: only a DONE line replaces engine.last, so a request that died, errored or was
         # disconnected must not have the PREVIOUS request's decode figures recorded as its own.
         engine_last0 = getattr(self.engine, "last", None)
+        trace = getattr(self.request_trace, "record", None)
+        waiting = time.perf_counter()
         with self.status_lock:
             self.status["queued"] += 1
         try:
             with self.fifo:
                 try:
                     with self.status_lock:
+                        if trace is not None:
+                            trace["queue_s"] += round(time.perf_counter() - waiting, 3)
+                            trace["state"] = "generating"
                         self.status["queued"] -= 1
                     # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
                     self.ensure_loaded()
@@ -1122,6 +1170,9 @@ class Service:
                                     yield "ping", None
                                     continue
                                 n += 1
+                                if trace is not None and trace["first_token_s"] is None:
+                                    with self.status_lock:
+                                        trace["first_token_s"] = round(time.perf_counter() - trace["_clock"], 3)
                                 if t in self.stop_ids:
                                     finish = "stop"
                                     raw_ids.append(t)
@@ -1617,6 +1668,14 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _json(self, code, obj):
+            if getattr(self, "record", None) is not None:
+                with svc.status_lock:
+                    self.record["http_status"] = code
+                    raw = json.dumps(obj, ensure_ascii=False, indent=2)
+                    self.record.update(response=raw[:262144], response_truncated=len(raw) > 262144)
+                    for key in ("error", "usage", "timings"):
+                        if key in obj:
+                            self.record[key] = obj[key]
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -1675,6 +1734,15 @@ def make_handler(svc: Service):
                     # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
                     self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
+            if path == "/api/requests":
+                if self._authorized():
+                    request_id = parse_qs(urlsplit(self.path).query).get("id", [None])[0]
+                    records = svc.request_records(request_id)
+                    self._json(404 if records is None else 200,
+                               {"error": {"message": "request no longer retained"}} if records is None else
+                               records if request_id else {"requests": records, "retention": 100, "persistent": False,
+                                                          "loaded": svc.loaded(), "auto_load": hasattr(svc.engine, "restart")})
+                return
             if path == "/settings":
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
@@ -1684,8 +1752,8 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
-            if path == "":
-                body = (ROOT / "serve" / "web" / "index.html").read_bytes()
+            if path in ("", "/api-monitor"):
+                body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1786,6 +1854,8 @@ def make_handler(svc: Service):
                         result = "loaded"
                     self._json(200, {"status": result, **svc.v1_status()})
                     return
+                if path in ("/v1/chat/completions", "/v1/messages"):
+                    self.record = svc.begin_request(path, req)
                 if path == "/v1/chat/completions":
                     self._openai(req)
                 elif path == "/v1/messages":
@@ -1807,6 +1877,18 @@ def make_handler(svc: Service):
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
             except EngineStuck as e:                         # an unload or restart that could not end the engine
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+
+            except OSError:
+                if getattr(self, "record", None) is not None:
+                    self.record["outcome"] = "disconnected"
+            finally:
+                record = getattr(self, "record", None)
+                if record is not None:
+                    with svc.status_lock:
+                        record["wallclock_s"] = round(time.perf_counter() - record["_clock"], 3)
+                        record["finished_at"] = time.time()
+                        record["state"] = "error" if record.get("error") else record.get("outcome", "completed")
+                    svc.request_trace.record = None
 
         def _props(self):
             model = parse_qs(urlsplit(self.path).query).get("model", [svc.model])[0]
@@ -1866,12 +1948,42 @@ def make_handler(svc: Service):
             self._json(200, {"shared": bool(shared), "defaults": shared})
 
         def _sse(self):
+            if getattr(self, "record", None) is not None:
+                self.record["http_status"] = 200
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
             self._cors()
             self.end_headers()
+
+        def _capture(self, items, api):
+            """Retain bounded input/output for the monitor without changing the API response."""
+            try:
+                for item in items:
+                    if item is not None:
+                        if api == "openai":
+                            delta = item["choices"][0]["delta"]
+                            content, reasoning = delta.get("content", ""), delta.get("reasoning_content", "")
+                            usage, timings = item.get("usage"), item.get("timings")
+                        else:
+                            _, event = item
+                            delta = event.get("delta", {})
+                            content, reasoning = delta.get("text", ""), delta.get("thinking", "")
+                            usage, timings = event.get("usage"), None
+                        with svc.status_lock:
+                            for name, value in (("output", content), ("reasoning", reasoning)):
+                                if value:
+                                    combined = self.record[name] + value
+                                    self.record[name] = combined[:262144]
+                                    self.record[name + "_truncated"] |= len(combined) > 262144
+                            if usage:
+                                self.record["usage"] = usage
+                            if timings:
+                                self.record["timings"] = timings
+                    yield item
+            finally:
+                items.close()
 
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
@@ -1899,6 +2011,7 @@ def make_handler(svc: Service):
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
             if validator is not None:
                 chunks = structured_chunks(chunks, validator)
+            chunks = self._capture(chunks, "openai")
             if not req.get("stream"):
                 return self._json(200, openai_collect(chunks))
             self._sse()
@@ -1911,16 +2024,19 @@ def make_handler(svc: Service):
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
+                self.record["outcome"] = "disconnected"
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
             except EngineDied as e:                          # mid-stream: say so, then end the stream properly
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
+                self.record["error"] = err["error"]
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
             except StructuredOutputError as e:
                 err = {"error": {"type": "structured_output_failed", "code": "structured_output_failed", "message": str(e)}}
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
             except ValueError as e:                          # the engine's ERR after the stream started: the
                 err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
+                self.record["error"] = err["error"]
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _count_tokens(self, req):
@@ -1941,6 +2057,7 @@ def make_handler(svc: Service):
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
+            events = self._capture(events, "anthropic")
             if not req.get("stream"):
                 return self._json(200, anthropic_collect(events))
             self._sse()
@@ -1954,13 +2071,16 @@ def make_handler(svc: Service):
                                          json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
                     self.wfile.flush()
             except OSError:
+                self.record["outcome"] = "disconnected"
                 cancel.set()
                 events.close()
             except EngineDied as e:                          # mid-stream: Anthropic's error event
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self.record["error"] = err["error"]
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
             except ValueError as e:                          # the engine's ERR after the stream started
                 err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+                self.record["error"] = err["error"]
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler

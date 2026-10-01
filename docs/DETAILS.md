@@ -814,3 +814,17 @@ tools/MCP are refused explicitly. Without `response_format`, ordinary text and t
 Structured SSE buffers the answer while sending keep-alive comments. It emits content only after validation,
 then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without invalid content deltas.
 `/v1/status.structured_output` advertises the formats, validation method and buffered streaming behavior.
+
+### API request monitor
+
+Open `/api-monitor` to inspect API traffic without opening a chat. It shows the model state, safe
+load/unload controls, active/queued requests, original request bodies, output, separate reasoning and
+non-stream response bodies. Total wall-clock includes FIFO waits and automatic loading; load, queue,
+first-token, prompt/output tokens and engine decode timing are shown separately.
+
+`GET /api/requests` returns compact summaries; `GET /api/requests?id=<id>` returns one retained request.
+Both use the existing API-key check. The monitor retains the newest **100 requests in memory** until restart,
+with **262,144 characters per input/output/reasoning/response field** and visible truncation flags. The actual API
+responses are unaffected. Headers are not recorded, and the monitor key is kept in this tab's session storage.
+Treat request history as sensitive input/output when exposing Strata on a network: set an API key as above.
+The page uses relative URLs and works through the existing host binding or a reverse proxy.
