@@ -1378,6 +1378,10 @@ def make_handler(svc: Service):
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                if path in ("/v1/chat/completions", "/v1/messages"):   # who asked: a later "disconnect" names its client
+                    print(f"[strata] request {path} from {self.client_address[0]} "
+                          f"({self.headers.get('User-Agent', '?')[:60]}), stream={bool(req.get('stream'))}, "
+                          f"max_tokens={req.get('max_tokens') or req.get('max_completion_tokens')}", flush=True)
                 if path == "/v1/chat/completions":
                     self._openai(req)
                 elif path == "/v1/messages":
