@@ -971,12 +971,24 @@ double probe_pcie_h2d_gbps() {
     }
     std::memset(h, 0, kBytes);   // fault the pages in before timing
     cudaMemcpyAsync(d, h, kBytes, cudaMemcpyHostToDevice);   // warmup: context up, copy engine primed
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    // Windows HIP: the events do not bracket the copies there (an RX 6800 read 3,300-26,000 GB/s, so every link kept
+    // the x16 share), so the copies are timed on the host: 1 GiB takes tens of milliseconds, so the synchronize
+    // around them hardly matters
+    const bool warm = cudaDeviceSynchronize() == cudaSuccess;
+    const Clock::time_point t0 = Clock::now();
+    for (int i = 0; i < kIters; ++i) cudaMemcpyAsync(d, h, kBytes, cudaMemcpyHostToDevice);
+    const bool ok = warm && cudaDeviceSynchronize() == cudaSuccess;
+    const float ms = (float) std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    const bool timed = ok && ms > 0.01f;
+#else
     cudaEventRecord(ev0);
     for (int i = 0; i < kIters; ++i) cudaMemcpyAsync(d, h, kBytes, cudaMemcpyHostToDevice);
     cudaEventRecord(ev1);
     const bool ok = cudaEventSynchronize(ev1) == cudaSuccess;
     float ms = 0.f;
     const bool timed = ok && cudaEventElapsedTime(&ms, ev0, ev1) == cudaSuccess && ms > 0.01f;
+#endif
     const double bw = timed ? ((double) kIters * (double) kBytes / (ms * 1e-3)) / 1e9 : -1.0;
     cudaEventDestroy(ev0);
     cudaEventDestroy(ev1);
