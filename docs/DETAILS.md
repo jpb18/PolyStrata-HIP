@@ -84,7 +84,11 @@ every group: the answer then no longer depends on the drafting. Measured on a Ry
 -1..-3%, the other models the same; the default stays the fastest rule. Through the server, two more things carry
 over from one request to the next (#410): the adaptive tier moves experts between RAM and VRAM (the GPU and the CPU
 round an expert differently), and the prompt cache resumes a repeated prompt and reads only its tail through the
-decode path. For byte-identical repeats add `--prompt-cache 0 --adapt-swaps 0` to the engine's args as well.
+decode path. For byte-identical repeats add `--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0` to the engine's args
+as well (#410): the PCIe share of the missed experts (computed on the GPU instead of the CPU) still made the first
+answer after a start differ from the next ones. Measured here (IQ3_XXS, a 3.6K-token prompt, 4 repeats): with all
+three switches 1 answer of 4, without `--pcie-frac 0` 2 of 4 (the first one differs), with the defaults 2 of 4.
+`--pcie-frac 0` costs decode speed (the missed experts all run on the CPU), so keep it for A/B runs.
 
 **The draft layer's tokens (0.1.27, `--draft-vocab`):** the MTP draft layer can only propose tokens from a subset
 of the vocabulary (`mtp/rt/draft_vocab.bin`). Since 0.1.27 the subset includes every Chinese, Japanese and Korean
