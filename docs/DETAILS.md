@@ -76,7 +76,10 @@ slightly differently. How many tokens share an expert depends on the drafts in a
 at temperature 0 can end in a different (equally good) answer when the drafting, the cache state or a resumed
 conversation differ (issue #152). `STRATA_IQ_MT_MIN=1` (in the config's `env`) uses the multi-token kernels for
 every group: the answer then no longer depends on the drafting. Measured on a Ryzen 7600 (AVX-512): IQ3_S decode
--1..-3%, the other models the same; the default stays the fastest rule.
+-1..-3%, the other models the same; the default stays the fastest rule. Through the server, two more things carry
+over from one request to the next (#410): the adaptive tier moves experts between RAM and VRAM (the GPU and the CPU
+round an expert differently), and the prompt cache resumes a repeated prompt and reads only its tail through the
+decode path. For byte-identical repeats add `--prompt-cache 0 --adapt-swaps 0` to the engine's args as well.
 
 **The draft layer's tokens (0.1.27, `--draft-vocab`):** the MTP draft layer can only propose tokens from a subset
 of the vocabulary (`mtp/rt/draft_vocab.bin`). Since 0.1.27 the subset includes every Chinese, Japanese and Korean
