@@ -70,6 +70,14 @@ VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the
 slower. It does not stream its KV cache (KV streaming is on by default from 64K), so it pays off mostly on large
 cards at long contexts.
 
+**Reproducible greedy output (0.1.30, opt-in, `STRATA_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
+expert for one token with ggml's dot product and for several tokens with Strata's multi-token kernels, which round
+slightly differently. How many tokens share an expert depends on the drafts in a verify window, so the same prompt
+at temperature 0 can end in a different (equally good) answer when the drafting, the cache state or a resumed
+conversation differ (issue #152). `STRATA_IQ_MT_MIN=1` (in the config's `env`) uses the multi-token kernels for
+every group: the answer then no longer depends on the drafting. Measured on a Ryzen 7600 (AVX-512): IQ3_S decode
+-1..-3%, the other models the same; the default stays the fastest rule.
+
 **The draft layer's tokens (0.1.27, `--draft-vocab`):** the MTP draft layer can only propose tokens from a subset
 of the vocabulary (`mtp/rt/draft_vocab.bin`). Since 0.1.27 the subset includes every Chinese, Japanese and Korean
 token (106,299 ids), so answers in those languages are 15-38% faster (Q2_0, RTX 5070). Its head takes ~180 MiB of
@@ -85,6 +93,50 @@ On the Coder the engine's committed memory drops from 36 to ~13 GB, with the sam
 5090 holds all of the Coder's experts, most of Q2_0's) it runs at nearly the usual speed. With a small one, most
 experts come from the SSD and it is much slower (setup says so). `START-HERE.bat --setup --low-ram on|off` overrides
 the choice.
+
+**Low-RAM mode, resident (engine 0.1.30):** when the experts the GPU does not hold fit the RAM (with the same ~10 GB
+beside them), setup picks the resident variant instead (`--resident-experts`): at start the engine copies exactly those
+experts from `experts.bin` into RAM (page-locked when the driver allows, else locked in RAM), so while it answers
+nothing is read from the SSD, however little RAM the OS leaves for its file cache. Examples with setup's context: a
+32 GB PC with a 24 GB GPU runs Q2_0, IQ2_XS and the Coder this way (~16-18 GB of experts in RAM, the GPU holds the
+other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC stays mapped. The details:
+- The prompt path borrows room in the GPU's expert cache for its buffers and puts those experts back after the prompt;
+  as far as the RAM allows, their experts are kept in RAM too (so a prompt reads nothing from the SSD either).
+- The cache still follows the conversation (`--adapt-every`): a swap copies the evicted expert back from VRAM into the
+  RAM place of the one that replaces it, so the RAM copy keeps holding exactly what the GPU does not.
+- The answers are the plain mapped mode's for the same expert placement: the bytes are the file's. With a page-locked
+  copy the GPU also takes its usual share of the misses over PCIe (`--pcie-frac`), as with enough RAM; `--pcie-frac 0`
+  (or `STRATA_RESIDENT_PIN=0`) gives the mapped mode's exact tokens.
+- The engine leaves 4 GB of the RAM it finds free (`STRATA_RESIDENT_HEADROOM_GIB`); when even the experts the GPU does
+  not hold do not fit, it says so and runs the plain mapped mode. The server log shows, per request, how many expert
+  reads went to the file (`resident RAM: ... blob reads from the file`: 0 in steady use).
+- `--low-ram resident|mmap` forces one variant (also on a PC with enough RAM, e.g. to try it).
+
+**Low-RAM mode without `experts.bin` (engine 0.1.31):** for the native packs (IQ2_XS, IQ3_XXS, IQ3_S, the Coder, Swift,
+Q2_0 packed by `tools/iq_pack.py`; not the canonical Q2_0 pack setup makes for AVX-512 CPUs) the mapped mode no longer
+needs the pack's `experts.bin`: when the pack has none, the engine
+maps the model's GGUF files themselves and reads each expert's gate, up and down rows from where `native_experts.txt`
+says they are (the files are checked against it first: every tensor's name, type, shape, offset and bounds). That
+saves the 23-50 GB copy on the disk. The answers are the same: on the Coder, 64 greedy tokens from `experts.bin` and
+from the GGUF gave identical tokens and logits. An expert read from the GGUF is three reads instead of one, so the
+engine fetches a layer's missing experts on 8 threads (`STRATA_FETCH_THREADS`) with one batched page request
+(Windows `PrefetchVirtualMemory`). With an `experts.bin` in the pack, nothing changes. Setup does not use this yet.
+
+**A RAM budget (engine 0.1.31, `--resident-budget-gib N`):** the resident variant for a model whose experts do not all
+fit: the N GiB of experts the GPU cache does not hold that the expert profile ranks hottest are copied into RAM at
+start (locked; page-locked when the driver allows the whole budget), and the rest are read from the files through the
+OS file cache. It implies `--mmap-experts` and leaves 4 GB of free RAM (a larger N is clamped, with a message). With
+the GGUF read in place it also warms the next layer's likely experts: while the CPU works on a layer, a thread applies
+the next layer's router to this layer's input and asks the OS for the pages of the predicted experts that neither the
+GPU nor the RAM budget holds (only pages - the experts computed are the same; `STRATA_LOOKAHEAD=0` turns it off). This
+is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 GB PC: 7-8.5 tokens/s at N = 40 on an
+RTX 5070, against ~3 tokens/s before these changes.
+
+**How much came from where:** with `--stats` the engine prints the tiers of the decode (`expert tiers`: blobs from the
+RAM copy, blobs and MB from the files, the time spent reading them; `routing prefetch`: how many of the file reads had
+been warmed). The server log has the same per request (`expert tiers: GPU ... hits ...; RAM ... blobs, files ...
+blobs ... MB read`), and `GET /metrics` lists `ram_blobs`, `file_blobs` and `file_mb` for each recent request (with
+engine 0.1.31 or newer).
 
 Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
 and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
@@ -168,6 +220,12 @@ thought about for 1,524 tokens. Not a benchmark, but consistent with the claim.
 ```
 START-HERE.bat --setup --family swift --model IQ2_XS
 ```
+
+### Experimental: Unsloth's UD-Q4_K_XL (manual import)
+
+A 4-bit quantization of the same model (111 GB, 72 GiB of experts). Not in setup: packing it and the server
+configuration are in **[docs/UNSLOTH_Q4.md](UNSLOTH_Q4.md)**. On a 64 GB PC with a 12 GB RTX 5070 it writes 7-8.5
+tokens/s, most experts read from the SSD; quality has not been measured against llama.cpp yet.
 
 ## Before you start
 
@@ -296,6 +354,27 @@ Terminal chat: `.venv/bin/python chat.py`.
 
 ---
 
+## Sharing the GPU with other programs (optional)
+
+By default the model stays loaded until you close Strata. On a PC that also games, renders or runs another model
+server, three server options (all off by default; also as keys in `strata-<model>.json`) give the VRAM back:
+
+| Option | Config key | What it does |
+| --- | --- | --- |
+| `--idle-unload 600` | `"idle_unload_s": 600` | unload the model after 600 s without requests; the next request loads it again |
+| `--min-free-vram-mib 11000` | `"min_free_vram_mib": 11000` | load an unloaded model only when that much VRAM is free (it waits up to 15 s for memory being given back), else answer **503** "the GPU is in use by another program" instead of starting into what a game left (with several GPUs it checks the first one) |
+| `--before-load "cmd"` | `"before_load": "cmd"` or `["cmd", "arg"]` | a command run before the model is loaded again, e.g. one that unloads another server's model |
+
+`POST /unload` unloads it now (`409` while a request is running) and `POST /load` loads it ahead of a request;
+`/health` says `"loaded"`, `/v1/models` lists it as `unloaded` (like llama.cpp's router), `/props` sets
+`is_sleeping` and the Monitor shows the state. Unloading ends the engine process - and the image encoder, when images
+are on; it is started again first, as at a start - so their VRAM and RAM go straight back. The model files stay in
+the OS file cache, so loading again takes seconds while that RAM is not needed elsewhere. Measured on an RTX 5060 Ti
+16 GB with Q2_0 in the low-RAM mode: unloading takes ~0.3 s, and a request to an unloaded model answered after
+4.6 s (text) or 14.7 s (a picture, image encoder on the CPU).
+
+---
+
 ## Using it
 
 The server listens on `http://127.0.0.1:8080` (change with `--port` in setup, or edit the run script).
@@ -336,6 +415,12 @@ print(r.choices[0].message.content)
   Without a setting the model uses its own default, **high**. `none` answers at once (fastest); `low` keeps the thinking
   short. The levels are instructions the model was trained with, not a hard token limit: on easy questions all three
   think briefly, on hard ones `high` thinks longest and is most accurate.
+- **A hard thinking budget (opt-in).** `"reasoning_budget_tokens": N` in a request (OpenAI or Anthropic) caps the
+  thinking at N tokens: when it gets there the server ends it with a short wrap-up line and `</think>`, and the model
+  answers from there (the engine continues from what it already holds, so nothing is read again). The wrap-up is
+  part of the thinking the client sees and counts as output tokens. `"reasoning_budget_tokens": N` in
+  `strata-<model>.json` sets it for every request; a request's own value wins, and `0` means no budget. Off by default;
+  Anthropic's `"thinking": {"budget_tokens": N}` still only chooses the level, as above.
 - **Streaming.** With `"stream": true` everything arrives as it is made: the thinking, the answer, and tool calls
   (the tool's name first, then its arguments piece by piece, like OpenAI and Anthropic do). While the model reads a
   long prompt the stream sends keep-alives, so agents do not time out; the server window prints progress every
@@ -371,9 +456,48 @@ prompt when that is 2,048 tokens or more (engine 0.1.20; PR #62 + #65), so that 
 system prompts and tool lists. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`,
 `--prompt-cache-root N` (0 = no system-prompt checkpoint), `--turn-token ID`.
 
-**Current limits (v1):** one request at a time, and one conversation's history in the KV cache at a time (switching
-between two chats re-reads the part where they diverge; the shared prefix, such as the system prompt, is reused); images
-only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
+**Multiple conversations (opt-in).** Add `--conversation-cache-mib 8192
+--conversation-cache-slots 4` to the engine arguments to park up to four conversations
+in a bounded 8 GiB host-RAM cache. This preserves controller/worker histories when
+their requests alternate; it does not execute requests concurrently. No client session
+ID is required: only exact token/image prefixes with matching steering mode are reused.
+The default budget is 0 (disabled); `--prompt-cache 0` also disables parking.
+The initial shared-core integration supports a single session GPU: combining
+enabled parking with `--layer-split` is rejected before model loading. Ordinary
+upstream layer-split checkpoints remain available with parking disabled. FP16,
+INT8, Q4_0 and identity-layout K8V4 snapshots are supported; the K8V4 draft ring
+remains INT8, as in upstream. Windows/HIP and multi-GPU runtime coverage must be
+reported separately from Linux/CUDA evidence.
+
+Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/V.
+They add host RAM, not another model or VRAM allocation. The byte budget also counts
+an incoming snapshot during a switch. After a restore, unchanged K/V pages can be
+retained for the next parking operation; growth appends storage without copying
+the existing pages. Rewinds refresh the affected pages, and running state and
+checkpoints are captured again. Retained active K/V counts against the same byte
+budget and is discarded before evicting parked entries under memory pressure.
+If reserving space for growth would evict another conversation, parking uses a
+full capture instead.
+Oldest parked entries are evicted first.
+Oversized snapshots or host allocation failures fall back to ordinary prompt processing.
+`--conversation-cache-min-free-mib N` (default 2560) additionally requires that
+physical-RAM headroom remain available: the engine checks before allocation and
+again after capture. Unknown telemetry or insufficient RAM skips parking. Windows
+uses `GlobalMemoryStatusEx`, Linux uses `MemAvailable`; these are host-level samples,
+not a reservation or enforcement of container/job memory limits. An 8 GiB budget
+is a cap, not a recommendation for every machine.
+
+The shared snapshot core validates all layers and checkpoints before applying any
+state. Invalid entries are discarded; transfer/synchronization failure is fatal
+rather than permission to continue with partial state. Indexer spare keys and the
+moving spare row are preserved, including checkpoint rewinds.
+The engine log reports parking, restoration, bytes, evictions, individual snapshot
+sizes and K/V bytes reused during capture. `STRATA_SNAPSHOT_FULL_CAPTURE=1` disables
+retention for diagnostic comparisons. Snapshots are not
+persisted across restarts.
+
+**Current limits (v1):** one request at a time, and one conversation cached at a time (switching between two chats
+re-reads the other one unless the opt-in cache above is enabled); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
 seed** are honored per request (OpenAI and Anthropic fields); with the default adaptive expert tier a sampled result
 is not reproducible run to run - for seed-reproducible output add `--adapt-every 100000` (static residency) to the
 engine arguments. The run config's optional `sampling` block sets the defaults for requests that leave the fields out
@@ -427,6 +551,43 @@ because of what it reads (a web page or a file can contain instructions). Give a
 it needs, prefer read-only tools, and don't add servers you don't trust. The tools can only be used from the chat
 page itself (a request with another site's Origin or without a JSON content type is refused); if Strata is reachable
 from other devices, set an API key.
+
+**Context extension past 262K (rope scaling, EXPERIMENTAL, off unless you pick it).** The model was trained on
+262,144 positions (rotary base 1e7). Rope scaling rescales the rotation angles so that longer contexts stay usable,
+with llama.cpp's types and flag names. `linear` is Position Interpolation: every angle is shrunk by the factor.
+`yarn` keeps the high-frequency angles, interpolates the low-frequency ones, and adds the magnitude correction
+that keeps the attention temperature where training put it. **Without the flags nothing changes:** an unscaled
+run computes exactly what it did before the feature existed, bit for bit. Scaled contexts need proportionally
+more VRAM/RAM for the KV cache and the rope tables (~13 KB and ~0.26 KB per token).
+
+What was measured (contributors' runs, RTX 5080 + IQ3_S, native path, in PR #84): per-position perplexity on the
+same tokens, with only the scaling flag changed. At 293K tokens (1.12x the trained length), `yarn` with factor 2
+lowered the NLL by 0.18 nats against both `none` and `linear` 2 (2.04 vs 2.22 / 2.22). That is 3-4x the path noise
+measured at the same length. `linear` 2 was indistinguishable from `none`. At 2.7K and 32K no arm separated from the
+noise. Needle tests do not tell the arms apart: the unscaled model also finds a needle at 413K. Long real-document
+Q&A worked with `yarn` 2 at 421K and `yarn` 4 at 714K (8/8 each), and a 1M-token `yarn` 4 run read end to end.
+Taken together, use **yarn**. It is still experimental: the numbers come from one machine and one quant.
+
+- setup: `START-HERE.bat --setup --context 393216` asks nothing extra - it picks the method (yarn; one
+  question when run interactively) and derives the factor from the final context for you (final context /
+  262,144, at least 1: 1.5 at 393K, 2 at 512K, 1 inside the trained range; `--rope-scaling`/`--rope-scale`
+  override; an explicit `--rope-scale` is kept as given even when it is too small for the context actually
+  served, so check it if you set one). An explicit `--rope-scaling none` for a context past
+  262,144 is refused: the setup will not configure a run with the stock angles past the trained range. If
+  the RAM check reduces a chosen 384K/512K back inside the trained range, an omitted method adds no
+  scaling, and an explicitly chosen one stays at factor 1 - the trained angles, no expansion (not a
+  switch for rope as a whole: explicitly supplied rope settings keep their behavior).
+- engine: `--rope-scaling none|linear|yarn`, `--rope-scale F`, and the raw ggml knobs `--rope-freq-base`,
+  `--rope-freq-scale`, `--yarn-orig-ctx` (default 262,144), `--yarn-ext-factor`, `--yarn-attn-factor`,
+  `--yarn-beta-fast` (32), `--yarn-beta-slow` (1). The model file's `rope.scaling.*` keys, when a
+  fine-tune ships them, are the defaults the flags override.
+
+The scaling is fixed for the whole run - the engine stores keys in its cache after rotating them, so one
+cache must never mix two scalings, and there is no per-request form. Within the trained 262,144 a scaled
+run is a slightly different model: the rescaled angles, and `yarn`'s magnitude correction, apply at every
+position, not only past the trained end. That is why the setup turns scaling on only for a context past
+262,144. Pictures read the same scaled table (their (t, h, w) positions feed it). That should work, but it is
+unmeasured: all the runs above are text.
 
 ---
 
@@ -557,6 +718,7 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | `the engine stopped unexpectedly (exit code ...)` | The engine process ended mid-answer - usually out of RAM (Linux ends the biggest program: `sudo dmesg \| grep -i -E 'killed process\|out of memory'`). The next request starts it again by itself. If it repeats: close other programs or pick a smaller size. The server also warns at start when the model's experts leave less than ~6 GB of RAM for everything else. |
 | Slow output, disk light busy | Not enough free RAM: close other programs, or choose Q2_0 / IQ2_XS. |
 | `prompt ... exceeds the context` | The request is longer than the context you chose: run setup again with a bigger `--context`. |
+| `the setup refuses --rope-scaling none for a past-trained context` | A context past the trained 262,144 needs the rotary angles rescaled (experimental rope scaling), and the setup will not configure one with the stock angles there. Let it pick (`START-HERE.bat --setup --context 393216` adds yarn and a covering factor), or pass `--rope-scaling linear` or `yarn` yourself. |
 | Slower than the tables | The monitor plugged into the GPU and other GPU programs take VRAM from the expert cache; RAM running below its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half. |
 | `this server was started without the vision encoder` | The model was set up for text only: run setup again with `--vision gpu`. |
 | A picture is refused or `cannot read the image` | The file is not a picture Pillow can open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF work). |
