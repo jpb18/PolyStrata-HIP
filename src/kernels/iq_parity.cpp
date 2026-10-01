@@ -27,7 +27,7 @@
 int main(int argc, char** argv) {
     const std::string dir = argc > 1 ? argv[1] : "logs/iq_fixture";
     const char* names[] = {"IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ1_M", "IQ4_NL", "IQ4_XS", "Q2_0", "Q3_K"};
-    int failures = 0;
+    int failures = 0, missing = 0;
     cudaStream_t s;
     cudaStreamCreate(&s);
     for (const char* nm : names) {
@@ -37,7 +37,10 @@ int main(int argc, char** argv) {
             std::printf("%-8s missing fixture: %s/%s.bin or %s/%s.f32 - generate the fixtures first with "
                         "python tools/iq_fixture.py --out %s (deterministic; see the tool's --help)\n",
                         nm, dir.c_str(), nm, dir.c_str(), nm, dir.c_str());
+            if (f) std::fclose(f);
+            if (g) std::fclose(g);
             ++failures;
+            ++missing;
             continue;
         }
         int hdr[3];
@@ -113,5 +116,10 @@ int main(int argc, char** argv) {
         cudaFree(dw); cudaFree(dq); cudaFree(dx); cudaFree(xq); cudaFree(dy);
     }
     std::printf("iq_parity: %d failures\n", failures);
+    // no fixture at all: the generator was skipped (no numpy / vendored gguf-py) - a skip (3), not a failure
+    if (missing == (int) (sizeof names / sizeof names[0])) {
+        std::printf("iq_parity: no fixtures in %s - skipped\n", dir.c_str());
+        return 3;
+    }
     return failures ? 1 : 0;
 }
