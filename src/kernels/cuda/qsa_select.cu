@@ -675,8 +675,13 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
     if (nq <= 0) return true;
     if (s.idx_dim != IDX_DIM || s.idx_n_head != IDX_HEADS || s.idx_block != R || nq > 65535 * TC_QT) return false;
 #if defined(__HIPCC__)
-    // AMD: the gfx12 (RDNA4) WMMA scorer; every other target keeps the warp kernel (false)
-    if (!sel_gfx12_device()) return false;
+    // AMD: the gfx12 (RDNA4) WMMA scorer, opt-in (STRATA_SELECT_WMMA=1): it selects slightly differently from the warp
+    // kernel (254/256 queries the same), so the default keeps the warp kernel; every other target keeps it too (false)
+    static const bool wmma_on = [] {
+        const char* v = std::getenv("STRATA_SELECT_WMMA");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    if (!wmma_on || !sel_gfx12_device()) return false;
     {
         const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
         const int64_t per = (int64_t) 4 * WITER * 16;
