@@ -2831,6 +2831,32 @@ int main(int argc, char** argv) {
     drive.d.src = srcp;
     drive.d.n_expert = g.n_expert;
     drive.d.jobs.resize((size_t) K);
+    // CS-T: routing-aware prefetch of the file tier (the GGUF in place): the next layer's router on this layer's MoE
+    // input predicts its experts and their pages are warmed meanwhile.  It only warms pages; STRATA_LOOKAHEAD=0 is
+    // the A/B arm, STRATA_LOOKAHEAD_K the experts per token (default 10).
+    strata::core::RouterLookahead lookahead;
+    if (srcp == &src && src.warms() && [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::atoi(v) != 0; }()) {
+        std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
+        bool ok = true;
+        for (int64_t l = 0; l < g.n_layers && ok; ++l) {
+            const strata::core::WeightRef* w = wt.find("blk." + std::to_string(l) + ".ffn_gate_inp.weight");
+            ok = w != nullptr && w->kind == strata::core::WeightKind::Bf16InF32 &&
+                 w->bytes == (uint64_t) (g.n_expert * g.n_embd) * 2;
+            if (!ok) break;
+            routers[(size_t) l].resize((size_t) (g.n_expert * g.n_embd));
+            ok = cudaMemcpy(routers[(size_t) l].data(), w->data, (size_t) w->bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+        }
+        const char* kv = std::getenv("STRATA_LOOKAHEAD_K");
+        if (ok && lookahead.start(std::move(routers), g.n_embd, g.n_expert, kv ? std::atoi(kv) : 10, &src, err)) {
+            drive.d.lookahead = &lookahead;
+            std::fprintf(stderr, "strata generate: routing-aware prefetch of the file tier on (the next layer's router)\n");
+        } else {
+            (void) cudaGetLastError();
+            std::fprintf(stderr, "strata generate: routing-aware prefetch off (%s)\n",
+                         ok ? err.c_str() : "the routers are not BF16 in the arena");
+            err.clear();
+        }
+    }
     // ---- R4.2c: THE HIT PATH.  Every one of these is required for `hits_ready()`, which is all-or-nothing on
     // purpose: a half-configured hit path would compute some experts twice and others not at all, and a token
     // built on that is wrong rather than refused.
@@ -5899,6 +5925,13 @@ int main(int argc, char** argv) {
                         fmb, rounds > 0 ? fmb / rounds : 0.0, rounds > 0 ? fms / rounds : 0.0,
                         fms > 0 ? fmb / fms : 0.0, src.gguf_mode() ? " (the GGUF in place)" : "",
                         (double) (fall0 - fbytes0) / 1e6);
+            if (drive.d.lookahead != nullptr)
+                std::printf("%-24s %lld experts warmed, %lld of the file tier's %lld blob reads had been warmed (%.1f%%); "
+                            "predictor %.1f ms/round on its thread, %lld layers skipped (still busy)\n", "routing prefetch",
+                            (long long) src.warmed(), (long long) src.warmed_hits(),
+                            (long long) (src.file_reads() - files0),
+                            src.file_reads() > files0 ? 100.0 * (double) src.warmed_hits() / (double) (src.file_reads() - files0) : 0.0,
+                            rounds > 0 ? drive.d.lookahead->busy_ms() / rounds : 0.0, (long long) drive.d.lookahead->skipped());
         }
         if (rounds > 0 && drive.d.pcie_num > 0)
             std::printf("%-24s %.2f distinct experts per layer read over PCIe (share %d/256 of the misses)\n",

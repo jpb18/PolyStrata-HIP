@@ -201,6 +201,41 @@ void dot_rows(int type, const uint8_t* row, int n, const void* const* act, int n
 
 bool kq256_supported(int type) noexcept { return type == 12 || type == 7 || type == 8; }
 
+void bf16_rows_dot_multi(const uint16_t* w, int rows, int cols, const float* x, int nt, float* out) {
+    // each row is read once for all `nt` (<= 8) tokens: the router (2.6 MB per layer) streams once per prediction
+    for (int r = 0; r < rows; ++r) {
+        const uint16_t* wr = w + (size_t) r * (size_t) cols;
+        __m256 acc[8];
+        for (int t = 0; t < nt; ++t) acc[t] = _mm256_setzero_ps();
+        for (int c = 0; c + 8 <= cols; c += 8) {
+            const __m256 wf = _mm256_castsi256_ps(
+                _mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*) (wr + c))), 16));
+            for (int t = 0; t < nt; ++t) acc[t] = _mm256_fmadd_ps(wf, _mm256_loadu_ps(x + (size_t) t * cols + c), acc[t]);
+        }
+        for (int t = 0; t < nt; ++t) out[(size_t) t * rows + r] = hsum_float_8(acc[t]);   // cols % 8 == 0 (2560)
+    }
+}
+
+void bf16_rows_dot(const uint16_t* w, int rows, int cols, const float* x, float* out) {
+    for (int r = 0; r < rows; ++r) {
+        const uint16_t* wr = w + (size_t) r * (size_t) cols;
+        __m256 acc = _mm256_setzero_ps();
+        int c = 0;
+        for (; c + 8 <= cols; c += 8) {
+            const __m256i h = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*) (wr + c)));
+            acc = _mm256_fmadd_ps(_mm256_castsi256_ps(_mm256_slli_epi32(h, 16)), _mm256_loadu_ps(x + c), acc);
+        }
+        float s = hsum_float_8(acc);
+        for (; c < cols; ++c) {
+            const uint32_t b = (uint32_t) wr[c] << 16;
+            float f;
+            std::memcpy(&f, &b, 4);
+            s += f * x[c];
+        }
+        out[r] = s;
+    }
+}
+
 void kq256_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
                    float* const* ff, int r0, int r1) {
     for (int t0 = 0; t0 < nt; t0 += MAXT) {
