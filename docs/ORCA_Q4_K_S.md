@@ -6,7 +6,7 @@ The ordinary GGUF quantizes some small projections which Strata reads as BF16. `
 
 ## Build and prepare
 
-Build Strata with CUDA, native experts, `STRATA_ORCA_Q4KS_MMQ=ON` (and `STRATA_BUILD_TESTS=ON` for the two parity programs below). This opt-in compiles the Q4_K, Q5_0 and Q5_1 GGML MMQ instances for CUDA or HIP; the usual Q8_0 draft-layer instance remains in both builds. HIP also needs `STRATA_PREFILL_MMQ=ON`. Select your card's compute capability, for example `89` on an L40S. On Windows with Ninja and CUDA 12.6, use the Visual Studio developer environment and `-DCMAKE_CUDA_RUNTIME_LIBRARY=Shared` to keep the CUDA runtime linkage consistent. The default pinned ggml checkout is supported by the project build.
+Build Strata with CUDA, native experts, `STRATA_ORCA_Q4KS_MMQ=ON` (and `STRATA_BUILD_TESTS=ON` for the two parity programs below). This opt-in compiles the Q5_0 GGML MMQ instance for CUDA or HIP (the Q4_K and Q5_1 instances come with the engine's K-quant MMQ build on CUDA); the usual Q8_0 draft-layer instance remains in both builds. HIP also needs `STRATA_PREFILL_MMQ=ON`. Select your card's compute capability, for example `89` on an L40S. On Windows with Ninja and CUDA 12.6, use the Visual Studio developer environment and `-DCMAKE_CUDA_RUNTIME_LIBRARY=Shared` to keep the CUDA runtime linkage consistent. The default pinned ggml checkout is supported by the project build.
 
 ```sh
 cmake -S . -B build -G Ninja -DSTRATA_ENABLE_CUDA=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_ORCA_Q4KS_MMQ=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared -DCMAKE_BUILD_TYPE=Release
