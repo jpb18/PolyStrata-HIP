@@ -16,6 +16,7 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 
 | | NVIDIA (Strata engine) | Intel Arc, Strata SYCL port | Intel Arc, llama.cpp |
 |---|---|---|---|
+| models | all four | the Coder IQ1_M; the original IQ2_XS too (experts beyond VRAM in the host mirror: 51-61 tok/s) | the Coder (fits VRAM) |
 | model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
 | where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
 | RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
@@ -436,6 +437,12 @@ first decode round, so it is a once-per-process cost, not lost throughput. Ruled
    mirror the device plan reads over PCIe (item 2). The port has the IQ2_XS/IQ3_XXS/Q2_0 expert kernels. Open: whether
    a 10+ GB pinned mirror fits beside everything else in 23 GB, and decode with that share of experts on a Gen3 x8
    link (3.6 GB mirrored measured 40.9 tok/s; expect less). Needs the 68 GB download.
+   **Done (2026-10-01)**: shard 1 downloaded (39.2 GB; shard 2 is byte-identical to the Coder's, so a hard link),
+   a native pack (`tools/iq_pack.py`, 6 s), the original model's expert profile, the same MTP draft layer. 18,329 of
+   24,576 experts in VRAM (24.6 GiB), 6,247 in the pinned host mirror (8.4 GiB, 9 s to fill), host RAM never below
+   12 GB free. **Decode 50.8 tok/s** on the 19-token prompt and **60.6** after 2,184 tokens, prompt 549 tok/s;
+   coherent, correct answers on both. Q2_0 and Swift 1.5 (similar size) should behave the same; IQ3_XXS/IQ3_S
+   (43-50 GB of experts) would need 19-26 GB mirrored, more than 23 GB of RAM allows.
 
 **Keeping up with upstream.** A merge of upstream `main` into `b70` leaves the copies in `sycl/` behind
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
