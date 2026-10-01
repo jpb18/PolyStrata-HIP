@@ -753,7 +753,14 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     if (nq <= 0) return;
     // the blocks a query can have: the call's active count when the caller knows it (the prompt path), else the capacity.
     // Decode (no count) keeps the capacity rule and the original register width: nothing changes there.
+#if defined(__HIPCC__)
     const bool counted = active_blocks > 0;
+#else
+    // CUDA keeps 0.1.32's capacity rule: #337's dispatch was measured on RDNA4 only, and on the RTX 5070 the 64K
+    // prompts read 1-3% slower with it
+    const bool counted = false;
+    (void) active_blocks;
+#endif
     const int64_t reach = counted && active_blocks < max_blocks ? active_blocks : max_blocks;
     const int64_t fit = (int64_t) TK_T * (counted ? TK_PER_MAX : TK_PER);
 #if defined(__HIPCC__)
