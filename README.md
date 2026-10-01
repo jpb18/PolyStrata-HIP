@@ -1,7 +1,7 @@
 <h1 align="center">Strata</h1>
 
 <p align="center"><b>Run a 125-billion-parameter AI model on a normal gaming PC</b><br>
-one NVIDIA card (12-24 GB) + 64 GB of RAM · Windows or Linux · one click to install<br>or an <b>Intel Arc</b> (32 GB) with llama.cpp underneath: <a href="docs/INTEL.md">docs/INTEL.md</a></p>
+one NVIDIA card (12-24 GB) + 64 GB of RAM · Windows or Linux · one click to install</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
 <sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with Strata (IQ3_S, 128K context) ·
@@ -18,25 +18,6 @@ of a word): faster than you can read.
 > [All the details](docs/DETAILS.md)
 
 ---
-
-
-> **Intel Arc port (this fork).** Strata's engine is CUDA. This fork adds a path for Intel Arc cards
-> that runs the same GGUF weights through llama.cpp's SYCL backend behind Strata's own server, web app
-> and APIs. It was developed and tested on this rig, so those are the numbers you will see quoted:
->
-> | | |
-> |---|---|
-> | GPU | Intel Arc Pro B70, 32 GB (Battlemage G31, PCI `8086:e223`), `xe` kernel driver |
-> | CPU / RAM | AMD Ryzen 7 1700X (8 cores, AVX2, no AVX-512) / 23 GiB |
-> | OS | Ubuntu 24.04.5 LTS, kernel 7.0, Docker 29, Python 3.12 |
-> | Storage | 2 TB PCIe NVMe (the model's 28.8 GB lookup table is paged from it) |
-> | Engine | llama.cpp 0.4.1-dev (b29c606), community SYCL build for the B70, oneAPI 2026.1, `ghcr.io/snailium/llama.cpp-sycl-intel-b70` |
-> | Model | Qwen3.8-Flash-Next GSQ-RCO **Coder**, IQ1_M: all 29.6 GB of shard 1 on the card |
-> | Measured | 23-25 tok/s decode (GPU-bound); prompt reading 150 tok/s on short prompts, 424 tok/s at 105k tokens; 128k context fits on the card; correct code; see [docs/INTEL.md](docs/INTEL.md) |
-> | SYCL port of the engine | `sycl/`: the CUDA engine migrated to SYCL, generating correct text on the B70. Same prompt, same card vs llama.cpp: **prompt 560 vs 138-319 tok/s, decode 45 vs 24-26 tok/s** (with the base model's MTP draft layer). `--stream-experts` fills the VRAM cache straight from the GGUF, so it runs on 23 GiB of RAM - [details](docs/INTEL.md#the-engine-itself-on-intel-the-sycl-port-sycl) |
->
-> No CUDA, no compiler: `./setup.sh` detects the Arc and does the rest. Not yet on this path: images
-> and MTP speculative decoding. Everything below this box is the original README for NVIDIA cards.
 
 ## How fast is it?
 
@@ -106,8 +87,14 @@ one later with `SETUP.bat` (the same as `START-HERE.bat --setup`; on Linux `./se
 For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](docs/ORCA.md).
 It needs an explicit packing conversion and is not an installer menu option.
 
+**Unsloth's 4-bit UD-Q4_K_XL** (experimental) is the fourth version in setup's menu (`--family unsloth`): the closest
+to the full model, but a 111 GB download whose 77 GB of experts do not fit in RAM. Strata keeps your RAM minus 24 GB
+of them in RAM and reads the rest from the SSD while it answers: 7-8.5 tokens/s on a 64 GB PC with a 12 GB GPU, several
+times slower than the sizes above, and long prompts are slow. It needs 48 GB of RAM or more, an NVMe SSD and one
+NVIDIA GPU (no images yet). Details and measurements: [UD-Q4_K_XL](docs/UNSLOTH_Q4.md).
+
 An **AMD Radeon RX 7900 XT / XTX, RX 9070 / 9070 XT or Radeon AI PRO R9700 on Linux** works too (experimental; the
-RX 7800 XT / 7700 XT and RX 9060 XT were validated by their owners):
+RX 7800 XT / 7700 XT and RX 9060 XT were validated by their owners; the RX 6800 / 6900 series, gfx1030, is community-reported):
 `./setup.sh --backend hip`, chosen by itself on a PC with no NVIDIA card Strata can use. It installs ROCm without sudo
 and compiles the engine (no images yet; several cards with `--gpus`). Details: [AMD HIP](docs/AMD_HIP.md).
 
@@ -277,8 +264,9 @@ Want the full picture? The [details](docs/DETAILS.md#how-it-works) explain every
 
 - Model: [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team; compressed versions by
   [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF);
-  [Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) by UkisAI. Their licenses apply
-  to the model files.
+  [Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) by UkisAI; the experimental
+  [UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) by Unsloth (its support follows
+  [eddoursul/Strata](https://github.com/eddoursul/Strata)). Their licenses apply to the model files.
 - Built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT). Ideas from
   [Splash](https://github.com/incoai/splash), [ninfer](https://github.com/Neroued/ninfer) and
   [HyperQwen](https://github.com/syv-ai/HyperQwen). More in the [details](docs/DETAILS.md#credits-and-licenses).

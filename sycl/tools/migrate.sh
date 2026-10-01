@@ -12,9 +12,11 @@ source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
 export PATH=/opt/intel/oneapi/dpcpp-ct/latest/bin:$PATH
 cd "$repo"
 # the compilation database: every .cu plus every .cpp/.hpp that includes a CUDA header
-python3 - "$repo" "$hdr" <<'PY'
+db_dir=$(mktemp -d)                                        # outside the checkout: nothing to ignore in git
+trap 'rm -rf "$db_dir"' EXIT
+python3 - "$repo" "$hdr" "$db_dir" <<'PY'
 import json, os, re, sys, subprocess
-repo, hdr = sys.argv[1], sys.argv[2]
+repo, hdr, db_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 files = subprocess.check_output(["bash", "-c",
     r"find src -name '*.cu'; grep -rl 'cuda_runtime\|cublas_v2\|cuda_fp16\|cuda\.h' src --include='*.cpp'"],
     cwd=repo, text=True).split()
@@ -28,18 +30,18 @@ for f in sorted(set(files) - skip):
     if tool == "nvcc": cmd += ["--cuda-gpu-arch=sm_80", "-x", "cuda"]
     cmd += ["-c", f, "-o", f + ".o"]
     db.append({"directory": repo, "file": os.path.join(repo, f), "arguments": cmd})
-json.dump(db, open(os.path.join(repo, "compile_commands.json"), "w"), indent=1)
+json.dump(db, open(os.path.join(db_dir, "compile_commands.json"), "w"), indent=1)
 print(len(db), "translation units")
 PY
 mkdir -p "$out"
 # --use-experimental-features: graph (cudaGraph -> sycl_ext_oneapi_graph), matrix (mma -> joint_matrix)
 # --gen-helper-function: copy the dpct helper headers next to the output so the port builds without the tool
-dpct -p "$repo" --in-root="$repo" --out-root="$out" \
+dpct -p "$db_dir" --in-root="$repo" --out-root="$out" \
      --cuda-include-path="$hdr" \
      --use-experimental-features=graph,matrix,logical-group,masked-sub-group-operation,occupancy-calculation,free-function-queries,local-memory-kernel-scope-allocation,bindless_images,virtual_mem,root-group,non-uniform-groups \
      --gen-helper-function --always-use-async-handler --sycl-named-lambda \
      --enable-ctad --optimize-migration --assume-nd-range-dim=3 \
      --report-type=all --report-file-prefix=dpct_report --report-format=csv \
-     --stop-on-parse-err=false ${DPCT_EXTRA:-} 2>&1 | tee "$out/../sycl-migrate.log" | tail -40
+     --stop-on-parse-err=false ${DPCT_EXTRA:-} 2>&1 | tee "$out/migrate.log" | tail -40
 echo "MIGRATE EXIT ${PIPESTATUS[0]}"
 find "$out" -type f | wc -l

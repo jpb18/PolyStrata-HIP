@@ -1,13 +1,13 @@
 # Strata on an Intel Arc
 
-Strata's engine is CUDA. On an Intel Arc there are two ways to run the same model behind the same Strata
-server (OpenAI and Anthropic APIs, streaming, tool calls, MCP, the web app all unchanged):
+Strata's engine is CUDA. On an Intel Arc it runs as **Strata's own engine, ported to SYCL** (`sycl/`, the
+section "The engine itself on Intel" below), behind the same Strata server: OpenAI and Anthropic APIs, streaming,
+tool calls, MCP and the web app all unchanged. llama.cpp's SYCL backend is the comparison point in the tables (it
+runs the same GGUF at about a third of the speed).
 
-- **Strata's own engine, ported to SYCL** (`sycl/`, the section "The engine itself on Intel" below). The
-  default once it is built: setup.py picks it on an Intel card when `build-sycl-aot/strata` and the
-  `strata-sycl-dev` image exist.
-- **llama.cpp's SYCL backend** (`--intel-engine llama`, or when the port is not built). Simpler to set
-  up, about a third of the speed.
+Everything Intel-specific lives in `sycl/`; no shared file of upstream's is changed, so upstream merges stay clean.
+`sycl/setup_intel.py` and `sycl/serve/server_intel.py` wrap upstream's `setup.py` and `serve/server.py` from
+outside.
 
 Written for and measured on an **Arc Pro B70 (32 GB)** running the Coder (IQ1_M) on Ubuntu 24.04, in a
 PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
@@ -33,47 +33,31 @@ tokens) on engine 0.1.31-sycl (2026-10-01);
 
 ## Setup
 
-    ./setup.sh
+Build the engine and its runtime image first ("How to build it" below), then:
 
-Setup notices the Arc (no `nvidia-smi`; an Intel GPU under the `xe` or `i915` driver in sysfs), says
-so, and takes the Intel path: no CUDA toolkit. With the SYCL port built it writes a `"strata"` config for it
-(see "Serving the port" below); otherwise, or with `--intel-engine llama`, it finds a `llama-server` and writes a
-config with a `"llama"` block and a start script. The rest of this section and the next two are that llama.cpp
-path.
+    python3 sycl/setup_intel.py [setup.py's options, e.g. --model IQ2_XS --context 32768 --port 8085]
 
-Where the `llama-server` comes from, in order:
+This is upstream's `setup.py`, run with the Intel steps swapped in (it imports setup.py and replaces those steps;
+setup.py itself is unchanged). The model choice, download, pack, tokenizer, MTP draft layer and the context and KV
+questions are setup's own. What changes:
 
-1. `--llama-server PATH` - a llama.cpp you built yourself with `-DGGML_SYCL=ON` (needs oneAPI).
-2. `llama-server` on PATH.
-3. A container: `ghcr.io/snailium/llama.cpp-sycl-intel-b70/llama-sycl-b70:stable`, a community SYCL
-   build for Battlemage (llama.cpp 0.4.1, IntelLLVM 2026.1, AOT for bmg-g31). Needs docker and the
-   `render` and `video` groups. Setup writes `start-llama.sh`, which runs it with the GPU passed
-   through and the right environment. The run script starts it when nothing is answering yet.
+- **GPU check:** the Arc is found in sysfs (vendor 8086 under `xe` or `i915`) and offered through setup's AMD
+  path. That is the path that builds locally and has no images.
+- **Engine step:** it uses the SYCL build (`build-sycl-aot/strata`, run in the `strata-sycl-dev` image by
+  `sycl/serve/strata-sycl.sh`) instead of compiling CUDA or HIP.
+- **RAM rule:** this does not apply. The CUDA engine keeps every expert in RAM; the port streams them from the
+  GGUF into VRAM (`--stream-experts`), so RAM only decides the KV streaming. `--check` lists what fits by VRAM.
+- **The config:** it uses the container's paths and `"backend": "sycl"`. The VRAM reserve is 1,024 MiB up to
+  32K and 2,048 MiB with 4,096-token prompt chunks above that. KV streaming (`--kv-resident 32768`) is on from
+  64K up when the RAM holds the KV. A `model_switcher` or `sampling` block from an earlier config is kept.
+  `run-<model>.sh` starts `sycl/serve/server_intel.py`.
 
-Then `run-<model>.sh` (or `./setup.sh` again) starts the model. First start of a 30 GB model: about
-two minutes.
+If a future `setup.py` drops a step this relies on, it stops with a message instead of writing a wrong config.
+The models, packs and checkout must sit under the folder `strata-sycl.sh` mounts at `/work` (the one above the
+checkout, or `STRATA_SYCL_ROOT`).
 
-Two flags worth knowing on a box that already runs things: `--port N` (the default 8080 is also what
-open-webui takes; the llama-server container gets N+1) and `--host 0.0.0.0` to reach it from other
-machines (the default binds localhost only, as upstream does).
-
-## The config
-
-```json
-{
- "engine": "llama",
- "tokenizer": ".../packs/coder-iq1_m/tokenizer",
- "llama": {
-  "url":   "http://127.0.0.1:8081",
-  "model": ".../Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
-  "start": ".../start-llama.sh",
-  "image": "ghcr.io/snailium/llama.cpp-sycl-intel-b70/llama-sycl-b70:stable"
- }
-}
-```
-
-`url` attaches to a running llama-server; `start` is run first if nothing answers there. A config
-with `"exe"` and `"args"` instead spawns a native binary directly. See `serve/engine_llama.py`.
+Then `run-<model>.sh` (or `sycl/setup_intel.py` again) starts the model. The first start of a 30 GB model
+takes about two minutes. `--port N` and `--host 0.0.0.0` work as in upstream's setup.
 
 ## Things that matter on this GPU
 
@@ -359,17 +343,17 @@ with `--stream-experts` there is no host copy of the experts, so any expert left
 and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
 5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free.
 
-**The Monitor tab on Intel.** `serve/telemetry.py` reads the Arc through sysfs (temperature, power and its cap,
-the PCIe link the card trained at) and, for load and VRAM, from `/run/gpustat.json`: xe reports those per client in
-`/proc/*/fdinfo`, which only root can read, so a small root sampler writes them (`tools/intel/gpustat.py`, install
-with its `gpustat.service` as its header says). A run config may also name a `model_switcher` (an RPC taking
-`{"mode": m}`) for a host that swaps models on one card: the web app then shows a Model menu.
+**The Monitor tab on Intel.** `sycl/serve/server_intel.py` is `serve/server.py` with two additions made at run
+time:
 
-`setup.py` writes this config by itself on an Intel card once the SYCL engine is built (`build-sycl-aot/strata`
-and the `strata-sycl-dev` image): a native pack, the MTP draft layer (from an existing `mtp-q2_0.gguf` without the
-5 GB download), the container's paths, the reserve (1,024 MiB up to 32K, 2,048 with 4,096-token chunks above),
-INT8 KV with `--kv-resident 32768` from 64K up (when the RAM holds the KV), and the `sampling` block of an earlier
-config kept. `--intel-engine llama` keeps llama.cpp.
+- **GPU readings.** When NVML has no card, it plugs `sycl/serve/xe_telemetry.py` into `serve/telemetry.py`'s
+  `gpu_reader`. That reads the Arc through sysfs (temperature, power and its cap, the PCIe link the card
+  trained at). Load and VRAM come from `/run/gpustat.json`: xe reports them per client in `/proc/*/fdinfo`,
+  which only root can read, so a small root sampler writes them (`sycl/tools/gpustat.py`; install it with its
+  `gpustat.service` as its header says).
+- **A Model menu.** A run config may name a `model_switcher` (an RPC taking `{"mode": m}`) for a host that swaps
+  models on one card. The web app's header then gets a Model menu (`sycl/serve/web/switcher.js`, injected into
+  the page).
 
 **Speed depends on the text.** Decode with speculative decoding tracks how often the draft layer guesses right.
 The served engine at 32K context: 45-51 tok/s on the test prompt (continuing a Fibonacci function, 77-85%
@@ -461,7 +445,9 @@ first decode round, so it is a once-per-process cost, not lost throughput. Ruled
 wherever upstream touched a file they mirror. They are refreshed by re-migration, not by hand (done for
 0.1.25-0.1.27, 2026-09-30):
 
-1. Merge upstream into `b70` and resolve `setup.py` (the Intel path lives beside upstream's AMD one).
+1. Merge upstream into `b70`. No shared file should conflict: the Intel code is all in `sycl/`. Then check that
+   `sycl/setup_intel.py --check` and `sycl/serve/server_intel.py --engine mock` still run against the new
+   setup.py and server.py.
 2. Migrate the *old* upstream tree (a `git archive` of the pre-merge commit) with `migrate.sh` into
    `sycl-base`, and the merged tree into `sycl-new`; about 3 minutes each in the dev image.
 3. `sycl/tools/normalize.sh <dir> <commit>` on both: dpct's file names, the unchanged files, the

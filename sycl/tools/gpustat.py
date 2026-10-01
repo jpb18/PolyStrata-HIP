@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU telemetry sampler for an Intel Arc on the xe driver (runs as root: tools/intel/gpustat.service).
+"""GPU telemetry sampler for an Intel Arc on the xe driver (runs as root: sycl/tools/gpustat.service).
 Writes /run/gpustat.json every INTERVAL s; Strata's web app (serve/telemetry.py) shows it in the Monitor tab:
   name, vram_used_mb / vram_total_mb (sum of drm-resident-vram0 over unique drm
   clients from /proc/*/fdinfo - the only VRAM accounting xe exposes; root-only),
@@ -10,8 +10,8 @@ Writes /run/gpustat.json every INTERVAL s; Strata's web app (serve/telemetry.py)
   x1 switch), the hottest VRAM channel, and the host's 1-minute load. Device totals only.
 Without it the Monitor tab still shows temperature, power and the PCIe link (sysfs), but not load or VRAM: xe
 reports those per client in /proc/*/fdinfo, which only root can read.
-Install:  sudo install -m 755 tools/intel/gpustat.py /usr/local/sbin/
-          sudo install -m 644 tools/intel/gpustat.service /etc/systemd/system/ && sudo systemctl enable --now gpustat
+Install:  sudo install -m 755 sycl/tools/gpustat.py /usr/local/sbin/
+          sudo install -m 644 sycl/tools/gpustat.service /etc/systemd/system/ && sudo systemctl enable --now gpustat
 Env: GPUSTAT_INTERVAL (s), GPUSTAT_POWER_WINDOW (s), GPUSTAT_PCI (the card, e.g. 0000:03:00.0; default the first
 Intel GPU on xe), GPUSTAT_VRAM_MB (the total; default the card's largest PCI BAR, which maps all of VRAM with
 resizable BAR - a little above what the runtime reports as usable).
