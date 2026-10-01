@@ -35,8 +35,9 @@ __device__ __forceinline__ uint16_t bf(float f) {
 __device__ __forceinline__ float sigm(float x) { return 1.0f / (1.0f + __expf(-x)); }
 __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__float2half_rn(f)); }
 // A SwiGLU product for an FP16 GEMM: saturated, so a token with a massive activation cannot turn into inf and then
-// NaN in the down projection (decode's q8_1 has room to ~8e6; FP16 ends at 65504)
-__device__ __forceinline__ uint16_t hf_sat(float f) { return hf(fminf(fmaxf(f, -65504.0f), 65504.0f)); }
+// NaN in the down projection (decode's q8_1 has room to ~8e6; FP16 ends at 65504).  A NaN stays NaN (fminf/fmaxf
+// would make it -65504 and hide where it came from); finite values below 65504 round exactly as before.
+__device__ __forceinline__ uint16_t hf_sat(float f) { return hf(isnan(f) ? f : fminf(fmaxf(f, -65504.0f), 65504.0f)); }
 // block-wide sum for blockDim.x <= 1024, result broadcast
 __device__ float block_sum(float v, float* sh) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
