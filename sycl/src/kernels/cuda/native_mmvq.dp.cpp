@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <string>
 #include <cmath>
 
@@ -140,6 +141,25 @@ __dpct_inline__ float warp_sum(float x) {
             offset);
     }
     return x;
+}
+
+template <int SG> __dpct_inline__ float sg_sum(float x) {   // SYCL port: warp_sum for a SG-wide sub-group
+#pragma unroll
+    for (int offset = SG / 2; offset > 0; offset >>= 1)
+        x += sycl::permute_group_by_xor(sycl::ext::oneapi::this_work_item::get_sub_group(), x, offset);
+    return x;
+}
+// SYCL port: the decode mmvq kernels as Xe2-native SIMD16 sub-groups (twice the registers per lane, same 128
+// threads per group) or as the CUDA-shaped 32-lane warp (default). STRATA_MMVQ_SG: 16 = all SIMD16, 1 = IQ4_XS
+// only, 2 = short outputs (n_out <= 1024) only, 3 = both. mmvq_sg_bench alone: SIMD16 wins on IQ4_XS (up to
+// 1.45x) and short outputs (up to 1.3x), loses 10-25% on the large K-quant projections.
+inline int mmvq_sg() {
+    static const int v = std::getenv("STRATA_MMVQ_SG") ? std::atoi(std::getenv("STRATA_MMVQ_SG")) : 32;
+    return v;
+}
+inline bool mmvq_sg16(bool iq4xs, int n_out) {
+    const int v = mmvq_sg();
+    return v == 16 || ((v & 1) && v < 4 && iq4xs) || ((v & 2) && v < 4 && n_out <= 1024);
 }
 
 __dpct_inline__ float warp_max(float x) {
@@ -1181,7 +1201,7 @@ struct SmallTraits {
 // equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
 
-template <typename F, int NCOLS, int NW, int ROWS>
+template <typename F, int NCOLS, int NW, int ROWS, int SG = WARP>
 /*
 DPCT1110: The total declared local variable size in device function
 native_mmvq_multi_kernel exceeds 128 bytes and may cause high register pressure.
@@ -1194,9 +1214,9 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
                          int n_in, int n_out) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     constexpr int BPI =
-        F::BPI * NW / WARPS; // blocks per iteration scale with the warp count
+        F::BPI * NW * SG / (WARPS * WARP); // blocks per iteration scale with the thread count
     const int tid =
-        WARP * int(item_ct1.get_local_id(1)) + int(item_ct1.get_local_id(2));
+        SG * int(item_ct1.get_local_id(1)) + int(item_ct1.get_local_id(2));
     const int row0 = ROWS * int(item_ct1.get_group(2));
     const int blocks_per_row = n_in / F::DIV;
     const int x_stride = n_in / Q8K;                   // Q8_1 blocks per activation column
@@ -1230,7 +1250,7 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
         }
     }
     auto &partial = *sycl::ext::oneapi::group_local_memory_for_overwrite<
-        float[NW - 1 > 0 ? NW - 1 : 1][NCOLS][ROWS][WARP]>(
+        float[NW - 1 > 0 ? NW - 1 : 1][NCOLS][ROWS][SG]>(
         sycl::ext::oneapi::this_work_item::get_work_group<3>());
     if (item_ct1.get_local_id(1) > 0) {
 #pragma unroll
@@ -1254,7 +1274,7 @@ native_mmvq_multi_kernel(const typename F::Block *__restrict__ w,
 #pragma unroll
             for (int l = 0; l < NW - 1; ++l) tmp[j][i] +=
                 partial[l][j][i][item_ct1.get_local_id(2)];
-            tmp[j][i] = warp_sum(tmp[j][i]);
+            tmp[j][i] = sg_sum<SG>(tmp[j][i]);
             if (item_ct1.get_local_id(2) == i && row0 + i < n_out)
                 y[std::size_t(j) * n_out + row0 + i] = tmp[j][i];
         }
@@ -1308,12 +1328,13 @@ void native_mmvq_rowwarp_kernel(const typename F::Block* __restrict__ w, const Q
 // 4-byte loads and measures 130-140 GB/s on the 8192-wide Q6_K projections. Here 8 lanes share a 256-block:
 // lane g takes positions iqs = 4g..4g+3, so its ql (16 B), qh (16 B) and each column's q8 ints (16 B) are one
 // vector load each; a 32-lane sub-group has four blocks in flight. One row per warp, WARPS rows per group.
-template <int NCOLS, int RPW>
+template <int NCOLS, int RPW, int SG = WARP>
 void native_mmvq_q6k_wide_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ x,
                                  float* __restrict__ y, int n_in, int n_out) {
     auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int lane = int(item.get_local_id(2)), warp = int(item.get_local_id(1));
-    const int row0 = (int(item.get_group(2)) * WARPS + warp) * RPW;
+    constexpr int NWG = WARPS * WARP / SG;              // sub-groups per work-group
+    const int row0 = (int(item.get_group(2)) * NWG + warp) * RPW;
     if (row0 >= n_out) return;
     const int blocks_per_row = n_in / QK, x_stride = n_in / Q8K;
     const int g = lane & 7, sub = lane >> 3;            // position group within the block, block within the iteration
@@ -1323,7 +1344,7 @@ void native_mmvq_q6k_wide_kernel(const Q6KBlock* __restrict__ w, const Q81Block*
     const int bq8_offset = 4 * (g >> 2) + ((g & 3) >> 1);
     const int u_int4 = g & 1;                           // ints 4(g%2)..+3 of the q8 block = one int4
     float acc[RPW][NCOLS] = {};
-    for (int kbx = sub; kbx < blocks_per_row; kbx += 4) {
+    for (int kbx = sub; kbx < blocks_per_row; kbx += SG / 8) {
         const int kby = kbx * (QK / Q8K);
         sycl::int4 ql4[RPW], qh4[RPW]; float dsc0[RPW], dsc1[RPW];
 #pragma unroll
@@ -1372,7 +1393,7 @@ void native_mmvq_q6k_wide_kernel(const Q6KBlock* __restrict__ w, const Q81Block*
         for (int j = 0; j < NCOLS; ++j) {
             float v = acc[r][j];
 #pragma unroll
-            for (int o = WARP / 2; o > 0; o >>= 1) v += dpct::experimental::permute_sub_group_by_xor(0xffffffffu, sg, v, o);
+            for (int o = SG / 2; o > 0; o >>= 1) v += sycl::permute_group_by_xor(sg, v, o);
             if (lane == 0 && row0 + r < n_out) y[std::size_t(j) * n_out + row0 + r] = v;
         }
 }
@@ -1385,6 +1406,14 @@ void launch_q6k_wide(const void* weights, const void* x_q8_1, float* y, int n_in
     const auto* w = static_cast<const Q6KBlock*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
     const int rpw = q6k_wide_rpw();
+    if (rpw == 1 && mmvq_sg16(false, n_out)) {
+        constexpr int NWG = WARPS * WARP / 16;
+        const unsigned blocks = unsigned((std::size_t(n_out) + NWG - 1) / NWG);
+        s->parallel_for<dpct_kernel_name<class native_mmvq_q6k_wide16, dpct_kernel_scalar<NCOLS>>>(
+            sycl::nd_range<3>(sycl::range(1, 1, blocks) * sycl::range(1, NWG, 16), sycl::range(1, NWG, 16)),
+            [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(16)]] { native_mmvq_q6k_wide_kernel<NCOLS, 1, 16>(w, x, y, n_in, n_out); });
+        return;
+    }
 #define STRATA_Q6W(RP) if (rpw == RP) { \
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS * RP - 1) / (WARPS * RP)); \
         s->parallel_for<dpct_kernel_name<class native_mmvq_q6k_wide, dpct_kernel_scalar<NCOLS>, dpct_kernel_scalar<RP>>>( \
@@ -1446,6 +1475,25 @@ void launch_multi_n(const void *weights, const void *x_q8_1, float *y, int n_in,
                         native_mmvq_multi_kernel<F, NCOLS, NW, ROWS>(w, x, y, n_in,
                                                                      n_out);
                     });
+        }
+        return;
+    }
+    if (mmvq_sg16(std::is_same_v<F, IQ4XSTraits>, n_out)) {   // same 128 threads as 8 SIMD16 sub-groups
+        constexpr int NW16 = WARPS * WARP / 16;
+        const sycl::range<3> t16(1, NW16, 16);
+        if (n_in / F::DIV < F::BPI) {
+            const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
+            s->parallel_for<dpct_kernel_name<class native_mmvq_multi16_small, F, dpct_kernel_scalar<NCOLS>>>(
+                sycl::nd_range<3>(sycl::range(1, 1, blocks) * t16, t16),
+                [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(16)]] {
+                    native_mmvq_multi_kernel<F, NCOLS, NW16, WARPS, 16>(w, x, y, n_in, n_out);
+                });
+        } else {
+            s->parallel_for<dpct_kernel_name<class native_mmvq_multi16, F, dpct_kernel_scalar<NCOLS>>>(
+                sycl::nd_range<3>(sycl::range(1, 1, unsigned(n_out)) * t16, t16),
+                [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(16)]] {
+                    native_mmvq_multi_kernel<F, NCOLS, NW16, 1, 16>(w, x, y, n_in, n_out);
+                });
         }
         return;
     }

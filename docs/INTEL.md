@@ -368,6 +368,12 @@ runtime's teardown began); it now exits directly once its requests are done.
    31 tok/s (from 4-5).
 4. QSA block selection on XMX: every query against every pooled block, a dense product that grows with the context.
 5. The hot decode kernels re-tuned for Xe2's native 16-wide sub-groups (twice the registers per thread).
+   **Tried, no gain**: SIMD16 builds of the multi-column mmvq and the wide Q6_K kernel (`STRATA_MMVQ_SG`: 16 all,
+   1 IQ4_XS only, 2 short outputs only; default 32). Alone (`mmvq_sg_bench`) SIMD16 is up to 1.45x faster on IQ4_XS
+   and 1.3x on the 640-row shared-expert projections, 10-25% slower on the large K-quant ones; in the engine no
+   setting beats SIMD32 beyond run-to-run noise (SIMD32 itself lands at 39 or 45 tok/s). Output tokens identical.
+   The same bench shows the real headroom: the dense decode kernels stream 100-280 GB/s of a 608 GB/s card
+   (Q6_K, the most common type, ~146 GB/s at 2-4 columns).
 6. INT8 prompt GEMMs: experts dequantized to INT8, oneMKL/oneDNN INT8 on XMX (half the dequant bytes, 2x rate).
 7. Fewer graph nodes per decode round (~2,500 at ~5 us): norm+rope, scores+top-k, gate+quantize fused.
 8. Wider speculation (two draft branches per verify window): the kernels are latency-bound, so it is nearly free.
