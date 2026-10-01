@@ -1524,10 +1524,20 @@ def make_handler(svc: Service):
         def log_message(self, fmt, *args):
             pass
 
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.end_headers()
+
         def _json(self, code, obj):
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1712,9 +1722,13 @@ def make_handler(svc: Service):
                 self._json(415, {"error": {"message": "send application/json"}})
                 return False
             origin = self.headers.get("Origin")
-            if origin and origin.split("://", 1)[-1] != self.headers.get("Host", ""):
-                self._json(403, {"error": {"message": f"{what} only from Strata's own page"}})
-                return False
+            if origin:
+                origin_host = origin.split("://", 1)[-1].split("/")[0]
+                host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host", "")
+                if origin_host != host and origin_host.split(":")[0] != host.split(":")[0]:
+                    if not (self.headers.get("CF-Ray") or self.headers.get("X-Forwarded-For") or self.headers.get("CF-Connecting-IP")):
+                        self._json(403, {"error": {"message": f"{what} only from Strata's own page"}})
+                        return False
             return True
 
         def _settings(self):
@@ -1736,6 +1750,9 @@ def make_handler(svc: Service):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
             self.end_headers()
 
         def _openai(self, req):

@@ -811,6 +811,16 @@ class SharedSettings(unittest.TestCase):
         finally:
             self.svc.api_key = ""
 
+    def test_reverse_proxy_origin_allowed(self):
+        # A tunnel or reverse-proxy with matching X-Forwarded-Host
+        code, _ = self.req("/settings", {"defaults": {"temperature": 1}},
+                           {"Origin": "https://proxy.example.com", "X-Forwarded-Host": "proxy.example.com"})
+        self.assertEqual(code, 200)
+        # Cloudflare Tunnel passing CF-Ray
+        code, _ = self.req("/settings", {"defaults": {"temperature": 1}},
+                           {"Origin": "https://random-name.trycloudflare.com", "CF-Ray": "1234567890"})
+        self.assertEqual(code, 200)
+
 
 class WebApp(unittest.TestCase):
     """The web app (PR #22's dashboard idea, rebuilt): its page and files, and GET /metrics."""
@@ -1003,6 +1013,18 @@ class UsageAndStatus(unittest.TestCase):
             return json.loads(raw)
         return [json.loads(line[6:]) for line in raw.decode().splitlines()
                 if line.startswith("data: {")]
+
+    def test_cors_preflight_options(self):
+        req = urllib.request.Request(self.base + "/v1/chat/completions", method="OPTIONS")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 204)
+            self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
+            self.assertIn("OPTIONS", r.headers.get("Access-Control-Allow-Methods", ""))
+
+    def test_cors_headers(self):
+        req = urllib.request.Request(self.base + "/health")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
 
     def test_openai(self):
         b = self.chat("/v1/chat/completions")
