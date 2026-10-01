@@ -490,11 +490,12 @@ int check_bf16_embd(cudaStream_t s) {
     float* dout = nullptr;
     cudaMalloc(&dt, table.size() * 2);
     cudaMalloc((void**) &dtok, tok.size() * 4);
-    cudaMalloc((void**) &dout, (size_t) (V * H) * 4);
+    const int64_t out_rows = NT > V ? NT : V;   // the gathered rows (NT) and the whole table (V) share the buffer
+    cudaMalloc((void**) &dout, (size_t) (out_rows * H) * 4);
     cudaMemcpy(dt, table.data(), table.size() * 2, cudaMemcpyHostToDevice);
     cudaMemcpy(dtok, tok.data(), tok.size() * 4, cudaMemcpyHostToDevice);
     auto widen = [](uint16_t b) { const uint32_t u = (uint32_t) b << 16; float f; std::memcpy(&f, &u, 4); return f; };
-    std::vector<float> got((size_t) (V * H));
+    std::vector<float> got((size_t) (out_rows * H));
     strata::kernels::iq_embed_rows(kBf16, dt, (size_t) H * 2, dtok, NT, H, dout, s);
     cudaStreamSynchronize(s);
     cudaMemcpy(got.data(), dout, (size_t) (NT * H) * 4, cudaMemcpyDeviceToHost);
@@ -506,7 +507,7 @@ int check_bf16_embd(cudaStream_t s) {
         }
     strata::kernels::iq_dequant_f32(kBf16, dt, V * H, dout, s);
     cudaStreamSynchronize(s);
-    cudaMemcpy(got.data(), dout, got.size() * 4, cudaMemcpyDeviceToHost);
+    cudaMemcpy(got.data(), dout, table.size() * 4, cudaMemcpyDeviceToHost);
     size_t values_differ = 0;
     for (size_t i = 0; i < table.size(); ++i) {
         const float want = widen(table[i]);
