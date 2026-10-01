@@ -1468,5 +1468,81 @@ class RestartWindow(unittest.TestCase):
             httpd.server_close()
 
 
+class ModelAliases(unittest.TestCase):
+    """#297: the config's `aliases` are listed by /v1/models and accepted as model names (answered under that name)."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
+                          ChatTemplate(ROOT / "serve/chat_template.jinja"), model_name="qwen3.8-flash-next-iq3_xxs")
+        cls.svc.set_aliases(["qwen", "local-model", "qwen", " ", "qwen3.8-flash-next-iq3_xxs"])
+        cls.httpd = serve(cls.svc, port=0)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=30) as r:
+            return json.loads(r.read())
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode()
+
+    def test_set_aliases(self):
+        self.assertEqual(self.svc.aliases, ["qwen", "local-model"])        # duplicates, blanks and the name itself
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.set_aliases("a, b")
+        self.assertEqual(svc.aliases, ["a", "b"])
+        svc.set_aliases(None)
+        self.assertEqual(svc.aliases, [])
+        for bad in (3, ["a", 1], {"a": 1}):
+            with self.assertRaises(ValueError):
+                svc.set_aliases(bad)
+
+    def test_models_lists_them(self):
+        data = self.get("/v1/models")["data"]
+        self.assertEqual([m["id"] for m in data], ["qwen3.8-flash-next-iq3_xxs", "qwen", "local-model"])
+        self.assertEqual(data[0]["aliases"], ["qwen", "local-model"])
+        self.assertEqual(data[1]["alias_of"], "qwen3.8-flash-next-iq3_xxs")
+        self.assertEqual(self.get("/props?model=local-model")["model_alias"], "qwen3.8-flash-next-iq3_xxs")
+
+    def test_requests_are_answered_under_the_alias(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        for asked, want in (("qwen", "qwen"), ("local-model", "local-model"),
+                            ("qwen3.8-flash-next-iq3_xxs", "qwen3.8-flash-next-iq3_xxs"),
+                            ("something-else", "qwen3.8-flash-next-iq3_xxs")):    # still served, as before
+            with self.subTest(asked=asked):
+                out = json.loads(self.post("/v1/chat/completions", {"model": asked, "messages": msgs, "max_tokens": 8}))
+                self.assertEqual(out["model"], want)
+                text = self.post("/v1/chat/completions", {"model": asked, "messages": msgs, "max_tokens": 8,
+                                                          "stream": True})
+                first = json.loads(text.split("data: ", 2)[1].strip())
+                self.assertEqual(first["model"], want)
+                out = json.loads(self.post("/v1/messages", {"model": asked, "messages": msgs, "max_tokens": 8}))
+                self.assertEqual(out["model"], want)
+
+    def test_without_aliases_nothing_changes(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/v1/models", timeout=30) as r:
+                data = json.loads(r.read())["data"]
+            self.assertEqual(len(data), 1)
+            self.assertNotIn("aliases", data[0])
+            self.assertEqual(svc.model_for({"model": "x"}), svc.model)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

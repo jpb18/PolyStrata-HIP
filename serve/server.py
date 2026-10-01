@@ -642,6 +642,7 @@ class Service:
                  fit_max_tokens: bool = False):
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
+        self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
@@ -671,6 +672,30 @@ class Service:
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
+
+    def set_aliases(self, aliases) -> None:
+        """#297: the config's `aliases` - a list of names (or one comma-separated string), like llama-server's --alias.
+        ValueError for anything else."""
+        if aliases is None:
+            aliases = []
+        if isinstance(aliases, str):
+            aliases = aliases.split(",")
+        if not isinstance(aliases, list) or not all(isinstance(x, str) for x in aliases):
+            raise ValueError(f"aliases={aliases!r}: expected a list of model names")
+        names = []
+        for x in (x.strip() for x in aliases):
+            if x and x != self.model and x not in names:
+                names.append(x)
+        self.aliases = names
+
+    def model_names(self) -> list[str]:
+        return [self.model, *self.aliases]
+
+    def model_for(self, req) -> str:
+        """The name to answer with: the request's own when it is the model's name or an alias (#297), else the model's.
+        Other names are still served, as before."""
+        asked = req.get("model") if isinstance(req, dict) else None
+        return asked if isinstance(asked, str) and asked in self.aliases else self.model
 
     def reasoning_budget(self, req) -> int | None:
         """#123: the most tokens this request may think, or None: the request's `reasoning_budget_tokens`, else the
@@ -1300,9 +1325,10 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
     """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
     an empty delta and a `strata_mcp` field, which only the web app reads."""
     cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
+    model = svc.model_for(req)
 
     def chunk(delta, finish=None):
-        return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": svc.model,
+        return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
 
     yield chunk({"role": "assistant", "content": ""})
@@ -1399,7 +1425,7 @@ def openai_collect(chunks) -> dict:
 def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel):
     mid = "msg_" + uuid.uuid4().hex[:24]
     yield "message_start", {"type": "message_start", "message": {
-        "id": mid, "type": "message", "role": "assistant", "model": svc.model, "content": [],
+        "id": mid, "type": "message", "role": "assistant", "model": svc.model_for(req), "content": [],
         "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": len(ids), "output_tokens": 0}}}
     index, open_kind, used_tool = -1, None, False
 
@@ -1603,7 +1629,10 @@ def make_handler(svc: Service):
                     if not loaded and (svc.idle_unload_s or getattr(svc.engine, "unloaded", False)):
                         model["status"] = {"value": "unloaded"}   # like llama-server's router: listed, loads on use
                         loaded = True
-                    self._json(200, {"object": "list", "data": [model] if loaded else []})
+                    if svc.aliases:                       # #297: the aliases, and each one listed under its own id
+                        model["aliases"] = list(svc.aliases)
+                    data = [model, *({**model, "id": x, "alias_of": svc.model} for x in svc.aliases)]
+                    self._json(200, {"object": "list", "data": data if loaded else []})
             elif path == "/props":
                 if self._authorized():
                     self._props()
@@ -1657,7 +1686,7 @@ def make_handler(svc: Service):
 
         def _props(self):
             model = parse_qs(urlsplit(self.path).query).get("model", [svc.model])[0]
-            if model != svc.model:
+            if model not in svc.model_names():
                 self._json(404, {"error": {"message": "model not found"}})
                 return
             if not svc.loaded() and not getattr(svc.engine, "unloaded", False):
@@ -2029,6 +2058,12 @@ def main() -> int:
                   model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
+    try:
+        svc.set_aliases(cfg.get("aliases"))             # #297: other names the model answers to
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    if svc.aliases:
+        print(f"[strata] model aliases: {', '.join(svc.aliases)}", flush=True)
     if ("STRATA_API_KEY" in os.environ and not os.environ["STRATA_API_KEY"].strip()) or             any(x == "--api-key" and i + 1 < len(sys.argv) and not sys.argv[i + 1].strip() or x.strip() == "--api-key="
                 for i, x in enumerate(sys.argv)):
         # #213: an empty key would switch authentication off without a word

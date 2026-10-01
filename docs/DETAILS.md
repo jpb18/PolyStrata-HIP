@@ -434,6 +434,9 @@ print(r.choices[0].message.content)
   `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
   can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
   `--fit-max-tokens` to `serve/server.py`). A prompt that leaves no room at all is still refused.
+- **Model aliases** (0.1.32). `"aliases": ["qwen", "local-model"]` in `strata-<model>.json` lists the model under
+  those names too in `/v1/models` (each with its own `id`, and in the model's `aliases`), like llama-server's
+  `--alias`; a request naming one is answered under that name. Any other name is still served, as before.
 - **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
   run setup with `START-HERE.bat --setup --host 0.0.0.0 --api-key some-long-secret` (or add `"host": "0.0.0.0"` and
   `"api_key": "..."` to `strata-<model>.json`). The server window then prints this PC's addresses
