@@ -104,6 +104,11 @@ class ModelBusy(RuntimeError):
     """Explicit model controls must not interrupt active or queued requests."""
 
 
+class EngineStuck(RuntimeError):
+    """The engine process did not end after QUIT, terminate and kill: the server keeps it (and says so) rather than
+    reporting its GPU and RAM as given back."""
+
+
 class GpuBusy(RuntimeError):
     """The model is unloaded and the GPU has less free VRAM than min_free_vram_mib: something else (a game, another
     model server) is using it, so the engine is not started into the little that is left."""
@@ -437,20 +442,28 @@ class StrataEngine:
                         break
 
     def close(self):
+        """End the engine process: QUIT first (the engine frees its memory itself - unpinning tens of GB can take
+        a while), then terminate, then kill, each given 20 s.  Raises EngineStuck when it still runs after all three."""
         if self.proc is None:
             return
         try:
             if self.proc.poll() is None:
-                self.proc.stdin.write("QUIT\n")
-                self.proc.stdin.flush()
-                self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
-                self.proc.wait(timeout=10)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
+                try:
+                    self.proc.stdin.write("QUIT\n")
+                    self.proc.stdin.flush()
+                    self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
+                    self.proc.wait(timeout=20)
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    self.proc.terminate()
+                    self.proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
             self.proc.kill()
             try:
-                self.proc.wait(timeout=5)
+                self.proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
-                raise RuntimeError("Strata is still releasing GPU/RAM; retry unloading after it exits") from None
+                raise EngineStuck("Strata is still releasing GPU/RAM; retry unloading after it exits") from None
+        except OSError:
+            pass
         finally:
             if self.proc.poll() is not None:
                 if self.pump is not None:
@@ -823,7 +836,10 @@ class Service:
         def loop():
             while True:
                 time.sleep(max(1.0, min(30.0, self.idle_unload_s / 4)))
-                self.unload(idle_for=self.idle_unload_s)
+                try:
+                    self.unload(idle_for=self.idle_unload_s)
+                except EngineStuck as e:                # tried again at the next turn; the thread keeps running
+                    print(f"[strata] idle unload: {e}", flush=True)
         threading.Thread(target=loop, daemon=True).start()
 
     def set_shared(self, defaults) -> dict:
@@ -1701,7 +1717,11 @@ def make_handler(svc: Service):
                 self._settings()
                 return
             if path == "/unload":                            # give the GPU back now (between requests)
-                r = svc.unload()
+                try:
+                    r = svc.unload()
+                except EngineStuck as e:
+                    self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                    return
                 self._json(409 if r == "busy" else 200, {"status": r})
                 return
             if path == "/load":                              # load now, e.g. ahead of a request
@@ -1757,7 +1777,7 @@ def make_handler(svc: Service):
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
             except EngineDied as e:                          # before the answer started (not streamed)
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
-            except RuntimeError as e:
+            except EngineStuck as e:                         # an unload or restart that could not end the engine
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
 
         def _props(self):

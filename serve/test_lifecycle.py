@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, MockEngine, Service, StrataEngine, serve
+from serve.server import ByteTokenizer, EngineDied, EngineStuck, MockEngine, Service, StrataEngine, serve
 
 
 class ResidentEngine(StrataEngine):
@@ -63,10 +63,24 @@ class Lifecycle(unittest.TestCase):
         proc.poll.return_value = None
         proc.wait.side_effect = subprocess.TimeoutExpired("engine", 2)
         engine.proc = proc
-        with self.assertRaisesRegex(RuntimeError, "still releasing"):
+        with self.assertRaisesRegex(EngineStuck, "still releasing"):
             engine.close()
         self.assertIs(engine.proc, proc)
+        proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
+
+    def test_close_terminates_before_it_kills(self):
+        # an engine that does not end on QUIT is terminated first (as the unload always did); kill is the last resort
+        engine = StrataEngine("missing-executable", [], lazy=True)
+        proc = mock.Mock()
+        proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+        proc.poll.side_effect = [None, 0]
+        proc.wait.side_effect = [subprocess.TimeoutExpired("engine", 20), 0]
+        engine.proc = proc
+        engine.close()
+        proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
+        self.assertIsNone(engine.proc)
 
     def test_native_lazy_constructor_does_not_start_a_process(self):
         engine = StrataEngine("missing-executable", ["--max-context", "16384"], lazy=True)
@@ -126,6 +140,15 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.engine.closes, 0)
         self.assertTrue(self.engine.loaded)
         self.assertEqual(self.request("/v1/unload", {}, {"Authorization": "Bearer local-secret"})[0], 200)
+
+    def test_an_engine_that_died_on_load_is_reported_as_such(self):
+        # EngineDied is a RuntimeError: it keeps its own answer ("the next request restarts it")
+        def died():
+            raise EngineDied("the engine ended while it started")
+        self.engine.restart = died
+        code, body = self.request("/v1/chat/completions", {"messages": [{"role": "user", "content": "Hello"}]})
+        self.assertEqual(code, 503)
+        self.assertIn("the next request restarts it", body["error"]["message"])
 
     def test_explicit_load_and_model_matching(self):
         self.assertEqual(self.request("/v1/load", {"model": "other-model"})[0], 404)
