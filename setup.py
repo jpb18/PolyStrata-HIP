@@ -1012,19 +1012,24 @@ def hipblaslt_table(arch, lib_dirs):
     return None
 
 
-def build_engine_hip(gpu, llama) -> Path:
+def build_engine_hip(gpu, llama, vision="none") -> Path:
     """Compile the HIP engine for this AMD GPU into engine/ (again only when its source changed: a `git pull`).
-    gpu["archs"]: every architecture it needs code for (the cards of a layer split), else gpu["arch"]."""
+    gpu["archs"]: every architecture it needs code for (the cards of a layer split), else gpu["arch"].  vision "cpu"
+    (#304): the image encoder too, for the CPU (there is no HIP encoder build yet)."""
     eng = ROOT / "engine"
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
-    src = source_hash(ENGINE_SOURCES)
+    src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
     archs = sorted(set(gpu.get("archs") or [gpu["arch"]]))
     has_archs = set(archs) <= set(meta.get("archs", []))
-    if meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and has_archs:
+    engine_ok = meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and has_archs
+    vision_ok = vision == "none" or ((eng / VEXE).exists() and meta.get("vision_src") == vsrc)
+    if engine_ok and vision_ok:
         ok("engine already built for this PC")
         return eng
+    if engine_ok:
+        return build_vision_cpu(eng, stamp, meta, llama, vsrc)
     if not (shutil.which("c++") or shutil.which("g++")) or not shutil.which("git"):
         fail("a C++ compiler and git are needed to compile the AMD engine",
              "Ubuntu/Debian: sudo apt install build-essential git   Fedora: sudo dnf install gcc-c++ git")
@@ -1048,9 +1053,32 @@ def build_engine_hip(gpu, llama) -> Path:
                  f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
                  f"-DSTRATA_GGML_DIR={llama}"], None, "")
     shutil.copy2(ROOT / "build-hip" / EXE, eng / EXE)
-    stamp.write_text(json.dumps({"source": "local-hip", "backend": "hip", "version": source_version(),
-                                 "archs": archs, "vision": "none", "lib_dirs": dirs, "src": src}, indent=1))
+    meta = {"source": "local-hip", "backend": "hip", "version": source_version(), "archs": archs, "vision": "none",
+            "lib_dirs": dirs, "src": src}
+    if vision != "none":
+        return build_vision_cpu(eng, stamp, meta, llama, vsrc)
+    stamp.write_text(json.dumps(meta, indent=1))
     ok(f"engine compiled: {eng / EXE}")
+    return eng
+
+
+def hip_vision(asked) -> str:
+    """The image encoder with the AMD backend (--vision): the CPU one when asked for (#304); a HIP (GPU) encoder build
+    is a later step, so `yes`/`gpu` leave images off, as before, and say how to get them."""
+    if asked in ("yes", "gpu"):
+        warn("the AMD backend has no GPU image encoder yet: images off (--vision cpu reads them on the CPU)")
+    return "cpu" if asked == "cpu" else "none"
+
+
+def build_vision_cpu(eng: Path, stamp: Path, meta: dict, llama, vsrc) -> Path:
+    """#304: the CPU image encoder beside the HIP engine (tools/vision without CUDA), recorded in its BUILD.json."""
+    if not ((eng / VEXE).exists() and meta.get("vision_src") == vsrc):
+        say("  Compiling the image encoder (for the CPU) ...")
+        cmake_build(ROOT / "tools" / "vision", ROOT / "build-vision", "strata-vision",
+                    [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=OFF"], None, "")
+        shutil.copy2(ROOT / "build-vision" / "bin" / VEXE, eng / VEXE)
+    stamp.write_text(json.dumps({**meta, "vision": "cpu", "vision_src": vsrc}, indent=1))
+    ok(f"engine: {eng / EXE}, image encoder (CPU): {eng / VEXE}")
     return eng
 
 
@@ -1174,7 +1202,7 @@ def update_installed_engine(url_base) -> None:
                     raise RuntimeError("no supported AMD GPU found")
                 # every architecture it was built for (a layer split across two families keeps both)
                 build_engine_hip({**g, "archs": [x for x in meta.get("archs", []) if x in AMD_ARCHS] or [g["arch"]]},
-                                 get_llama_cpp())
+                                 get_llama_cpp(), meta.get("vision") or "none")
             except (Exception, SystemExit) as e:
                 warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: "
                      "starting the installed one")
@@ -2317,9 +2345,7 @@ def main() -> int:
     if ctx > 8192:
         ok(f"KV cache: {'8-bit' if kv == 'int8' else '4-bit (Hadamard-rotated)'}")
     if hip:
-        vision = "none"
-        if a.vision not in (None, "no", "none"):
-            warn("images are not available with the AMD backend yet: off")
+        vision = hip_vision(a.vision)
     elif a.vision:
         vision = {"yes": "gpu", "no": "none"}.get(a.vision, a.vision)
     else:
@@ -2406,7 +2432,7 @@ def main() -> int:
         else:
             vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text()), gpu, vision)
     if eng is None:
-        eng = build_engine_hip(gpu, llama) if hip else build_engine(gpu, vision, a.yes, llama)
+        eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama)
     meta = json.loads((eng / "BUILD.json").read_text())
     lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs()
     ok(f"engine: {eng / EXE}")
