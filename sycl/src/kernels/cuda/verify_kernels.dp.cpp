@@ -927,12 +927,16 @@ __dpct_inline__ void wait_flag_ge_kernel(const volatile uint32_t *flag,
 }  // namespace
 
 namespace {
+inline bool plan_parallel() {   // STRATA_PLAN_PARALLEL=0: thread 0 groups the entries alone (the old way)
+    static const bool v = std::getenv("STRATA_PLAN_PARALLEL") == nullptr || std::atoi(std::getenv("STRATA_PLAN_PARALLEL")) != 0;
+    return v;
+}
 __dpct_inline__ void resident_plan_kernel(
     const int32_t *__restrict__ ids, int n, int k,
     const int32_t *__restrict__ res, int n_expert, const uint8_t *cache_base,
     const unsigned long long *slot_off, long long blob,
     int32_t *__restrict__ pl, long long capx, uint32_t *skip, uint32_t ring,
-    const unsigned long long *__restrict__ mir) {
+    const unsigned long long *__restrict__ mir, bool par) {
 #if STRATA_PLAN_LOCAL
     // SYCL port: the host's exact loop, but over a local copy of the ids and their slots. One thread reading global
     // memory for every compare (n^2 of them) took 87 us per layer on the B70 - 4% of a decode round; a work-group
@@ -956,8 +960,59 @@ __dpct_inline__ void resident_plan_kernel(
         if (!valid || (sl < 0 && ma == 0)) s_bad = 1;
     }
     item.barrier(sycl::access::fence_space::local_space);
+    if (s_bad || n > 64) { if (tid == 0) *skip = 0; return; }   // n > 64 never happens (kVerifyMaxT * 10 = 60); refuse rather than read past
+    if (par) {
+        // SYCL port: the grouping in parallel, one thread per entry (unitrace: thread 0 alone took 73 us per layer,
+        // ~3.5 ms of a decode round). The plan is the host loop's exactly: groups in order of first occurrence,
+        // entries in a group in index order. Entry i: L = its expert's first index; its group = the number of
+        // first occurrences before L; the group starts at the number of entries whose leader is before L; its
+        // place in the group = the number of earlier entries with the same leader.
+        auto &s_lead = *sycl::ext::oneapi::group_local_memory_for_overwrite<int32_t[64]>(item.get_group());
+        if (tid < n) {
+            int L = tid;
+            for (int j = 0; j < tid; ++j) if (s_ids[j] == s_ids[tid]) { L = j; break; }
+            s_lead[tid] = L;
+        }
+        item.barrier(sycl::access::fence_space::local_space);
+        int32_t* counts = pl;
+        int32_t* start = pl + 4;
+        int32_t* dst = start + capx + 1;
+        int32_t* tok = dst + capx;
+        const long long ptr_off = ((4 + (capx + 1) + 2 * capx) + 1) & ~1ll;
+        unsigned long long* ptr = (unsigned long long*) (pl + ptr_off);
+        int32_t* start2 = pl + ptr_off + 4 * capx;
+        if (tid < n) {
+            const int L = s_lead[tid];
+            int g = 0, gstart = 0, pos = 0;
+            for (int j = 0; j < n; ++j) {
+                const int Lj = s_lead[j];
+                if (j < L && Lj == j) ++g;           // first occurrences before L
+                if (Lj < L) ++gstart;                // entries of earlier groups
+                if (j < tid && Lj == L) ++pos;       // earlier entries of this group
+            }
+            dst[gstart + pos] = tid;
+            tok[gstart + pos] = tid / k;
+            if (L == tid) {
+                const int32_t slot = s_res[tid];
+                ptr[g] = slot >= 0 ? (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob))
+                                   : s_mir[tid];
+                start[g] = gstart;
+            }
+        }
+        item.barrier(sycl::access::fence_space::global_and_local);
+        if (tid != 0) return;
+        int groups = 0;
+        for (int i = 0; i < n; ++i) groups += s_lead[i] == i;
+        start[groups] = n;
+        start2[0] = n;
+        counts[0] = groups;
+        counts[1] = n;
+        counts[2] = 0;
+        sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::device);
+        strata::sys_store(skip, ring);
+        return;
+    }
     if (tid != 0) return;
-    if (s_bad || n > 64) { *skip = 0; return; }   // n > 64 never happens (kVerifyMaxT * 10 = 60); refuse rather than read past
 #else
     // the original: one thread, the host's exact loop over global memory
     for (int i = 0; i < n; ++i) {
@@ -1083,13 +1138,14 @@ void resident_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
+        const bool par = plan_parallel();
         strata::q_of(stream)
             ->parallel_for<dpct_kernel_name<class resident_plan_kernel_db6b7a>>(
                 sycl::nd_range<3>(sycl::range(1, 1, STRATA_PLAN_LOCAL ? 64 : 1), sycl::range(1, 1, STRATA_PLAN_LOCAL ? 64 : 1)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
                     resident_plan_kernel(ids, n_entries, k, res_layer, n_expert,
                                          cache_base, slot_off, blob, plan, capx,
-                                         skip, ring, mir);
+                                         skip, ring, mir, par);
                 });
     }
     check("resident_plan");

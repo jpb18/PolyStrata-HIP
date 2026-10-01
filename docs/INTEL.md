@@ -384,6 +384,21 @@ runtime's teardown began); it now exits directly once its requests are done.
    Still misaligned: IQ4_XS (136 B, 8-aligned, ~100 GB/s), IQ4_NL (18 B), Q8_0 (34 B); Q4_K/Q5_K are aligned
    but use 4-byte loads in the multi kernel (230-280 GB/s).
 
+**Decode round 2 (2026-09-30), from a unitrace of 256 decoded tokens.** Each step measured on its own, 19-token prompt,
+256 tokens, two runs each, output tokens identical throughout:
+
+| | decode |
+|---|---|
+| after the Q6_K alignment fix | 53.9 tok/s |
+| + `resident_plan` grouping in parallel (thread 0 alone took 73 us per layer, ~3.5 ms a round) | 57.1 |
+| + the GR down kernel reads the activations directly (the 60 KB SLM tile per group capped occupancy) | 58.7 |
+| + wide 16-byte-load kernels for Q4_K, Q5_K, IQ4_XS (codebook in registers) | **62.6** |
+
+Kernel level: IQ4_XS 107 -> 323 GB/s at 2 columns (61 -> 212 at 6), Q4_K/Q5_K 1.3-1.6x; the GR read 135 -> 110 us at
+6 tokens (bitwise equal). Switches to the old paths: `STRATA_PLAN_PARALLEL=0`, `STRATA_GR_DOWN_DIRECT=0`,
+`STRATA_MMVQ_WIDE_K=0`. (`iq_parity` reports 10 "missing fixture" failures with and without the change: the oracle
+fixtures are not in the port's tree.)
+
 **Two-speed runs, explained (2026-09-30).** Identical greedy runs decode at either ~45 or ~39 tok/s. A per-gather
 trace of the PLE reader (`STRATA_PLE_TRACE=1`) shows the slow runs pay one 226 ms PLE read stall in the first
 decode round, after the window graphs are captured; every other read and round matches the fast runs. Prompt time

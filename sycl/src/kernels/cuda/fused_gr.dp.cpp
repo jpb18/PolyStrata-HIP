@@ -401,6 +401,58 @@ __dpct_inline__ void gr_down_multi_kernel(GrMulti m, uint8_t *dpct_local) {
     }
 }
 
+// SYCL port: gr_down_multi_kernel without the shared-memory tile. The tiled kernel stages T x 2560 floats per
+// work-group (60 KB at T = 6) for 8 rows (40 KB of weights): the copy outweighs the weights and the SLM caps the
+// B70 at ~2 groups per Xe core (unitrace: 64 us per call, ~100 GB/s). Here each lane reads its 8 xn floats per
+// token straight from global memory (T x 40 KB in all, L1/L2-resident, shared by every group). Same per-lane
+// order of the sums, so the outputs are bitwise the tiled kernel's.
+__dpct_inline__ void gr_down_multi_direct_kernel(GrMulti m) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int t = item_ct1.get_local_id(2), lane = t & 31, warp = t >> 5;
+    const int T = m.T;
+    const int gid = (int) item_ct1.get_group(2);
+    const bool inject_block = gid == DOWN_BLOCKS * DOWN_SPLIT;
+    const int split = inject_block ? 0 : gid % DOWN_SPLIT, rb = inject_block ? 0 : gid / DOWN_SPLIT;
+    const int row = inject_block ? warp : rb * WARPS + warp;
+    const bool active = !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
+    if (!active) return;
+    const uint16_t* wrow = (inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) row * D;
+    const sycl::uint4* w4 = reinterpret_cast<const sycl::uint4*>(wrow);
+    float acc[kFusedGrMaxT];
+#pragma unroll
+    for (int k = 0; k < kFusedGrMaxT; ++k) acc[k] = 0.0f;
+    for (int base = inject_block ? 0 : split * TILE; base < D; base += inject_block ? TILE : TILE * DOWN_SPLIT) {
+        sycl::uint4 wv[TQ];
+#pragma unroll
+        for (int q = 0; q < TQ; ++q) wv[q] = *(w4 + base / 8 + lane + 32 * q);
+#pragma unroll
+        for (int q = 0; q < TQ; ++q) {
+            const int j = lane + 32 * q;
+#pragma unroll
+            for (int k = 0; k < kFusedGrMaxT; ++k)
+                if (k < T) {
+                    const sycl::float4* x4 = reinterpret_cast<const sycl::float4*>(m.xn + (size_t) k * D + base + j * 8);
+                    const sycl::float4 a0 = x4[0], a1 = x4[1];
+                    const float xv[8] = {a0.x(), a0.y(), a0.z(), a0.w(), a1.x(), a1.y(), a1.z(), a1.w()};
+                    acc[k] += dot8(wv[q], xv);
+                }
+        }
+    }
+    float s[kFusedGrMaxT];
+#pragma unroll
+    for (int k = 0; k < kFusedGrMaxT; ++k) s[k] = k < T ? warp_sum(acc[k]) : 0.0f;
+#pragma unroll
+    for (int k = 0; k < kFusedGrMaxT; ++k) {
+        if (k >= T || lane != k) continue;
+        if (inject_block) m.a[k].inject_out[row] = s[k];
+        else m.part[((size_t) split * kFusedGrMaxT + k) * LR + row] = s[k];
+    }
+}
+bool gr_down_direct() {   // default; STRATA_GR_DOWN_DIRECT=0: the tiled kernel (gr_bench: 13-19% slower at 3-6 tokens)
+    static const bool v = std::getenv("STRATA_GR_DOWN_DIRECT") == nullptr || std::atoi(std::getenv("STRATA_GR_DOWN_DIRECT")) != 0;
+    return v;
+}
+
 constexpr int UPM_COLS = 16;                      // columns per block (x 4 streams = 64 rows, 8 per warp)
 constexpr int UPM_BLOCKS = N / UPM_COLS;          // 160
 
@@ -588,7 +640,12 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         attr[dev] = true;
     }
     const int chunk_tok = (dev >= 0 && dev < 64 && chunk[dev]) ? chunk[dev] : kFusedGrMaxT;
-    if (chunk_tok >= n_tok) {
+    if (gr_down_direct()) {
+        st->parallel_for<dpct_kernel_name<class gr_down_multi_direct>>(
+            sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS * DOWN_SPLIT + 1) * sycl::range(1, 1, THREADS),
+                              sycl::range(1, 1, THREADS)),
+            [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { gr_down_multi_direct_kernel(m); });
+    } else if (chunk_tok >= n_tok) {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
