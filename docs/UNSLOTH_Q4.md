@@ -1,8 +1,8 @@
-# Unsloth UD-Q4_K_XL (experimental, manual import)
+# Unsloth UD-Q4_K_XL (experimental)
 
-**Experimental, not in setup yet.** Engine 0.1.31 or newer. Validated on one PC: Windows 10, an RTX 5070 (12 GB),
-64 GB of RAM and an AVX-512 CPU, on 2026-10-01. Everything below is a manual workflow; `START-HERE.bat` / `setup.sh`
-do not offer this model.
+**Experimental.** Setup offers it from engine 0.1.32 ([below](#setup)); the manual workflow after that section works
+with engine 0.1.31 or newer. Validated on one PC: Windows 10, an RTX 5070 (12 GB), 64 GB of RAM and an AVX-512 CPU,
+on 2026-10-01.
 
 The target is Unsloth's 4-bit quantization of the same model the other packs use:
 [unsloth/Qwen3.8-Flash-Next-GGUF, `UD-Q4_K_XL`, revision `38bb39e`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL).
@@ -10,6 +10,28 @@ The target is Unsloth's 4-bit quantization of the same model the other packs use
 Q5_1 (Q8_0 in layers 2, 4, 30, 46, 47) for down; the token embedding, the output head, the attention and shared-expert
 projections and the PLE key are Q8_0; the 28.8 GB PLE table is IQ4_NL. The routed experts are 71.7 GiB, about twice
 the 3-bit models'.
+
+## Setup
+
+`START-HERE.bat --setup` (Linux: `./setup.sh --setup`) and choose **Qwen3.8-Flash-Next (Unsloth)**, marked
+`[experimental]`; or directly:
+
+```sh
+START-HERE.bat --setup --family unsloth --model UD-Q4_K_XL
+```
+
+What setup does differently for this model:
+
+- It needs 48 GB of RAM or more and engine 0.1.32 or newer (checked before anything is downloaded), and an NVIDIA
+  GPU. One GPU only: with `--gpus` it uses the first one and says so. No images (the vision encoder is not wired to
+  this file yet) and no experimental speed projection (not tested with it).
+- It downloads the four shards below from the pinned revision `38bb39e` (resumable, like the other models), then
+  checks each one's size and SHA-256 against the table below; the check takes a few minutes once and is remembered
+  in the file's finish mark. A file with the wrong hash is deleted, so the next run downloads it again.
+- It packs with `--compat-bf16` and never writes `experts.bin` (`--low-ram` does not apply).
+- The RAM budget is the PC's RAM less 24 GB: `--resident-budget-gib 40` on 64 GB, at most all 71 GiB of experts on
+  96 GB or more. From a 64K context up, where the KV cache moves to RAM, its size comes out of the budget.
+- It recommends an 8K context on a GPU under 14 GB (every GB of KV cache is a GB less of cached experts).
 
 ## The files
 
@@ -24,7 +46,8 @@ in shard 2 and its gate/up in shard 3, which this engine handles (`native_expert
 | `Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf` | 12,087,983,520 | `753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a` |
 
 Keep the four files together in one folder under these names (the engine finds shards 2-4 from shard 1's name; a
-missing shard is an error that names it). Check them before packing (`sha256sum -c`, or `Get-FileHash` on Windows).
+missing shard is an error that names it). Setup checks them itself; by hand, check them before packing
+(`sha256sum -c`, or `Get-FileHash` on Windows).
 Hugging Face snapshot symlinks work if you pass the snapshot's file name, not the hash-named blob it points to.
 
 ## What it needs
@@ -35,7 +58,7 @@ Hugging Face snapshot symlinks work if you pass the snapshot's file name, not th
 | RAM | 64 GB measured. The RAM budget (below) holds the most-used experts; the rest come from the SSD through the OS file cache. |
 | GPU | 12 GB measured (RTX 5070): after the weights, the draft layer and the buffers, the expert cache held 1,280 of the 24,576 experts (3.7 GiB) at 4K context. |
 
-## The pack
+## The pack (by hand)
 
 Build Strata (or install 0.1.31+), then, from the repository root, with gguf-py from the pinned llama.cpp
 (setup installs it; `STRATA_GGUF_PY` can point to its `gguf-py` folder):
