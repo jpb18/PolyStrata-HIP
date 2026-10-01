@@ -19,7 +19,7 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 | model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
 | where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
 | RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
-| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **70.8 tok/s** (19-token prompt, 256 greedy tokens), **63.6** after a 2,184-token prompt; ~56 through the API on a chat request | 23-25 tok/s |
+| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **76.1 tok/s** (19-token prompt, 256 greedy tokens), 63.6 after a 2,184-token prompt (before the IQ4_NL change); ~56 through the API on a chat request | 23-25 tok/s |
 | prompt reading | ~1,870 tok/s | **799 tok/s** at 2,184 tokens, 1,062 at 80K | ~150 tok/s (424 at 105K) |
 | speculative decoding (MTP) | yes | yes (the base checkpoint's draft layer; 70-85% of drafts accepted on code) | no |
 | images | yes | not yet | not yet |
@@ -405,7 +405,8 @@ runtime's teardown began); it now exits directly once its requests are done.
 | + the GR down kernel reads the activations directly (the 60 KB SLM tile per group capped occupancy) | 58.7 |
 | + wide 16-byte-load kernels for Q4_K, Q5_K, IQ4_XS (codebook in registers) | 62.6 |
 | + wide kernels for Q8_0 (MTP dense, shexp down of layer 0) and IQ4_NL (shexp down); Q6_K's activation loads aligned | 65.6 |
-| + the GR down projection sliced by columns (each group stages one 128-column slice of xn, 4 lanes per row) + a fixed-order reduce | **70.6** |
+| + the GR down projection sliced by columns (each group stages one 128-column slice of xn, 4 lanes per row) + a fixed-order reduce | 70.6 |
+| + IQ4_NL expert dots (the down projection in 39 of 48 layers): codebook in registers, weights as aligned 4-byte loads, bitwise the same ints (2026-10-01) | **76.1** |
 
 The last step changes the output: identical for 146 tokens, then a near-tie after a comma goes the other way (the new
 kernels sum in a different order). Q8_0 kernels 4-6x (189 -> 31 us at 2560 x 10240, 2 columns), IQ4_NL 640 -> 2560
@@ -467,7 +468,7 @@ wherever upstream touched a file they mirror. They are refreshed by re-migration
 
 | | |
 |---|---|
-| decode | 70.8 tok/s on a 19-token prompt, 63.6 after a 2,184-token prompt (256 greedy tokens, MTP + suffix drafts) |
+| decode | 76.1 tok/s on a 19-token prompt (2026-10-01); 63.6 after a 2,184-token prompt before the IQ4_NL change (256 greedy tokens, MTP + suffix drafts) |
 | prompt | 799 tok/s on 2,184 tokens |
 | through the API | 55.7 tok/s on a 300-token chat answer, prompt included |
 | VRAM | all 12,288 experts resident, ~1.9 GB free with everything loaded (`--vram-reserve-mib 1024`) |

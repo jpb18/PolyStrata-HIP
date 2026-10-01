@@ -326,16 +326,53 @@ __dpct_inline__ float vec_dot_iq1_m_q8_1(const void *__restrict__ vbq,
     return d * ((sumi[0] + sumf[0]) * sc0 + (sumi[1] + sumf[1]) * sc1);
 }
 
+// SYCL port: the IQ4_NL codebook in registers and its 2-byte-aligned weights as aligned loads. ggml reads 4 uint32 of
+// the codebook from global memory per lookup and each weight int as two 16-bit loads (block_iq4_nl is 18 bytes, its
+// qs 2-byte aligned); the expert down projection (IQ4_NL in 39 of 48 layers) was the largest expert kernel. Same ints
+// out, so the dots are bitwise unchanged.
+__dpct_inline__ uint32_t iq4nl_lut4(uint32_t q4) {   // four nibbles -> four kvalues_iq4nl bytes
+    constexpr uint32_t t0 = 0xBFAD9881u, t1 = 0xF6EADDCFu, t2 = 0x26190D01u, t3 = 0x71594535u;
+    uint32_t r = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t n = (q4 >> (8 * i)) & 0xF;
+        const uint32_t t = n < 4 ? t0 : n < 8 ? t1 : n < 12 ? t2 : t3;
+        r |= ((t >> (8 * (n & 3))) & 0xFF) << (8 * i);
+    }
+    return r;
+}
+__dpct_inline__ sycl::int2 iq4nl_pair(int aux) {   // = get_int_from_table_16(aux, kvalues_iq4nl)
+    return sycl::int2((int) iq4nl_lut4((uint32_t) aux & 0x0f0f0f0fu), (int) iq4nl_lut4(((uint32_t) aux >> 4) & 0x0f0f0f0fu));
+}
+__dpct_inline__ sycl::int2 load8_a2(const uint8_t* p) {   // 8 bytes at a 2-byte-aligned address, as two ints
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const uint32_t* q = reinterpret_cast<const uint32_t*>(a & ~uintptr_t(3));
+    const uint32_t w0 = q[0], w1 = q[1];
+    if (!(a & 2)) return sycl::int2((int) w0, (int) w1);
+    const uint32_t w2 = q[2];   // only when unaligned: it then holds needed bytes, so it cannot cross a page
+    return sycl::int2((int) ((w0 >> 16) | (w1 << 16)), (int) ((w1 >> 16) | (w2 << 16)));
+}
+#ifndef STRATA_IQ4NL_FAST
+#define STRATA_IQ4NL_FAST 1   // compile-time: -DSTRATA_IQ4NL_FAST=0 for ggml's table/16-bit-load path
+#endif
+
 __dpct_inline__ float vec_dot_iq4_nl_q8_1(const void *__restrict__ vbq,
                                           const block_q8_1 *__restrict__ bq8_1,
                                           const int &kbx, const int &iqs) {
     const block_iq4_nl* bq4 = (const block_iq4_nl*) vbq + kbx;
     const int* q8 = (const int*) bq8_1->qs + iqs;
     int sumi = 0;
+#if STRATA_IQ4NL_FAST
+    const sycl::int2 qq = load8_a2(bq4->qs + 4 * iqs);
+#endif
 #pragma unroll
     for (int l = 0; l < 2; ++l) {
+#if STRATA_IQ4NL_FAST
+        const sycl::int2 v = iq4nl_pair(l ? qq.y() : qq.x());
+#else
         const int aux_q4 = get_int_b2(bq4->qs, iqs + l);
         const sycl::int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
+#endif
         sumi = ggml_cuda_dp4a(v.x(), q8[l + 0], sumi);
         sumi = ggml_cuda_dp4a(v.y(), q8[l + 4], sumi);
     }
@@ -577,10 +614,17 @@ template <> struct Multi<20> {   // iq4_nl (down)
     static constexpr bool has = true; static constexpr int NW = 4;
     __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
         const block_iq4_nl* bq4 = (const block_iq4_nl*) vbq + kbx;
+#if STRATA_IQ4NL_FAST
+        const sycl::int2 qq = load8_a2(bq4->qs + 4 * iqs);
+#endif
 #pragma unroll
         for (int l = 0; l < 2; ++l) {
+#if STRATA_IQ4NL_FAST
+            const sycl::int2 v = iq4nl_pair(l ? qq.y() : qq.x());
+#else
             const int aux_q4 = get_int_b2(bq4->qs, iqs + l);
             const sycl::int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
+#endif
             m.w[2 * l + 0] = v.x();
             m.w[2 * l + 1] = v.y();
         }
