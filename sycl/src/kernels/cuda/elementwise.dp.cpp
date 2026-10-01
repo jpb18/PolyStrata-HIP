@@ -5,6 +5,7 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/sycl_doorbell.hpp"
 #include "strata/kernels/elementwise.hpp"
+#include "strata/kernels/dp4a.hpp"
 
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -12,7 +13,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <time.h>
 
 namespace strata::kernels {
 namespace {
@@ -363,6 +363,10 @@ void silu_inplace(float* x, int64_t n, void* stream) {
 /// the write was not ordered into host-visible memory, so no amount of reading it would show it, and the driver
 /// call was flushing the whole pipeline enough to make it appear.  A 10-22 us driver call per iteration is a
 /// very expensive substitute for one fence instruction.
+///
+/// **THE STORE IS VOLATILE**, like `doorbell_publish_kernel`'s.  On RDNA4 (gfx1201) a plain store to mapped pinned
+/// memory stays in the GPU's L2 until the stream is synchronized - the host never saw the ring (tests/hip/handoff:
+/// 0 of 100 rings seen without a sync; volatile, a system-scope atomic store or a fence after the store: 100 of 100).
 __dpct_inline__ void doorbell_ring_kernel(uint32_t *seq) {
     /*
     DPCT1078: Consider replacing memory_order::acq_rel with
@@ -376,12 +380,7 @@ __dpct_inline__ void doorbell_ring_kernel(uint32_t *seq) {
 __dpct_inline__ void doorbell_wait_kernel(const volatile uint32_t *flag,
                                           const volatile uint32_t *seq) {
     const uint32_t want = strata::sys_load(seq);
-    /*
-    DPCT1008: __nanosleep function is not defined in SYCL. This is a
-    hardware-specific feature. Consult with your hardware vendor to find a
-    replacement.
-    */
-    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) != want; ++spin) {}
+    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) != want; ++spin) strata_spin_pause();
     /*
     DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions

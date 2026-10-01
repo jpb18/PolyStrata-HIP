@@ -41,6 +41,7 @@
 #include <atomic>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 #include <chrono>
 #include <cmath>
@@ -119,13 +120,65 @@ std::atomic<const Verifier*> g_diag_verifier{nullptr};
 void diag_active_verifier(std::FILE* f) {
     if (const Verifier* v = g_diag_verifier.load()) v->diag(f);
 }
+// #267: every live verifier (a layer split has one per stage), for the release before the engine ends
+constexpr int kLiveMax = 16;
+std::atomic<Verifier*> g_live[kLiveMax];
+void release_live_verifiers(std::FILE* f) {
+    for (auto& slot : g_live)
+        if (Verifier* v = slot.load()) {
+            const Clock::time_point t0 = Clock::now();
+            const bool done = v->release_gpu_waits(5000);
+            if (f != nullptr)
+                std::fprintf(f, "strata: released the verify window's GPU waits (#267): the GPU %s\n",
+                             done ? ("finished in " + std::to_string((long long) ms_since(t0)) + " ms").c_str()
+                                  : "did not finish within 5 s");
+        }
+    if (f != nullptr) std::fflush(f);
+}
+std::string released_note(bool drained) {
+    return drained ? "; its GPU waits were released and the GPU finished (#267)"
+                   : "; its GPU waits were released but the GPU did not finish within 5 s (#267)";
+}
+// #267 test hook: STRATA_TEST_VERIFY_STALL=N withholds the last layer's flag in the N-th window (1-based), so the
+// GPU spins on a flag nobody raises - the bounded window wait and the release are then what ends it.  Unset: never.
+const int64_t g_test_stall = [] {
+    const char* e = std::getenv("STRATA_TEST_VERIFY_STALL");
+    return e != nullptr ? (int64_t) std::atoll(e) : (int64_t) 0;
+}();
 }  // namespace
+
+bool Verifier::release_gpu_waits(int timeout_ms) try {
+    released_.store(true);
+    // the words the spin kernels read (wait_flag_ge, wait_flag_ge_or) are mapped host memory, so a store here
+    // reaches them with no API call; UINT32_MAX is past every ring.  (E-6's skip words are device memory, but
+    // wait_flag_ge_or also returns on its flag.)  A host function raising flag B later only raises.
+    for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_})
+        if (p != nullptr) *(volatile uint32_t*) p = UINT32_MAX;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    _mm_sfence();
+    const OnDevice on_device(device_);
+    const Clock::time_point t0 = Clock::now();
+    // SYCL port: no cudaStreamQuery; a queue with nothing left to run reports ext_oneapi_empty()
+    for (dpct::queue_ptr q : {cs_, copy_}) {
+        if (q == nullptr) continue;
+        while (!q->ext_oneapi_empty()) {
+            if (ms_since(t0) > timeout_ms) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    return true;
+} catch (...) {
+    return false;   // the runtime may already be tearing down (the watchdog's path ends the engine)
+}
 
 void Verifier::diag(std::FILE* f) const {
     auto rd = [](const uint32_t* p) { return p ? *(const volatile uint32_t*) p : 0u; };
-    std::fprintf(f, "  verify window: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
-                    "served %u, plan (A) %u, copies (B) %u\n", last_t_, (long long) last_pos0_, cur_layer_ + 1,
-                 rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
+    // #251: outside a verify stage these are the LAST window's numbers (it finished), not the stalled work's
+    const char* where = progress().where.load();
+    const bool current = where != nullptr && std::strncmp(where, "verify window", 13) == 0;
+    std::fprintf(f, "  verify window%s: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
+                    "served %u, plan (A) %u, copies (B) %u\n", current ? "" : " (last window, not the current stage)",
+                 last_t_, (long long) last_pos0_, cur_layer_ + 1, rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
 }
 
 Verifier::~Verifier() try {
@@ -133,6 +186,10 @@ Verifier::~Verifier() try {
     // that throws aborts the process (exit 139); the waits and frees below are best-effort then.
     const Verifier* self = this;
     g_diag_verifier.compare_exchange_strong(self, nullptr);
+    for (auto& slot : g_live) {
+        Verifier* me = this;
+        slot.compare_exchange_strong(me, nullptr);
+    }
     if (cs_) cs_->wait();
     for (auto& e : exec_)
         if (e) delete (e);
@@ -155,6 +212,11 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
                     const NativeHead *head, int max_t, std::string &err) try {
     g_diag_verifier.store(this);
     diag_verify_fn().store(&diag_active_verifier);
+    for (auto& slot : g_live) {
+        Verifier* none = nullptr;
+        if (slot.load() == this || slot.compare_exchange_strong(none, this)) break;
+    }
+    release_gpu_fn().store(&release_live_verifiers);
     device_ = dpct::get_current_device_id(); // a layer split's stage on another
                                              // GPU: its streams, graphs and
                                              // buffers live there
@@ -197,7 +259,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
 
     const strata::kernels::QsaShapes s = shapes_of(g);
     cap_ = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
-    max_blocks_ = ss.qsa_states[0].max_cells / s.idx_block + 2;
+    max_blocks_ = ss.qsa_states[ss.qsa_primary()].max_cells / s.idx_block + 2;
     attn_scratch_floats_ = (int64_t) strata::kernels::qsa_decode_attn_scratch_floats(cap_, s);
 
     const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
@@ -526,7 +588,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                     !native_of(wout, v.name("ssm_out.weight"), err))
                     return false;
                 const int64_t gi = gdn_idx[(size_t) l];
-                float* state = ss.gdn_state + (size_t) gi * gdn_floats;
+                float* state = ss.gdn_state + (size_t) (gi - ss.gdn_ord0) * gdn_floats;
                 float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
                 float* qkv = qkv_L_ + (size_t) gi * MT * C;
                 float* hb = h_L_ + (size_t) gi * MT * C;
@@ -565,7 +627,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 auto norm_rope = [&](float* data, const WeightRef* norm, int rows, int cols, const int32_t* pos) {
                     if (native_qsa_enabled()) native_qsa_rms_norm_weighted(data, (const float*) norm->data, data, cols, rows, EPS, cs);
                     else rms_norm_weighted(data, (const float*) norm->data, rows, cols, EPS, cs);
-                    if (native_rope_enabled()) native_rope_apply(data, data, rows, cols, (int) s.n_rot, (float) qsa_freq_base(), pos, cs);
+                    if (native_rope_enabled()) native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), pos, cs);
                     else rope_neox_apply(data, data, rows, cols, (int) s.n_rot, st.cos_tab, st.sin_tab, pos, cs);
                 };
                 float* idx_raw = idx_raw_L_ + (size_t) qi * MT * ID;
@@ -610,7 +672,7 @@ bool Verifier::record_window(int T, dpct::queue_ptr cs, std::string &err) {
                 for (int t = tb; t < te; ++t)
                     native_qsa_indexer_append(idx_raw + t * ID, step_ + t * kStepCount + kStepPos, 0,
                                               (const float*) wikn->data, EPS, ib, s, st.max_cells,
-                                              (float) qsa_freq_base(), cs);
+                                              rope_scaling(), cs);
                 stamp(l, 9, grp);
                 native_mmvq(wq->native_type, wq->native_data, xq_, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD),
                             n, cs);
@@ -1040,7 +1102,7 @@ bool Verifier::capture_commit(std::string &err) try {
             if (!is_qsa_layer(g, l)) {
                 const WeightRef* wnm = need(v, "ssm_norm.weight", err);
                 if (!wnm) { ok = false; break; }
-                float* state = ss.gdn_state + (size_t) gdn_index * gdn_floats;
+                float* state = ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
                 float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
                 const float* qkv = qkv_L_ + (size_t) gdn_index * MT * C;
                 gdn_conv_commit(conv, qkv, (int) C, commit_, cs_);
@@ -1057,7 +1119,7 @@ bool Verifier::capture_commit(std::string &err) try {
                 for (int64_t t = 0; t < MT; ++t)
                     native_qsa_indexer_append(idx_raw_L_ + (size_t) (qsa_index * MT + t) * ID, commit_ + 2 + t, 0,
                                               (const float*) wikn->data, EPS, ib, s, st.max_cells,
-                                              (float) qsa_freq_base(), cs_);
+                                              rope_scaling(), cs_);
                 ++qsa_index;
             }
         }
@@ -1104,7 +1166,8 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     if (T < 1 || T > max_t_) { err = "verify: window size out of range"; return false; }
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
-    if (pos0 + T > ss.qsa_states[0].max_cells) { err = "verify: the window runs past the context"; return false; }
+    if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
+    if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
     if (!capture(T, err) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
     const Clock::time_point t0 = Clock::now();
@@ -1171,7 +1234,9 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     // so waiting on them per layer fails. STRATA_VERIFY_NO_HOST=1 waits for the whole window instead. Only for
     // an all-resident cache: a missed expert would leave the GPU waiting for a plan that never comes.
     static const bool no_host = std::getenv("STRATA_VERIFY_NO_HOST") != nullptr;
-    for (int64_t k = 0; !no_host && k < (le_ - lb_) * G; ++k) {
+    const int64_t steps = (le_ - lb_) * G;
+    const bool test_stall = g_test_stall > 0 && windows + 1 == g_test_stall;   // #267 test hook (off: false)
+    for (int64_t k = 0; !no_host && k < steps; ++k) {
         const int64_t l = lb_ + k / G;
         const int grp = (int) (k % G);
         const uint32_t want = (uint32_t) (k + 1);
@@ -1203,7 +1268,11 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
                     return false;
                 }
             }
-            if (now - a > std::chrono::seconds(20)) { err = "verify: timed out at layer " + std::to_string(l); return false; }
+            if (now - a > std::chrono::seconds(20)) {
+                // #267: the caller ends the engine; no spin kernel may outlive it
+                err = "verify: timed out at layer " + std::to_string(l) + released_note(release_gpu_waits(5000));
+                return false;
+            }
         }
         const Clock::time_point b = Clock::now();
         VDBG("layer %lld rang\n", (long long) l);
@@ -1228,11 +1297,14 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
             *(volatile uint32_t*) h_flagA_ = want;
             raise_flag(h_flagB_, want);
         }
-        *flag = want;
+        if (!(test_stall && k + 1 == steps)) *flag = want;
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
         ms_pool += ms_since(b);
     }
     progress_at("verify window: waiting for the GPU to finish the window (flags A/B/M raised)", (int64_t) T);
+    // #267: a window the GPU never finishes (a spin kernel that never sees its flag) holds the host here; the stall
+    // watchdog then releases every verifier's GPU waits (release_live_verifiers) before it ends the engine, so no
+    // spin kernel outlives the process.  The wait itself stays a blocking sync (a polling wait cost decode upstream).
     const dpct::err0 se = DPCT_CHECK_ERROR(cs_->wait());
     if (std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {
         const Clock::time_point t_done = Clock::now();
@@ -1458,6 +1530,47 @@ void Verifier::publish_plan(void* ctx) {
     Verifier* v = (Verifier*) ctx;
     _mm_sfence();
     *(volatile uint32_t*) v->h_flagA_ = v->cur_layer_ + 1;
+}
+
+bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int32_t extra_id, std::FILE* out,
+                               std::string& err) try {
+    if (next_ != nullptr) return next_->window_logprobs(targets, T, pos0, extra_id, out, err);
+    const OnDevice on_device(device_);
+    if (head_logits_ == nullptr || n_vocab_ <= 0 || T <= 0 || targets == nullptr || out == nullptr) {
+        err = "window_logprobs: no head logits for this window";
+        return false;
+    }
+    // run() synchronized cs_ before returning, so the head of this window is complete
+    std::vector<float> h((size_t) T * (size_t) n_vocab_);
+    cs_->memcpy(h.data(), head_logits_, h.size() * sizeof(float)).wait();
+    for (int t = 0; t < T; ++t) {
+        const float* row = h.data() + (size_t) t * (size_t) n_vocab_;
+        const int32_t tgt = targets[t];
+        if (tgt < 0 || (int64_t) tgt >= n_vocab_) continue;
+        int64_t top = 0;
+        for (int64_t v = 1; v < n_vocab_; ++v)
+            if (row[v] > row[top]) top = v;
+        const double maxv = row[top];
+        const bool has_extra = extra_id >= 0 && (int64_t) extra_id < n_vocab_;
+        double sum = 0.0, sum_without = 0.0;   // the second skips extra_id: no cancellation when it holds ~all mass
+        for (int64_t v = 0; v < n_vocab_; ++v) {
+            const double e = std::exp((double) row[v] - maxv);
+            sum += e;
+            if (v != (int64_t) extra_id) sum_without += e;
+        }
+        const double lse = maxv + std::log(sum);
+        const double extra = has_extra ? (double) row[extra_id] - lse : NAN;
+        const double without = has_extra && tgt != extra_id && sum_without > 0.0
+                                   ? (double) row[tgt] - (maxv + std::log(sum_without)) : NAN;
+        std::fprintf(out, "%lld\t%d\t%.9f\t%lld\t%.9f\t%d\t%.9f\t%.9f\n", (long long) (pos0 + t), (int) tgt,
+                     (double) row[tgt] - lse, (long long) top, maxv - lse, (int) (top == (int64_t) tgt), extra,
+                     without);
+    }
+    std::fflush(out);
+    return true;
+} catch (sycl::exception const& e) {
+    err = std::string("window_logprobs: ") + e.what();
+    return false;
 }
 
 bool Verifier::commit(int n_keep, std::string &err, bool wait) try {

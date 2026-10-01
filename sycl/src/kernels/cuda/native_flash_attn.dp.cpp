@@ -262,17 +262,17 @@ attend(const float *__restrict__ q, const sycl::half *__restrict__ k,
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
         /*
-        DPCT1013: The rounding mode could not be specified and the generated
-        code may have different accuracy than the original code. Verify the
-        correctness. SYCL math built-in function rounding mode is aligned with
-        OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the
+        generated code may have different accuracy than the original code.
+        Verify the correctness. SYCL math built-in function rounding mode is
+        aligned with OpenCL C 1.2 standard.
         */
         vkq[i].x() = vkq[i].x() * rescale;
         /*
-        DPCT1013: The rounding mode could not be specified and the generated
-        code may have different accuracy than the original code. Verify the
-        correctness. SYCL math built-in function rounding mode is aligned with
-        OpenCL C 1.2 standard.
+        DPCT1013: The rounding mode could not be specified and the
+        generated code may have different accuracy than the original code.
+        Verify the correctness. SYCL math built-in function rounding mode is
+        aligned with OpenCL C 1.2 standard.
         */
         vkq[i].y() = vkq[i].y() * rescale;
     }

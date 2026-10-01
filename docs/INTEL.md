@@ -16,19 +16,19 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 
 | | NVIDIA (Strata engine) | Intel Arc, Strata SYCL port | Intel Arc, llama.cpp |
 |---|---|---|---|
-| models | all four | the Coder IQ1_M; the original IQ2_XS too (experts beyond VRAM in the host mirror: 51-61 tok/s) | the Coder (fits VRAM) |
+| models | all four | the Coder IQ1_M; the original IQ2_XS too (experts beyond VRAM in the host mirror: 58-64 tok/s) | the Coder (fits VRAM) |
 | model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
 | where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
 | RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
-| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **77.9 tok/s** (19-token prompt, 256 greedy tokens), **74.2** after a 2,184-token prompt, **66.1** after 128K, 54.1 after 256K; 48-72 through the API | 23-25 tok/s |
-| prompt reading | ~1,870 tok/s | **787 tok/s** at 2,184 tokens, 856 at 128K, 740 at 256K | ~150 tok/s (424 at 105K) |
+| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **78.2 tok/s** (19-token prompt, 256 greedy tokens), **75.7** after a 2,184-token prompt, 59.5 after 128K, 48.7 after 256K; 48-72 through the API | 23-25 tok/s |
+| prompt reading | ~1,870 tok/s | **780 tok/s** at 2,184 tokens, 1,189 at 40K, 934 at 128K, 784 at 256K | ~150 tok/s (424 at 105K) |
 | speculative decoding (MTP) | yes | yes (the base checkpoint's draft layer; 70-85% of drafts accepted on code) | no |
 | images | yes | not yet | not yet |
-| context | up to 262K | 256K measured, 54 tok/s decode there (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
+| context | up to 262K | 256K measured, 49 tok/s decode there (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
 on the text"). The SYCL numbers are greedy runs of the engine (as in "How to run it by hand" below, 256 new
-tokens) on the 2026-10-01 build;
+tokens) on engine 0.1.31-sycl (2026-10-01);
 "Decode round 2" below lists what each change bought.
 
 ## Setup
@@ -298,24 +298,29 @@ output tokens between paths, never only timings.
   It costs ~1 s on short prompts (2,184 tokens: 610 vs 792 tok/s), so the port borrows by default only above a
   32K context (`--prefill-borrow` / `--no-prefill-borrow` decide explicitly).
 
-**Long contexts (2026-10-01, the current build, setup's flags: `--kv-resident 32768 --vram-reserve-mib 2048
---prefill 4096`, prompt-slot borrowing on).** Same text repeated to length, then 256 greedy tokens:
+**Long contexts (2026-10-01, engine 0.1.31-sycl, setup's flags: `--kv-resident 32768 --vram-reserve-mib 2048
+--prefill 4096`, prompt-slot borrowing off - see the 0.1.31 merge below).** Same text repeated to length, then 256
+greedy tokens:
 
-| context | KV | prompt | decode after | peak VRAM | experts in VRAM (of 12,288) |
+| context | KV | prompt | decode after | peak VRAM | experts in the host mirror |
 |---|---|---|---|---|---|
-| 128K | int8 | 856 tok/s (150 s) | **66.1 tok/s** | 29.9 GB | 12,288 |
-| 128K | q4_0 | 834 tok/s (153 s) | 62.4 tok/s | 29.7 GB | 12,288 |
-| 256K | int8 | 740 tok/s (346 s) | **54.1 tok/s** | 30.2 GB | 12,288 |
-| 256K | q4_0 | 726 tok/s (353 s) | 52.5 tok/s | 29.9 GB | 12,288 |
-| 128K | k8v4, KV in VRAM | **995 tok/s** (129 s) | 65.8 tok/s | 30.7 GB | 12,241 (47 in the host mirror) |
-| 256K | k8v4, KV in VRAM | **804 tok/s** (318 s) | 51.2 tok/s | 30.6 GB | 11,294 (994, 1.9 GB, in the host mirror) |
+| 128K | int8 | 934 tok/s (137 s) | **59.5 tok/s** | 29.7 GB | 1,040 (2.0 GB) |
+| 128K | q4_0 | 887 tok/s (144 s) | 53.4 tok/s | 29.3 GB | 1,073 |
+| 128K | k8v4, KV in VRAM | **1,026 tok/s** (125 s) | 54.4 tok/s | 29.5 GB | 1,523 (2.9 GB) |
+| 256K | int8 | 784 tok/s (327 s) | **48.7 tok/s** | 29.7 GB | 1,288 (2.5 GB) |
+| 256K | q4_0 | 763 tok/s (336 s) | 43.2 tok/s | 29.6 GB | 1,188 |
+| 256K | k8v4, KV in VRAM | 838 tok/s (305 s) | 42.3 tok/s | 29.5 GB | 2,327 (4.5 GB) |
+
+Before the merge, with borrowing (every expert in VRAM): 128K int8 856 / 66.1, 256K int8 740 / 54.1 tok/s. Without
+borrowing the prompt buffers keep their own VRAM, ~1,000-2,300 experts move to the pinned host mirror (planned item
+2) and decode pays ~10-17% for reading them over PCIe; the prompt is 4-9% faster.
 
 KV streaming (`--kv-resident`) keeps the whole KV in pinned host memory and only the attended window in VRAM, so
-every expert stays on the card at any context; setup.py turns it on from 64K up and keeps INT8 (the faster of the
+the KV pushes no experts out; setup.py turns it on from 64K up and keeps INT8 (the faster of the
 two at every size here). Without it the KV pushes experts out and decode after the prompt fell to 4-9 tok/s at
 128K-256K (2026-09-30). `--kv k8v4` does not support streaming yet: setup keeps its KV in VRAM, which pushes up to
-~1,000 experts out at 256K; those come from the pinned host mirror over PCIe (planned item 2), so decode holds at
-51 tok/s (it was 3.8 before the mirror). k8v4 reads prompts fastest (no streaming copies) and works through the FP32
+more experts out; those come from the pinned host mirror over PCIe (planned item 2), so decode holds at 42 tok/s at
+256K (it was 3.8 before the mirror). k8v4 reads prompts fastest (no streaming copies) and works through the FP32
 attention fallback (its dedicated prompt kernel is the XMX one below).
 
 **XMX prompt attention v2.** 64-cell chunks, vector-packed K^T and V, hi+lo Q in one accumulator per scale group,
@@ -469,6 +474,33 @@ wherever upstream touched a file they mirror. They are refreshed by re-migration
 5. A fixup whose pattern upstream changed shows up as a compile error (the PTX gate became an `#elif`
    under upstream's `__HIPCC__` guard); extend the fixup, re-run it, rebuild.
 
+**The 0.1.31 merge (2026-10-01).** Upstream 0.1.29 -> 0.1.31 (132 commits) by the steps above: 45 migrated files
+changed for real (27 more only in dpct's kernel-name hashes), 38 conflicts resolved, verify.cpp/mtp.cpp/
+conversation_state.cpp ported by hand. A symbol audit (the port's feature identifiers counted before and after) is
+part of the procedure now: it caught a dropped mirror hook and four doorbell waits that had lost their spin bound
+(upstream renamed the loops; `fixups.py` covers both spellings). What the merge needed beyond conflicts:
+
+- **The expert kernels.** Upstream sends the i-quant experts to new multi kernels (one warp per row, 8 rows a
+  group); the port's grid is sized for its own kernels (8 lanes a row, 32 rows a group), so only a quarter of each
+  expert's rows were written and the output was end-of-text tokens. The port's kernels stay the default (they also
+  serve upstream's new Q4_K/Q5_K/Q5_1/Q8_0 experts); `STRATA_EXPERT_SPLIT=1` runs upstream's, with their grid.
+- **Prompt-slot borrowing hangs** in the first chunk of any prompt with it on (40K, 128K; GPU busy, no chunk ends)
+  since upstream's borrow rework. Off by default on SYCL (`--prefill-borrow` opts in); long prompts are faster
+  without it, decode after them ~10-17% slower (the table above). Open.
+- **Upstream's new tests found three dpct mistranslations from the first migration.** dpct writes `__fadd_rn(a, b)`
+  as `a + b` without parentheses, so `__fadd_rn(sum, c ? x : y)` became `sum + c ? x : y` (replaced, not added): in
+  the native QSA indexer's per-token pooled key (the decode path: blocks completed while generating got wrong
+  pooled keys; prompt blocks come from the batched kernel and were right), in the native QSA scores (an opt-in
+  path) and in the s2 activation rounding (every value 0; the Q2_0 s2 pack, unused here). Fixed, and `fixups.py`
+  now parenthesises. `qsa_parity`'s batch-vs-sequential test passes; decode output after long prompts changed.
+- **Upstream's new kernels against the port's on the B70** (decode tok/s, Coder 19 / 2,184-token prompts, IQ2_XS
+  19): port defaults 78.1 / 75.7 / 58.6; `STRATA_EXPERT_SPLIT=1` 65.6-69.5 / 67.2 / 49.1 (-11 to -16%);
+  `STRATA_GR_V3=1` 73.2 / 72.4 (-4 to -6%). Both stay opt-in.
+- **Speed after the merge:** Coder 78.2 / 75.7 tok/s (as before), IQ2_XS 58.6 / 64.2 (from 50.8 / 60.6).
+- **Still failing:** `iq_multi_parity` on IQ2_XS (type 17: the port's mmvq disagrees with the reference, old and new
+  kernel alike; no model here uses it), `s2_expert_grouped_parity` (the s2 path), `kv_hybrid_parity`'s last step
+  (needs the unported tensor-core prompt kernel). `ple_parity` and `native_expert_parity` need model files.
+
 **Not ported yet (2026-10-01).**
 
 - Three kernels carry inline PTX (`mma.sync` tensor-core matrix ops, `ldmatrix`, `cp.async`):
@@ -486,12 +518,12 @@ wherever upstream touched a file they mirror. They are refreshed by re-migration
 - Speculative decoding on the llama.cpp path (the GGUF carries no draft layer llama.cpp can use). The SYCL
   port has it (MTP draft layer, `--mtp`).
 
-## Measured, 2026-10-01, Arc Pro B70, Coder IQ1_M, 32K context, INT8 KV: the SYCL port
+## Measured, 2026-10-01, Arc Pro B70, Coder IQ1_M, 32K context, INT8 KV: the SYCL port (engine 0.1.31-sycl)
 
 | | |
 |---|---|
-| decode | 77.9 tok/s on a 19-token prompt, 74.2 after a 2,184-token prompt (256 greedy tokens, MTP + suffix drafts) |
-| prompt | 787 tok/s on 2,184 tokens; 856 tok/s at 128K, 740 at 256K |
+| decode | 78.2 tok/s on a 19-token prompt, 75.7 after a 2,184-token prompt (256 greedy tokens, MTP + suffix drafts) |
+| prompt | 780 tok/s on 2,184 tokens; 934 tok/s at 128K, 784 at 256K |
 | through the API | 48-72 tok/s on a ~190-token chat answer, prompt included (the first request after a start is the slower one) |
 | VRAM | all 12,288 experts resident, ~1.9 GB free with everything loaded (`--vram-reserve-mib 1024`) |
 | RAM | no host copy of the experts (`--stream-experts`) |

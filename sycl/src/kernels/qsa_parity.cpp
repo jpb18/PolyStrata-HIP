@@ -50,6 +50,7 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/native_qsa_indexer.hpp"
 
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/rope.hpp"
@@ -1450,6 +1451,230 @@ int main(int argc, char** argv) {
 
         check(DPCT_CHECK_ERROR(delete (ex2)), "exd");
         check(DPCT_CHECK_ERROR(delete (g2)), "gd");
+    }
+
+    // ================= the NATIVE indexer's batched append vs the sequential one =================
+    // The prefill path appends a chunk in one native_qsa_indexer_append_batch call, the decode path appends
+    // token by token - and one cache must never be able to tell which path filled it (rope_scaling.hpp's
+    // one-rotation rule).  So the batch's whole end state must be BIT-IDENTICAL to the sequential appends',
+    // under all three scaling configs: none (today's rotation), linear 2 (pure angle shrink, no correction)
+    // and yarn 2 (corr-dims ramp and the mscale magnitude) - both kernels must take the same RopeScaling.
+    // "Bit-identical" is asserted on the bit representations (memcmp of the state words): float != would
+    // pass a NaN-payload or -0.0 flip that the claim does not cover.  Eight cells: exactly two completed
+    // blocks, so the paths' end states agree on block_pos too (a mid-block chunk end leaves the sequential
+    // path pointing at the open block's base and the batch at the last completed one's - upstream C-2's own
+    // semantics, the same for every scaling; see native_qsa_indexer.hpp's block_pos contract).
+    {
+        std::printf("\n-- the native indexer's batched append vs the sequential one\n");
+        const int64_t NB = 8;                          // exactly two complete blocks of r=4
+        const int32_t BASE = 100;                      // positions 100..107, not cell indices 0..7
+        const int64_t MC = 1024;                       // the capacity both sides validate against
+        using RST = strata::kernels::RopeScalingType;
+        struct Variant { const char* name; RST type; double factor; double ext; };
+        const Variant variants[] = {{"none", RST::None, 1.0, 0.0},
+                                    {"linear 2", RST::Linear, 2.0, 0.0},
+                                    {"yarn 2", RST::YaRN, 2.0, 1.0}};
+        std::vector<float> raws((size_t) NB * IDXD);
+        for (int64_t t = 0; t < NB; ++t)
+            for (int64_t d = 0; d < IDXD; ++d)
+                raws[(size_t) t * IDXD + d] = (float) (gauss(rng) * std::pow(4.0, (double) (t % 4)));
+        dpct::queue_ptr cs = &dpct::get_in_order_queue();
+        check(DPCT_CHECK_ERROR(
+                  cs = dpct::get_current_device().create_queue(true)),
+              "cs");
+        std::vector<float> none_pooled;
+        for (const Variant& var : variants) {
+            strata::kernels::RopeScaling sc;
+            sc.type = var.type;
+            sc.factor = var.factor;
+            sc.ext_factor = var.ext;
+            const size_t prows = (size_t) (MC / R + 1) * IDXD, trows = (size_t) (R - 1) * IDXD;
+            Dev<float> pooledA(prows), deadA(IDXD), tailA(trows), pooledB(prows), deadB(IDXD), tailB(trows);
+            Dev<int32_t> bposA(1), bposB(1), dpos(1);
+            for (Dev<float>* dp : {&pooledA, &deadA, &tailA, &pooledB, &deadB, &tailB})
+                check(
+                    DPCT_CHECK_ERROR(
+                        dpct::get_in_order_queue()
+                            .memset(dp->p, 0,
+                                    dp == &pooledA || dp == &pooledB ? prows * 4
+                                    : dp == &deadA || dp == &deadB   ? IDXD * 4
+                                                                   : trows * 4)
+                            .wait()),
+                    "zero");
+            check(DPCT_CHECK_ERROR(
+                      dpct::get_in_order_queue().memset(bposA.p, 0, 4).wait()),
+                  "zero");
+                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                           .memset(bposB.p, 0, 4)
+                                           .wait()),
+                      "zero");
+            Dev<float> draw((size_t) IDXD), drawAll;
+            drawAll.put(raws);
+            strata::kernels::QsaIndexerBuffers bufsA{tailA.p, deadA.p, pooledA.p, bposA.p};
+            strata::kernels::QsaIndexerBuffers bufsB{tailB.p, deadB.p, pooledB.p, bposB.p};
+            for (int64_t t = 0; t < NB; ++t) {         // the sequential side: one cell, its device position
+                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                           .memcpy(draw.p,
+                                                   &raws[(size_t)t * IDXD],
+                                                   (size_t)IDXD * 4)
+                                           .wait()),
+                      "raw");
+                const int32_t tp = (int32_t) t;
+                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                           .memcpy(dpos.p, &tp, 4)
+                                           .wait()),
+                      "pos");
+                strata::kernels::native_qsa_indexer_append(draw.p, dpos.p, BASE, dw_kn.p, EPS, bufsA, S, MC, sc, cs);
+                // SYCL port: cudaMemcpy on the legacy stream waited for this append before the next copy refilled
+                // `draw`; a default-queue copy does not wait for work on `cs`, so without this the next cell's raw
+                // keys could overwrite this one before the kernel reads them
+                check(DPCT_CHECK_ERROR(cs->wait()), "append");
+            }
+            strata::kernels::native_qsa_indexer_append_batch(drawAll.p, NB, 0, BASE, dw_kn.p, EPS, bufsB, S, MC, sc, cs);
+            check(DPCT_CHECK_ERROR(cs->wait()), "sync");
+            const std::vector<float> pa = pooledA.get(prows), pb = pooledB.get(prows);
+            const std::vector<float> da = deadA.get((size_t) IDXD), db = deadB.get((size_t) IDXD);
+            const std::vector<float> ta = tailA.get(trows), tbb = tailB.get(trows);
+            const std::vector<int32_t> ba = bposA.get(1), bb = bposB.get(1);
+            long long bad = 0;
+            for (size_t i = 0; i < pa.size(); ++i) bad += std::memcmp(&pa[i], &pb[i], 4) != 0;
+            for (size_t i = 0; i < da.size(); ++i) bad += std::memcmp(&da[i], &db[i], 4) != 0;
+            for (size_t i = 0; i < ta.size(); ++i) bad += std::memcmp(&ta[i], &tbb[i], 4) != 0;
+            bad += std::memcmp(&ba[0], &bb[0], 4) != 0;
+            std::printf("  %-44s %s (%lld of %zu state words differ)\n",
+                        (std::string("batch vs sequential, ") + var.name).c_str(),
+                        bad ? "*** WRONG ***" : "bit-identical", bad, pa.size() + da.size() + ta.size() + 1);
+            if (bad) ++g_bad;
+            if (var.type == RST::None) none_pooled = pa;
+            else {
+                int moved = 0;
+                for (size_t i = 0; i < pa.size(); ++i) moved += std::memcmp(&pa[i], &none_pooled[i], 4) != 0;
+                std::printf("  %-44s %d of %zu pooled words differ from the none baseline\n",
+                            (std::string("the scaling is visible, ") + var.name).c_str(), moved, pa.size());
+                if (!moved) { std::printf("    *** the batched append ignored its scaling ***\n"); ++g_bad; }
+            }
+        }
+        check(DPCT_CHECK_ERROR(dpct::get_current_device().destroy_queue(cs)),
+              "csd");
+    }
+
+    // ================= the spare (position 0) under rope scaling: the table indexer vs the native one =========
+    // The spare key (`dead`, and `pooled[0]` until the first block completes) rotates at angle 0.  Its sine is
+    // 0 in every scaling, so the rotation is `v * cos_tab[0][pair]`: exactly `v` unscaled (row 0 is (1, 0), the
+    // bit-exact value section 2 asserts), `v * mscale` under YaRN - the magnitude every other pooled row and
+    // the native kernel's spare carry.  The table kernel used to skip the rotation at position 0, which left
+    // the spare the one unscaled key of a scaled cache.  Asserted per variant: the table spare is BIT-EXACTLY
+    // the unscaled spare times row 0 on the rotated dims and the unscaled spare past them; `pooled[0]` equals
+    // `dead`; the native spare carries the same factor (to f32 rounding: its mscale is formed in float); and
+    // under YaRN the factor is observable (row 0 is not 1).
+    {
+        std::printf("\n-- the spare key (position 0) under rope scaling: table indexer vs native indexer\n");
+        using RST = strata::kernels::RopeScalingType;
+        struct Variant { const char* name; RST type; double factor; double ext; };
+        const Variant variants[] = {{"none", RST::None, 1.0, 0.0},
+                                    {"linear 2", RST::Linear, 2.0, 0.0},
+                                    {"yarn 2", RST::YaRN, 2.0, 1.0}};
+        const int64_t MC = 64, HALF = S.n_rot / 2, NROT = S.n_rot;
+        std::vector<float> raw0((size_t) IDXD);
+        for (int64_t d = 0; d < IDXD; ++d) raw0[(size_t) d] = rnd(3.0);
+        Dev<float> draw0;
+        draw0.put(raw0);
+        Dev<int32_t> dpos0(1);
+        const int32_t zero = 0;
+        check(DPCT_CHECK_ERROR(
+                  dpct::get_in_order_queue().memcpy(dpos0.p, &zero, 4).wait()),
+              "pos0");
+        dpct::queue_ptr cs = &dpct::get_in_order_queue();
+        check(DPCT_CHECK_ERROR(
+                  cs = dpct::get_current_device().create_queue(true)),
+              "cs");
+        const size_t prows = (size_t) (MC / R + 1) * IDXD, trows = (size_t) (R - 1) * IDXD;
+        // one cell at position 0 through either kernel; returns (dead, pooled[0])
+        auto spare = [&](bool native, const strata::kernels::RopeScaling &sc,
+                         std::vector<float> &dead,
+                         std::vector<float> &pooled0) {
+            try {
+                         Dev<float> pooled(prows), dd((size_t)IDXD), tail(trows);
+            Dev<int32_t> bpos(1);
+            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                       .memset(pooled.p, 0, prows * 4)
+                                       .wait()),
+                  "zero");
+            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                       .memset(dd.p, 0, (size_t)IDXD * 4)
+                                       .wait()),
+                  "zero");
+            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                                       .memset(tail.p, 0, trows * 4)
+                                       .wait()),
+                  "zero");
+            check(DPCT_CHECK_ERROR(
+                      dpct::get_in_order_queue().memset(bpos.p, 0, 4).wait()),
+                  "zero");
+            strata::kernels::QsaIndexerBuffers bufs{tail.p, dd.p, pooled.p, bpos.p};
+            if (native) {
+                strata::kernels::native_qsa_indexer_append(draw0.p, dpos0.p, 0, dw_kn.p, EPS, bufs, S, MC, sc, cs);
+            } else {
+                std::vector<float> tc((size_t) (MC * HALF)), ts(tc.size());
+                strata::kernels::build_rope_table((int) NROT, sc, (int) MC, tc.data(), ts.data());
+                Dev<float> dc, dsn;
+                dc.put(tc);
+                dsn.put(ts);
+                strata::kernels::indexer_key_append(draw0.p, dpos0.p, 0, dw_kn.p, EPS, bufs, S, dc.p, dsn.p, cs);
+            }
+            check(DPCT_CHECK_ERROR(cs->wait()), "sync");
+            dead = dd.get((size_t) IDXD);
+            pooled0 = pooled.get((size_t) IDXD);
+        }
+                         catch (sycl::exception const &exc) {
+                           std::cerr << exc.what()
+                                     << "Exception caught at file:" << __FILE__
+                                     << ", line:" << __LINE__ << std::endl;
+                           std::exit(1);
+                         }
+        };
+        std::vector<float> t_none, t_none_p, n_none, n_none_p;
+        for (const Variant& var : variants) {
+            strata::kernels::RopeScaling sc;
+            sc.type = var.type;
+            sc.factor = var.factor;
+            sc.ext_factor = var.ext;
+            std::vector<float> row0c((size_t) (MC * HALF)), row0s(row0c.size());
+            strata::kernels::build_rope_table((int) NROT, sc, (int) MC, row0c.data(), row0s.data());
+            std::vector<float> td, tp, nd, np;
+            spare(false, sc, td, tp);
+            spare(true, sc, nd, np);
+            if (var.type == RST::None) { t_none = td; t_none_p = tp; n_none = nd; n_none_p = np; }
+            long long tbad = 0, pbad = 0, sin_bad = 0;
+            double nworst = 0;
+            for (int64_t i = 0; i < HALF; ++i) sin_bad += row0s[(size_t) i] != 0.0f;
+            for (int64_t d = 0; d < IDXD; ++d) {
+                const float c0 = d < NROT ? row0c[(size_t) (d % HALF)] : 1.0f;
+                const float want = d < NROT ? t_none[(size_t) d] * c0 : t_none[(size_t) d];
+                tbad += std::memcmp(&td[(size_t) d], &want, 4) != 0;
+                pbad += std::memcmp(&tp[(size_t) d], &td[(size_t) d], 4) != 0;
+                const double nwant = (double) n_none[(size_t) d] * (double) c0;
+                const double den = std::max(std::fabs(nwant), 1e-6);
+                nworst = std::max(nworst, std::fabs((double) nd[(size_t) d] - nwant) / den);
+            }
+            require(std::string("  ") + var.name + ": row 0 of the table is (c, 0)", sin_bad == 0,
+                    std::to_string(sin_bad) + " nonzero sines");
+            require(std::string("  ") + var.name + ": the table spare is the unscaled spare times row 0, BIT-EXACT",
+                    tbad == 0, std::to_string(tbad) + " of " + std::to_string(IDXD) + " wrong");
+            require(std::string("  ") + var.name + ": the table's pooled[0] is its spare", pbad == 0,
+                    std::to_string(pbad) + " wrong");
+            require(std::string("  ") + var.name + ": the native spare carries the same row-0 factor", nworst <= 4e-7,
+                    "worst relative " + std::to_string(nworst));
+            if (var.type == RST::YaRN) {
+                int moved = 0;
+                for (int64_t d = 0; d < NROT; ++d) moved += std::memcmp(&td[(size_t) d], &t_none[(size_t) d], 4) != 0;
+                require("  yarn 2: the magnitude correction is observable on the table spare",
+                        row0c[0] != 1.0f && moved > NROT / 2,
+                        "row0 cos " + std::to_string(row0c[0]) + ", " + std::to_string(moved) + " dims moved");
+            }
+        }
+        check(DPCT_CHECK_ERROR(dpct::get_current_device().destroy_queue(cs)),
+              "csd");
     }
 
     std::printf("\nqsa: %d failures\n", g_bad);

@@ -23,6 +23,7 @@
 #include <dpct/dpct.hpp>
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
+#include "strata/kernels/sampler.hpp"
 
 #include <cstdint>
 #include <algorithm>
@@ -51,9 +52,9 @@ public:
     /// SYCL port: capture the round, step and prompt graphs at load rather than on first use (see Verifier::warm)
     bool warm(std::string& err) {
         for (int T = 1; T <= max_t_; ++T)
-            if (!capture_round(T, err) || !capture_prefill(T, err)) return false;
+            if (!capture_round(T, false, err) || !capture_prefill(T, err)) return false;
         for (int j = 1; j < std::min(max_t_ - 1, max_drafts_); ++j)
-            if (!capture_step(j, err)) return false;
+            if (!capture_step(j, false, err)) return false;
         return true;
     }
     uint64_t vram_bytes() const { return vram_; }
@@ -81,6 +82,16 @@ public:
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
+
+    /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; STRATA_SPEC_COUPLED=1, set up by bind()): the request's
+    /// sampling.  A sampled request (temperature > 0, not greedy) then drafts by SAMPLING with the target's chain and
+    /// the target's Philox draw for the verifying row, and `probs` is the draft's probability under that chain; a
+    /// greedy one keeps the argmax drafts and their graphs.  A no-op when the switch is off.
+    void set_draft_sampling(const strata::kernels::SamplerParams& sp);
+    /// Coupled mode with penalties: the history the next draft() chain starts from - what the session holds after the
+    /// window's commit (`tail`) and the window's pick at its last accepted row (`next`, the next window's row 0).
+    void set_draft_history(const int32_t* tail, int64_t n_tail, int32_t next);
+    bool coupled() const { return coupled_active_; }
 
     double ms_draft = 0, ms_prefill = 0;
     int64_t rounds = 0;
@@ -110,9 +121,20 @@ private:
                         std::string &err);
     bool capture_prefill(int T, std::string& err);
     bool capture_prefill_dev(int T, std::string& err);   ///< E-4: without the mapped staging (inputs copied on device)
-    bool capture_round(int T, std::string& err);
-    bool capture_step(int j, std::string& err);
+    bool capture_round(int T, bool coupled, std::string& err);
+    bool capture_step(int j, bool coupled, std::string& err);
     dpct::experimental::command_graph_exec_ptr step_exec_[9] = {};
+    // coupled draft sampling: its own round/step graphs (the argmax ones stay as they were), the request's
+    // parameters and the penalty ring (mapped staging + device copies), the split scratch, token id -> subset index
+    bool setup_coupled(std::string& err);
+    dpct::experimental::command_graph_exec_ptr round_exec_c_[9] = {};
+    dpct::experimental::command_graph_exec_ptr step_exec_c_[9] = {};
+    bool coupled_ok_ = false, coupled_active_ = false;
+    bool coupled_rec_ = false;   ///< record_forward: the full layer ends in the coupled sampler (draft coupled_j_)
+    int coupled_j_ = 0;
+    strata::kernels::SamplerParams *h_cparams_ = nullptr, *m_cparams_ = nullptr, *cparams_ = nullptr;
+    int32_t *h_chist_ = nullptr, *m_chist_ = nullptr, *cring_ = nullptr, *dinv_ = nullptr;
+    void* cscratch_ = nullptr;
     const float* f32(const char* name) const;
     const uint16_t* bf16(const char* name) const;
     const void* q8(const char* name) const;

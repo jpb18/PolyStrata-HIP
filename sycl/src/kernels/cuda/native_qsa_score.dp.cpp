@@ -106,7 +106,7 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
     }
     float sum=(((h[0] + h[1]) + h[2]) + h[3]);
     if(bias)sum=(sum + bias[row]);
-    sum=(sum + row==full&&n%R?1e9f:0.0f);
+    sum=(sum + (row==full&&n%R?1e9f:0.0f));
     for(int i=row*R;i<n&&i<(row+1)*R;++i)cells[i]=sum;
 #else
     auto &shared = *sycl::ext::oneapi::group_local_memory_for_overwrite<
@@ -208,7 +208,7 @@ __dpct_inline__ void score_kernel(const float *__restrict__ pooled,
         correctness. SYCL math built-in function rounding mode is aligned with
         OpenCL C 1.2 standard.
         */
-        sum = sum + row == full && n % R ? 1e9f : 0.0f;
+        sum = sum + (row == full && n % R ? 1e9f : 0.0f);
         // The live causal mask is +0. Invalid/padded cells are never exported.
         /*
         DPCT1013: The rounding mode could not be specified and the generated
@@ -252,7 +252,7 @@ __global__ void scalar_score_kernel(
         sum=(sum + head_score[2]);
         sum=(sum + head_score[3]);
         if(bias)sum=(sum + bias[row]);
-        sum=(sum + row==full&&n%R?1e9f:0.0f);
+        sum=(sum + (row==full&&n%R?1e9f:0.0f));
         sum=(sum + 0.0f);
         for(int i=row*R;i<n&&i<(row+1)*R;++i)cells[i]=sum;
     }

@@ -45,6 +45,13 @@ void ck(int s, const char *what) {
     }
 }
 
+// A setup call whose failure the engine survives (the handle keeps its defaults), as before #240 - but said.
+void note(int s, const char *what) {
+    if (s != 0) std::fprintf(
+        stderr, "prefill gemm: %s: cuBLAS status %d (continuing)\n", what,
+        (int)s);
+}
+
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
 struct HipLtCallKey {
     strata::prefill::hipblaslt::InputType type;
@@ -289,19 +296,24 @@ bool Gemm::init_external(void *stream, uint16_t *scratch, int64_t scratch_elems,
                          void *workspace, size_t ws_bytes,
                          std::string &err) try {
     dpct::blas::descriptor_ptr h = nullptr;
-    if (DPCT_CHECK_ERROR(h = new dpct::blas::descriptor()) != 0) {
-        err = "prefill gemm: cublasCreate failed"; return false;
+    if (const int s = DPCT_CHECK_ERROR(h = new dpct::blas::descriptor());
+        s != 0) {
+        err = "prefill gemm: cublasCreate: cuBLAS status " + std::to_string((int) s);
+        return false;
     }
     handle_ = h;
     stream_ = stream;
     external_ = true;
-    h->set_queue(strata::q_of(stream));
+    note(DPCT_CHECK_ERROR(h->set_queue(strata::q_of(stream))),
+         "cublasSetStream");
     workspace_ = workspace;
     /*
-    DPCT1026: The call to cublasSetWorkspace was removed because this
-    functionality is redundant in SYCL.
+    DPCT1027: The call to cublasSetWorkspace was replaced with 0 because
+    this functionality is redundant in SYCL.
     */
-    h->set_math_mode(dpct::blas::math_mode::mm_default);
+    note(0, "cublasSetWorkspace");
+    note(DPCT_CHECK_ERROR(h->set_math_mode(dpct::blas::math_mode::mm_default)),
+         "cublasSetMathMode");
     scratch_ = scratch;
     scratch_elems_ = scratch_elems;
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
@@ -333,33 +345,72 @@ void Gemm::rebind(uint16_t* scratch, int64_t scratch_elems, void* workspace, siz
 }
 
 bool Gemm::init(void *stream, int64_t scratch_elems, std::string &err) try {
+    // #240: every failure names the call and the real status, so "no VRAM" can be told from a broken install
     dpct::blas::descriptor_ptr h = nullptr;
-    if (DPCT_CHECK_ERROR(h = new dpct::blas::descriptor()) != 0) {
-        err = "prefill gemm: cublasCreate failed"; return false;
+    if (const int s = DPCT_CHECK_ERROR(h = new dpct::blas::descriptor());
+        s != 0) {
+        err = "prefill gemm: cublasCreate: cuBLAS status " + std::to_string((int) s);
+        return false;
     }
     handle_ = h;
     stream_ = stream;
-    h->set_queue(strata::q_of(stream));
+    note(DPCT_CHECK_ERROR(h->set_queue(strata::q_of(stream))),
+         "cublasSetStream");
     // A fixed workspace so the handle never allocates on the way (and graphs could capture it later).
     const size_t ws = 32u << 20;
-    if (DPCT_CHECK_ERROR(workspace_ = (void *)sycl::malloc_device(
-                             ws, dpct::get_in_order_queue())) != 0) {
-        err = "prefill gemm: workspace"; return false;
+    /*
+    DPCT1000: Error handling if-stmt was detected but could not be
+    rewritten.
+    */
+    if (const dpct::err0 e =
+            DPCT_CHECK_ERROR(workspace_ = (void *)sycl::malloc_device(
+                                 ws, dpct::get_in_order_queue()));
+        e != 0) {
+        /*
+        DPCT1009: SYCL reports errors using exceptions and does not use
+        error codes. Please replace the "get_error_string_dummy(...)" with a
+        real error-handling function.
+        */
+        /*
+        DPCT1001: The statement could not be removed.
+        */
+        err = std::string("prefill gemm: workspace of 32 MiB: ") +
+              dpct::get_error_string_dummy(e);
+        return false;
     }
     /*
-    DPCT1026: The call to cublasSetWorkspace was removed because this
-    functionality is redundant in SYCL.
+    DPCT1027: The call to cublasSetWorkspace was replaced with 0 because
+    this functionality is redundant in SYCL.
     */
-    h->set_math_mode(dpct::blas::math_mode::mm_default);
+    note(0, "cublasSetWorkspace");
+    note(DPCT_CHECK_ERROR(h->set_math_mode(dpct::blas::math_mode::mm_default)),
+         "cublasSetMathMode");
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     hipblaslt_state_ = create_hipblaslt_state(workspace_, ws).release();
 #endif
-    if (scratch_elems > 0 &&
-        DPCT_CHECK_ERROR(
-            scratch_ = (uint16_t *)sycl::malloc_device(
-                (size_t)scratch_elems * 2, dpct::get_in_order_queue())) != 0) {
-        err = "prefill gemm: dequant scratch of " + std::to_string(scratch_elems * 2 >> 20) + " MiB";
-        return false;
+    if (scratch_elems > 0) {
+        /*
+        DPCT1000: Error handling if-stmt was detected but could not be
+        rewritten.
+        */
+        if (const dpct::err0 e = DPCT_CHECK_ERROR(
+                scratch_ = (uint16_t *)sycl::malloc_device(
+                    (size_t)scratch_elems * 2, dpct::get_in_order_queue()));
+            e != 0) {
+            /*
+            DPCT1001: The statement could not be removed.
+            */
+            err = "prefill gemm: dequant scratch of " +
+                  std::to_string(scratch_elems * 2 >> 20) + " MiB: " +
+                  /*
+                  DPCT1009: SYCL reports errors using exceptions and does
+                  not use error codes. Please replace the
+                  "get_error_string_dummy(...)" with a real error-handling
+                  function.
+                  */
+                  dpct::get_error_string_dummy(e);
+            return false;
+        }
     }
     scratch_elems_ = scratch_elems;
     return true;

@@ -942,17 +942,21 @@ auto &sh = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
 }
 __dpct_inline__ void rope_kernel(float *__restrict__ x, int64_t heads,
                                  int64_t dim, int64_t ld, int64_t pos0,
-                                 float theta_scale,
+                                 float theta_scale, float freq_scale,
+                                 float corr_low, float corr_high,
+                                 float ext_factor, float mscale,
                                  const int32_t *__restrict__ mtab) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int64_t row = item_ct1.get_group(2); // t * heads + h
     const int pair = item_ct1.get_local_id(2); // 0..31
     const int64_t t = row / heads, h = row % heads;
     float* p = x + t * ld + h * dim;
-    const float theta =
+    const float theta_extrap =
         (float)strata::kernels::mrope_pos(mtab, (int)(pos0 + t), pair) *
         dpct::pow(theta_scale, (float)pair);
-    const float c = sycl::cos((float)theta), s = sycl::sin((float)theta);
+    float c, s;
+    strata::kernels::rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale,
+                                       pair, c, s);
     const float a = p[pair], b = p[pair + 32];
     p[pair] = a * c - b * s;
     p[pair + 32] = a * s + b * c;
@@ -1678,15 +1682,23 @@ void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, 
     }
     check("rms_rows");
 }
-void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t pos0, float freq_base, void* stream) {
-    const float theta_scale = powf(freq_base, -2.0f / 64.0f);
+void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t pos0,
+          const strata::kernels::RopeScaling& scaling, void* stream) {
+    // The engine validates the resolved config at startup with the same rule (generate.cpp), so this only
+    // fires for a caller that bypassed it; the prompt path has no error return here, so it stops the process.
+    if (const char* why = strata::kernels::rope_scaling_invalid(scaling)) {
+        std::fprintf(stderr, "prefill rope: invalid rope scaling: %s\n", why);
+        std::exit(1);
+    }
+    const float theta_scale = powf((float) scaling.freq_base, -2.0f / 64.0f);
+    const strata::kernels::RopeKernelArgs k = scaling.kernel_args(64);   // none: the identity constants
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
         strata::q_of(stream)
             ->submit([&](sycl::handler &cgh) {
-                auto strata_kernels_mrope_table_ct6 =
+                auto strata_kernels_mrope_table_ct11 =
                     strata::kernels::mrope_table();
 
                 cgh.parallel_for<dpct_kernel_name<class rope_kernel_4d58b9>>(
@@ -1695,7 +1707,9 @@ void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t p
                                       sycl::range(1, 1, 32)),
                     exp_props, [=](sycl::nd_item<3> item_ct1) {
                         rope_kernel(x, heads, dim, ld, pos0, theta_scale,
-                                    strata_kernels_mrope_table_ct6);
+                                    k.freq_scale, k.corr_low, k.corr_high,
+                                    k.ext_factor, k.attn_factor,
+                                    strata_kernels_mrope_table_ct11);
                     });
             });
     }

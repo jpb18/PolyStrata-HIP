@@ -10,7 +10,7 @@
 #
 # Device code is JIT-compiled from SPIR-V unless STRATA_SYCL_AOT names a device (bmg-g31 for the Arc Pro B70).
 cmake_minimum_required(VERSION 3.24)
-project(strata_sycl VERSION 0.1.24 LANGUAGES C CXX)
+project(strata_sycl VERSION 0.1.31 LANGUAGES C CXX)   # the upstream engine version this port tracks
 set(STRATA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -120,12 +120,14 @@ if(STRATA_NATIVE_EXPERTS)
     endif()
     add_subdirectory(${strata_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   endif()
-  strata_resolve(_cpu_native src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/iq_avx2.cpp)
+  strata_resolve(_cpu_native src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/iq_avx2.cpp
+                             src/kernels/cpu/kq_avx2.cpp)   # 0.1.31: the Q4_K/Q5_K/Q5_1/Q8_0 expert rows
   target_sources(strata_kernels_cpu PRIVATE ${_cpu_native})
   target_include_directories(strata_kernels_cpu PRIVATE ${STRATA_ROOT}/third_party/ggml)
   set_source_files_properties(${STRATA_ROOT}/src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS
     "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mf16c;-mfma")
   set_source_files_properties(${STRATA_ROOT}/src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
+  set_source_files_properties(${STRATA_ROOT}/src/kernels/cpu/kq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
   target_link_libraries(strata_kernels_cpu PUBLIC ggml-cpu ggml-base)
   target_compile_definitions(strata_kernels_cpu PUBLIC STRATA_NATIVE_EXPERTS=1)
 endif()
@@ -153,8 +155,10 @@ target_link_libraries(strata_kernels PUBLIC strata_core)
 
 strata_resolve(_engine src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
                        src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp
-                       src/core/mtp.cpp)
+                       src/core/mtp.cpp src/core/conversation_snapshot.cpp src/core/conversation_state.cpp
+                       src/core/conversation_memory.cpp)   # 0.1.31: the conversation snapshots (#216)
 add_library(strata_engine STATIC ${_engine} ${CMAKE_CURRENT_SOURCE_DIR}/src/core/gguf_expert_source.cpp)
+target_include_directories(strata_engine PRIVATE ${STRATA_ROOT}/src/core)   # conversation_checked.hpp (#include "...")
 target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu)
 
 # cuBLAS -> oneMKL through dpct::blas (needs the MKL SYCL BLAS domain)
@@ -180,6 +184,23 @@ if(STRATA_SYCL_PARITY)
     target_link_libraries(${p}_parity PRIVATE strata_kernels)
     add_test(NAME ${p}_parity COMMAND ${p}_parity --selftest)
   endforeach()
+  # 0.1.31: the IQ kernels that decode a weight part once for every column/entry, bitwise vs the per-column ones
+  # (no --selftest flag: it runs its checks by default), and the rewritten per-hit/grouped expert kernels vs the
+  # previous ones, bitwise
+  strata_resolve(_src src/kernels/iq_multi_parity.cpp)
+  add_executable(iq_multi_parity ${_src})
+  target_link_libraries(iq_multi_parity PRIVATE strata_kernels)
+  add_test(NAME iq_multi_parity COMMAND iq_multi_parity)
+  strata_resolve(_src src/kernels/s2_expert_grouped_parity.cpp)
+  add_executable(s2_expert_grouped_parity ${_src})
+  target_link_libraries(s2_expert_grouped_parity PRIVATE strata_kernels)
+  add_test(NAME s2_expert_grouped_parity COMMAND s2_expert_grouped_parity --selftest)
+  # the conversation snapshots (#216) against the engine, as upstream's STRATA_BUILD_CONVERSATION_TESTS
+  strata_resolve(_src src/core/conversation_snapshot_test.cpp)
+  add_executable(conversation_snapshot_test ${_src})
+  target_link_libraries(conversation_snapshot_test PRIVATE strata_engine)
+  add_test(NAME conversation_snapshot_test COMMAND conversation_snapshot_test)
+  set_tests_properties(conversation_snapshot_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
   # the prompt-attention parity takes a context length, not --selftest, and needs the tensor-core kernel (not
   # ported yet: it reports "refused the pools" here). Built, not registered.
   strata_resolve(_src src/kernels/qsa_prompt_attn_parity.cpp)

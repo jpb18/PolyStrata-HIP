@@ -42,7 +42,9 @@ bool overlaps(const void* a, size_t an, const void* b, size_t bn) {
     return x <= y ? y - x < an : x - y < bn;
 }
 __dpct_inline__ void apply(const float *x, float *out, int rows, int width,
-                           int n_rot, float theta_scale, const int *positions,
+                           int n_rot, float theta_scale, float freq_scale,
+                           float corr_low, float corr_high, float ext_factor,
+                           float mscale, const int *positions,
                            const int32_t *mtab) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int row = item_ct1.get_group(1);
@@ -57,9 +59,10 @@ __dpct_inline__ void apply(const float *x, float *out, int rows, int width,
         }
         return;
     }
-    const float theta = mrope_pos(mtab, positions[row], pair) *
-                        dpct::pow(theta_scale, float(pair));
-    const float c = sycl::cos((float)theta), s = sycl::sin((float)theta);
+    const float theta_extrap = mrope_pos(mtab, positions[row], pair) *
+                               dpct::pow(theta_scale, float(pair));
+    float c, s;
+    rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale, pair, c, s);
     const float a = x[start + pair], b = x[start + pair + n_rot / 2];
     out[start + pair] = a * c - b * s;
     out[start + pair + n_rot / 2] = a * s + b * c;
@@ -86,13 +89,13 @@ const int32_t* mrope_table() { return mrope_tab[mrope_dev()].load(std::memory_or
 void native_rope_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_rope_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_rope_apply(const float* x, float* out, int rows, int head_dim,
-                       int n_rot, float freq_base, const int* positions, void* stream) {
+                       int n_rot, const RopeScaling& scaling, const int* positions, void* stream) {
     if (!x || !out || !positions || !stream || rows < 1 || rows > 65535 ||
         (head_dim != 128 && head_dim != 256) || n_rot != 64 ||
-        !std::isfinite(freq_base) || freq_base <= 1.0f ||
+        rope_scaling_invalid(scaling) != nullptr ||
         reinterpret_cast<uintptr_t>(x) % 4 || reinterpret_cast<uintptr_t>(out) % 4 ||
         reinterpret_cast<uintptr_t>(positions) % 4) {
-        throw std::invalid_argument("native RoPE requires aligned F32 rows, width 128/256, rotation 64, valid base and explicit stream");
+        throw std::invalid_argument("native RoPE requires aligned F32 rows, width 128/256, rotation 64, valid base/scaling and explicit stream");
     }
     const size_t bytes = size_t(rows) * head_dim * sizeof(float);
     if ((x != out && overlaps(x, bytes, out, bytes)) ||
@@ -101,14 +104,15 @@ void native_rope_apply(const float* x, float* out, int rows, int head_dim,
         throw std::invalid_argument("native RoPE buffers partially overlap");
     }
     // Match pinned host-side float powf before device fast powf/trigonometry.
-    const float theta_scale = powf(freq_base, -2.0f / n_rot);
+    const float theta_scale = powf((float) scaling.freq_base, -2.0f / n_rot);
+    const RopeKernelArgs k = scaling.kernel_args(n_rot);   // none: the identity constants
     {
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
         ((sycl::queue *)(strata::q_of(stream)))
             ->submit([&](sycl::handler &cgh) {
-                auto mrope_table_ct7 = mrope_table();
+                auto mrope_table_ct12 = mrope_table();
 
                 cgh.parallel_for<dpct_kernel_name<class apply_b955ef>>(
                     sycl::nd_range<3>(
@@ -117,7 +121,9 @@ void native_rope_apply(const float* x, float* out, int rows, int head_dim,
                         sycl::range(1, 1, 128)),
                     exp_props, [=](sycl::nd_item<3> item_ct1) {
                         apply(x, out, rows, head_dim, n_rot, theta_scale,
-                              positions, mrope_table_ct7);
+                              k.freq_scale, k.corr_low, k.corr_high,
+                              k.ext_factor, k.attn_factor, positions,
+                              mrope_table_ct12);
                     });
             });
     }

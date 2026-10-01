@@ -23,6 +23,7 @@
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/core/coupled_draft.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -512,9 +513,13 @@ __dpct_inline__ void warp_first(float &bv, int &bi) {
 /// the same argument, the sums in the same order, `cum += e / sum` with the same correctly rounded quotient - so
 /// the cut, the survivors and the pick are the same.  (`n_keep == 0`, reachable only with min_p > 1, which the
 /// callers clamp, read `sel_ids[-1]` in the old tail; it reads `sel_ids[0]` here.)
+/// kProb (the coupled draft only): lane 0 also writes the pick's probability under the final distribution to
+/// `*prob_out`.  The sampler's own calls take kProb = false, whose code is the tail above, unchanged.
+template <bool kProb = false>
 inline void sampled_tail_warp(const int *sel_ids, const float *sel_logit, int k,
                               const SamplerParams &p, int t,
-                              int *__restrict__ out, double *ex) {
+                              int *__restrict__ out, double *ex,
+                              float *prob_out = nullptr) {
     const int lane =
         (int)(sycl::ext::oneapi::this_work_item::get_nd_item<3>().get_local_id(
                   2) &
@@ -590,9 +595,9 @@ inline void sampled_tail_warp(const int *sel_ids, const float *sel_logit, int k,
 #pragma unroll
         for (int i = 0; i < n_keep; ++i) sum += ex[i];
     /*
-    DPCT1108: '__shfl_sync' was migrated with the experimental feature masked
-    sub_group function which may not be supported by all compilers or runtimes.
-    You may need to adjust the code.
+    DPCT1108: '__shfl_sync' was migrated with the experimental feature
+    masked sub_group function which may not be supported by all compilers or
+    runtimes. You may need to adjust the code.
     */
     sum = dpct::experimental::select_from_sub_group(
         kFullMask, sycl::ext::oneapi::this_work_item::get_sub_group(), sum, 0);
@@ -603,13 +608,15 @@ inline void sampled_tail_warp(const int *sel_ids, const float *sel_logit, int k,
     if (lane == 0) {
         const float u = philox_uniform(p.seed, p.counter + (uint64_t) t);
         double cum = 0.0;
-        int pick = sel_ids[n_keep > 0 ? n_keep - 1 : 0];
+        int pi = n_keep > 0 ? n_keep - 1 : 0;
+        int pick = sel_ids[pi];
 #pragma unroll
         for (int i = 0; i < n_keep; ++i) {
             cum += ex[i];
-            if ((double) u < cum) { pick = sel_ids[i]; break; }
+            if ((double) u < cum) { pick = sel_ids[i]; pi = i; break; }
         }
         out[t] = pick;
+        if constexpr (kProb) *prob_out = n_keep > 0 ? (float) ex[pi] : 1.0f;
     }
 }
 
@@ -981,6 +988,122 @@ sampler_split_merge_kernel(const sycl::int2 *__restrict__ cand, int n_blocks,
     sampled_tail_warp(sel_ids, sel_logit, k, p, t, out, ex);
 }
 
+// ---- COUPLED DRAFT SAMPLING (include/strata/core/coupled_draft.hpp): the MTP draft layer samples its draft with the
+// target's chain and the target's Philox draw.  Everything that varies per request or per round - the chain's
+// parameters, the seed, the counter (from the cell's step record), the penalty history - is read from DEVICE memory:
+// these kernels are captured into the drafter's round/step graphs.  One row, `nv` logits: the draft head's
+// vocabulary subset (rt/draft_vocab.bin) or the whole vocabulary; `sub_to_id` maps a subset index to its token id.
+
+/// The round's inputs: the request's SamplerParams and the history base (the last h slots before `cap`), from
+/// mapped host memory into the device copies the chain's kernels read.
+__dpct_inline__ void coupled_stage_kernel(const SamplerParams *__restrict__ mp,
+                                          const int *__restrict__ mh,
+                                          SamplerParams *__restrict__ dp,
+                                          int *__restrict__ ring, int cap) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const volatile int *s = (const volatile int *)mp;
+    int* d = (int*) dp;
+#pragma unroll
+    for (int i = item_ct1.get_local_id(2);
+         i < (int)(sizeof(SamplerParams) / sizeof(int));
+         i += item_ct1.get_local_range(2)) d[i] = s[i];
+    const int h = strata::core::coupled_hist_len(((const volatile SamplerParams*) mp)->penalty_last_n, cap);
+    const volatile int* vh = (const volatile int*) mh;
+#pragma unroll
+    for (int i = cap - h + (int)item_ct1.get_local_id(2); i < cap;
+         i += item_ct1.get_local_range(2)) ring[i] = vh[i];
+}
+
+/// The penalties, applied in place to the draft logits before the selection - the target applies the same
+/// `apply_penalties` to the same token with the same count over the same window before its own.  Draft j's window
+/// is the ring's [cap + j - h, cap + j): the base plus drafts 0 .. j-1.  A history token outside the draft head's
+/// subset has no logit here.  Each distinct token is penalised once: the entry whose `atomicOr` sets its bit does it.
+__dpct_inline__ void coupled_penalize_kernel(
+    float *__restrict__ logits, int nv, const int *__restrict__ id_to_sub,
+    int id_vocab, const SamplerParams *__restrict__ dp,
+    const int *__restrict__ ring, int cap, int j, uint8_t *dpct_local) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const SamplerParams p = *dp;
+    const int h = strata::core::coupled_hist_len(p.penalty_last_n, cap);
+    if (h <= 0) return;
+    const int* hrow = ring + strata::core::coupled_hist_start(cap, j, h);
+    auto seen = (unsigned int *)dpct_local;
+    const int words = (nv + 31) / 32;
+#pragma unroll
+    for (int w = item_ct1.get_local_id(2); w < words;
+         w += item_ct1.get_local_range(2)) seen[w] = 0u;
+    /*
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
+    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
+    performance if there is no access to global memory.
+    */
+    item_ct1.barrier();
+    for (int i = item_ct1.get_local_id(2); i < h;
+         i += item_ct1.get_local_range(2)) {
+        const int v = hrow[i];
+        if (v < 0 || v >= id_vocab) continue;
+        const int s = id_to_sub != nullptr ? id_to_sub[v] : v;
+        if (s < 0 || s >= nv) continue;
+        const unsigned bit = 1u << (s & 31);
+        if (dpct::atomic_fetch_or<sycl::access::address_space::generic_space>(
+                &seen[s >> 5], bit) &
+            bit) continue;
+        logits[s] = apply_penalties(logits[s], history_count(hrow, h, v), p);
+    }
+}
+
+/// The merge of `sampler_split_merge_kernel` (lists of `kpart` entries, the request's top_k taken from them), then
+/// `sampled_tail_warp` with the counter of the row that will verify this draft.  Lane 0 maps the pick to its token
+/// id, writes it and its probability, and appends it to the ring for the next draft's penalty window.
+__dpct_inline__ void coupled_merge_kernel(
+    const sycl::int2 *__restrict__ cand, int n_blocks, int nv, int kpart,
+    const SamplerParams *__restrict__ dp, const int *__restrict__ step_rec,
+    const int *__restrict__ sub_to_id, int *__restrict__ ring, int cap, int j,
+    int *__restrict__ out_id, float *__restrict__ out_prob) {
+    const int lane =
+        (int)sycl::ext::oneapi::this_work_item::get_nd_item<3>().get_local_id(
+            2);
+    SamplerParams p = *dp;
+    p.counter = strata::core::coupled_draft_counter((int64_t) step_rec[0]);
+    const int k = sampled_k(p.top_k, nv);    // <= kpart: the first k of a union lie in the first k of each list
+    auto &lists = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        sycl::int2[kSplitMaxBlocks * kSelMax]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &sel_ids =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<int[kSelMax]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &sel_logit =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[kSelMax]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &ex =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<double[kSelMax]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &pick = *sycl::ext::oneapi::group_local_memory_for_overwrite<int[1]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &prob = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[1]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+#pragma unroll
+    for (int e = lane; e < n_blocks * kpart; e += 32) lists[e] = cand[e];
+    sycl::group_barrier(sycl::ext::oneapi::this_work_item::get_sub_group());
+    warp_merge_lists(lists, n_blocks, kpart, k, nv, [&](int i, float v, int id) {
+        if (lane == 0) { sel_ids[i] = id < nv ? id : 0; sel_logit[i] = v; }
+    });
+    sycl::group_barrier(sycl::ext::oneapi::this_work_item::get_sub_group());
+    if (p.greedy || p.temperature <= 0.0f) {   // never launched for greedy requests; the argmax, defensively
+        if (lane == 0) { pick[0] = sel_ids[0]; prob[0] = 1.0f; }
+    } else {
+        sampled_tail_warp<true>(sel_ids, sel_logit, k, p, 0, pick, ex, prob);
+    }
+    sycl::group_barrier(sycl::ext::oneapi::this_work_item::get_sub_group());
+    if (lane == 0) {
+        const int s = pick[0];
+        const int id = sub_to_id != nullptr ? sub_to_id[s] : s;
+        *out_id = id;
+        *out_prob = prob[0];
+        ring[cap + j] = id;
+    }
+}
+
 // Which sampled path runs, read once: `STRATA_OLD_SAMPLER=1` is `sampler_kernel` (engine 0.1.20),
 // `STRATA_SAMPLER_ONE_BLOCK=1` the one-block kernel; by default the split top_k wherever it applies.
 enum class SampledPath { Split, OneBlock, Old };
@@ -1281,6 +1404,120 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
     const dpct::err0 e = 0;
 
     if (stream == nullptr) dpct::get_current_device().queues_wait_and_throw();
+}
+
+namespace {
+int coupled_blocks(int nv) { return (nv + kSplitBlockSpan - 1) / kSplitBlockSpan; }
+int coupled_kpart(int nv) { return nv < kSelMax ? nv : kSelMax; }
+void coupled_check(const char* what) {
+    /*
+    DPCT1010: SYCL uses exceptions to report errors and does not use the
+    error codes. The cudaGetLastError function call was replaced with 0. You
+    need to rewrite this code.
+    */
+    const dpct::err0 e = 0;
+}
+}  // namespace
+
+size_t coupled_draft_scratch_bytes(int nv) {
+    if (nv <= 0 || coupled_blocks(nv) > kSplitMaxBlocks) return 0;
+    return (size_t)coupled_blocks(nv) * (size_t)kSelMax * sizeof(sycl::int2);
+}
+
+void coupled_draft_stage(const SamplerParams* mapped_params, const int32_t* mapped_hist, SamplerParams* params,
+                         int32_t* ring, int cap, void* stream) {
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->parallel_for<dpct_kernel_name<class coupled_stage_kernel_113245>>(
+                sycl::nd_range<3>(sycl::range(1, 1, 256),
+                                  sycl::range(1, 1, 256)),
+                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                    coupled_stage_kernel(mapped_params, mapped_hist, params,
+                                         ring, cap);
+                });
+    }
+    coupled_check("coupled_draft_stage");
+}
+
+void coupled_draft_sample(float* logits, int nv, const int32_t* sub_to_id, const int32_t* id_to_sub, int id_vocab,
+                          const SamplerParams* params, int32_t* ring, int cap, int j, const int32_t* step_rec,
+                          void* scratch, int32_t* out_id, float* out_prob, void* stream) {
+    const dpct::queue_ptr s = strata::q_of(stream);
+    const int n_blocks = coupled_blocks(nv), kpart = coupled_kpart(nv);
+    if (nv <= 0 || n_blocks > kSplitMaxBlocks || scratch == nullptr) {
+        std::fprintf(stderr, "coupled_draft_sample: %d logits need scratch and at most %d blocks\n", nv, kSplitMaxBlocks);
+        std::exit(1);
+    }
+    /*
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
+    limit. To get the device limit, query info::device::max_work_group_size.
+    Adjust the work-group size if needed.
+    */
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        s->submit([&](sycl::handler &cgh) {
+            /*
+            DPCT1083: The size of local memory in the migrated code may be
+            different from the original code. Check that the allocated memory
+            size in the migrated code is correct.
+            */
+            sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(
+                sycl::range((unsigned)((nv + 31) / 32) * sizeof(unsigned)),
+                cgh);
+
+            cgh.parallel_for<
+                dpct_kernel_name<class coupled_penalize_kernel_6ca8a2>>(
+                sycl::nd_range<3>(sycl::range(1, 1, 1024),
+                                  sycl::range(1, 1, 1024)),
+                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                    coupled_penalize_kernel(
+                        logits, nv, id_to_sub, id_vocab, params, ring, cap, j,
+                        dpct_local_acc_ct1
+                            .get_multi_ptr<sycl::access::decorated::no>()
+                            .get());
+                });
+        });
+    }
+    coupled_check("coupled_penalize");
+    // the selection of the split sampler, unchanged: every 4,096-logit block's first `kpart` (the widest list,
+    // since the request's top_k is only known on the device), penalties already applied above
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        s->parallel_for<
+            dpct_kernel_name<class sampler_split_part_kernel_cc5674>>(
+            sycl::nd_range<3>(sycl::range(1, 1u, (unsigned)n_blocks) *
+                                  sycl::range(1, 1, kSplitWarps * 32),
+                              sycl::range(1, 1, kSplitWarps * 32)),
+            exp_props,
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
+                sampler_split_part_kernel(logits, nv, nullptr, 0,
+                                          SamplerParams{}, kpart, n_blocks,
+                                          (sycl::int2 *)scratch);
+            });
+    }
+    coupled_check("coupled_draft split part");
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+        dpct::has_capability_or_fail(s->get_device(), {sycl::aspect::fp64});
+
+        s->parallel_for<dpct_kernel_name<class coupled_merge_kernel_1fbeb1>>(
+            sycl::nd_range<3>(sycl::range(1, 1, 32), sycl::range(1, 1, 32)),
+            exp_props,
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] {
+                coupled_merge_kernel((const sycl::int2 *)scratch, n_blocks, nv,
+                                     kpart, params, step_rec, sub_to_id, ring,
+                                     cap, j, out_id, out_prob);
+            });
+    }
+    coupled_check("coupled_draft merge");
 }
 
 }  // namespace strata::kernels

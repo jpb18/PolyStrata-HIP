@@ -41,7 +41,9 @@ for rel in all_sources():
     edit(rel, sub(r"^(\s*)cudaGraphUpload\(\w+, \w+\);", r"\1// no cudaGraphUpload on SYCL: a finalized command_graph is already resident", re.M))
     # __fadd_rn / __float_as_uint spellings
     for _ in range(3):   # nested __fadd_rn(__fadd_rn(a, b), c)
-        edit(rel, sub(r"__fadd_rn\((\([^()]*\)|[^,()]+),\s*([^()]+)\)", r"(\1 + \2)"))
+        # the second operand parenthesised: `__fadd_rn(sum, c ? x : y)` must not become `(sum + c ? x : y)`
+        # (2026-10-01: it did, in the QSA indexer's pooled sum and the QSA block scores - the sum was replaced, not added)
+        edit(rel, sub(r"__fadd_rn\((\([^()]*\)|[^,()]+),\s*([^()]+)\)", r"(\1 + (\2))"))
     edit(rel, lambda s: s.replace("__float_as_uint(", "sycl::bit_cast<uint32_t>("))
     # 4. volatile casts on kernel arguments (the kernels take plain pointers).
     edit(rel, lambda s: s.replace("(const volatile sycl::float4 *)", "(const sycl::float4 *)"))
@@ -86,7 +88,17 @@ def doorbell(s):
                   "    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) != want; ++spin) {}")
     s = s.replace("    while (strata::sys_load(flag) < value) /* spin (no __nanosleep on SYCL) */;",
                   "    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}")
+    # upstream 0.1.31 spells the waits `while (*flag ...) strata_spin_pause();` and the ring with 4-space indent:
+    # same treatment (system-scope loads/stores, bounded: an unbounded orphaned spin wedges the B70's GT)
+    s = s.replace("    *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;", "    strata::sys_store(seq, strata::sys_load(seq) + 1u);")
+    s = s.replace("    while (*flag != want) strata_spin_pause();",
+                  "    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) != want; ++spin) strata_spin_pause();")
+    s = s.replace("    while (*flag < value) strata_spin_pause();",
+                  "    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) strata_spin_pause();")
     return s
+# 0.1.31: dp4a.hpp's spin pause is __nanosleep, which SYCL lacks: the bounded spin (kSpinMax) is the backoff
+edit("include/strata/kernels/dp4a.hpp", lambda s: s.replace("    __nanosleep(100);\n",
+     "    // SYCL port: no __nanosleep; the doorbell waits are bounded by strata::kSpinMax instead\n"))
 edit("src/kernels/cuda/elementwise.dp.cpp", doorbell)
 edit("src/kernels/cuda/verify_kernels.dp.cpp", doorbell)
 
@@ -181,6 +193,11 @@ edit("src/kernels/cuda/verify_kernels.dp.cpp", lambda s: s.replace(
 #     make the launchers that have no in-kernel fallback refuse the device (their callers then use the older
 #     kernels, exactly as on a pre-Ampere card). The XMX joint_matrix versions are phase-4 follow-up work.
 OFF = "#if 0   // SYCL: inline PTX (mma/ldmatrix/cp.async) - the XMX port is pending; see tools/fixups.py"
+# 0.1.31: a Turing m16n8k8 branch (`#elif !STRATA_PA_SM80`) with its own inline PTX; dpct's DPCT_COMPATIBILITY_TEMP
+# selects it on SYCL. Unreachable there (qsa_prompt_attn_batch refuses the device), so it compiles to nothing.
+edit("src/kernels/cuda/qsa_prompt_attn.dp.cpp", lambda s: s.replace(
+    '#elif !STRATA_PA_SM80\n    asm volatile("mma.sync.aligned.m16n8k8',
+    '#elif 0   // SYCL: Turing\'s m16n8k8 PTX (unreachable: the launcher refuses this device)\n    asm volatile("mma.sync.aligned.m16n8k8'))
 ON = "#if 1   // SYCL: the scalar path (the PTX one above is not ported yet)"
 for rel in ["src/kernels/cuda/qsa_prompt_attn.dp.cpp", "src/kernels/cuda/qsa_select.dp.cpp",
             "src/kernels/cuda/native_qsa_score.dp.cpp"]:

@@ -9,10 +9,10 @@
 #include "strata/sycl_doorbell.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/resident_plan_mirror.hpp"
+#include "strata/kernels/dp4a.hpp"
 
 #include <cstdio>
 #include <cstdlib>
-#include <time.h>
 
 #ifndef STRATA_PLAN_LOCAL
 #define STRATA_PLAN_LOCAL 1   // 0: the original one-thread plan kernel (A/B)
@@ -911,12 +911,7 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
 namespace {
 __dpct_inline__ void wait_flag_ge_kernel(const volatile uint32_t *flag,
                                          uint32_t value) {
-    /*
-    DPCT1008: __nanosleep function is not defined in SYCL. This is a
-    hardware-specific feature. Consult with your hardware vendor to find a
-    replacement.
-    */
-    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}
+    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) strata_spin_pause();
     /*
     DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
@@ -1076,12 +1071,7 @@ __dpct_inline__ void wait_flag_ge_or_kernel(const volatile uint32_t *flag,
                                             uint32_t value,
                                             const volatile uint32_t *skip) {
     if (strata::sys_load(skip) == value) return;
-    /*
-    DPCT1008: __nanosleep function is not defined in SYCL. This is a
-    hardware-specific feature. Consult with your hardware vendor to find a
-    replacement.
-    */
-    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) {}
+    for (uint32_t spin = 0; spin < strata::kSpinMax && strata::sys_load(flag) < value; ++spin) strata_spin_pause();
     /*
     DPCT1078: Consider replacing memory_order::acq_rel with
     memory_order::seq_cst for correctness if strong memory order restrictions
@@ -1288,7 +1278,7 @@ namespace {
     __dpct_inline__ void gpu_stamp_kernel(unsigned long long *buf, int i) {
     unsigned long long t;
 #if defined(__HIPCC__)
-    t = wall_clock64() * 10ull;   // gfx11: a constant 100 MHz counter, in ns
+    t = wall_clock64() * 10ull;   // gfx11 / gfx12: a constant 100 MHz counter, in ns
 #else
     /*
     DPCT1053: Migration of device assembly code is not supported.
