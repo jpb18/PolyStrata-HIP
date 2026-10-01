@@ -61,8 +61,8 @@ source/destination type, method, whether it is exact, the largest absolute error
 264 F32 tensors (routers, injections, SSM gates) whose values are already BF16's are stored as BF16 exactly; the 195
 Q8_0 projections above are rounded to BF16 (largest absolute error 0.0144, in `hc_ffn_up`); the PLE convolution (F32)
 is narrowed to F16 when the engine loads it (largest error 3e-8). That is the compatibility Unsloth's file needs; it is
-not the original BF16 checkpoint. The output has not yet been compared with llama.cpp on the same GGUF (argmax
-agreement); treat quality as unmeasured.
+not the original BF16 checkpoint. The output matches llama.cpp's on the same file:
+[Quality](#quality-against-llamacpp-on-the-same-file).
 
 ## The MTP draft layer
 
@@ -130,6 +130,42 @@ low-RAM mode; `STRATA_RESIDENT_PIN=0` keeps the budget locked only (the CPU then
 - Where the time goes (`--stats` on the command line): at 40 GiB about 550-750 ms of each verify round (3.5 tokens) is
   reading experts from the SSD, ~75 ms the CPU's expert kernels, ~13 ms the GPU.
 
+## Quality: against llama.cpp on the same file
+
+Strata and llama.cpp (the pinned commit `3cf0325`, a CPU build reading the GGUF memory-mapped) were given the same
+token sequences, and at every position each wrote its 20 most likely next tokens with their log-probabilities: Strata
+through its verify windows (`STRATA_LOGPOS` with `STRATA_LOGPOS_TOPK=20`), llama.cpp from `llama_get_logits_ith` over
+one batch. Strata ran with the recommended settings (RAM budget 40 GiB, the MTP draft layer on, greedy,
+`--adapt-every 100000` so the expert cache does not move during the run). Per position: whether the most likely token is the same (argmax
+agreement), how many of the 5 / 10 most likely tokens both have, the KL divergence (llama.cpp's distribution against
+Strata's, over llama.cpp's top 20 plus one bucket for the rest), and the perplexity of the sequence under each.
+
+| Token set | Positions | Argmax agreement | Top-5 / top-10 overlap | KL | Perplexity Strata / llama.cpp |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Code: Strata's greedy answer to a coding prompt (an LRU cache in Python, 56-token prompt) | 400 | **99.0%** | 95.6% / 95.3% | 0.0008 | 1.067 / 1.070 |
+| Thinking: Strata's greedy answer to a reasoning puzzle (with thinking, 55-token prompt) | 324 | **97.5%** | 96.2% / 96.4% | 0.0016 | 1.107 / 1.106 |
+| After a 16K prompt: Strata's greedy continuation (256 tokens) of the 16,384 real-text tokens below | 256 | 90.2% | 88.1% / 89.3% | 0.039 | 1.619 / 1.623 |
+| Real text after a 16K prompt: the last 510 tokens of 16,384 tokens of this repository's docs and code | 510 | 91.2% | 88.3% / 89.9% | 0.035 | 4.27 / 4.29 |
+| The same 511 positions with only 512 tokens before them | 511 | 89.2% | 86.0% / 86.3% | 0.061 | 8.99 / 8.87 |
+
+For comparison, [eddoursul/Strata](https://github.com/eddoursul/Strata) reported 98.2-99.3% (code), 95.6-95.8%
+(thinking) and 97.7% (after a 16K prompt) for the same file against llama.cpp on an RTX 3090.
+
+**Where they differ:** at near-ties. Grouped by llama.cpp's own gap between its two most likely tokens, Strata picks
+the same token at every position of the code and thinking answers where that gap is 0.2 or more (695 of 695) and at
+every position after the 16K prompt where it is 0.5 or more (144 of 144 in the continuation, 254 of 254 in the real
+text; 50 of 54 and 117 of 121 between 0.2 and 0.5). Text after a long document has many more near-ties than a short
+answer (58 of the continuation's 256 positions and 135 of the real text's 510 have a gap under 0.2, against 13 of the
+code answer's 400), which is why its agreement is lower. It is not the long context itself: the same real-text
+positions after only 512 tokens agree a little less (89.2%), and the perplexities match within 3% in every set. For
+scale, Strata's own greedy run and its teacher-forced rerun of the continuation pick different tokens at 6% of the
+positions (93.8% the same: other window sizes, other experts in VRAM), the same kind of near-tie flips. The 16K
+prompts were read by Strata's batched prompt path (15,872 tokens), the rest through the verify windows.
+
+To repeat it: Strata's side is `STRATA_LOGPOS=<file>` with `STRATA_LOGPOS_TOPK=20` (engine 0.1.32) on a serve
+engine with `--short-read` covering the positions to compare; llama.cpp's side was a short program over
+`llama_decode` / `llama_get_logits_ith` writing the same top 20 per position.
+
 ## Opt-ins and switches (environment variables)
 
 | | |
@@ -147,8 +183,9 @@ low-RAM mode; `STRATA_RESIDENT_PIN=0` keeps the budget locked only (the CPU then
   test_iq_pack.py`); CTests `gguf_split_test`, `expert_layout_test`, `native_expert_parity_*` (the three real expert
   format pairs against ggml-cpu, the Q5_1 min term, Q8_0 rows); the in-place mode against `experts.bin` on the Coder
   (identical tokens and logits).
-- Real runs: greedy answers to a coding prompt (correct) at every budget and setting above, identical across them. Not
-  yet: llama.cpp argmax agreement, long prompts, sampled decoding, long conversations. Please report what you see.
+- Real runs: greedy answers to a coding prompt (correct) at every budget and setting above, identical across them;
+  the same tokens as llama.cpp at 97.5-99% of the positions of short greedy answers and 90-91% after a 16K prompt,
+  differing mostly at near-ties (above). Not yet: sampled decoding, long conversations. Please report what you see.
 
 ## Credits
 

@@ -225,7 +225,9 @@ START-HERE.bat --setup --family swift --model IQ2_XS
 
 A 4-bit quantization of the same model (111 GB, 72 GiB of experts). Not in setup: packing it and the server
 configuration are in **[docs/UNSLOTH_Q4.md](UNSLOTH_Q4.md)**. On a 64 GB PC with a 12 GB RTX 5070 it writes 7-8.5
-tokens/s, most experts read from the SSD; quality has not been measured against llama.cpp yet.
+tokens/s, most experts read from the SSD; it picks the same tokens as llama.cpp on the same file at 97.5-99% of
+the positions of short greedy answers, 90-91% after a 16K prompt, differing mostly at near-ties
+([measured](UNSLOTH_Q4.md#quality-against-llamacpp-on-the-same-file)).
 
 ## Before you start
 
