@@ -31,7 +31,9 @@ import json
 import os
 import queue
 import re
+import select
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1722,9 +1724,35 @@ def make_handler(svc: Service):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
         record = None                                       # #332: this request's monitor record, if kept
+        watch_done = None                                   # #430 #431: stops this request's disconnect watcher
 
         def log_message(self, fmt, *args):
             pass
+
+        def _watch_client(self, cancel: threading.Event) -> None:
+            """#430 #431: cancel the request as soon as its client hangs up.  A non-streamed request writes nothing
+            until it ends, and a streamed one only a keep-alive per prompt chunk (and the first write after a hang-up
+            usually still succeeds), so a dropped request kept the engine busy until its answer or the whole prompt
+            was done.  Every 0.5 s: the socket readable with nothing to read (EOF) means the client closed it.  A
+            request is HTTP/1.0 and fully read here, so no later bytes are expected - data is not a hang-up."""
+            done = self.watch_done = threading.Event()
+            sock = self.connection
+
+            def watch():
+                while not done.wait(0.5) and not cancel.is_set():
+                    try:
+                        readable, _, _ = select.select([sock], [], [], 0)
+                        gone = bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+                    except (ConnectionError, TimeoutError):
+                        gone = True
+                    except (OSError, ValueError):            # the socket was closed here: the request has ended
+                        return
+                    if gone:
+                        self._note(outcome="disconnected")
+                        cancel.set()
+                        return
+
+            threading.Thread(target=watch, daemon=True, name="strata-client-watch").start()
 
         def _note(self, **values):
             """#332: what the monitor shows about this request (nothing when the monitor is off)."""
@@ -1978,6 +2006,8 @@ def make_handler(svc: Service):
                 self._note(outcome="disconnected")
                 raise                                        # as before #332: the server's own handling
             finally:
+                if self.watch_done is not None:
+                    self.watch_done.set()
                 record = self.record
                 if record is not None:
                     with svc.status_lock:
@@ -2107,6 +2137,7 @@ def make_handler(svc: Service):
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
+            self._watch_client(cancel)                       # #430 #431
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
@@ -2158,6 +2189,7 @@ def make_handler(svc: Service):
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
+            self._watch_client(cancel)                       # #430 #431
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
             events = self._capture(events, "anthropic")
             if not req.get("stream"):

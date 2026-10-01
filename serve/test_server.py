@@ -593,6 +593,59 @@ class DyingEngine(MockEngine):
             yield t
 
 
+class SlowPromptEngine(MockEngine):
+    """Reads a "long prompt" for up to 20 s without a token (the engine sends nothing then), stopping on cancel."""
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        self.cancelled_after = None
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 20:
+            if cancel.is_set():
+                self.cancelled_after = time.monotonic() - t0
+                return
+            time.sleep(0.05)
+        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+
+class ClientHangUp(unittest.TestCase):
+    """#430 #431: a client that hangs up during a long prompt read cancels the request within about a second -
+    non-streamed (which writes nothing until the end) and streamed (one keep-alive per prompt chunk) alike."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.engine = SlowPromptEngine(tok, "</think>\n\nOK", max_context=CTX)
+        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.httpd = serve(cls.svc, port=0)
+        cls.port = cls.httpd.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def hang_up(self, stream):
+        import socket as so
+        body = json.dumps({"model": "x", "max_tokens": 20, "stream": stream,
+                           "messages": [{"role": "user", "content": "a long prompt"}]}).encode()
+        c = so.create_connection(("127.0.0.1", self.port))
+        c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        time.sleep(1.0)
+        c.close()
+        t0 = time.monotonic()
+        while self.engine.cancelled_after is None and time.monotonic() - t0 < 10:
+            time.sleep(0.05)
+        self.assertIsNotNone(self.engine.cancelled_after, "the request was not cancelled")
+        self.assertLess(self.engine.cancelled_after, 3.0)
+
+    def test_non_streamed(self):
+        self.hang_up(False)
+
+    def test_streamed(self):
+        self.hang_up(True)
+
+
 class EngineDeath(unittest.TestCase):
     """Issue #27: a dead engine is an error (not "length"), and the next request starts it again."""
 
