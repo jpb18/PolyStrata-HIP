@@ -3892,9 +3892,15 @@ int main(int argc, char** argv) {
         // S-token chunk's buffers for the whole session (0.1.29's own buffers, carved from the tail of its cache):
         // a request of at most S prompt tokens then lends, streams and refills nothing, a longer one lends (and
         // refills) only the slots above them.  Their experts stay non-resident (the CPU / PCIe path computes them).
+        // STRATA_SPLIT_SMALL_MAX=M: a request of at most M prompt tokens reads in S-token chunks on those stages
+        // (several chunks, still nothing lent) instead of borrowing for a bigger one.
+        int64_t split_small = 0, split_small_max = 0;
         if (multi_gpu && !pf_parts.empty() && !host_res.empty()) {
             const char* v = std::getenv("STRATA_SPLIT_SMALL_OWN");
             const int64_t S = v ? request_chunk(std::atoll(v), o.prefill_chunk) : 0;
+            const char* vm = std::getenv("STRATA_SPLIT_SMALL_MAX");
+            split_small = S;
+            split_small_max = S > 0 ? std::max<int64_t>(S, vm ? std::atoll(vm) : S) : 0;
             int64_t evicted = 0;
             for (PfPart& p : pf_parts) {
                 if (S <= 0 || p.first < 0) continue;
@@ -4924,7 +4930,10 @@ int main(int argc, char** argv) {
                 const auto t_ln = Clock::now();
                 // what this segment needs, capped by the configured chunk: a request lends only what its own
                 // prompt needs, so a large chunk costs a short prompt nothing
-                const int64_t want = request_chunk(tokens, o.prefill_chunk);
+                const int64_t want_full = request_chunk(tokens, o.prefill_chunk);
+                // #340: a short enough request reads in the stages' own S-token chunks (nothing lent)
+                const int64_t want = split_small > 0 && tokens <= split_small_max ? std::min(want_full, split_small)
+                                                                                 : want_full;
                 if (want <= 0) {
                     e = "prefill: cannot lend buffers for an empty request segment";
                     return false;
