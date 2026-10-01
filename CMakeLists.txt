@@ -884,6 +884,8 @@ if(STRATA_NATIVE_EXPERTS)
         set_tests_properties(native_expert_parity_${_name} PROPERTIES TIMEOUT 120)
       endforeach()
       add_test(NAME native_expert_parity_q5_1_min COMMAND native_expert_parity --q5_1-min)
+      # #290: the BF16 token embedding (--embd-gguf) gathered and dequantized bit for bit
+      add_test(NAME native_expert_parity_bf16_embd COMMAND native_expert_parity --bf16-embd)
       # a pair without GPU kernels (Q6_K gate/up) is refused by native_expert_supported, not run
       add_test(NAME native_expert_parity_refuses_q6_K COMMAND native_expert_parity --synthetic q6_K/q8_0)
       set_tests_properties(native_expert_parity_refuses_q6_K PROPERTIES WILL_FAIL TRUE)
