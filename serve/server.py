@@ -673,6 +673,12 @@ class Service:
         self.fifo = threading.Lock()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+        # #321: browser pages of these origins may call /v1/* (CORS; "*" = any page - only with an api_key that
+        # matters); empty = no CORS headers at all, as before
+        self.cors_origins: list[str] = []
+        # #321: origins that count as Strata's own page for /settings and MCP tools, e.g. the web app reached through a
+        # reverse proxy or tunnel whose Host differs ("https://strata.example.com"); never a wildcard
+        self.trusted_origins: list[str] = []
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
         self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
@@ -1524,20 +1530,39 @@ def make_handler(svc: Service):
         def log_message(self, fmt, *args):
             pass
 
-        def do_OPTIONS(self):
-            self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
+        def _cors(self):
+            """#321: CORS headers for an API path (/v1/*) and an origin the config lists in cors_origins - nothing
+            otherwise, so a browser keeps every other page away from the API, /settings, /unload and the MCP tools."""
+            if not svc.cors_origins or not self.path.split("?")[0].startswith("/v1/"):
+                return
+            origin = (self.headers.get("Origin") or "").rstrip("/")
+            if "*" in svc.cors_origins:
+                allow = "*"
+            elif origin and origin in svc.cors_origins:
+                allow = origin
+                self.send_header("Vary", "Origin")
+            else:
+                return
+            self.send_header("Access-Control-Allow-Origin", allow)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "*")
+            # the headers the preflight asks for (SDKs add their own; "*" does not cover Authorization)
+            asked = self.headers.get("Access-Control-Request-Headers")
+            self.send_header("Access-Control-Allow-Headers",
+                             asked or "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta")
+            self.send_header("Access-Control-Max-Age", "600")
+
+        def do_OPTIONS(self):
+            # a CORS preflight: no credentials come with it, so no API key; the headers only for cors_origins
+            self.send_response(204)
+            self._cors()
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def _json(self, code, obj):
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self._cors()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1721,14 +1746,15 @@ def make_handler(svc: Service):
             if not self.headers.get("Content-Type", "").startswith("application/json"):
                 self._json(415, {"error": {"message": "send application/json"}})
                 return False
-            origin = self.headers.get("Origin")
-            if origin:
-                origin_host = origin.split("://", 1)[-1].split("/")[0]
-                host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host", "")
-                if origin_host != host and origin_host.split(":")[0] != host.split(":")[0]:
-                    if not (self.headers.get("CF-Ray") or self.headers.get("X-Forwarded-For") or self.headers.get("CF-Connecting-IP")):
-                        self._json(403, {"error": {"message": f"{what} only from Strata's own page"}})
-                        return False
+            # The Origin must be this server's own address (host and port), or an origin the config trusts
+            # (trusted_origins: the web app behind a reverse proxy or tunnel).  Headers a proxy adds (X-Forwarded-*,
+            # CF-Ray, CF-Connecting-IP) prove nothing about the page that sent the request, so they open nothing.
+            origin = (self.headers.get("Origin") or "").rstrip("/")
+            if origin and origin.split("://", 1)[-1] != self.headers.get("Host", "") and \
+                    origin not in svc.trusted_origins:
+                self._json(403, {"error": {"message": f"{what} only from Strata's own page (or an origin in the "
+                                                      f"config's trusted_origins)"}})
+                return False
             return True
 
         def _settings(self):
@@ -1750,9 +1776,8 @@ def make_handler(svc: Service):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
+            self._cors()
             self.end_headers()
 
         def _openai(self, req):
@@ -1892,6 +1917,28 @@ def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     httpd = Server((host, port), make_handler(svc))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
+
+
+def origins_of(value, key: str, wildcard: bool) -> list[str]:
+    """#321: a config's origin list ("https://chat.example.com" or a list of them) - scheme://host[:port], no path;
+    "*" only where `wildcard` allows it.  A wrong entry stops the start rather than opening less or more than meant."""
+    if value is None or value == "" or value == []:
+        return []
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
+        raise SystemExit(f"[strata] {key}: expected an origin or a list of origins")
+    out = []
+    for x in items:
+        x = x.strip().rstrip("/")
+        if x == "*" and wildcard:
+            out.append(x)
+            continue
+        scheme, sep, rest = x.partition("://")
+        if scheme not in ("http", "https") or not sep or not rest or "/" in rest or "*" in rest:
+            raise SystemExit(f"[strata] {key}: {x!r} is not an origin like https://chat.example.com"
+                             + ("" if wildcard else " (no wildcards here)"))
+        out.append(x)
+    return out
 
 
 SHARED_KEYS = ("reasoning_effort", "temperature", "top_p", "top_k", "seed", "max_tokens", "experimental_speed_projection")
@@ -2092,6 +2139,12 @@ def main() -> int:
               file=sys.stderr)
         return 2
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    svc.cors_origins = origins_of(cfg.get("cors_origins"), "cors_origins", wildcard=True)
+    svc.trusted_origins = origins_of(cfg.get("trusted_origins"), "trusted_origins", wildcard=False)
+    if svc.cors_origins:
+        print(f"[strata] CORS on /v1/* for {', '.join(svc.cors_origins)}"
+              + ("" if svc.api_key or "*" not in svc.cors_origins else
+                 " - WARNING: any web page may use the model (no API key)"), flush=True)
     svc.idle_unload_s = a.idle_unload if a.idle_unload is not None else float(cfg.get("idle_unload_s") or 0)
     svc.min_free_vram_mib = a.min_free_vram_mib if a.min_free_vram_mib is not None else \
         int(cfg.get("min_free_vram_mib") or 0)
