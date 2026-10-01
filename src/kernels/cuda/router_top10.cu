@@ -311,7 +311,6 @@ void launch_generic(const float* logits, int n_tokens, int n_expert, int k, int*
     threads = (threads + 31) & ~31;
     const size_t taken_bytes = ((size_t) n_expert + 15u) & ~(size_t) 15u;
     const size_t smem = taken_bytes + (size_t) n_expert * sizeof(double) + (size_t) n_expert * sizeof(float);
-#if defined(__HIPCC__)
     if (mode == 1) {
         router_top10_fast_kernel<false><<<(unsigned) n_tokens, threads, smem, (cudaStream_t) stream>>>(
             logits, n_tokens, n_expert, k, ids, weights);
