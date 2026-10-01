@@ -86,9 +86,10 @@ double g_pinned_share = 1.0;
 // 8192-token chunks: 96 slots 1153 tok/s, 384 1294 (the next layer's experts arrive during its attention half) -
 // and 96 when a large share goes through host copies (IQ3_S on 64 GB, a third unpinned: 96 slots 1216, 256 1070 -
 // the host copies are the limit and the bigger ring only takes cache slots).  STRATA_PREFILL_RING overrides.
+int g_ring_override = 0;   // #340: set by a layer split (Prefill::set_ring_override); 0 = the rule below
 inline int ring_slots(size_t T) {
     const char* v = std::getenv("STRATA_PREFILL_RING");
-    const int r = v ? std::atoi(v) : (g_pinned_share >= 0.9 ? 384 : 96);
+    const int r = v ? std::atoi(v) : g_ring_override > 0 ? g_ring_override : (g_pinned_share >= 0.9 ? 384 : 96);
     if (v && r == STAGE) return STAGE; // Explicit opt-in to routed-only staging, including large chunks.
     const int big = r < 16 ? 16 : r > RING_MAX ? RING_MAX : r;
     return (int64_t) T >= stream_all_min() ? big : STAGE;
@@ -843,6 +844,7 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
     return true;
 }
 void Prefill::set_pinned_share(double share) { g_pinned_share = share; }
+void Prefill::set_ring_override(int slots) { g_ring_override = slots > 0 ? slots : 0; }
 double Prefill::pinned_share() { return g_pinned_share; }
 
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk) {

@@ -2144,7 +2144,16 @@ int main(int argc, char** argv) {
     // for buffers that cannot be priced exactly yet because the sessions do not exist.  `plan_lend` uses the
     // exact `Prefill::bytes_needed` as soon as it can.
     const bool pf_borrow = !o.no_prefill_borrow && !o.expert_profile.empty();
-    const int64_t split_pf_mib = (o.prefill_chunk > 0 && !pf_borrow) ? 160 + (o.prefill_chunk * 680) / 1024 : 0;
+    // (#340: the estimate predates the streamed ring: from 1024-token chunks the prompt path also holds a ring of
+    // whole expert blobs, which a split without borrowing sizes at 96 (Prefill::set_ring_override below) and books
+    // here - without it a `--no-prefill-borrow` split filled the cards and the draft head no longer fit)
+    const int64_t split_ring_mib =
+        (multi_gpu && !pf_borrow && o.prefill_chunk >= 1024)
+            ? (int64_t) ((96ull * (uint64_t) strata::kernels::cpu::expert_layout().max_blob + (1ull << 20) - 1) >> 20)
+            : 0;
+    if (split_ring_mib > 0) strata::prefill::Prefill::set_ring_override(96);
+    const int64_t split_pf_mib =
+        (o.prefill_chunk > 0 && !pf_borrow) ? 160 + (o.prefill_chunk * 680) / 1024 + split_ring_mib : 0;
     // ---- WHAT A STAGE RESERVES, AND ON WHICH STAGE.  The flat 1 GiB this used to withhold from EVERY stage
     // after the first was booked "for its windows and the drafter", but the windows measure 75 MiB ("window up
     // to 6 tokens, 74.1 MiB of device buffers", on every boot) and the drafter is loaded on ONE stage - the
@@ -3657,6 +3666,22 @@ int main(int argc, char** argv) {
                                      : (uint64_t) (xc.slots() - first) *
                                            (uint64_t) strata::kernels::cpu::expert_layout().max_blob;
         };
+        // #340: a layer split whose caches already hold most experts streams few of them through the prompt path, so
+        // the 384-slot ring (sized for a card that streams nearly every expert of a chunk) only makes every stage's
+        // loan bigger: 96 slots (0.1.30's ring here) when >= 75% of the (layer, expert) pairs are resident.  One GPU
+        // keeps the pinned-share rule.  STRATA_SPLIT_RING=N: N slots on a split; 0: the pinned-share rule.
+        if (multi_gpu && !host_res.empty()) {
+            int64_t res_n = 0;
+            for (const int32_t r : host_res) res_n += r >= 0;
+            const double res_share = (double) res_n / (double) host_res.size();
+            const char* v = std::getenv("STRATA_SPLIT_RING");
+            const int ring = v ? std::atoi(v) : (res_share >= 0.75 ? 96 : 0);
+            if (ring > 0) {
+                strata::prefill::Prefill::set_ring_override(ring);
+                std::fprintf(stderr, "strata serve: layer split: %.0f%% of the experts resident, the prompt path's "
+                                     "streamed ring %d slots\n", 100.0 * res_share, ring);
+            }
+        }
         std::vector<PfPart> pf_parts;
         // a cache too small to lend the prompt path its buffers would make it allocate them on top - on a card
         // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
@@ -3863,6 +3888,37 @@ int main(int argc, char** argv) {
             return 1;
         }
         mem_mark("the head and the prompt path");
+        // #340: STRATA_SPLIT_SMALL_OWN=S (tokens): on a layer split, every stage that borrows keeps the slots for an
+        // S-token chunk's buffers for the whole session (0.1.29's own buffers, carved from the tail of its cache):
+        // a request of at most S prompt tokens then lends, streams and refills nothing, a longer one lends (and
+        // refills) only the slots above them.  Their experts stay non-resident (the CPU / PCIe path computes them).
+        if (multi_gpu && !pf_parts.empty() && !host_res.empty()) {
+            const char* v = std::getenv("STRATA_SPLIT_SMALL_OWN");
+            const int64_t S = v ? request_chunk(std::atoll(v), o.prefill_chunk) : 0;
+            int64_t evicted = 0;
+            for (PfPart& p : pf_parts) {
+                if (S <= 0 || p.first < 0) continue;
+                const int32_t first_s = std::max<int32_t>(p.first, (int32_t) (p.cache->slots() - part_slots(p, S)));
+                int64_t n = 0;
+                for (int64_t l = p.lb; l < p.le; ++l)
+                    for (int64_t ex = 0; ex < g.n_expert; ++ex) {
+                        int32_t& r = host_res[(size_t) (l * g.n_expert + ex)];
+                        if (r >= first_s) { r = strata::core::kNotResident; ++n; }
+                    }
+                evicted += n;
+                std::fprintf(stderr, "strata serve:   CUDA%d keeps %lld slots for %lld-token prompts (%lld experts "
+                                     "no longer resident)\n", p.dev < 0 ? 0 : p.dev,
+                             (long long) (p.cache->slots() - first_s), (long long) S, (long long) n);
+            }
+            if (evicted > 0) {
+                if (d_res != nullptr)
+                    cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+                for (auto& st : stages) {
+                    const strata::core::OnDevice on(st->dev);
+                    cudaMemcpy(st->d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+                }
+            }
+        }
         // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
         // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
         // the widest window; a request without penalties gets a null buffer and takes the byte-for-byte
