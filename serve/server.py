@@ -99,6 +99,11 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+class EngineStarting(RuntimeError):
+    """The engine is (re)starting and has not said READY yet (#344): no context size to plan a request with - a 503,
+    not a 400 about the prompt."""
+
+
 class GpuBusy(RuntimeError):
     """The model is unloaded and the GPU has less free VRAM than min_free_vram_mib: something else (a game, another
     model server) is using it, so the engine is not started into the little that is left."""
@@ -206,15 +211,18 @@ class StrataEngine:
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):
             self.info["version"] = str(self.info["engine"])
+        self.ended = False                              # READY: alive from here (restart() set it True, #344)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
-        for line in self.proc.stdout:
-            self.lines.put(line)
-        self.ended = True                               # its output closed: it is gone, even before the OS says so
-        self.lines.put(None)
+        proc, lines = self.proc, self.lines             # this process's: a restart replaces both (#344)
+        for line in proc.stdout:
+            lines.put(line)
+        if self.proc is proc:                           # a killed engine's pump must not mark its successor dead
+            self.ended = True                           # its output closed: it is gone, even before the OS says so
+        lines.put(None)
 
     def death_note(self) -> str:
         """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
@@ -274,7 +282,10 @@ class StrataEngine:
         except OSError:
             pass
         info = dict(self.info)
-        self.ended = False
+        # #344: not alive until READY - __init__ sets max_context to 0 and blocks until the engine says READY, and a
+        # request that saw alive() in that window skipped load() and failed with "context (0)".  __init__ clears
+        # `ended` itself once READY (before its pump thread can set it again).
+        self.ended = True
         self.__init__(*self.spawn)
         self.info = {**info, **self.info}
 
@@ -953,6 +964,8 @@ class Service:
                 for path, _ in encoded:
                     f.write(path.read_bytes())
             self.embeddings.path = combined
+        if self.engine.max_context <= 0:                # #344: (re)starting, not a prompt that is too long
+            raise EngineStarting("the engine is starting (a minute or two); try again shortly")
         room = self.engine.max_context - CTX_SLACK - len(ids)
         if max_new is None or max_new <= 0 or (self.fit_max_tokens and room < 1):
             if room < 1:
@@ -1637,7 +1650,7 @@ def make_handler(svc: Service):
                     self._json(404, {"error": {"message": "not found"}})
             except ValueError as e:
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
-            except GpuBusy as e:
+            except (GpuBusy, EngineStarting) as e:
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
             except EngineDied as e:                          # before the answer started (not streamed)
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})

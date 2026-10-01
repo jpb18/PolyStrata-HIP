@@ -1380,5 +1380,93 @@ class StatusHandover(unittest.TestCase):
         self.assertFalse(svc.status["busy"])
         self.assertNotIn("tail", svc.status)
 
+
+FAKE_STRATA = '''import pathlib, sys, time
+gate = pathlib.Path(sys.argv[sys.argv.index("--gate") + 1])
+print("INFO engine=0.0.0", flush=True)
+while not gate.exists():                     # the test says when the engine is "ready"
+    time.sleep(0.01)
+print("READY 4096 stop", flush=True)
+for line in sys.stdin:
+    if line.startswith("QUIT"):
+        break
+'''
+
+
+class RestartWindow(unittest.TestCase):
+    """#344: while the engine restarts it is not alive (a request waits for the restart instead of reading
+    max_context 0), and a request that still meets max_context 0 gets a 503 "starting", not a 400 about its prompt."""
+
+    def test_not_alive_until_ready(self):
+        from unittest import mock
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as d:
+            script, gate = Path(d) / "fake_strata.py", Path(d) / "ready"
+            script.write_text(FAKE_STRATA, encoding="utf-8")
+            real = server.subprocess.Popen
+            with mock.patch.object(server.subprocess, "Popen",
+                                   lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
+                gate.touch()
+                eng = StrataEngine("strata", ["--gate", str(gate)])
+                try:
+                    self.assertEqual(eng.max_context, 4096)
+                    self.assertTrue(eng.alive())
+                    gate.unlink()
+                    old = eng.proc
+                    old.kill()
+                    old.wait(10)
+                    deadline = time.time() + 10
+                    while not getattr(eng, "ended", False) and time.time() < deadline:
+                        time.sleep(0.01)                  # the server has noticed: its output closed
+                    self.assertFalse(eng.alive())
+                    t = threading.Thread(target=eng.restart)
+                    t.start()
+                    deadline = time.time() + 10
+                    while eng.proc is old and time.time() < deadline:
+                        time.sleep(0.005)
+                    self.assertIsNot(eng.proc, old, "restart never started the engine")
+                    time.sleep(0.2)                       # the new engine is up, but has not said READY
+                    self.assertEqual(eng.max_context, 0)
+                    self.assertFalse(eng.alive(), "alive before READY: a request would plan with context 0")
+                    gate.touch()
+                    t.join(10)
+                    self.assertFalse(t.is_alive())
+                    self.assertTrue(eng.alive())
+                    self.assertEqual(eng.max_context, 4096)
+                    # restart() of a running engine kills it first: that engine's output thread ends after the new
+                    # one is up, and must not mark it dead (it did: every request after restarted it again)
+                    eng.restart()
+                    time.sleep(0.5)
+                    self.assertTrue(eng.alive())
+                    self.assertEqual(eng.max_context, 4096)
+                finally:
+                    gate.touch()
+                    eng.unload()
+
+    def test_context_zero_is_503(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "</think>\n\nok", max_context=0), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            for path, body in (("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                                                         "max_tokens": 16}),
+                               ("/v1/messages", {"model": "m", "max_tokens": 16,
+                                                 "messages": [{"role": "user", "content": "hi"}]})):
+                req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=30)
+                with cm.exception as e:
+                    self.assertEqual(e.code, 503, path)
+                    text = e.read().decode()
+                self.assertIn("starting", text)
+                self.assertNotIn("leaves no room", text)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()
