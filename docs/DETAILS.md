@@ -5,7 +5,8 @@ New here? Start with the [README](../README.md) - it has everything you need to 
 
 > **On this page:** [Speed](#speed-measured) · [Other GPUs](#other-gpus-estimated) · [Which model?](#which-model) ·
 > [Requirements](#before-you-start) · [Windows](#windows) · [Linux](#linux) · [API](#using-it) ·
-> [MCP tools](#tools-from-mcp-servers) · [Images](#images-vision) ·
+> [MCP tools](#tools-from-mcp-servers) · [MCP server](#manage-strata-from-your-ai-assistant-mcp-server) ·
+> [Images](#images-vision) ·
 > [Troubleshooting](#troubleshooting) · [How it works](#how-it-works)
 
 ---
@@ -620,6 +621,29 @@ run is a slightly different model: the rescaled angles, and `yarn`'s magnitude c
 position, not only past the trained end. That is why the setup turns scaling on only for a context past
 262,144. Pictures read the same scaled table (their (t, h, w) positions feed it). That should work, but it is
 unmeasured: all the runs above are text.
+
+---
+
+## Manage Strata from your AI assistant (MCP server)
+
+`tools/strata_mcp.py` is an MCP server for Claude Code, Claude Desktop, Cursor, VS Code, Codex and other assistants.
+Once it is added, you can ask your assistant "install Strata for this PC", "start Strata" or "is Strata running?".
+In Claude Code, add it with:
+
+```bash
+claude mcp add strata -- python C:\Users\user\Strata\tools\strata_mcp.py
+```
+
+It has eight tools: status (the running model, what is installed, the hardware, a recommended size), the model
+list, install, start, stop, logs, a speed test, and connection settings for other apps.
+
+Install runs `setup.py` with `--yes` in the background. Before it downloads anything, it shows the plan and waits
+for your OK. Start and stop work like the run scripts and the server's own unload. The MCP server only ends
+processes it started itself. It uses only Python's standard library, so it works before `.venv` exists.
+
+The config snippets for every client, the tool arguments and the safety rules are in
+[docs/MCP_SERVER.md](MCP_SERVER.md). This is the opposite direction from
+[Tools from MCP servers](#tools-from-mcp-servers) above, where the Strata model calls *your* MCP tools.
 
 ---
 
