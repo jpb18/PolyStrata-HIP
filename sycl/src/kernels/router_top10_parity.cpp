@@ -84,17 +84,17 @@ int run_case(const char* name, const std::vector<float>& logits, int n_tokens, i
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_l, logits.data(), logits.size() * sizeof(float)).wait()),
           "copy");
     strata::kernels::router_top10(d_l, n_tokens, n_expert, k, d_ids, d_w, nullptr);
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(h_ids.data(), d_ids, h_ids.size() * sizeof(int))
                   .wait()),
           "back ids");
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(h_w.data(), d_w, h_w.size() * sizeof(float))
                   .wait()),
           "back w");

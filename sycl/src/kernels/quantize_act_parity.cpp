@@ -89,7 +89,7 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), (size_t)n * sizeof(float)).wait()),
           "copy x");
     // PROBE: does the DEVICE hold what the host thinks it sent?  The scale byte differs with the SAME
@@ -98,7 +98,7 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
     {
         std::vector<float> rt((size_t) n);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(rt.data(), d_x, (size_t)n * sizeof(float))
                       .wait()),
               "probe copy back");
@@ -108,12 +108,12 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
     }
     strata::kernels::quantize_q8_0(d_x, d_b, n, nullptr);
     strata::kernels::dequant_q8_0(d_b, d_back, n, nullptr);
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                .memcpy(g_blocks.data(), d_b, g_blocks.size())
                                .wait()),
           "back blocks");
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(g_back.data(), d_back, (size_t)n * sizeof(float))
                   .wait()),
           "back vals");
@@ -221,17 +221,17 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), (size_t)n * sizeof(float)).wait()),
           "copy x");
     strata::kernels::quantize_q8_K(d_x, d_b, n, nullptr);
     strata::kernels::dequant_q8_K(d_b, d_back, n, nullptr);
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                .memcpy(g_blocks.data(), d_b, g_blocks.size())
                                .wait()),
           "back blocks");
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(g_back.data(), d_back, (size_t)n * sizeof(float))
                   .wait()),
           "back vals");

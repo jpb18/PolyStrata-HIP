@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_st, st_dev.data(), st_dev.size() * 4).wait()),
               "cst");
         /*
@@ -197,7 +197,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_q, q.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_q, q.data(),
                                                                  q.size() * 4).wait()),
               "cq");
         /*
@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_k, k.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_k, k.data(),
                                                                  k.size() * 4).wait()),
               "ck");
         /*
@@ -215,7 +215,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_v, v.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_v, v.data(),
                                                                  v.size() * 4).wait()),
               "cv");
         /*
@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_g, gate.data(), gate.size() * 4).wait()),
               "cg");
         /*
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_b, beta.data(), beta.size() * 4).wait()),
               "cb");
 
@@ -241,12 +241,12 @@ int main(int argc, char** argv) {
         strata::kernels::gdn_step(d_st, d_q, d_k, d_v, d_g, d_b, d_o, sh, nullptr);
 
         std::vector<float> got_o((size_t) h_v * S), got_st(st_dev.size());
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                    .memcpy(got_o.data(), d_o, got_o.size() * 4)
                                    .wait()),
               "cgo");
         check(
-            DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                  .memcpy(got_st.data(), d_st, got_st.size() * 4)
                                  .wait()),
             "cgst");
@@ -280,7 +280,7 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                       d_st, zero.data(), zero.size() * 4).wait()),
                   "z0");
             /*
@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                       d_g, zg.data(), zg.size() * 4).wait()),
                   "z1");
             /*
@@ -298,12 +298,12 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                       d_b, zb.data(), zb.size() * 4).wait()),
                   "z2");
             strata::kernels::gdn_step(d_st, d_q, d_k, d_v, d_g, d_b, d_o, sh, nullptr);
             std::vector<float> zz(zero.size());
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memcpy(zz.data(), d_st, zz.size() * 4)
                                        .wait()),
                   "z3");
@@ -401,7 +401,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_cs, cs.data(), cs.size() * 4).wait()),
               "ccs");
         /*
@@ -410,7 +410,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_x, x.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_x, x.data(),
                                                                  x.size() * 4).wait()),
               "ccx");
         /*
@@ -419,17 +419,17 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_w, kW.data(), kW.size() * 4).wait()),
               "ccw");
         strata::kernels::gdn_conv_step(d_cs, d_x, d_w, d_o, C, dc, nullptr);
         std::vector<float> got((size_t) C), got_cs(cs.size());
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                    .memcpy(got.data(), d_o, got.size() * 4)
                                    .wait()),
               "cgo");
         check(
-            DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                  .memcpy(got_cs.data(), d_cs, got_cs.size() * 4)
                                  .wait()),
             "cgs");
@@ -483,12 +483,12 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_x, x.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_x, x.data(),
                                                                  x.size() * 4).wait()),
               "lcx");
         strata::kernels::gdn_l2_norm(d_x, rows, cols, eps, nullptr);
         std::vector<float> got(x.size());
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                    .memcpy(got.data(), d_x, got.size() * 4)
                                    .wait()),
               "lcg");
@@ -534,7 +534,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_o, o.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_o, o.data(),
                                                                  o.size() * 4).wait()),
               "nco");
         /*
@@ -543,7 +543,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_z, z.data(),
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_z, z.data(),
                                                                  z.size() * 4).wait()),
               "ncz");
         /*
@@ -552,12 +552,12 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_sn, sn.data(), sn.size() * 4).wait()),
               "ncs");
         strata::kernels::gdn_out_norm(d_o, d_z, d_sn, d_y, hv2, S2, eps, nullptr);
         std::vector<float> got(y_ref.size());
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                    .memcpy(got.data(), d_y, got.size() * 4)
                                    .wait()),
               "ncy");

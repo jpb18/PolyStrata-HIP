@@ -114,13 +114,13 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_l, logits.data(), logits.size() * sizeof(float)).wait()),
           "copy");
     // -1 in every output slot first: a row the kernel leaves unwritten can never match (a verify window reads
     // every row, so "no output" is a wrong answer, not a skipped one)
     check(
-        DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                              .memset(d_o, 0xFF, (size_t)n_tokens * sizeof(int))
                              .wait()),
         "fill out");
@@ -135,7 +135,7 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_h, hist.data(), hist.size() * sizeof(int)).wait()),
               "copy hist");
     }
@@ -143,7 +143,7 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
                                    nullptr);
     std::vector<int> got((size_t) n_tokens);
     check(
-        DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                              .memcpy(got.data(), d_o, got.size() * sizeof(int))
                              .wait()),
         "back");
@@ -394,7 +394,7 @@ struct DeviceRows {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   l, logits.data(), logits.size() * sizeof(float)).wait()),
               "copy");
         if (hist_len > 0) {
@@ -408,7 +408,7 @@ struct DeviceRows {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                       h, hist.data(), hist.size() * sizeof(int)).wait()),
                   "copy hist");
         }
@@ -423,7 +423,7 @@ struct DeviceRows {
     std::vector<int> sample(const strata::kernels::SamplerParams &p,
                             dpct::queue_ptr stream) {
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memset(o, 0xFF, (size_t)n_tokens * sizeof(int))
                       .wait()),
               "fill out");
@@ -432,7 +432,7 @@ struct DeviceRows {
             check(DPCT_CHECK_ERROR(stream->wait()), "stream sync");
         std::vector<int> got((size_t) n_tokens);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got.data(), o, got.size() * sizeof(int))
                       .wait()),
               "back");
@@ -473,7 +473,7 @@ void bench_sampled() {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_l, l.data(), l.size() * sizeof(float)).wait()),
               "bench copy");
         for (int k : {20, 64}) {
@@ -621,19 +621,19 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_l, l.data(), l.size() * sizeof(float)).wait()),
               "c1");
         strata::kernels::sample_tokens(d_l, NT, NV, nullptr, 0, a, d_a, nullptr);
         strata::kernels::sample_tokens(d_l, NT, NV, nullptr, 0, b, d_b, nullptr);
         std::vector<int> ga((size_t) NT), gb((size_t) NT);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(ga.data(), d_a, ga.size() * sizeof(int))
                       .wait()),
               "g1");
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(gb.data(), d_b, gb.size() * sizeof(int))
                       .wait()),
               "g2");
@@ -1130,7 +1130,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   input, uniform.data(), uniform.size() * sizeof(float)).wait()),
               "counter upload");
         strata::kernels::SamplerParams p;
@@ -1138,7 +1138,7 @@ int main(int argc, char** argv) {
         strata::kernels::sample_tokens(input, count, vocab, nullptr, 0, p, output, nullptr);
         std::vector<int> batch(count), singles(count), repeated(count);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(batch.data(), output, count * sizeof(int))
                       .wait()),
               "counter batch");
@@ -1147,13 +1147,13 @@ int main(int argc, char** argv) {
             strata::kernels::sample_tokens(input, 1, vocab, nullptr, 0, one, output + i, nullptr);
         }
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(singles.data(), output, count * sizeof(int))
                       .wait()),
               "counter singles");
         strata::kernels::sample_tokens(input, count, vocab, nullptr, 0, p, output, nullptr);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(repeated.data(), output, count * sizeof(int))
                       .wait()),
               "counter repeated");
@@ -1388,7 +1388,7 @@ int main(int argc, char** argv) {
                       cs = dpct::get_current_device().create_queue(true)),
                   "fixture 18 stream");
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue()
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                           .memset(rows.o, 0xFF, (size_t)T * sizeof(int))
                           .wait()),
                   "fixture 18 fill");
@@ -1407,7 +1407,7 @@ int main(int argc, char** argv) {
                   "instantiate");
             for (int replay = 0; replay < 2; ++replay) {
                 check(DPCT_CHECK_ERROR(
-                          dpct::get_in_order_queue()
+                          (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                               .memset(rows.o, 0xFF, (size_t)T * sizeof(int))
                               .wait()),
                       "fixture 18 refill");
@@ -1415,7 +1415,7 @@ int main(int argc, char** argv) {
                       "graph launch");
                 check(DPCT_CHECK_ERROR(cs->wait()), "graph sync");
                 std::vector<int> got((size_t) T);
-                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                            .memcpy(got.data(), rows.o,
                                                    got.size() * sizeof(int))
                                            .wait()),

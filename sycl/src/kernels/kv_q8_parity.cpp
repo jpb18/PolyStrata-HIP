@@ -38,7 +38,7 @@ T *dalloc(size_t n) {
                             n * sizeof(T) + 64, dpct::get_in_order_queue())),
        "malloc");
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memset(p, 0, n * sizeof(T) + 64).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(p, 0, n * sizeof(T) + 64).wait()),
        "memset");
     return p;
 }
@@ -60,7 +60,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_table, table.data(), pages * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_table, table.data(), pages * 4).wait()),
        "table");
     int8_t *kq = dalloc<int8_t>((size_t) cells * H * D), *vq = dalloc<int8_t>((size_t) cells * H * D);
     uint16_t *ks = dalloc<uint16_t>((size_t) cells * H * G), *vs = dalloc<uint16_t>((size_t) cells * H * G);
@@ -89,7 +89,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(step, hstep, sizeof hstep).wait()),
            "step");
         /*
         DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
@@ -97,7 +97,7 @@ int main() {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(kcur, kv.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(kcur, kv.data(),
                                                               kv.size() * 4).wait()),
            "k");
         /*
@@ -106,7 +106,7 @@ int main() {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(vcur, vv.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(vcur, vv.data(),
                                                               vv.size() * 4).wait()),
            "v");
         k::kv_append_q8_step(kq, vq, ks, vs, d_table, step, kcur, vcur, s, nullptr);
@@ -117,19 +117,19 @@ int main() {
     // 1. codes and scales bitwise vs the host reference
     std::vector<int8_t> hkq((size_t) cells * H * D), hvq(hkq.size());
     std::vector<uint16_t> hks((size_t) cells * H * G), hvs(hks.size());
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hkq.data(), kq, hkq.size())
                             .wait()),
        "d2h");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hvq.data(), vq, hvq.size())
                             .wait()),
        "d2h");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hks.data(), ks, hks.size() * 2)
                             .wait()),
        "d2h");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hvs.data(), vs, hvs.size() * 2)
                             .wait()),
        "d2h");
@@ -171,7 +171,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(d_ids, ids.data(), n_ids * 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_ids, ids.data(), n_ids * 4).wait()),
            "ids");
         int32_t hstep[k::kStepCount] = {0, 0, 0, n_ids};
         /*
@@ -181,26 +181,26 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(step, hstep, sizeof hstep).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(step, hstep, sizeof hstep).wait()),
            "step");
         k::kv_gather_q8_step(kq, vq, ks, vs, d_table, d_ids, step, max_ids, s, k8, v8, nullptr);
         k::kv_gather_step(kp, vp, d_table, d_ids, step, max_ids, s, k16, v16, nullptr);
         ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
            "gather");
         std::vector<uint16_t> a8((size_t) n_ids * H * D), b8(a8.size()), a16(a8.size()), b16(a8.size());
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(a8.data(), k8, a8.size() * 2)
                                 .wait()),
            "d2h");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(b8.data(), v8, b8.size() * 2)
                                 .wait()),
            "d2h");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(a16.data(), k16, a16.size() * 2)
                                 .wait()),
            "d2h");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(b16.data(), v16, b16.size() * 2)
                                 .wait()),
            "d2h");

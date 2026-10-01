@@ -262,3 +262,12 @@ for rel in all_sources():
     edit(str(rel), sub(r"\(\(cudaStream_t\)(\w+)\)->", r"strata::q_of(\1)->"))
 # 0.1.29: sycl::free takes void*; NativeEmbed frees a const device pointer.
 edit("src/core/native_head.cpp", lambda s: s.replace("sycl::free(dev_, dpct::get_in_order_queue())", "sycl::free((void *) dev_, dpct::get_in_order_queue())"))
+
+# 2026-10-01: cudaMemcpy / cudaMemset on the legacy default stream wait for every earlier launch on the device's
+# blocking streams; dpct's `get_in_order_queue().memcpy(...)` does not wait for work on another queue. The parity
+# tests launch on their own queue (`s`, `cs`) and copy results back on the default one, so a slow kernel's output
+# could be read before it finished (iq_multi_parity's IQ2_XS reference, qsa_parity's sequential side). In the tests,
+# every default-queue copy/fill first drains the device's queues - cudaMemcpy's semantics.
+for p in sorted((root / "src" / "kernels").glob("*_parity.cpp")):
+    edit(str(p.relative_to(root)), sub(r"(?<!queues_wait_and_throw\(\), )dpct::get_in_order_queue\(\)(\s*)\.(memcpy|memset)\(",
+                                       r"(dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())\1.\2("))

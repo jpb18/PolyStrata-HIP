@@ -98,13 +98,13 @@ struct Dev {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   p, v.data(), v.size() * sizeof(T)).wait()),
               "H2D");
     }
     std::vector<T> get(size_t n) const {
         std::vector<T> v(n);
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                    .memcpy(v.data(), p, n * sizeof(T))
                                    .wait()),
               "D2H");
@@ -585,7 +585,7 @@ int main(int argc, char** argv) {
         strata::kernels::QsaIndexerBuffers bufs{dtail.p, ddead.p, dpooled.p, dblockpos.p};
         Dev<float> draw((size_t) IDXD);
         for (int64_t t = 0; t < NT; ++t) {      // one cell at a time: the tail is a ring and the spare row MOVES
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memcpy(draw.p,
                                                &raw_flat[(size_t)t * IDXD],
                                                (size_t)IDXD * 4)
@@ -594,7 +594,7 @@ int main(int argc, char** argv) {
             const int32_t tpos = (int32_t) t;
             check(
                 DPCT_CHECK_ERROR(
-                    dpct::get_in_order_queue().memcpy(dpos.p, &tpos, 4).wait()),
+                    (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dpos.p, &tpos, 4).wait()),
                 "pos");
             strata::kernels::indexer_key_append(draw.p, dpos.p, POS_BASE, dw_kn.p, EPS, bufs, S, dcos.p, dsin.p,
                                                 nullptr);
@@ -1059,13 +1059,13 @@ int main(int argc, char** argv) {
         Dev<float> draw((size_t) IDXD);
         strata::kernels::QsaIndexerBuffers bufs{dptail.p, dpdead.p, dpp.p, dblockpos2.p};
         for (int64_t t = 0; t < T; ++t) {
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memcpy(draw.p, &praw[(size_t)t * IDXD],
                                                (size_t)IDXD * 4)
                                        .wait()),
                   "raw");
             const int32_t tpos = (int32_t) t;
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memcpy(dpos2.p, &tpos, 4)
                                        .wait()),
                   "pos2");
@@ -1389,13 +1389,13 @@ int main(int argc, char** argv) {
         // replay A: cells 0..3, which completes block 0
         for (int t = 0; t < 4; ++t) {
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue()
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                           .memcpy(raw2d.p, &raw2[(size_t)t * IDXD2], IDXD2 * 4)
                           .wait()),
                   "r2");
             const int32_t tp = t;
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue().memcpy(pos2.p, &tp, 4).wait()),
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(pos2.p, &tp, 4).wait()),
                   "p2");
             check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().ext_oneapi_graph(*ex2)),
                   "launchA");
@@ -1405,13 +1405,13 @@ int main(int argc, char** argv) {
         // replay B: cells 4..7 through the SAME graph, which completes block 1
         for (int t = 4; t < 8; ++t) {
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue()
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                           .memcpy(raw2d.p, &raw2[(size_t)t * IDXD2], IDXD2 * 4)
                           .wait()),
                   "r3");
             const int32_t tp = t;
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue().memcpy(pos2.p, &tp, 4).wait()),
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(pos2.p, &tp, 4).wait()),
                   "p3");
             check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().ext_oneapi_graph(*ex2)),
                   "launchB");
@@ -1494,7 +1494,7 @@ int main(int argc, char** argv) {
             for (Dev<float>* dp : {&pooledA, &deadA, &tailA, &pooledB, &deadB, &tailB})
                 check(
                     DPCT_CHECK_ERROR(
-                        dpct::get_in_order_queue()
+                        (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memset(dp->p, 0,
                                     dp == &pooledA || dp == &pooledB ? prows * 4
                                     : dp == &deadA || dp == &deadB   ? IDXD * 4
@@ -1502,9 +1502,9 @@ int main(int argc, char** argv) {
                             .wait()),
                     "zero");
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue().memset(bposA.p, 0, 4).wait()),
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(bposA.p, 0, 4).wait()),
                   "zero");
-                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                            .memset(bposB.p, 0, 4)
                                            .wait()),
                       "zero");
@@ -1513,14 +1513,14 @@ int main(int argc, char** argv) {
             strata::kernels::QsaIndexerBuffers bufsA{tailA.p, deadA.p, pooledA.p, bposA.p};
             strata::kernels::QsaIndexerBuffers bufsB{tailB.p, deadB.p, pooledB.p, bposB.p};
             for (int64_t t = 0; t < NB; ++t) {         // the sequential side: one cell, its device position
-                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                            .memcpy(draw.p,
                                                    &raws[(size_t)t * IDXD],
                                                    (size_t)IDXD * 4)
                                            .wait()),
                       "raw");
                 const int32_t tp = (int32_t) t;
-                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                            .memcpy(dpos.p, &tp, 4)
                                            .wait()),
                       "pos");
@@ -1582,7 +1582,7 @@ int main(int argc, char** argv) {
         Dev<int32_t> dpos0(1);
         const int32_t zero = 0;
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue().memcpy(dpos0.p, &zero, 4).wait()),
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dpos0.p, &zero, 4).wait()),
               "pos0");
         dpct::queue_ptr cs = &dpct::get_in_order_queue();
         check(DPCT_CHECK_ERROR(
@@ -1596,20 +1596,20 @@ int main(int argc, char** argv) {
             try {
                          Dev<float> pooled(prows), dd((size_t)IDXD), tail(trows);
             Dev<int32_t> bpos(1);
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memset(pooled.p, 0, prows * 4)
                                        .wait()),
                   "zero");
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memset(dd.p, 0, (size_t)IDXD * 4)
                                        .wait()),
                   "zero");
-            check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                        .memset(tail.p, 0, trows * 4)
                                        .wait()),
                   "zero");
             check(DPCT_CHECK_ERROR(
-                      dpct::get_in_order_queue().memset(bpos.p, 0, 4).wait()),
+                      (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(bpos.p, 0, 4).wait()),
                   "zero");
             strata::kernels::QsaIndexerBuffers bufs{tail.p, dd.p, pooled.p, bpos.p};
             if (native) {

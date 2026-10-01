@@ -44,7 +44,7 @@ template <typename T> T* up(const std::vector<T>& h) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d, h.data(), h.size() * sizeof(T)).wait()),
        "upload");
     return d;
@@ -155,11 +155,11 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16
     ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
        "run");
     std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(o.data(), d_old, o.size() * 4)
                             .wait()),
        "down");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(nw.data(), d_new, nw.size() * 4)
                             .wait()),
        "down");

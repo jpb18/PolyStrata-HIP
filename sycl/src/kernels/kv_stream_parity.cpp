@@ -43,7 +43,7 @@ template <typename T> T* dalloc(size_t n) {
                             n * sizeof(T) + 64, dpct::get_in_order_queue())),
        "malloc");
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memset(p, 0, n * sizeof(T) + 64).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(p, 0, n * sizeof(T) + 64).wait()),
        "memset");
     return p;
 }
@@ -141,7 +141,7 @@ bool run(int fmt) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(ident, t.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(ident, t.data(),
                                                               n_blocks * 4).wait()),
            "ident");
     }
@@ -178,7 +178,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(kc, hk.data(), hk.size() * 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(kc, hk.data(), hk.size() * 4).wait()),
            "k");
         /*
         DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
@@ -187,7 +187,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(vc, hv.data(), hv.size() * 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(vc, hv.data(), hv.size() * 4).wait()),
            "v");
         /*
         DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
@@ -196,7 +196,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(step, st, sizeof(st)).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(step, st, sizeof(st)).wait()),
            "step");
         append(ref, ident, step, kc, vc, s, fmt, nullptr);
         append(slots, m.page_table, step, kc, vc, s, fmt, &host.p);
@@ -220,7 +220,7 @@ bool run(int fmt) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(ids, hids.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(ids, hids.data(),
                                                               hids.size() * 4).wait()),
            "ids");
         /*
@@ -229,7 +229,7 @@ bool run(int fmt) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(steps, hst.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(steps, hst.data(),
                                                               hst.size() * 4).wait()),
            "steps");
         /*
@@ -239,7 +239,7 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(q, hq.data(), hq.size() * 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(q, hq.data(), hq.size() * 4).wait()),
            "q");
         k::qsa_decode_attn_batch(q, ref.attn(ident), ids, steps, cap, s, scratch, out_ref, n_q, nullptr);
         k::kv_stream_resolve(m, slots.attn(m.page_table), host.p, fmt, ids, steps, n_q, cap, s, nullptr);
@@ -247,12 +247,12 @@ bool run(int fmt) {
         ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
            "batch");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memcpy(a.data(), out_ref, (size_t)n_q * NH * D * 4)
                    .wait()),
            "a");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memcpy(b2.data(), out_str, (size_t)n_q * NH * D * 4)
                    .wait()),
            "b");
@@ -260,11 +260,11 @@ bool run(int fmt) {
             if (bad++ < 5) std::fprintf(stderr, "  %s pos %lld n_q %d: streamed attention differs\n", name, (long long) pos, n_q);
         }
         // the map inverts itself
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(pt.data(), m.page_table, n_blocks * 4)
                                 .wait()),
            "pt");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(sb.data(), m.slot_block, n_slots * 4)
                                 .wait()),
            "sb");
@@ -303,7 +303,7 @@ bool run(int fmt) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(ids, hids.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(ids, hids.data(),
                                                               hids.size() * 4).wait()),
            "ids");
         /*
@@ -313,17 +313,17 @@ bool run(int fmt) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(steps, hst.data(), 16).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(steps, hst.data(), 16).wait()),
            "steps");
         k::qsa_decode_attn_batch(q, ref.attn(ident), ids, steps, cap, s, scratch, out_ref, 1, nullptr);
         k::qsa_decode_attn_batch(q, ring.attn(rt), ids, steps, cap, s, scratch, out_str, 1, nullptr);
         ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
            "ring");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(a.data(), out_ref, (size_t)NH * D * 4)
                                 .wait()),
            "a");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(b2.data(), out_str, (size_t)NH * D * 4)
                                 .wait()),
            "b");

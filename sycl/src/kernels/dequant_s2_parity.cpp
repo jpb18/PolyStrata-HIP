@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "copy scales");
 
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
 
     std::vector<float> gpu(cpu.size());
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(gpu.data(), d_out, gpu.size() * sizeof(float))
                   .wait()),
           "copy back");

@@ -65,12 +65,12 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        dpct::get_in_order_queue().memcpy(dw, raw.data(), raw.size()).wait();
+        (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dw, raw.data(), raw.size()).wait();
         double dq_err = 0.0;
         if (strata::kernels::iq_supported(type) && ((size_t) rows * cols) % 256 == 0) {
             strata::kernels::iq_dequant_f32(type, dw, (int64_t) rows * cols, dq, s);
             std::vector<float> got(ref.size());
-            dpct::get_in_order_queue()
+            (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                 .memcpy(got.data(), dq, got.size() * 4)
                 .wait();
             double num = 0, den = 0;
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        dpct::get_in_order_queue().memcpy(dx, x.data(), x.size() * 4).wait();
+        (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dx, x.data(), x.size() * 4).wait();
         strata::kernels::quantize_q8_1_rows(dx, MC, cols, xq, s);
         std::vector<float> y((size_t) MC * rows), yn(y.size());
         int multi_bad = 0;
@@ -108,13 +108,13 @@ int main(int argc, char** argv) {
                 strata::kernels::native_mmvq(type, dw, (const uint8_t*) xq + (size_t) c * cols / 32 * 36,
                                              dy + (size_t) c * rows, cols, rows, 1, s);
             s->wait();
-            dpct::get_in_order_queue()
+            (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                 .memcpy(y.data(), dy, y.size() * 4)
                 .wait();
             for (int nc = 2; nc <= MC; ++nc) {
                 strata::kernels::native_mmvq(type, dw, xq, dy, cols, rows, nc, s);
                 s->wait();
-                dpct::get_in_order_queue()
+                (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                     .memcpy(yn.data(), dy, yn.size() * 4)
                     .wait();
                 if (strata::kernels::native_mmvq_multi_exact() &&

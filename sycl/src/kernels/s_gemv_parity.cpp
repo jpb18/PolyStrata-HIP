@@ -252,7 +252,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "copy x");
     /*
@@ -261,7 +261,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_codes, codes.data(), codes.size()).wait()),
           "copy codes");
     /*
@@ -270,7 +270,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "copy scales");
     /*
@@ -279,13 +279,13 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_offsets, offsets.data(), offsets.size() * sizeof(float)).wait()),
           "copy offsets");
     strata::kernels::s_gemv(d_x, d_codes, d_scales, d_offsets, d_y, n_in, n_out, form);
     std::vector<float> got((size_t) n_out);
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(got.data(), d_y, got.size() * sizeof(float))
                   .wait()),
           "copy back");
@@ -372,7 +372,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
           "bench copy x");
     /*
@@ -381,7 +381,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_codes, codes.data(), codes.size()).wait()),
           "bench copy codes");
     /*
@@ -390,7 +390,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
           "bench copy scales");
 
@@ -430,7 +430,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     // sums in a different order - so this is a relative comparison, not bit equality.
     strata::kernels::s_gemv(d_x, d_codes, d_scales, nullptr, d_y, n_in, n_out, form);
     std::vector<float> ref_naive((size_t) n_out);
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                .memcpy(ref_naive.data(), d_y,
                                        ref_naive.size() * sizeof(float))
                                .wait()),
@@ -455,7 +455,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
         // correctness of the thing being timed
         std::vector<float> got((size_t) n_out);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got.data(), d_y, got.size() * sizeof(float))
                       .wait()),
               "copy split result");
@@ -488,7 +488,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
                                       std::chrono::steady_clock::now() - q0).count());
                 }
                 std::sort(qms.begin(), qms.end());
-                check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                            .memcpy(got.data(), d_y,
                                                    got.size() * sizeof(float))
                                            .wait()),
@@ -524,7 +524,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
                     }
                     std::sort(fms.begin(), fms.end());
                     check(
-                        DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                        DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                              .memcpy(got.data(), d_y,
                                                      got.size() * sizeof(float))
                                              .wait()),
@@ -669,7 +669,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_x, x.data(), x.size() * sizeof(uint16_t)).wait()),
               "copy x");
         /*
@@ -678,7 +678,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_codes, codes.data(), codes.size()).wait()),
               "copy codes");
         /*
@@ -687,13 +687,13 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_scales, scales.data(), scales.size() * sizeof(float)).wait()),
               "copy scales");
         strata::kernels::s_gemv(d_x, d_codes, d_scales, nullptr, d_y, n_in, n_out, tc.form);
         std::vector<float> got((size_t) n_out);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got.data(), d_y, got.size() * sizeof(float))
                       .wait()),
               "copy back");

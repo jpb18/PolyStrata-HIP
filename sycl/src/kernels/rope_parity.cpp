@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_x, x.data(), x.size() * sizeof(float)).wait()),
           "copy x");
     /*
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_cos, hcos.data(), hcos.size() * sizeof(float)).wait()),
           "copy cos");
     /*
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_sin, hsin.data(), hsin.size() * sizeof(float)).wait()),
           "copy sin");
     /*
@@ -152,13 +152,13 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
               d_pos, pos.data(), pos.size() * sizeof(int)).wait()),
           "copy pos");
     strata::kernels::rope_neox_apply(d_x, d_out, rows, head_dim, n_rot, d_cos, d_sin, d_pos, nullptr);
     std::vector<float> got(ref.size());
     check(DPCT_CHECK_ERROR(
-              dpct::get_in_order_queue()
+              (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                   .memcpy(got.data(), d_out, got.size() * sizeof(float))
                   .wait()),
           "back");
@@ -207,19 +207,19 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_x, e.data(), e.size() * sizeof(float)).wait()),
               "copy e");
         // position 7, NOT position 0: at pos 0 sin is exactly 0, so dim half legitimately does not move and
         // the check would report the correct kernel as wrong.  The first version made exactly that mistake.
         int p7 = 7;
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                    .memcpy(d_pos, &p7, sizeof(int))
                                    .wait()),
               "copy p7");
         strata::kernels::rope_neox_apply(d_x, d_out, 1, head_dim, n_rot, d_cos, d_sin, d_pos, nullptr);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(o.data(), d_out, o.size() * sizeof(float))
                       .wait()),
               "back e");
@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_x, x.data(), x.size() * sizeof(float)).wait()),
               "copy x");
         /*
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_cos, yc.data(), yc.size() * sizeof(float)).wait()),
               "copy ycos");
         /*
@@ -406,7 +406,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_sin, ys.data(), ys.size() * sizeof(float)).wait()),
               "copy ysin");
         /*
@@ -415,13 +415,13 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_pos, pos.data(), pos.size() * sizeof(int)).wait()),
               "copy pos");
         strata::kernels::rope_neox_apply(d_x, d_out, rows, head_dim, n_rot, d_cos, d_sin, d_pos, nullptr);
         std::vector<float> got2(ref2.size());
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got2.data(), d_out, got2.size() * sizeof(float))
                       .wait()),
               "back");
@@ -487,7 +487,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_x2, x2.data(), x2.size() * sizeof(float)).wait()),
               "copy x2");
         /*
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_c2, sc.data(), sc.size() * sizeof(float)).wait()),
               "copy c2");
         /*
@@ -505,7 +505,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_s2, ss.data(), ss.size() * sizeof(float)).wait()),
               "copy s2");
         /*
@@ -514,7 +514,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_p2, pos2.data(), pos2.size() * sizeof(int)).wait()),
               "copy p2");
         // The native path demands an explicit stream - a null one is refused by validation, not defaulted.
@@ -527,12 +527,12 @@ int main(int argc, char** argv) {
         check(DPCT_CHECK_ERROR(cs5->wait()), "sync5");
         std::vector<float> got_t(x2.size()), got_n(x2.size());
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got_t.data(), d_t2, got_t.size() * sizeof(float))
                       .wait()),
               "back t2");
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got_n.data(), d_n2, got_n.size() * sizeof(float))
                       .wait()),
               "back n2");
@@ -559,7 +559,7 @@ int main(int argc, char** argv) {
         strata::kernels::native_rope_apply(d_x2, d_n2, nrows, head_dim, n_rot, none5, d_p2, cs5);
         check(DPCT_CHECK_ERROR(cs5->wait()), "sync5b");
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got_n.data(), d_n2, got_n.size() * sizeof(float))
                       .wait()),
               "back n2b");
@@ -571,7 +571,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_c2, nc5.data(), nc5.size() * sizeof(float)).wait()),
               "copy c2b");
         /*
@@ -580,12 +580,12 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        check(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        check(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                   d_s2, ns5.data(), ns5.size() * sizeof(float)).wait()),
               "copy s2b");
         strata::kernels::rope_neox_apply(d_x2, d_t2, nrows, head_dim, n_rot, d_c2, d_s2, d_p2, nullptr);
         check(DPCT_CHECK_ERROR(
-                  dpct::get_in_order_queue()
+                  (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                       .memcpy(got_t.data(), d_t2, got_t.size() * sizeof(float))
                       .wait()),
               "back t2b");

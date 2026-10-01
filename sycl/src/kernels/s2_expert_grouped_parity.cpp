@@ -69,7 +69,7 @@ template <typename T> T* dalloc(size_t n) {
                             n * sizeof(T) + 256, dpct::get_in_order_queue())),
        "malloc");
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memset(p, 0, n * sizeof(T) + 256).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(p, 0, n * sizeof(T) + 256).wait()),
        "memset");
     return p;
 }
@@ -80,13 +80,13 @@ template <typename T> void up(T* d, const std::vector<T>& h) {
     is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d, h.data(), h.size() * sizeof(T)).wait()),
        "h2d");
 }
 template <typename T> std::vector<T> down(const T* d, size_t n) {
     std::vector<T> h(n);
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(h.data(), d, n * sizeof(T))
                             .wait()),
        "d2h");
@@ -170,12 +170,12 @@ bool twice(const char* name, float* d_out, size_t out_floats, const Scratch& s,
            const std::function<void()>& call, Run* keep, bool expect_new = true) {
     Run r[2];
     for (int old = 1; old >= 0; --old) {
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memset(d_out, 0xA5, out_floats * 4)
                                 .wait()),
            "sentinel out");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memset(s.p, 0x5A, s.bytes).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(s.p, 0x5A, s.bytes).wait()),
            "sentinel scratch");
         k::moe_grouped_select_old(old);
         (void) k::moe_grouped_last_path();   // clear
@@ -510,7 +510,7 @@ void check_all() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(d_x2 + 2, x.data(), XROW).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_x2 + 2, x.data(), XROW).wait()),
            "x2");
         const int n_hits = 3;
         std::vector<int32_t> slot{2, 5, 7}, dst{4, 0, 9};
@@ -554,7 +554,7 @@ void check_all() {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_arena + (size_t)i * STRIDE, fx.hb(i), BLOB).wait()),
                "arena");
         {
@@ -572,7 +572,7 @@ void check_all() {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_arena + 4 + (size_t)i * BLOB, fx.hb(i), BLOB).wait()),
                "arena");
         {
@@ -625,7 +625,7 @@ void bench() {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    fx.d + (size_t)i * BLOB, b.data(), BLOB).wait()),
                "blob");
         }

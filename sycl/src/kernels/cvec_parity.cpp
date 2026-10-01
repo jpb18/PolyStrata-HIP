@@ -44,14 +44,14 @@ pageable, call wait() on event return by memcpy API to ensure synchronization
 behavior.
 */
 void up(T *d, const std::vector<T> &h) {
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d, h.data(), h.size() * sizeof(T)).wait()),
        "up");
 }
 template <typename T>
 std::vector<T> down(const T* d, size_t n) {
     std::vector<T> h(n);
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(h.data(), d, n * sizeof(T))
                             .wait()),
        "down");

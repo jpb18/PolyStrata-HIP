@@ -46,7 +46,7 @@ T* dalloc(size_t n) {
                             n * sizeof(T) + 256, dpct::get_in_order_queue())),
        "malloc");
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memset(p, 0, n * sizeof(T) + 256).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(p, 0, n * sizeof(T) + 256).wait()),
        "memset");
     return p;
 }
@@ -118,13 +118,13 @@ void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(dw, w.data(), w.size()).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dw, w.data(), w.size()).wait()),
        "w");
     // the double reference's weights: the GPU dequantizer (iq_parity checks it against gguf-py)
     float* dwf = dalloc<float>((size_t) n_out * n_in);
     k::iq_dequant_f32(t, dw, (int64_t) n_out * n_in, dwf, s);
     std::vector<float> wf((size_t) n_out * n_in);
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(wf.data(), dwf, wf.size() * 4)
                             .wait()),
        "wf");
@@ -138,14 +138,14 @@ void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(dx, x.data(), x.size() * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dx, x.data(), x.size() * 4).wait()),
        "x");
     const size_t xq_bytes = (size_t) max_cols * (n_in / 32) * 36;
     uint8_t* dxq = dalloc<uint8_t>(xq_bytes);
     k::quantize_q8_1_rows(dx, max_cols, n_in, dxq, s);
     std::vector<uint8_t> xq(xq_bytes);
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(xq.data(), dxq, xq_bytes).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(xq.data(), dxq, xq_bytes).wait()),
        "xq");
     const auto xd = dequant_q8_1(xq, (size_t) max_cols * n_in);
     float* dy_old = dalloc<float>((size_t) max_cols * n_out);
@@ -155,11 +155,11 @@ void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
     int bad = 0;
     double worst = 0.0;
     for (int nc : cols) {
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memset(dy_old, 0xFF, y_old.size() * 4)
                                 .wait()),
            "memset");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memset(dy_new, 0xFF, y_new.size() * 4)
                                 .wait()),
            "memset");
@@ -168,11 +168,11 @@ void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
         k::iq_set_old_kernels(false);
         k::iq_mmvq(t, dw, dxq, dy_new, n_in, n_out, nc, s);
         ck(DPCT_CHECK_ERROR(s->wait()), "sync");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(y_old.data(), dy_old, y_old.size() * 4)
                                 .wait()),
            "y_old");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(y_new.data(), dy_new, y_new.size() * 4)
                                 .wait()),
            "y_new");
@@ -249,7 +249,7 @@ struct Grouped {
             by memcpy API to ensure synchronization behavior.
             */
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue().memcpy(db, b.data(), b.size()).wait()),
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(db, b.data(), b.size()).wait()),
                "blob");
             blobs.push_back(db);
             ptr.push_back((unsigned long long) db);
@@ -265,7 +265,7 @@ struct Grouped {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(dptr, ptr.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dptr, ptr.data(),
                                                               ptr.size() * 8).wait()),
            "ptr");
         /*
@@ -274,11 +274,11 @@ struct Grouped {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                dstart, start.data(), start.size() * 4).wait()),
            "start");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(dn, &n_groups, 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dn, &n_groups, 4).wait()),
            "n");
         if (n_ent) {
             /*
@@ -287,7 +287,7 @@ struct Grouped {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    ddst, dst.data(), dst.size() * 4).wait()),
                "dst");
             /*
@@ -296,7 +296,7 @@ struct Grouped {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    dtok, tok.data(), tok.size() * 4).wait()),
                "tok");
         }
@@ -309,7 +309,7 @@ struct Grouped {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(dx, x.data(), x.size() * 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dx, x.data(), x.size() * 4).wait()),
            "x");
         dxq = dalloc<uint8_t>((size_t) tokens * (H / 32) * 36);
         dscr = dalloc<uint8_t>(k::native_expert_scratch_bytes(cap_ent, FF));
@@ -336,12 +336,12 @@ struct Grouped {
         k::iq_set_old_kernels(false);
     }
     std::vector<float> result(bool old, dpct::queue_ptr s) {
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memset(dout, 0xFF, out_floats * 4)
                                 .wait()),
            "memset"); // NaN rows: must stay NaN where nothing writes
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memset(dscr, 0,
                            k::native_expert_scratch_bytes(cap_ent, L.n_ff))
                    .wait()),
@@ -349,7 +349,7 @@ struct Grouped {
         run(old, s);
         ck(DPCT_CHECK_ERROR(s->wait()), "sync");
         std::vector<float> o(out_floats);
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(o.data(), dout, o.size() * 4)
                                 .wait()),
            "out");
@@ -411,7 +411,7 @@ void bench(dpct::queue_ptr s, std::mt19937 &rng) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(dw, w.data(), w.size()).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dw, w.data(), w.size()).wait()),
            "w");
         const auto x = random_x((size_t) 8 * n_in, rng);
         float* dx = dalloc<float>(x.size());
@@ -422,7 +422,7 @@ void bench(dpct::queue_ptr s, std::mt19937 &rng) {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(dx, x.data(), x.size() * 4).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(dx, x.data(), x.size() * 4).wait()),
            "x");
         uint8_t* dxq = dalloc<uint8_t>((size_t) 8 * (n_in / 32) * 36);
         k::quantize_q8_1_rows(dx, 8, n_in, dxq, s);

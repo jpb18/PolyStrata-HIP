@@ -43,7 +43,7 @@ template <typename T> T* dalloc(size_t n) {
                             n * sizeof(T) + 64, dpct::get_in_order_queue())),
        "malloc");
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memset(p, 0, n * sizeof(T) + 64).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(p, 0, n * sizeof(T) + 64).wait()),
        "memset");
     return p;
 }
@@ -84,6 +84,10 @@ void quantize_block_q4_0_host(const float* x, k::block_q4_0& blk) {
 }  // namespace
 
 int main() {
+    // SYCL port: qsa_prompt_attn's tensor-core (mma.sync PTX) kernel is not ported; on SYCL the prompt attention this
+    // test's last step checks exists as the XMX kernel (opt-in in the engine, where the FP32 fallback is faster).
+    // Test the kernel the port has, unless the caller chose (STRATA_PROMPT_ATTN_XMX=0 shows the refusal).
+    setenv("STRATA_PROMPT_ATTN_XMX", "1", 0);
     std::printf("=== Running kv_hybrid_parity test ===\n");
     k::QsaShapes s = k::qsa_real_shapes();
     s.page_size = 64;
@@ -103,7 +107,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_table, table.data(), pages * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_table, table.data(), pages * 4).wait()),
        "table");
 
     std::vector<float> K((size_t) cells * H * D), V((size_t) cells * H * D);
@@ -152,12 +156,12 @@ int main() {
     int append_bad = 0, gather_bad = 0;
     for (int c = 0; c < cells; ++c) {
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memcpy(d_kcur, &K[(size_t)c * H * D], (size_t)H * D * 4)
                    .wait()),
            "kcur");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memcpy(d_vcur, &V[(size_t)c * H * D], (size_t)H * D * 4)
                    .wait()),
            "vcur");
@@ -170,7 +174,7 @@ int main() {
         to ensure synchronization behavior.
         */
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memcpy(d_step, step, sizeof step).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_step, step, sizeof step).wait()),
            "step");
         // exactly what qsa_layer's hybrid branch does
         k::fwht256_inplace_cuda(d_vcur, H, nullptr);
@@ -189,15 +193,15 @@ int main() {
     std::vector<int8_t> hk((size_t) cells * H * D);
     std::vector<uint16_t> hks((size_t) cells * H * G);
     std::vector<uint8_t> hv4((size_t) cells * H * q4_row);
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hk.data(), d_kq, hk.size())
                             .wait()),
        "kq");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hks.data(), d_ks, hks.size() * 2)
                             .wait()),
        "ks");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(hv4.data(), d_v4, hv4.size())
                             .wait()),
        "v4");
@@ -232,7 +236,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_ids, ids.data(), cells * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_ids, ids.data(), cells * 4).wait()),
        "ids");
     int32_t step[k::kStepCount];
     k::qsa_step_fill(step, cells - 1, s);
@@ -244,7 +248,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_step, step, sizeof step).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_step, step, sizeof step).wait()),
        "step2");
     uint16_t *d_ksc = dalloc<uint16_t>((size_t) cells * H * D), *d_vsc = dalloc<uint16_t>((size_t) cells * H * D);
     k::kv_gather_q8_step(d_kq, d_kq, d_ks, d_ks, d_table, d_ids, d_step, cells, s, d_ksc, d_ksc, nullptr);
@@ -252,11 +256,11 @@ int main() {
     ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
        "gather sync");
     std::vector<uint16_t> h_ksc((size_t) cells * H * D), h_vsc((size_t) cells * H * D);
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(h_ksc.data(), d_ksc, h_ksc.size() * 2)
                             .wait()),
        "ksc");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(h_vsc.data(), d_vsc, h_vsc.size() * 2)
                             .wait()),
        "vsc");
@@ -285,7 +289,7 @@ int main() {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_q, q.data(), q.size() * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_q, q.data(), q.size() * 4).wait()),
        "q");
     k::QsaAttnPools pools;
     pools.k_q = d_kq; pools.k_scale = d_ks; pools.v_q4 = d_v4; pools.page_table = d_table;
@@ -296,7 +300,7 @@ int main() {
     ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
        "attn sync");
     std::vector<float> h_attn((size_t) QH * D);
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memcpy(h_attn.data(), d_attn, h_attn.size() * 4)
                             .wait()),
        "attn");
@@ -349,7 +353,7 @@ int main() {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(d_q2, q2.data(),
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_q2, q2.data(),
                                                               q2.size() * 4).wait()),
            "q2");
         // the batched kernel indexes ids[z * cap + ...]: one FULL selection per query
@@ -362,7 +366,7 @@ int main() {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                d_ids2, ids2.data(), ids2.size() * 4).wait()),
            "ids2");
         int32_t* d_steps2 = dalloc<int32_t>(nq * k::kStepCount);
@@ -376,7 +380,7 @@ int main() {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_steps2 + i * k::kStepCount, st2, sizeof st2).wait()),
                "steps2");
         }
@@ -387,7 +391,7 @@ int main() {
         ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
            "attn2 sync");
         std::vector<float> h_at2((size_t) nq * QH * D);
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(h_at2.data(), d_at2, h_at2.size() * 4)
                                 .wait()),
            "at2");
@@ -454,7 +458,7 @@ int main() {
                "at4 sync");
             std::vector<float> h_at4((size_t) QH * D);
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(h_at4.data(), d_at4, h_at4.size() * 4)
                        .wait()),
                "at4");

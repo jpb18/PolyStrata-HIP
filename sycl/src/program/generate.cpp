@@ -5285,6 +5285,7 @@ int main(int argc, char **argv) try {
                 if (p.lent.empty()) return true;
                 tr("refill start", (long long) p.lent.size());
                 const strata::core::OnDevice on(p.dev);
+                size_t queued = 0;
                 for (const auto& [i, slot] : p.lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
                     const uint8_t* b = srcp->blob(i / g.n_expert, i % g.n_expert);
                     const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
@@ -5292,6 +5293,8 @@ int main(int argc, char **argv) try {
                                                             : p.cache->fill_slot_queued(slot, b, e, nb)))
                         return false;
                     host_res[(size_t) i] = slot;
+                    // SYCL port: drain before GgufExpertSource's 512-buffer blob ring can wrap onto a queued copy
+                    if (!refill_blocking() && ++queued % 256 == 0 && !p.cache->sync_queued(e)) return false;
                 }
                 if (!p.cache->sync_queued(e)) return false;
                 p.lent.clear();
@@ -5905,6 +5908,7 @@ int main(int argc, char **argv) try {
         // refill the lent slots from the arena and give them back to the decode tier
         if (!lent.empty()) {
             const Clock::time_point tr = Clock::now();
+            size_t queued = 0;
             for (const auto& [i, slot] : lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
                 const uint8_t* b = srcp->blob(i / g.n_expert, i % g.n_expert);
                 const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
@@ -5914,6 +5918,13 @@ int main(int argc, char **argv) try {
                     return 1;
                 }
                 host_res[(size_t) i] = slot;
+                // SYCL port: GgufExpertSource::blob() hands out a ring of 512 buffers, valid until the next blob()
+                // call; a queued copy reads its buffer later, so drain before the ring can wrap onto one (938 lent
+                // slots refilled through 512 buffers gave ~426 slots another expert's bytes)
+                if (!refill_blocking() && ++queued % 256 == 0 && !xcache.sync_queued(err)) {
+                    std::fprintf(stderr, "strata generate: refilling the lent slots failed: %s\n", err.c_str());
+                    return 1;
+                }
             }
             if (!xcache.sync_queued(err)) {
                 std::fprintf(stderr, "strata generate: refilling the lent slots failed: %s\n", err.c_str());

@@ -196,12 +196,12 @@ int history_advance_regression() {
            norm_storage = sycl::malloc_device<float>(
                (channels + 2 * guard), dpct::get_in_order_queue())),
        "history norm allocation");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memset(history_storage, 0xa5,
                                     (count + 2 * guard) * sizeof(float))
                             .wait()),
        "history guard init");
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                             .memset(norm_storage, 0xa5,
                                     (channels + 2 * guard) * sizeof(float))
                             .wait()),
@@ -214,7 +214,7 @@ int history_advance_regression() {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            history, expected.data(), count * sizeof(float)).wait()),
        "history initial values");
     dpct::queue_ptr stream;
@@ -256,7 +256,7 @@ int history_advance_regression() {
            "history captured advance");
         ck(DPCT_CHECK_ERROR(stream->wait()), "history captured advance sync");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memcpy(actual.data(), history, count * sizeof(float))
                    .wait()),
            "history readback");
@@ -273,12 +273,12 @@ int history_advance_regression() {
     if (!overlap_refused || !null_refused) ++bad;
     auto guard_ok = [&](float* storage, size_t payload) {
         uint8_t before[64], after[64];
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(before, storage, sizeof(before))
                                 .wait()),
            "history prefix guard");
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue()
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                    .memcpy(after, storage + guard + payload, sizeof(after))
                    .wait()),
            "history suffix guard");
@@ -770,7 +770,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_nk, cap.w_nk.data(), hcd * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_nk, cap.w_nk.data(), hcd * 4).wait()),
        "cnk");
     /*
     DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
@@ -779,7 +779,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_nq, cap.w_nq.data(), hcd * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_nq, cap.w_nq.data(), hcd * 4).wait()),
        "cnq");
     /*
     DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
@@ -788,7 +788,7 @@ int main(int argc, char** argv) {
     synchronization behavior.
     */
     ck(DPCT_CHECK_ERROR(
-           dpct::get_in_order_queue().memcpy(d_nc, cap.w_nc.data(), hcd * 4).wait()),
+           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(d_nc, cap.w_nc.data(), hcd * 4).wait()),
        "cnc");
     /*
     DPCT1114: cudaMemcpy is migrated to asynchronization memcpy, assuming
@@ -796,7 +796,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d_kc, key_codes.data(), key_codes.size()).wait()),
        "ckc");
     /*
@@ -805,7 +805,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d_vb, value_bf16.data(), value_bf16.size() * 2).wait()),
        "cvb");
     /*
@@ -814,7 +814,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d_c1, conv1d_f16.data(), conv1d_f16.size() * 2).wait()),
        "cc1");
 
@@ -836,7 +836,7 @@ int main(int argc, char** argv) {
     memory is not pageable, call wait() on event return by memcpy API to ensure
     synchronization behavior.
     */
-    ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+    ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
            d_ks, key_scales.data(), key_scales.size() * 4).wait()),
        "cks");
     w.key_scales = d_ks;
@@ -866,7 +866,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                d_emb, cap.emb.data() + (size_t)t * nd, nd * 4).wait()),
            "cemb");
         /*
@@ -875,7 +875,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                d_hid, cap.hidden.data() + (size_t)t * hcd, hcd * 4).wait()),
            "chid");
         /*
@@ -884,7 +884,7 @@ int main(int argc, char** argv) {
         If the memory is not pageable, call wait() on event return by memcpy API
         to ensure synchronization behavior.
         */
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                d_hist, hist_state.data(), (size_t)k::NG_HIST * hcd * 4).wait()),
            "chist");
         k::PleOut out{};
@@ -899,7 +899,7 @@ int main(int argc, char** argv) {
     if (t == 0) {
         const size_t bytes = (size_t) k::ple_block_scratch_bytes();
         ck(DPCT_CHECK_ERROR(
-               dpct::get_in_order_queue().memset(ple_ws, 0xa5, bytes).wait()),
+               (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memset(ple_ws, 0xa5, bytes).wait()),
            "PLE prelaunch guard sentinel");
         const struct AliasCase { float* k::PleOut::* field; size_t offset; } cases[] = {
             {&k::PleOut::key, 0}, {&k::PleOut::value, hcd}, {&k::PleOut::gate, hcd + nd},
@@ -917,7 +917,7 @@ int main(int argc, char** argv) {
         ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
            "PLE guard no-launch sync");
         std::vector<uint8_t> sentinel(bytes);
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(sentinel.data(), ple_ws, bytes)
                                 .wait()),
            "PLE guard sentinel readback");
@@ -930,31 +930,31 @@ int main(int argc, char** argv) {
     k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
     ck(DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()),
        "ple_block sync");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_key.data(), d_ck, hcd * 4)
                                 .wait()),
            "rck");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_value.data(), d_cv, nd * 4)
                                 .wait()),
            "rcv");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_gate.data(), d_g, k::NG_HC * 4)
                                 .wait()),
            "rg");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_gated.data(), d_gd, hcd * 4)
                                 .wait()),
            "rgd");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_norm.data(), d_nm, hcd * 4)
                                 .wait()),
            "rnm");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_conv.data(), d_co, hcd * 4)
                                 .wait()),
            "rco");
-        ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+        ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                 .memcpy(dev_res.data(), d_cr, hcd * 4)
                                 .wait()),
            "rcr");
@@ -1015,7 +1015,7 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_emb, witness.data(), nd * sizeof(float)).wait()),
                "native PLE witness");
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
@@ -1024,7 +1024,7 @@ int main(int argc, char** argv) {
                "legacy PLE witness sync");
             std::vector<float> legacy_value(nd);
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(legacy_value.data(), d_cv, nd * sizeof(float))
                        .wait()),
                "legacy PLE witness value");
@@ -1040,12 +1040,12 @@ int main(int argc, char** argv) {
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, stream);
             ck(DPCT_CHECK_ERROR(stream->wait()), "native PLE sync");
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(native_value.data(), d_cv, nd * sizeof(float))
                        .wait()),
                "native PLE value");
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(native_result.data(), d_cr, hcd * sizeof(float))
                        .wait()),
                "native PLE result");
@@ -1075,7 +1075,7 @@ int main(int argc, char** argv) {
                "native PLE replay");
             ck(DPCT_CHECK_ERROR(stream->wait()), "native PLE replay sync");
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(replay.data(), d_cr, hcd * sizeof(float))
                        .wait()),
                "native PLE replay result");
@@ -1094,7 +1094,7 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_emb, cap.emb.data(), nd * sizeof(float)).wait()),
                "restore PLE embedding");
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
@@ -1102,7 +1102,7 @@ int main(int argc, char** argv) {
                    dpct::get_current_device().queues_wait_and_throw()),
                "restored PLE sync");
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(replay.data(), d_cr, hcd * sizeof(float))
                        .wait()),
                "restored PLE result");
@@ -1136,11 +1136,11 @@ int main(int argc, char** argv) {
                                     hcd * 4, dpct::get_in_order_queue())),
                "native PLE raw projection");
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memset(native_storage, 0xa5, native_bytes + 2 * guard)
                        .wait()),
                "native PLE weight guards");
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                     .memset(q_storage, 0xa5, qbytes + 2 * guard)
                                     .wait()),
                "native PLE q8 guards");
@@ -1152,7 +1152,7 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    native_data, native_key.data(), native_bytes).wait()),
                "native PLE weights upload");
             k::PleWeights nw = w;
@@ -1166,7 +1166,7 @@ int main(int argc, char** argv) {
                    stream = dpct::get_current_device().create_queue(true)),
                "native PLE key stream");
             const size_t workspace_bytes = (size_t) k::ple_block_scratch_bytes();
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                     .memset(ple_ws, 0xa5, workspace_bytes)
                                     .wait()),
                "native PLE no-launch sentinel");
@@ -1190,7 +1190,7 @@ int main(int argc, char** argv) {
             ck(DPCT_CHECK_ERROR(stream->wait()), "native PLE refusal sync");
             std::vector<uint8_t> sentinel(workspace_bytes);
             ck(DPCT_CHECK_ERROR(
-                   dpct::get_in_order_queue()
+                   (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                        .memcpy(sentinel.data(), ple_ws, workspace_bytes)
                        .wait()),
                "native PLE refusal sentinel");
@@ -1208,13 +1208,13 @@ int main(int argc, char** argv) {
                 pageable memory. If the memory is not pageable, call wait() on
                 event return by memcpy API to ensure synchronization behavior.
                 */
-                ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+                ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                        d_emb, cap.emb.data() + (size_t)p * nd, nd * 4).wait()),
                    "native PLE key input");
                 k::native_q2_0_f32(native_data, d_emb, native_q, raw_projection, k::NG_N_EMBD, k::NG_HC_DIM, 1, stream);
                 ck(DPCT_CHECK_ERROR(stream->wait()), "native PLE raw key sync");
                 ck(DPCT_CHECK_ERROR(
-                       dpct::get_in_order_queue()
+                       (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                            .memcpy(projected.data(), raw_projection, hcd * 4)
                            .wait()),
                    "native PLE raw key read");
@@ -1228,12 +1228,12 @@ int main(int argc, char** argv) {
                 ck(DPCT_CHECK_ERROR(stream->wait()),
                    "native PLE key direct sync");
                 ck(DPCT_CHECK_ERROR(
-                       dpct::get_in_order_queue()
+                       (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                            .memcpy(actual_key.data(), d_ck, hcd * 4)
                            .wait()),
                    "native PLE key read");
                 ck(DPCT_CHECK_ERROR(
-                       dpct::get_in_order_queue()
+                       (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                            .memcpy(actual_result.data(), d_cr, hcd * 4)
                            .wait()),
                    "native PLE result read");
@@ -1263,7 +1263,7 @@ int main(int argc, char** argv) {
                     ck(DPCT_CHECK_ERROR(stream->wait()),
                        "native PLE key replay sync");
                     ck(DPCT_CHECK_ERROR(
-                           dpct::get_in_order_queue()
+                           (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                .memcpy(replay.data(), d_cr, hcd * 4)
                                .wait()),
                        "native PLE key replay read");
@@ -1279,12 +1279,12 @@ int main(int argc, char** argv) {
                 const void* storage = b == 0 ? native_storage : q_storage;
                 const size_t payload = b == 0 ? native_bytes : qbytes;
                 std::vector<uint8_t> ends(2 * guard);
-                ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+                ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                         .memcpy(ends.data(), storage, guard)
                                         .wait()),
                    "native PLE prefix guard");
                 ck(DPCT_CHECK_ERROR(
-                       dpct::get_in_order_queue()
+                       (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                            .memcpy(ends.data() + guard,
                                    static_cast<const uint8_t *>(storage) +
                                        guard + payload,
@@ -1305,14 +1305,14 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_emb, cap.emb.data(), nd * 4).wait()),
                "native PLE restore input");
             k::ple_block(d_emb, d_hid, d_hist, w, out, ple_ws, nullptr);
             ck(DPCT_CHECK_ERROR(
                    dpct::get_current_device().queues_wait_and_throw()),
                "native PLE default restore sync");
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                     .memcpy(replay.data(), d_cr, hcd * 4)
                                     .wait()),
                "native PLE default restore read");
@@ -1338,13 +1338,13 @@ int main(int argc, char** argv) {
                    dpct::get_current_device().queues_wait_and_throw()),
                "compact PLE sync");
             std::vector<float> compact_norm(hcd), compact_result(hcd);
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                     .memcpy(compact_norm.data(),
                                             compact.normalized,
                                             hcd * sizeof(float))
                                     .wait()),
                "compact PLE normalized");
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue()
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())
                                     .memcpy(compact_result.data(), d_hid,
                                             hcd * sizeof(float))
                                     .wait()),
@@ -1359,7 +1359,7 @@ int main(int argc, char** argv) {
             memory. If the memory is not pageable, call wait() on event return
             by memcpy API to ensure synchronization behavior.
             */
-            ck(DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
+            ck(DPCT_CHECK_ERROR((dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(
                    d_hid, cap.hidden.data(), hcd * sizeof(float)).wait()),
                "restore PLE hidden input");
             sycl::free(compact_workspace, dpct::get_in_order_queue());
