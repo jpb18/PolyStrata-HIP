@@ -709,6 +709,9 @@ class Service:
         self.trusted_origins: list[str] = []
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
         self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
+        # #332: the API request monitor (/api-monitor) keeps the last 100 requests' prompts and answers in memory,
+        # so it is off unless the config's "api_monitor" (or --api-monitor) turns it on
+        self.api_monitor = False
         self.api_requests = collections.deque(maxlen=100)  # bounded I/O in memory; no headers or API keys
         self.request_trace = threading.local()
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
@@ -931,6 +934,9 @@ class Service:
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
     def begin_request(self, path, req):
+        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then)."""
+        if not self.api_monitor:
+            return None
         raw = json.dumps(req, ensure_ascii=False, indent=2)
         record = {"id": uuid.uuid4().hex[:12], "path": path, "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
@@ -1636,8 +1642,16 @@ def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
+        record = None                                       # #332: this request's monitor record, if kept
+
         def log_message(self, fmt, *args):
             pass
+
+        def _note(self, **values):
+            """#332: what the monitor shows about this request (nothing when the monitor is off)."""
+            if self.record is not None:
+                with svc.status_lock:
+                    self.record.update(values)
 
         def _cors(self):
             """#321: CORS headers for an API path (/v1/*) and an origin the config lists in cors_origins - nothing
@@ -1668,7 +1682,7 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _json(self, code, obj):
-            if getattr(self, "record", None) is not None:
+            if self.record is not None:
                 with svc.status_lock:
                     self.record["http_status"] = code
                     raw = json.dumps(obj, ensure_ascii=False, indent=2)
@@ -1734,7 +1748,7 @@ def make_handler(svc: Service):
                     # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
                     self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
-            if path == "/api/requests":
+            if path == "/api/requests" and svc.api_monitor:
                 if self._authorized():
                     request_id = parse_qs(urlsplit(self.path).query).get("id", [None])[0]
                     records = svc.request_records(request_id)
@@ -1752,7 +1766,7 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
-            if path in ("", "/api-monitor"):
+            if path == "" or (path == "/api-monitor" and svc.api_monitor):
                 body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1879,10 +1893,10 @@ def make_handler(svc: Service):
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
 
             except OSError:
-                if getattr(self, "record", None) is not None:
-                    self.record["outcome"] = "disconnected"
+                self._note(outcome="disconnected")
+                raise                                        # as before #332: the server's own handling
             finally:
-                record = getattr(self, "record", None)
+                record = self.record
                 if record is not None:
                     with svc.status_lock:
                         record["wallclock_s"] = round(time.perf_counter() - record["_clock"], 3)
@@ -1948,8 +1962,7 @@ def make_handler(svc: Service):
             self._json(200, {"shared": bool(shared), "defaults": shared})
 
         def _sse(self):
-            if getattr(self, "record", None) is not None:
-                self.record["http_status"] = 200
+            self._note(http_status=200)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1958,7 +1971,13 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _capture(self, items, api):
-            """Retain bounded input/output for the monitor without changing the API response."""
+            """Retain bounded input/output for the monitor without changing the API response (the items as they
+            are when the monitor is off)."""
+            if self.record is None:
+                return items
+            return self._captured(items, api)
+
+        def _captured(self, items, api):
             try:
                 for item in items:
                     if item is not None:
@@ -2024,19 +2043,20 @@ def make_handler(svc: Service):
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
-                self.record["outcome"] = "disconnected"
+                self._note(outcome="disconnected")
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
             except EngineDied as e:                          # mid-stream: say so, then end the stream properly
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
-                self.record["error"] = err["error"]
+                self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
             except StructuredOutputError as e:
                 err = {"error": {"type": "structured_output_failed", "code": "structured_output_failed", "message": str(e)}}
+                self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
             except ValueError as e:                          # the engine's ERR after the stream started: the
                 err = {"error": {"type": "server_error", "message": str(e)}}   # headers are sent, so no 400 now
-                self.record["error"] = err["error"]
+                self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _count_tokens(self, req):
@@ -2071,16 +2091,16 @@ def make_handler(svc: Service):
                                          json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
                     self.wfile.flush()
             except OSError:
-                self.record["outcome"] = "disconnected"
+                self._note(outcome="disconnected")
                 cancel.set()
                 events.close()
             except EngineDied as e:                          # mid-stream: Anthropic's error event
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
-                self.record["error"] = err["error"]
+                self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
             except ValueError as e:                          # the engine's ERR after the stream started
                 err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
-                self.record["error"] = err["error"]
+                self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler
@@ -2288,6 +2308,9 @@ def main() -> int:
                                          "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
                                          "the config)")
     ap.add_argument("--lazy", action="store_true", help="start the text-only API unloaded; load on first request")
+    ap.add_argument("--api-monitor", action="store_true",
+                    help="the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in "
+                         "memory (also \"api_monitor\": true in the config; off by default)")
     ap.add_argument("--idle-unload", type=float, default=None, metavar="SECONDS",
                     help="unload the model after this many seconds without requests, so other programs (games, other "
                          "model servers) can use the VRAM; the next request loads it again (also \"idle_unload_s\" "
@@ -2369,6 +2392,11 @@ def main() -> int:
     svc.api_key = a.api_key or cfg.get("api_key", "")
     svc.cors_origins = origins_of(cfg.get("cors_origins"), "cors_origins", wildcard=True)
     svc.trusted_origins = origins_of(cfg.get("trusted_origins"), "trusted_origins", wildcard=False)
+    svc.api_monitor = a.api_monitor or cfg.get("api_monitor") is True
+    if svc.api_monitor:
+        print("[strata] API request monitor on (/api-monitor): the last 100 requests' prompts and answers are kept in "
+              "memory" + ("" if svc.api_key else "; anyone who can reach this server can read them (no API key)"),
+              flush=True)
     if svc.cors_origins:
         print(f"[strata] CORS on /v1/* for {', '.join(svc.cors_origins)}"
               + ("" if svc.api_key or "*" not in svc.cors_origins else

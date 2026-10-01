@@ -28,11 +28,37 @@ class ReloadableEngine(MockEngine):
         self.running, self.unloaded = True, False
 
 
+class MonitorOff(unittest.TestCase):
+    """#332 is opt-in: by default no prompt or answer is kept, and the monitor's endpoints do not exist."""
+
+    def test_off_by_default(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "Hello.", max_context=4096), tok,
+                      ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            req = urllib.request.Request(base + "/v1/chat/completions", headers={"Content-Type": "application/json"},
+                                         data=json.dumps({"messages": [{"role": "user", "content": "secret"}]}).encode())
+            with urllib.request.urlopen(req, timeout=10) as r:
+                self.assertEqual(r.status, 200)
+            self.assertEqual(len(svc.api_requests), 0)
+            for path in ("/api/requests", "/api-monitor"):
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    urllib.request.urlopen(base + path, timeout=10)
+                self.assertEqual(e.exception.code, 404, path)
+                e.exception.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class Monitor(unittest.TestCase):
     def setUp(self):
         self.tok = ByteTokenizer()
         self.engine = ReloadableEngine(self.tok, "Thought.</think>\nHello <script>alert(1)</script>.", max_context=16384)
         self.svc = Service(self.engine, self.tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        self.svc.api_monitor = True                       # opt-in ("api_monitor": true / --api-monitor)
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -52,9 +78,11 @@ class Monitor(unittest.TestCase):
             return response.status, json.loads(raw) if "application/json" in response.headers.get("Content-Type", "") else raw
 
     def chat(self, api="openai", **kwargs):
+        # Anthropic thinks only when asked (#278): "thinking" there, reasoning_effort for OpenAI
+        think = {"thinking": {"type": "enabled", "budget_tokens": 1024}} if api == "anthropic" else             {"reasoning_effort": "low"}
         return self.request("/v1/messages" if api == "anthropic" else "/v1/chat/completions",
                             {"messages": [{"role": "user", "content": "Say hello."}],
-                             "max_tokens": 256, "reasoning_effort": "low", **kwargs})
+                             "max_tokens": 256, **think, **kwargs})
 
     def latest(self):
         summary = self.request("/api/requests")[1]["requests"][0]

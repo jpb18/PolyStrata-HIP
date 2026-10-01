@@ -817,6 +817,9 @@ then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without
 
 ### API request monitor
 
+Off by default, since it keeps prompts and answers in memory: turn it on with `"api_monitor": true` in
+`strata-<model>.json` (or `serve/server.py --api-monitor`); otherwise nothing is recorded and the two endpoints below
+answer 404.
 Open `/api-monitor` to inspect API traffic without opening a chat. It shows the model state, safe
 load/unload controls, active/queued requests, original request bodies, output, separate reasoning and
 non-stream response bodies. Total wall-clock includes FIFO waits and automatic loading; load, queue,
