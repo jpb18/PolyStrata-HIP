@@ -1274,9 +1274,24 @@ bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int3
         const double extra = has_extra ? (double) row[extra_id] - lse : NAN;
         const double without = has_extra && tgt != extra_id && sum_without > 0.0
                                    ? (double) row[tgt] - (maxv + std::log(sum_without)) : NAN;
-        std::fprintf(out, "%lld\t%d\t%.9f\t%lld\t%.9f\t%d\t%.9f\t%.9f\n", (long long) (pos0 + t), (int) tgt,
+        std::fprintf(out, "%lld\t%d\t%.9f\t%lld\t%.9f\t%d\t%.9f\t%.9f", (long long) (pos0 + t), (int) tgt,
                      (double) row[tgt] - lse, (long long) top, maxv - lse, (int) (top == (int64_t) tgt), extra,
                      without);
+        // STRATA_LOGPOS_TOPK=K: the K most likely tokens and their log-probabilities too (`id:logprob`), for a
+        // top-k comparison with another engine on the same tokens (docs/UNSLOTH_Q4.md)
+        static const int topk = [] {
+            const char* v = std::getenv("STRATA_LOGPOS_TOPK");
+            return v != nullptr ? std::max(0, std::min(256, std::atoi(v))) : 0;
+        }();
+        if (topk > 0) {
+            std::vector<int32_t> order((size_t) n_vocab_);
+            for (int64_t v = 0; v < n_vocab_; ++v) order[(size_t) v] = (int32_t) v;
+            std::partial_sort(order.begin(), order.begin() + topk, order.end(),
+                              [&](int32_t a, int32_t b) { return row[a] > row[b]; });
+            for (int j = 0; j < topk; ++j)
+                std::fprintf(out, "\t%d:%.6f", order[(size_t) j], (double) row[order[(size_t) j]] - lse);
+        }
+        std::fprintf(out, "\n");
     }
     std::fflush(out);
     return true;
