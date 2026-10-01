@@ -3697,9 +3697,34 @@ int main(int argc, char** argv) {
                     p.first = (int32_t) (p.cache->slots() - part_slots(p, chunk));
                     p.first_now = p.first;
                 }
+                // #340: a split stage whose card still has room for the chunk's buffers (its cache already holds
+                // every expert of its layers, so auto stopped short of its VRAM) keeps them as its own instead of
+                // borrowing cache slots: nothing of it is lent, streamed during the prompt or refilled after it.
+                // Room = the buffers + 1.5 GiB (the verify windows, the draft head, hipBLAS/cuBLAS workspaces made
+                // after this).  Layer splits only - one GPU keeps its loan exactly as before.
+                // STRATA_SPLIT_OWN_BUFFERS=0: every stage borrows (0.1.30/0.1.31).
+                static const bool own_ok = [] {
+                    const char* v = std::getenv("STRATA_SPLIT_OWN_BUFFERS");
+                    return v == nullptr || v[0] != '0';
+                }();
+                if (pf_parts.size() > 1 && own_ok) {
+                    for (PfPart& p : pf_parts) {
+                        const strata::core::OnDevice on(p.dev);
+                        size_t fb = 0, tb = 0;
+                        if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
+                        const uint64_t need = strata::prefill::Prefill::bytes_needed(g, *p.ses, chunk);
+                        if ((uint64_t) fb >= need + (3ull << 29)) {
+                            std::fprintf(stderr, "strata serve:   CUDA%d keeps its own prompt buffers (%.2f GiB of "
+                                                 "%.2f GiB free): no loan\n", p.dev < 0 ? 0 : p.dev,
+                                         (double) need / 1073741824.0, (double) fb / 1073741824.0);
+                            p.first = -1;
+                            p.first_now = -1;
+                        }
+                    }
+                }
                 lend_first = pf_parts[0].first;
-                borrow = xcache.device_slot(lend_first);
-                borrow_bytes = part_bytes(pf_parts[0], lend_first);
+                borrow = lend_first >= 0 ? xcache.device_slot(lend_first) : nullptr;
+                borrow_bytes = lend_first >= 0 ? part_bytes(pf_parts[0], lend_first) : 0;
             } else if (o.prefill_auto) {
                 o.prefill_chunk = 1024;   // nothing lendable: small buffers of its own
             } else if (pf_parts.size() > 1) {
@@ -3718,11 +3743,14 @@ int main(int argc, char** argv) {
         } else if (o.prefill_auto && d_res == nullptr) {
             o.prefill_chunk = 1024;       // #85: no expert cache at all (a full 8 GB card): small buffers of its own
         }
-        if (borrow != nullptr) {
-            std::fprintf(stderr, "strata serve: the prompt path borrows %lld CUDA0 cache slots (%.2f GiB)\n",
-                         (long long) (xcache.slots() - lend_first), (double) borrow_bytes / 1073741824.0);
+        bool any_loan = borrow != nullptr;
+        for (size_t i = 1; i < pf_parts.size(); ++i) any_loan = any_loan || pf_parts[i].first >= 0;
+        if (any_loan) {
+            if (borrow != nullptr)
+                std::fprintf(stderr, "strata serve: the prompt path borrows %lld CUDA0 cache slots (%.2f GiB)\n",
+                             (long long) (xcache.slots() - lend_first), (double) borrow_bytes / 1073741824.0);
             for (size_t i = 1; i < pf_parts.size(); ++i)   // one loan per stage, from that stage's own cache
-                std::fprintf(stderr, "strata serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
+                if (pf_parts[i].first >= 0) std::fprintf(stderr, "strata serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
                              pf_parts[i].dev, (long long) (pf_parts[i].cache->slots() - pf_parts[i].first),
                              (long long) pf_parts[i].cache->slots(),
                              (double) part_bytes(pf_parts[i], pf_parts[i].first) / 1073741824.0);
@@ -3814,15 +3842,15 @@ int main(int argc, char** argv) {
                 sp.reset();
                 (void) cudaGetLastError();
                 o.prefill_chunk = next;
-                if (borrow != nullptr) {         // smaller loans for the smaller chunk
+                if (any_loan) {                  // smaller loans for the smaller chunk
                     for (PfPart& p : pf_parts)
                         if (p.first >= 0) {
                             p.first = (int32_t) (p.cache->slots() - part_slots(p, next));
                             p.first_now = p.first;
                         }
                     lend_first = pf_parts[0].first;
-                    borrow = xcache.device_slot(lend_first);
-                    borrow_bytes = part_bytes(pf_parts[0], lend_first);
+                    borrow = lend_first >= 0 ? xcache.device_slot(lend_first) : nullptr;
+                    borrow_bytes = lend_first >= 0 ? part_bytes(pf_parts[0], lend_first) : 0;
                 }
                 err.clear();
                 continue;
