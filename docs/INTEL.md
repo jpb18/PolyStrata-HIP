@@ -1,35 +1,43 @@
 # Strata on an Intel Arc
 
-Strata's engine is CUDA. On an Intel Arc the same model runs behind the same Strata server, with
-llama.cpp's SYCL backend doing the arithmetic. Everything above the engine - the OpenAI and Anthropic
-APIs, streaming, tool calls, MCP, the web app - is unchanged.
+Strata's engine is CUDA. On an Intel Arc there are two ways to run the same model behind the same Strata
+server (OpenAI and Anthropic APIs, streaming, tool calls, MCP, the web app all unchanged):
 
-Written for and measured on an **Arc Pro B70 (32 GB)** running the Coder (IQ1_M) on Ubuntu 24.04.
+- **Strata's own engine, ported to SYCL** (`sycl/`, the section "The engine itself on Intel" below). The
+  default once it is built: setup.py picks it on an Intel card when `build-sycl-aot/strata` and the
+  `strata-sycl-dev` image exist.
+- **llama.cpp's SYCL backend** (`--intel-engine llama`, or when the port is not built). Simpler to set
+  up, about a third of the speed.
 
-## What you get
+Written for and measured on an **Arc Pro B70 (32 GB)** running the Coder (IQ1_M) on Ubuntu 24.04, in a
+PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 
-| | NVIDIA (Strata engine) | Intel Arc (llama.cpp engine) |
-|---|---|---|
-| model files | the same GGUFs | the same GGUFs |
-| where the model lives | experts in RAM, hot ones on the card | **all of shard 1 on the card** (it fits a 32 GB card); shard 2's lookup table paged from disk |
-| RAM needed | 32-64 GB | little: the model is on the card (23 GB was fine) |
-| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | 23-25 tok/s on the B70 |
-| prompt reading | ~1,870 tok/s | ~150 tok/s |
-| speculative decoding (MTP) | yes | no (the GGUF carries no draft layer llama.cpp can use) |
-| images | yes | not yet |
-| context | up to 262K | 32K by default; 131K is the measured ceiling on a 32 GB card (see below); 262K does not fit |
+## What you get (2026-10-01)
 
-The speed gap is the SYCL backend's known state on Battlemage: general matrix multiplies do not use
-the XMX units yet (only the oneDNN flash-attention path does). It is upstream llama.cpp work, not
-something in Strata. Decode is GPU-bound at 90%+ busy, so nothing is falling back to the CPU.
+| | NVIDIA (Strata engine) | Intel Arc, Strata SYCL port | Intel Arc, llama.cpp |
+|---|---|---|---|
+| model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
+| where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
+| RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
+| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **70.8 tok/s** (19-token prompt, 256 greedy tokens), **63.6** after a 2,184-token prompt; ~56 through the API on a chat request | 23-25 tok/s |
+| prompt reading | ~1,870 tok/s | **799 tok/s** at 2,184 tokens, 1,062 at 80K | ~150 tok/s (424 at 105K) |
+| speculative decoding (MTP) | yes | yes (the base checkpoint's draft layer; 70-85% of drafts accepted on code) | no |
+| images | yes | not yet | not yet |
+| context | up to 262K | 256K measured (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
+
+Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
+on the text"). The SYCL numbers are greedy runs of the engine test rig on the final 2026-09-30 build (commit
+ccdae3e); "Decode round 2" below lists what each change bought.
 
 ## Setup
 
     ./setup.sh
 
 Setup notices the Arc (no `nvidia-smi`; an Intel GPU under the `xe` or `i915` driver in sysfs), says
-so, and takes the Intel path: no compiler, no CUDA toolkit. It downloads the model, exports the
-tokenizer, finds a `llama-server`, and writes a config with a `"llama"` block and a start script.
+so, and takes the Intel path: no CUDA toolkit. With the SYCL port built it writes a `"strata"` config for it
+(see "Serving the port" below); otherwise, or with `--intel-engine llama`, it finds a `llama-server` and writes a
+config with a `"llama"` block and a start script. The rest of this section and the next two are that llama.cpp
+path.
 
 Where the `llama-server` comes from, in order:
 
@@ -299,8 +307,9 @@ repeated to length, 64 greedy tokens after it:
 | 256K | k8v4 | 752 tok/s | 3.8 tok/s | 30.7 GB | 11,294 |
 | 256K | int8 | 718 tok/s | 3.7 tok/s | 30.7 GB | 10,923 |
 
-Every configuration completes and answers coherently; decode after the prompt is set by how many experts the KV
-leaves room for. **KV streaming fixes it** (`--kv-resident 32768`: the whole KV in pinned host memory, only the
+(Measured before the 2026-09-30 decode work in "Decode round 2"; decode after a long prompt is higher now, not
+re-measured.) Every configuration completes and answers coherently; decode after the prompt is set by how many
+experts the KV leaves room for. **KV streaming fixes it** (`--kv-resident 32768`: the whole KV in pinned host memory, only the
 attended window in VRAM): every expert stays in VRAM and decode after the prompt is 38.7 tok/s at 128K int8
 (from 8.5), 35.3 at 128K q4_0, 31.3 at 256K int8 (from 3.7) and 31.5 at 256K q4_0 (from 5.0); the prompt pays
 5-13% (725-860 tok/s). setup.py turns it on from 64K up for the SYCL engine and keeps INT8. k8v4 works through the FP32 attention fallback; its dedicated
@@ -335,7 +344,8 @@ attached (paths in the config's `args` are the container's, the data root mounte
 ```
 
 Measured through the OpenAI API with those sampling defaults: 36 tok/s decode on a first turn, 33 on a follow-up
-(which reuses the conversation's cached prompt), against 24-26 for llama.cpp on the same card. The reserve matters:
+(which reuses the conversation's cached prompt), against 24-26 for llama.cpp on the same card. After the 2026-09-30
+decode work: 55.7 tok/s on a 300-token answer (prompt included), 55-59 tok/s over 5,000-18,000-token answers. The reserve matters:
 with `--stream-experts` there is no host copy of the experts, so any expert left out of VRAM is read from the SSD
 and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
 5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free.
@@ -343,7 +353,8 @@ and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 12
 `setup.py` writes this config by itself on an Intel card once the SYCL engine is built (`build-sycl-aot/strata`
 and the `strata-sycl-dev` image): a native pack, the MTP draft layer (from an existing `mtp-q2_0.gguf` without the
 5 GB download), the container's paths, the reserve (1,024 MiB up to 32K, 2,048 with 4,096-token chunks above),
-Q4_0 KV above 64K, and the `sampling` block of an earlier config kept. `--intel-engine llama` keeps llama.cpp.
+INT8 KV with `--kv-resident 32768` from 64K up (when the RAM holds the KV), and the `sampling` block of an earlier
+config kept. `--intel-engine llama` keeps llama.cpp.
 
 **Speed depends on the text.** Decode with speculative decoding tracks how often the draft layer guesses right.
 The served engine at 32K context: 45-51 tok/s on the rig's test prompt (continuing a Fibonacci function, 77-85%
@@ -435,24 +446,34 @@ wherever upstream touched a file they mirror. They are refreshed by re-migration
 5. A fixup whose pattern upstream changed shows up as a compile error (the PTX gate became an `#elif`
    under upstream's `__HIPCC__` guard); extend the fixup, re-run it, rebuild.
 
-**Not ported yet.**
+**Not ported yet (2026-10-01).**
 
 - Three kernels carry inline PTX (`mma.sync` tensor-core matrix ops, `ldmatrix`, `cp.async`):
-  `qsa_prompt_attn`, `qsa_select`'s block scores, `native_qsa_score`. Each already has the "older card"
-  fallback the CUDA build uses below sm_80, and the SYCL build takes that path: the launchers refuse the
-  device and their callers use the older kernels. The XMX versions (`joint_matrix`, bf16/f16 on Xe2; no
-  tf32) are the next piece of work and the one that decides prompt speed.
+  `qsa_prompt_attn`, `qsa_select`'s block scores, `native_qsa_score`. The SYCL build takes the "older card"
+  fallback the CUDA build uses below sm_80. `qsa_prompt_attn` also has an XMX version (`joint_matrix`, opt-in
+  `STRATA_PROMPT_ATTN_XMX=1`): correct, but slower than the fallback (see "XMX prompt attention v2").
 - The ggml MMQ prefill path (`moe_mmq.cu`) needs llama.cpp's ggml-cuda sources; not built.
-- AOT device code (`-DSTRATA_SYCL_AOT=bmg-g31`) is wired but untested; the port JITs from SPIR-V.
+- AOT device code is what runs: `AOT=bmg-g31 BUILD_DIR=.../build-sycl-aot` (the JIT build costs ~47 s of
+  compiling on the first window).
 
 ## Not done
 
-- Images. Strata's vision path encodes with `strata-vision` into embeddings the CUDA engine reads;
-  llama-server takes the image itself (`--mmproj`). Wiring that is the next piece.
-- Speculative decoding. Strata's MTP draft is its own packed format; the GGUF has none.
-- The expert-residency profile and n-gram lookup: moot with the model on the card.
+- Images, on both Intel engines. Strata's vision path encodes with `strata-vision` into embeddings the CUDA
+  engine reads; neither the SYCL port nor the llama.cpp config wires it yet.
+- Speculative decoding on the llama.cpp path (the GGUF carries no draft layer llama.cpp can use). The SYCL
+  port has it (MTP draft layer, `--mtp`).
 
-## Measured, 2026-09-29, Arc Pro B70, Coder IQ1_M, 32K context, q8_0 KV
+## Measured, 2026-09-30, Arc Pro B70, Coder IQ1_M, 32K context, INT8 KV: the SYCL port
+
+| | |
+|---|---|
+| decode | 70.8 tok/s on a 19-token prompt, 63.6 after a 2,184-token prompt (256 greedy tokens, MTP + suffix drafts) |
+| prompt | 799 tok/s on 2,184 tokens |
+| through the API | 55.7 tok/s on a 300-token chat answer, prompt included |
+| VRAM | all 12,288 experts resident, ~1.9 GB free with everything loaded (`--vram-reserve-mib 1024`) |
+| RAM | no host copy of the experts (`--stream-experts`) |
+
+## Measured, 2026-09-29, Arc Pro B70, Coder IQ1_M, 32K context, q8_0 KV: llama.cpp
 
 | | |
 |---|---|
