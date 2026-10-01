@@ -53,7 +53,7 @@ The rest of setup is the same as on NVIDIA: the model download, the start script
 
 ## Windows
 
-Since 0.1.33 an AMD card on Windows is set up like an NVIDIA one: download Strata, double-click `START-HERE.bat`.
+Since 0.1.34 an AMD card on Windows is set up like an NVIDIA one: download Strata, double-click `START-HERE.bat`.
 On a PC with no NVIDIA card Strata can use, the AMD card is chosen by itself; with both, setup asks
 (`START-HERE.bat --backend hip` picks AMD directly).
 
@@ -80,7 +80,7 @@ On a PC with no NVIDIA card Strata can use, the AMD card is chosen by itself; wi
   mapped memory through it correctly, but a device-to-device copy into it does not land, which is why
   `tests/hip/handoff` times out there (the engine does not use that copy; `tests/hip/mapped_alias` reports it).
 
-**What is validated (0.1.33):** #325's author ran the engine of this port on an RX 9070 XT (Windows 11, ROCm
+**What is validated (0.1.34):** #325's author ran the engine of this port on an RX 9070 XT (Windows 11, ROCm
 10.2.0a20260930 in `.venv`, compiled on the PC): Coder IQ1_M at 32K, 29.2 tok/s decode, ~181 tok/s prefill,
 correct answers; ctest 42 of 46. The maintainers have no Windows AMD card: the release zip was built on an NVIDIA PC,
 and checked there on the Ryzen CPU's integrated Radeon (gfx1036, a test build of the same tree): with only the zip's
