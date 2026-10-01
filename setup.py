@@ -2767,6 +2767,8 @@ def main() -> int:
             if d.get("budget"):
                 verdict = (f"EXPERIMENTAL, fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
                            "read from the SSD" if ram >= d["ram_gb"] else "does not fit")
+                if hip:                                # #429: not run on AMD yet (its prompt kernels are CUDA-only)
+                    verdict += " - NVIDIA only so far, untested on AMD"
             elif low_ram_needed(m, ram) and low_ram_fits(m, ram, gpu["vram_gb"]) and a.low_ram != "off":
                 verdict = (f"fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, gpu['vram_gb']):.0f}% "
                            "of its experts, " + ("the rest stays in RAM)" if low_ram_resident(m, ram, gpu["vram_gb"])
@@ -2812,6 +2814,14 @@ def main() -> int:
         # experts.bin: it would be another 77 GB on the disk), and one GPU (the budget mode has no layer split)
         warn(f"{model} is EXPERIMENTAL (docs/UNSLOTH_Q4.md): most of its experts are read from the SSD while it "
              "answers, so it is several times slower than the 2-3-bit models; quality checked against llama.cpp")
+        if hip:
+            # #429 (jkuepker): checked before the 111 GB download.  The HIP engine has no prompt kernels for its
+            # Q4_K / Q5_K experts (STRATA_MMQ_KQUANTS is CUDA-only) and it has not been run on AMD: asked, not refused
+            confirm_risk(f"{model} has not been run on AMD cards yet: its prompt kernels are NVIDIA-only, so on "
+                         f"{gpu_name(gpu)} long prompts read much more slowly, and it may not work at all",
+                         bool(a.model), a.yes, f"{model} is NVIDIA-only so far", "choose one of the 2-3-bit models, "
+                         f"or --model {model} --yes to try it on AMD anyway", "  Try it anyway?")
+            warn(f"installing {model} on an AMD card, as you chose (please report how it runs)")
         if ram < MODELS[model]["ram_gb"]:
             confirm_risk(f"{model} needs {MODELS[model]['ram_gb']} GB of RAM or more; this PC has {ram:.0f} GB: "
                          f"its RAM budget would be {resident_budget_gib(model, ram)} GiB, so nearly every expert is "
@@ -2976,11 +2986,17 @@ def main() -> int:
         if s.exists() and not done(s) and whole_shard(s):
             mark(s, "whole (checked against its own tensor directory)")
     have_model = all(s.exists() and (done(s) or a.gguf_dir) for s in shards)
-    need = (0 if a.gguf_dir or have_model else MODELS[model]["download_gb"]) + 8 + \
+    # #425 (jctaborda): a download that resumes needs room only for what is still missing - the finished shards and
+    # the .part files already on the disk count
+    on_disk = sum(f.stat().st_size for s in shards for f in (s, s.with_name(s.name + ".part")) if f.is_file()) / 1e9
+    to_fetch = 0 if a.gguf_dir or have_model else max(MODELS[model]["download_gb"] - on_disk, 0)
+    need = to_fetch + 8 + \
         (40 if model == "Q2_0" and avx512 and family == "qwen" else 0) + (1 if vision != "none" else 0) + \
         (MODELS[model]["arena_gb"] + 1 if low_ram and not (model == "Q2_0" and avx512 and family == "qwen") else 0)
     if free_gb(models_dir) < need:
-        fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB", "use --models-dir on a bigger drive")
+        fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
+             (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
+             "use --models-dir on a bigger drive")
 
     # ---- 3. python packages
     step(3, "Python packages")
