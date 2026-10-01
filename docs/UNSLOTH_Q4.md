@@ -151,10 +151,13 @@ low-RAM mode; `STRATA_RESIDENT_PIN=0` keeps the budget locked only (the CPU then
   273-282 s). Reading a prompt streams every expert once per 4K chunk, and the third of them outside the RAM budget
   come from the SSD (~35 GB per chunk), so the prompt path now reads them with 32 threads and up to 128 blobs in
   flight when the experts are read from the GGUF in place (`STRATA_STAGER_THREADS` / `STRATA_STAGER_RING` override
-  it; 4 and 16 before, still the default for every other model). The experts' products go through llama.cpp's MMQ
-  kernels for Q4_K / Q5_K / Q5_1 / Q8_0 (as for the other models' formats; `STRATA_PREFILL_MMQ=0` for FP16): 4x less
-  GPU time for them, but on this PC the prompt waits for the SSD either way (the same 29 s per 4K chunk with or
-  without). Between the chunks, the 28.8 GB PLE table's rows take ~5 s per chunk.
+  it; 4 and 16 before, still the default for every other model). Between the chunks, the 28.8 GB PLE table's rows
+  take ~5 s per chunk.
+- An engine compiled with `-DSTRATA_MMQ_KQUANTS=ON` multiplies the Q4_K / Q5_K / Q5_1 experts of a prompt with
+  llama.cpp's MMQ kernels (as the other models' formats always are) instead of dequantizing them to FP16: 4x less GPU
+  time for those products, but on this PC the prompt waits for the SSD either way (29 s per 4K chunk with or
+  without). Off in the released engine: it loads every kernel at start, and these took 1-3 expert slots of VRAM from
+  every model.
 - The speed varies from run to run (6.7-8.6 tok/s at 40 GiB for the same prompt), with what the OS file cache holds.
 - For comparison, IQ3_S (all its experts in RAM) writes ~53 tok/s on the same PC ([the speed tables](DETAILS.md#speed-measured)).
 - Where the time goes (`--stats` on the command line): at 40 GiB about 550-750 ms of each verify round (3.5 tokens) is
@@ -191,8 +194,8 @@ positions after only 512 tokens agree a little less (89.2%), and the perplexitie
 scale, Strata's own greedy run and its teacher-forced rerun of the continuation pick different tokens at 6% of the
 positions (93.8% the same: other window sizes, other experts in VRAM), the same kind of near-tie flips. The 16K
 prompts were read by Strata's batched prompt path (15,872 tokens), the rest through the verify windows. These numbers
-are engine 0.1.31's prompt path (FP16 products); with 0.1.32's MMQ prompt path the continuation after the 16K prompt
-agrees at 92.2% (KL 0.029, three runs, identical).
+are the FP16 prompt path's (the released engine's); with the MMQ prompt path (`-DSTRATA_MMQ_KQUANTS=ON`, above) the
+continuation after the 16K prompt agrees at 92.2% (KL 0.029, three runs, identical).
 
 To repeat it: Strata's side is `STRATA_LOGPOS=<file>` with `STRATA_LOGPOS_TOPK=20` (engine 0.1.32) on a serve
 engine with `--short-read` covering the positions to compare; llama.cpp's side was a short program over
@@ -213,8 +216,8 @@ engine with `--short-read` covering the positions to compare; llama.cpp's side w
   have kernels for; the engine checks every layer's formats at start and refuses an unsupported one by name.
 - Tests: the packer's synthetic 4-shard and conversion tests (`.venv/bin/python -m unittest discover -s tools -p
   test_iq_pack.py`); CTests `gguf_split_test`, `expert_layout_test`, `native_expert_parity_*` (the three real expert
-  format pairs against ggml-cpu, the Q5_1 min term, Q8_0 rows), `prefill_mmq_kquant_test` (the prompt path's MMQ
-  products for Q4_K / Q5_K / Q5_1 / Q8_0 against ggml's dequantized weights); the in-place mode against `experts.bin` on the Coder
+  format pairs against ggml-cpu, the Q5_1 min term, Q8_0 rows), `prefill_mmq_kquant_test` (with `-DSTRATA_MMQ_KQUANTS=ON`: the
+  prompt path's MMQ products for Q4_K / Q5_K / Q5_1 / Q8_0 against ggml's dequantized weights); the in-place mode against `experts.bin` on the Coder
   (identical tokens and logits).
 - Real runs: greedy answers to a coding prompt (correct) at every budget and setting above, identical across them;
   the same tokens as llama.cpp at 97.5-99% of the positions of short greedy answers and 90-91% after a 16K prompt,
