@@ -597,6 +597,13 @@ def free_gb(path):
 
 
 # ------------------------------------------------------------------------------------------------ downloads
+def drop_archive(z: Path) -> None:
+    """An unpacked or refused engine archive and its .done mark go: a refused one kept them, and every later run
+    reused it ("already downloaded") instead of the published one (PR #324)."""
+    z.unlink(missing_ok=True)
+    z.with_name(z.name + ".done").unlink(missing_ok=True)
+
+
 def download(url, dst: Path, what=None):
     """Resumable HTTP(S) download with a progress line; `file://` and plain paths are copied (tests, mirrors).
     A finished file gets a <name>.done mark, so a later run skips it without asking the server."""
@@ -1083,6 +1090,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
             warn(f"the ready-made engine at {base} is version {meta.get('version')}; this setup needs "
                  f"{need}: compiling instead")
         shutil.rmtree(tmp, ignore_errors=True)
+        drop_archive(z)
         return None
     archs = [int(a) for a in meta.get("archs", [])]
     miss = [int(x) for x in gpu.get("archs", [gpu["arch"]])
@@ -1091,6 +1099,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
         warn(f"the ready-made engine is built for {', '.join(str(a) for a in archs)}; your GPU is "
              f"{', '.join(str(x) for x in miss)}" + ("" if updating else ": compiling instead"))
         shutil.rmtree(tmp, ignore_errors=True)
+        drop_archive(z)
         return None
     for p in tmp.iterdir():
         dst = eng / p.name
@@ -1098,8 +1107,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
             shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
         p.replace(dst)
     shutil.rmtree(tmp, ignore_errors=True)
-    z.unlink(missing_ok=True)
-    z.with_name(z.name + ".done").unlink(missing_ok=True)
+    drop_archive(z)
     if not (eng / EXE).exists():
         fail("the ready-made engine archive has no " + EXE)
     if not WIN:
@@ -1814,6 +1822,17 @@ OLD_DRAFT_VOCABS = {"369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced959
 DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin"}
 
 
+def mtp_corrupt(mtp: Path, env=None) -> bool:
+    """#327: True when the MTP tensors an install fetched are not the pinned checkpoint's (tools/mtp_fetch.py verify,
+    which hashes only files that changed since they last checked out).  A mirror that ignored range requests left the
+    shards' starts there instead, and the draft layer built from them accepted nothing - with no error anywhere."""
+    if not (mtp / "tensors").is_dir():
+        return False
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "verify", "--out", str(mtp)], env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return r.returncode == 3
+
+
 def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
     """The draft layer's token subset in the MTP folder: `cjk` (data/draft_vocab.bin, since 0.1.27, #137) or `en`
     (data/draft_vocab_en.bin, the English/code subset before it: ~110 MiB less VRAM, English answers 1-2% faster).
@@ -2381,7 +2400,11 @@ def main() -> int:
     ok(f"model prepared: {pack}")
     mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
     rt = mtp / "rt"
-    if not (rt / "experts.bin").exists():
+    corrupt = (rt / "experts.bin").exists() and mtp_corrupt(mtp, env)
+    if corrupt:
+        warn("some MTP tensors are not the checkpoint's (a download mirror that ignored range requests, #327): "
+             "fetching them again and rebuilding the draft layer")
+    if corrupt or not (rt / "experts.bin").exists():
         say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
         say("  only its ~5 GB of MTP tensors are downloaded.")
         run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)], env=env)
