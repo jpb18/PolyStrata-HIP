@@ -1978,7 +1978,17 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
 OLD_DRAFT_VOCABS = {"369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced9597fb25"}   # to 0.1.26: 27 Han tokens
 
 
-DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin"}
+DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin", "cyrillic": "draft_vocab_cyrillic.bin"}
+
+
+def saved_draft_vocab(cfg_path: Path) -> str | None:
+    """The draft subset a model's config chose earlier (--draft-vocab), or None: a setup run again without the flag
+    rewrites the config, and would otherwise put the default subset back."""
+    try:
+        v = json.loads(cfg_path.read_text(encoding="utf-8-sig")).get("draft_vocab")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return v if v in DRAFT_VOCABS else None
 
 
 def mtp_corrupt(mtp: Path, env=None) -> bool:
@@ -1993,8 +2003,10 @@ def mtp_corrupt(mtp: Path, env=None) -> bool:
 
 
 def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
-    """The draft layer's token subset in the MTP folder: `cjk` (data/draft_vocab.bin, since 0.1.27, #137) or `en`
-    (data/draft_vocab_en.bin, the English/code subset before it: ~110 MiB less VRAM, English answers 1-2% faster).
+    """The draft layer's token subset in the MTP folder: `cjk` (data/draft_vocab.bin, since 0.1.27, #137), `en`
+    (data/draft_vocab_en.bin, the English/code subset before it: ~110 MiB less VRAM, English answers 1-2% faster) or
+    `cyrillic` (data/draft_vocab_cyrillic.bin: English/code and the whole Cyrillic script, for Ukrainian, Russian,
+    Bulgarian, Serbian... answers).
     Copied when missing or when a shipped subset other than the chosen one is there; a subset made by hand is kept."""
     new, dst = ROOT / "data" / DRAFT_VOCABS.get(choice, "draft_vocab.bin"), rt / "draft_vocab.bin"
     if not new.exists() or not rt.is_dir():
@@ -2005,8 +2017,9 @@ def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
                                       for f in DRAFT_VOCABS.values() if (ROOT / "data" / f).exists()}
         if old not in shipped or old == hashlib.sha256(new.read_bytes()).hexdigest():
             return
-        ok("draft layer: the token subset " + ("with Chinese, Japanese and Korean" if choice == "cjk" else
-                                               "for English and code (less VRAM)"))
+        ok("draft layer: the token subset " + {"cjk": "with Chinese, Japanese and Korean",
+                                               "cyrillic": "with the Cyrillic script"}.get(choice,
+                                                                                          "for English and code (less VRAM)"))
     shutil.copyfile(new, dst)
 
 
@@ -2132,7 +2145,8 @@ def main() -> int:
                     help="tune the engine's settings for this PC (about 5-10 minutes), then start the model")
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
-                         "and code only (~110 MiB less VRAM, English answers 1-2%% faster)")
+                         "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
+                         "and the Cyrillic script (Ukrainian, Russian... answers decode ~30%% faster)")
     ap.add_argument("--low-ram", choices=["auto", "on", "off", "resident", "mmap"], default="auto",
                     help="read the model's experts from one file in its folder instead of copying them all into RAM "
                          "(for a PC with a big GPU and little RAM); auto: when the experts would not fit the RAM. In "
@@ -2607,7 +2621,9 @@ def main() -> int:
              "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
         run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
             env=env)
-    refresh_draft_vocab(rt, a.draft_vocab or "cjk")
+    # a setup run again without --draft-vocab keeps the subset this model's config chose before (cyrillic, en)
+    draft_vocab = a.draft_vocab or saved_draft_vocab(ROOT / f"strata-{tag.lower()}.json")
+    refresh_draft_vocab(rt, draft_vocab or "cjk")
     ok(f"MTP draft layer: {rt}")
 
     # ---- 7. the start script
@@ -2682,8 +2698,8 @@ def main() -> int:
         cfg["host"] = a.host
     if a.api_key:
         cfg["api_key"] = a.api_key
-    if a.draft_vocab:
-        cfg["draft_vocab"] = a.draft_vocab
+    if draft_vocab:
+        cfg["draft_vocab"] = draft_vocab
     if vision != "none":
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
                          "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
