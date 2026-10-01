@@ -886,6 +886,12 @@ __global__ void __launch_bounds__(128) mmvq_multi_kernel(const uint8_t* __restri
 // ---------------------------------------------------------------- grouped native experts
 constexpr int GU_ROWS = 8;     // rows per block (one warp each)
 
+// Group g is computed by block row g % gridDim.y: rows y, y + gridDim.y, ... < *n_groups.  The callers size the
+// launch for the most groups a call can have (cap: every entry its own expert), but the count is only known on the
+// device, and a verify window's PCIe call usually has no group at all: with one block row per possible group every
+// unused one was cap x (2 n_ff / 8 + n_embd / 8) blocks that started only to return.  A smaller gridDim.y strides
+// instead.  Each group's rows are computed by the same warp code in the same order either way, so the results do
+// not depend on gridDim.y (gridDim.y = cap_groups is the one-row-per-group launch).
 template<int TG>
 __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                         const int32_t* __restrict__ grp_start,
@@ -893,20 +899,21 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
                                                         const int32_t* __restrict__ ent_tok,
                                                         const block_q8_1* __restrict__ xq, NativeExpertLayout L,
                                                         float* __restrict__ gate, float* __restrict__ up) {
-    const int g = blockIdx.y;
-    if (g >= *n_groups) return;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row = blockIdx.x * GU_ROWS + warp;             // 0 .. 2*n_ff
     if (row >= 2 * L.n_ff) return;
     const bool is_up = row >= L.n_ff;
     const int r = is_up ? row - (int) L.n_ff : row;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
-    const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+    const size_t off = (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
-    const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    for (int e = e0; e < e1; ++e) {
-        const float s = row_dot<TG>(wr, xq + (size_t) ent_tok[e] * xb, nb, lane);
-        if (lane == 0) (is_up ? up : gate)[(size_t) e * L.n_ff + r] = s;
+    const int ng = *n_groups;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* wr = (const uint8_t*) grp_ptr[g] + off;
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; ++e) {
+            const float s = row_dot<TG>(wr, xq + (size_t) ent_tok[e] * xb, nb, lane);
+            if (lane == 0) (is_up ? up : gate)[(size_t) e * L.n_ff + r] = s;
+        }
     }
 }
 
@@ -922,28 +929,29 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
                                                               const int32_t* __restrict__ ent_tok,
                                                               const block_q8_1* __restrict__ xq, NativeExpertLayout L,
                                                               float* __restrict__ gate, float* __restrict__ up) {
-    const int g = blockIdx.y;
-    if (g >= *n_groups) return;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row = blockIdx.x * GU_ROWS + warp;             // 0 .. 2*n_ff
     if (row >= 2 * L.n_ff) return;
     const bool is_up = row >= L.n_ff;
     const int r = is_up ? row - (int) L.n_ff : row;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
-    const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+    const size_t w_off = (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
-    const int e0 = grp_start[g], e1 = grp_start[g + 1];
     float* dst = is_up ? up : gate;
-    for (int e = e0; e < e1; e += GRP_NC) {
-        const int n = min(GRP_NC, e1 - e);
-        int off[GRP_NC];
+    const int ng = *n_groups;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {   // the group stride, as native_gu_kernel
+        const uint8_t* wr = (const uint8_t*) grp_ptr[g] + w_off;
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+            int off[GRP_NC];
 #pragma unroll
-        for (int c = 0; c < GRP_NC; ++c) off[c] = ent_tok[e + min(c, n - 1)] * xb;
-        float s[GRP_NC];
-        row_dot_multi<TG, GRP_NC>(wr, xq, off, n, nb, lane, s);
+            for (int c = 0; c < GRP_NC; ++c) off[c] = ent_tok[e + min(c, n - 1)] * xb;
+            float s[GRP_NC];
+            row_dot_multi<TG, GRP_NC>(wr, xq, off, n, nb, lane, s);
 #pragma unroll
-        for (int c = 0; c < GRP_NC; ++c)
-            if (c < n && lane == c) dst[(size_t) (e + c) * L.n_ff + r] = s[c];
+            for (int c = 0; c < GRP_NC; ++c)
+                if (c < n && lane == c) dst[(size_t) (e + c) * L.n_ff + r] = s[c];
+        }
     }
 }
 
@@ -962,18 +970,19 @@ __global__ void __launch_bounds__(256) native_down_kernel(const unsigned long lo
                                                           const int32_t* __restrict__ ent_dst,
                                                           const block_q8_1* __restrict__ hq, NativeExpertLayout L,
                                                           float* __restrict__ out) {
-    const int g = blockIdx.y;
-    if (g >= *n_groups) return;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r = blockIdx.x * 8 + warp;
     if (r >= L.n_embd) return;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
-    const uint8_t* wr = blob + L.down_off + (size_t) r * L.d_row;
+    const size_t off = L.down_off + (size_t) r * L.d_row;
     const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
-    const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    for (int e = e0; e < e1; ++e) {
-        const float s = row_dot<TD>(wr, hq + (size_t) e * hb, nb, lane);
-        if (lane == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = s;
+    const int ng = *n_groups;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {   // as native_gu_kernel
+        const uint8_t* wr = (const uint8_t*) grp_ptr[g] + off;
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; ++e) {
+            const float s = row_dot<TD>(wr, hq + (size_t) e * hb, nb, lane);
+            if (lane == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = s;
+        }
     }
 }
 
@@ -985,33 +994,32 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
                                                                 const int32_t* __restrict__ ent_dst,
                                                                 const block_q8_1* __restrict__ hq, NativeExpertLayout L,
                                                                 float* __restrict__ out) {
-    const int g = blockIdx.y;
-    if (g >= *n_groups) return;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r = blockIdx.x * 8 + warp;
     if (r >= L.n_embd) return;
-    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
-    const uint8_t* wr = blob + L.down_off + (size_t) r * L.d_row;
+    const size_t w_off = L.down_off + (size_t) r * L.d_row;
     const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
-    const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    for (int e = e0; e < e1; e += GRP_NC) {
-        const int n = min(GRP_NC, e1 - e);
-        int off[GRP_NC];
+    const int ng = *n_groups;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {   // the group stride, as native_gu_kernel
+        const uint8_t* wr = (const uint8_t*) grp_ptr[g] + w_off;
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+            int off[GRP_NC];
 #pragma unroll
-        for (int c = 0; c < GRP_NC; ++c) off[c] = (e + min(c, n - 1)) * hb;
-        float s[GRP_NC];
-        row_dot_multi<TD, GRP_NC>(wr, hq, off, n, nb, lane, s);
+            for (int c = 0; c < GRP_NC; ++c) off[c] = (e + min(c, n - 1)) * hb;
+            float s[GRP_NC];
+            row_dot_multi<TD, GRP_NC>(wr, hq, off, n, nb, lane, s);
 #pragma unroll
-        for (int c = 0; c < GRP_NC; ++c)
-            if (c < n && lane == c) out[(size_t) ent_dst[e + c] * L.n_embd + r] = s[c];
+            for (int c = 0; c < GRP_NC; ++c)
+                if (c < n && lane == c) out[(size_t) ent_dst[e + c] * L.n_embd + r] = s[c];
+        }
     }
 }
 
 // ---------------------------------------------------------------- q8_1 (quantize.cu)
-__global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __restrict__ y, long long n) {
-    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const float xi = x[i];
+// value i of a q8_1 row set (the warp holds block i / 32, lane = i % 32)
+__device__ __forceinline__ void q8_1_store(const float xi, block_q8_1* __restrict__ y, const long long i) {
     float amax = fabsf(xi), sum = xi;
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) {
@@ -1023,6 +1031,40 @@ __global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __
     const long long ib = i / 32, iqs = i % 32;
     y[ib].qs[iqs] = q;
     if (iqs == 0) y[ib].ds = make_half2(d, sum);
+}
+
+__global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __restrict__ y, long long n) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    q8_1_store(x[i], y, i);
+}
+
+// swiglu_entries_kernel and quantize_q8_1_kernel in one pass, over the call's own entries only:
+// [grp_start[0], grp_start[*n_groups]) (a call's entries are contiguous; the verify window's PCIe call starts after
+// its VRAM call) instead of all cap_entries twice - nothing reads the others: the down kernel reads its groups'.
+// n_ff is a multiple of 32, so a warp is one q8_1 block and the bounds are warp-uniform.  The values are the two
+// kernels': the SwiGLU product is rounded on its own - it must not contract into the first add of q8_1_store's block
+// sum, as it could not when it went through memory (CUDA: __fmul_rn; HIP's __fmul_rn is a plain product, so there
+// the product is written here under contract(off)) - then q8_1_store unchanged: the same blocks, bit for bit.
+__global__ void __launch_bounds__(256) swiglu_q8_1_entries_kernel(const float* __restrict__ gate,
+                                                                  const float* __restrict__ up,
+                                                                  const int32_t* __restrict__ grp_start,
+                                                                  const int32_t* __restrict__ n_groups, int n_ff,
+                                                                  block_q8_1* __restrict__ hq) {
+#if defined(__HIPCC__)
+#pragma clang fp contract(off)
+#endif
+    const long long lo = (long long) grp_start[0] * n_ff, hi = (long long) grp_start[*n_groups] * n_ff;
+    for (long long i = lo + (long long) blockIdx.x * blockDim.x + threadIdx.x; i < hi;
+         i += (long long) gridDim.x * blockDim.x) {
+        const float g = gate[i];
+#if defined(__HIPCC__)
+        const float h = (g / (1.0f + __expf(-g))) * up[i];
+#else
+        const float h = __fmul_rn(g / (1.0f + __expf(-g)), up[i]);
+#endif
+        q8_1_store(h, hq, i);
+    }
 }
 
 // ---------------------------------------------------------------- dequant (dequantize.cuh)
@@ -1490,10 +1532,18 @@ size_t native_expert_scratch_bytes(int64_t cap, int64_t n_ff) {
     return 3 * ((f + 255) & ~(size_t) 255) + (((size_t) cap * (size_t) (n_ff / 32) * sizeof(block_q8_1) + 255) & ~(size_t) 255);
 }
 
+namespace {
+bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
+}  // namespace
+
+void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
+
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
-                           int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream) {
+                           int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
+                           int64_t grid_groups) {
     if (cap_groups <= 0 || cap_entries <= 0) return;
+    if (L.n_ff % 32 != 0) { std::fprintf(stderr, "native_expert_grouped: n_ff %lld\n", (long long) L.n_ff); std::exit(1); }
     cudaStream_t s = (cudaStream_t) stream;
     const size_t f = (size_t) cap_entries * (size_t) L.n_ff * sizeof(float), fa = (f + 255) & ~(size_t) 255;
     float* gate = (float*) scratch;
@@ -1501,7 +1551,9 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     float* h = (float*) ((uint8_t*) scratch + 2 * fa);
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
-    const dim3 ggu((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) cap_groups);
+    const bool v1 = g_grouped_v1;
+    const int64_t gy = (v1 || grid_groups <= 0 || grid_groups > cap_groups) ? cap_groups : grid_groups;
+    const dim3 ggu((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) gy);
     switch (L.gu_type) {
 #define STRATA_GU(T) case T: launch_gu<T>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         STRATA_GU_FMTS(STRATA_GU)
@@ -1510,9 +1562,15 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
     check("native_expert_grouped/gu");
     const long long nh = (long long) cap_entries * L.n_ff;
-    swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
-    quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
-    const dim3 gd((unsigned) ((L.n_embd + 7) / 8), (unsigned) cap_groups);
+    if (v1) {
+        swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
+        quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
+    } else {
+        swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, grp_start, n_groups,
+                                                                                (int) L.n_ff, hq);
+    }
+    check("native_expert_grouped/swiglu");
+    const dim3 gd((unsigned) ((L.n_embd + 7) / 8), (unsigned) gy);
     switch (L.d_type) {
 #define STRATA_DOWN(T) case T: launch_down<T>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         STRATA_D_FMTS(STRATA_DOWN)
