@@ -19,7 +19,7 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 | model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
 | where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
 | RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
-| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **77.9 tok/s** (19-token prompt, 256 greedy tokens), **74.2** after a 2,184-token prompt, **66.1** after 128K, 54.1 after 256K | 23-25 tok/s |
+| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **77.9 tok/s** (19-token prompt, 256 greedy tokens), **74.2** after a 2,184-token prompt, **66.1** after 128K, 54.1 after 256K; 48-72 through the API | 23-25 tok/s |
 | prompt reading | ~1,870 tok/s | **787 tok/s** at 2,184 tokens, 856 at 128K, 740 at 256K | ~150 tok/s (424 at 105K) |
 | speculative decoding (MTP) | yes | yes (the base checkpoint's draft layer; 70-85% of drafts accepted on code) | no |
 | images | yes | not yet | not yet |
@@ -304,12 +304,16 @@ output tokens between paths, never only timings.
 | 128K | q4_0 | 834 tok/s (153 s) | 62.4 tok/s | 29.7 GB | 12,288 |
 | 256K | int8 | 740 tok/s (346 s) | **54.1 tok/s** | 30.2 GB | 12,288 |
 | 256K | q4_0 | 726 tok/s (353 s) | 52.5 tok/s | 29.9 GB | 12,288 |
+| 128K | k8v4, KV in VRAM | **995 tok/s** (129 s) | 65.8 tok/s | 30.7 GB | 12,241 (47 in the host mirror) |
+| 256K | k8v4, KV in VRAM | **804 tok/s** (318 s) | 51.2 tok/s | 30.6 GB | 11,294 (994, 1.9 GB, in the host mirror) |
 
 KV streaming (`--kv-resident`) keeps the whole KV in pinned host memory and only the attended window in VRAM, so
 every expert stays on the card at any context; setup.py turns it on from 64K up and keeps INT8 (the faster of the
 two at every size here). Without it the KV pushes experts out and decode after the prompt fell to 4-9 tok/s at
-128K-256K (2026-09-30). `--kv k8v4` does not support streaming yet: setup keeps its KV in VRAM, and it works through
-the FP32 attention fallback (its dedicated prompt kernel is the XMX one below).
+128K-256K (2026-09-30). `--kv k8v4` does not support streaming yet: setup keeps its KV in VRAM, which pushes up to
+~1,000 experts out at 256K; those come from the pinned host mirror over PCIe (planned item 2), so decode holds at
+51 tok/s (it was 3.8 before the mirror). k8v4 reads prompts fastest (no streaming copies) and works through the FP32
+attention fallback (its dedicated prompt kernel is the XMX one below).
 
 **XMX prompt attention v2.** 64-cell chunks, vector-packed K^T and V, hi+lo Q in one accumulator per scale group,
 one accumulator update per chunk: 1.4-1.5x faster than v1 and correct in all modes (`qsa_prompt_attn_parity`,
@@ -340,8 +344,9 @@ attached (paths in the config's `args` are the container's, the data root mounte
 ```
 
 Measured through the OpenAI API with those sampling defaults: 36 tok/s decode on a first turn, 33 on a follow-up
-(which reuses the conversation's cached prompt), against 24-26 for llama.cpp on the same card. After the 2026-09-30
-decode work: 55.7 tok/s on a 300-token answer (prompt included), 55-59 tok/s over 5,000-18,000-token answers. The reserve matters:
+(which reuses the conversation's cached prompt), against 24-26 for llama.cpp on the same card. After the decode work
+(2026-10-01 build): 48-72 tok/s on a ~190-token answer, prompt included (the first request after a start is the slower
+one); 55-59 tok/s over 5,000-18,000-token answers on the 2026-09-30 build. The reserve matters:
 with `--stream-experts` there is no host copy of the experts, so any expert left out of VRAM is read from the SSD
 and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
 5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free.
@@ -472,7 +477,7 @@ wherever upstream touched a file they mirror. They are refreshed by re-migration
 |---|---|
 | decode | 77.9 tok/s on a 19-token prompt, 74.2 after a 2,184-token prompt (256 greedy tokens, MTP + suffix drafts) |
 | prompt | 787 tok/s on 2,184 tokens; 856 tok/s at 128K, 740 at 256K |
-| through the API | 55.7 tok/s on a 300-token chat answer, prompt included |
+| through the API | 48-72 tok/s on a ~190-token chat answer, prompt included (the first request after a start is the slower one) |
 | VRAM | all 12,288 experts resident, ~1.9 GB free with everything loaded (`--vram-reserve-mib 1024`) |
 | RAM | no host copy of the experts (`--stream-experts`) |
 
