@@ -1272,6 +1272,7 @@ int main(int argc, char** argv) {
         }
     }
     bool multi_gpu = !split_devs.empty() && !split_same;   // cleared by --split-skip-if-fits before any stage loads
+    bool split_own_auto = false;   // #340: the split keeps own prompt buffers by its rule (not --no-prefill-borrow)
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
         std::fprintf(stderr, "strata generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
         return 2;
@@ -1335,6 +1336,7 @@ int main(int argc, char** argv) {
             }
             if (own) {
                 o.no_prefill_borrow = true;
+                split_own_auto = true;
                 std::fprintf(stderr, "strata generate: layer split: every stage keeps its own prompt buffers (~%lld MiB "
                                      "each, %lld-token chunks)%s\n", (long long) reserve_mib, (long long) own_chunk,
                              v ? " (STRATA_SPLIT_OWN=1)" : "");
@@ -2203,13 +2205,23 @@ int main(int argc, char** argv) {
     // the windows and - only on the stage that carries them - the drafter and the head.
     const int64_t kWindowMib = 96;       // the verify windows; 75 MiB measured, rounded up
     const int64_t kDrafterMib = 1000;    // the MTP drafter (839 MiB) + the head, on the last stage only
-    auto stage_room = [&](int dev, bool later, bool drafter) -> int64_t {
+    // #340: with the own prompt buffers chosen by the split's rule (not asked for with --no-prefill-borrow) the
+    // boundary is searched as the borrowing configuration would (no reserve): the reserve then only makes the caches
+    // smaller, which measured cost no decode (K=28 on 9070 XT + R9700: 58.4 tok/s own vs 58.5 borrowing), while a
+    // search with the reserve moved the boundary to K=32 and decode to 54.8. STRATA_SPLIT_OWN_PLACE=reserve: the
+    // search sees the reserve.
+    static const bool place_with_reserve = [] {
+        const char* v = std::getenv("STRATA_SPLIT_OWN_PLACE");
+        return v != nullptr && std::string(v) == "reserve";
+    }();
+    auto stage_room = [&](int dev, bool later, bool drafter, bool search = false) -> int64_t {
         const strata::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
         if (const cudaError_t e = cudaMemGetInfo(&fb, &tb); e != cudaSuccess)
             std::fprintf(stderr, "strata generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
                          cudaGetErrorString(e));
-        const int64_t reserve = ((int64_t) o.vram_reserve_mib + split_pf_mib + (later ? kWindowMib : 0) +
+        const int64_t pf = search && split_own_auto && !place_with_reserve ? 0 : split_pf_mib;
+        const int64_t reserve = ((int64_t) o.vram_reserve_mib + pf + (later ? kWindowMib : 0) +
                                  (drafter ? kDrafterMib : 0)) << 20;
         return std::max<int64_t>((int64_t) fb - reserve, 0);
     };
@@ -2220,7 +2232,7 @@ int main(int argc, char** argv) {
         std::vector<double> layer_ms((size_t) ns);
         for (int i = 0; i < ns; ++i) {
             const int dev = i == 0 ? 0 : stages[(size_t) i - 1]->dev;
-            cap[(size_t) i] = stage_room(i == 0 ? -1 : dev, i > 0, i + 1 == ns);
+            cap[(size_t) i] = stage_room(i == 0 ? -1 : dev, i > 0, i + 1 == ns, true);
             int sms = 0, khz = 0;
             cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
             if (cudaDeviceGetAttribute(&khz, cudaDevAttrClockRate, dev) != cudaSuccess || khz <= 0) khz = 1800000;
