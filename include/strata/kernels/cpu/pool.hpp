@@ -63,15 +63,12 @@ struct ExpertJobMulti {
     const void* nact[MAXT] = {};
 };
 
-/// One logical processor per PHYSICAL core, so a worker is never scheduled onto an SMT sibling of another
-/// worker.  On the 6-core/12-thread machine this project measures on, `hardware_concurrency()/2` workers on
-/// logical processors 0..5 would put every worker on a sibling pair and halve the useful bandwidth - which is
-/// exactly the kind of error that shows up as "the CPU path is slower than the model says" with no clue why.
-/// How worker threads are allocated across physical/logical CPU cores.
+/// How worker threads are allocated across physical/logical CPU cores (#272).  `All` is the layout the pool has
+/// always used and the default; the hybrid-aware ones are opt-in (--pool-affinity auto|p-cores).
 enum class PoolAffinity {
     Auto,      ///< Hybrid: prioritize physical P-cores, then SMT, then E-cores (defaults to P-core count)
     PCores,    ///< Restrict workers strictly to Performance cores and their SMT siblings
-    All,       ///< Legacy behavior: linear physical core order without hybrid distinction
+    All,       ///< The default: one worker per physical core in the OS's order, without hybrid distinction
 };
 
 struct CpuTopology {
@@ -83,7 +80,7 @@ struct CpuTopology {
     int host_core = -1;             ///< Logical core reserved for host thread
 };
 
-CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity = PoolAffinity::Auto);
+CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity = PoolAffinity::All);
 
 /// One logical processor per PHYSICAL core, so a worker is never scheduled onto an SMT sibling of another
 /// worker.  On the 6-core/12-thread machine this project measures on, `hardware_concurrency()/2` workers on
@@ -91,7 +88,7 @@ CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity = PoolAff
 /// exactly the kind of error that shows up as "the CPU path is slower than the model says" with no clue why.
 ///
 /// `skip_first` drops the first core, which P2.S3 reserves for the host loop.
-std::vector<int> physical_cores(bool skip_first, PoolAffinity affinity = PoolAffinity::Auto);
+std::vector<int> physical_cores(bool skip_first, PoolAffinity affinity = PoolAffinity::All);
 
 /// **THE RESERVATION IS A FICTION UNLESS THE HOST IS ACTUALLY PUT THERE.**
 ///
@@ -124,7 +121,7 @@ public:
     /// threads on six cores. `false` is the A/B arm and exists so the change is measurable rather than
     /// asserted - the counter it moves is `pool phases ... drain`, which is host-side and needs no profiler.
     explicit ExpertPool(int n_workers = 0, bool pin = true, bool host_works = true,
-                        PoolAffinity affinity = PoolAffinity::Auto);
+                        PoolAffinity affinity = PoolAffinity::All);
     /// The watchdog's view of the pool (issue #31): the batch, the counters, every thread's state.
     void diag(std::FILE* f) const;
     ~ExpertPool();
@@ -268,7 +265,7 @@ private:
     };
     const NativeFmt* nfmt_ = nullptr;
     std::vector<SplitBufMulti> split_multi_;
-    PoolAffinity affinity_ = PoolAffinity::Auto;
+    PoolAffinity affinity_ = PoolAffinity::All;
     CpuTopology topo_;
 };
 

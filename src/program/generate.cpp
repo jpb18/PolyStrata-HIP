@@ -256,7 +256,8 @@ struct Options {
     bool graph_only = false;
     bool gpu_only_full = false;   ///< R0.3: pre + post + head, the true per-token GPU floor
     int pool_workers = 0;         ///< R2.2: 0 = "all physical cores minus the host's"; >0 overrides
-    strata::kernels::cpu::PoolAffinity pool_affinity = strata::kernels::cpu::PoolAffinity::Auto;
+    /// #272: the pool's core layout; `all` (the default) is the layout it always had, auto / p-cores are opt-in
+    strata::kernels::cpu::PoolAffinity pool_affinity = strata::kernels::cpu::PoolAffinity::All;
     /// R2.2's first half, as an A/B arm.  **ON by default**, because the measurement that justifies it is the
     /// pool's own drain: 33.7 GB/s against 5/6 x 44.14 = 36.8 for five workers, on a machine whose sixth core
     /// is reserved for a host thread that has nothing to do while the drain runs.
@@ -551,11 +552,12 @@ void usage() {
                  "                       pool is six threads on six cores instead of five plus an idle core;\n"
                  "                       this flag restores the five-worker form for comparison on `pool phases`.\n"
                  "  --pool-workers N     R2.2: CPU expert pool worker count.  Default 0 = every physical core\n"
-                 "                       except the one the host loop spins on (or P-core count minus 1 on\n"
-                 "                       hybrid CPUs).  A sweep is how the pool's deviation from `cpu_s2` is attributed.\n"
-                 "  --pool-affinity MODE Worker CPU affinity: auto (default: prioritize P-cores), p-cores\n"
-                 "                       (strictly performance cores), or all (all physical cores without\n"
-                 "                       hybrid distinction).\n"
+                 "                       except the one the host loop spins on (with --pool-affinity auto or\n"
+                 "                       p-cores on a hybrid CPU: P-cores minus 1).  A sweep is how the pool's\n"
+                 "                       deviation from `cpu_s2` is attributed.\n"
+                 "  --pool-affinity MODE Worker CPU affinity: all (default: one worker per physical core, as\n"
+                 "                       always), auto (hybrid CPUs: P-cores first, then their SMT siblings,\n"
+                 "                       then E-cores) or p-cores (P-cores and their siblings only).\n"
                  "  --coupled-draft      enable coupled draft sampling for MTP drafter under sampling (STRATA_SPEC_COUPLED)\n"
                  "  --no-coupled-draft   disable coupled draft sampling (propose argmax drafts)\n"
                  "  --mmap-experts       R2.1: opt OUT of the resident expert arena, back to MapViewOfFile.\n"
@@ -2536,7 +2538,7 @@ int main(int argc, char** argv) {
         srcp = &arena_src;
     }
     strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker, o.pool_affinity);
-    if (pool.is_hybrid()) {
+    if (pool.is_hybrid() && pool.affinity() != strata::kernels::cpu::PoolAffinity::All) {
         const char* aff_str = pool.affinity() == strata::kernels::cpu::PoolAffinity::PCores ? "p-cores" :
                               pool.affinity() == strata::kernels::cpu::PoolAffinity::All ? "all" : "auto";
         std::fprintf(stderr, "strata generate: hybrid CPU detected (%d P-cores / %d threads, %d E-cores), pool workers: %d, affinity: %s\n",
