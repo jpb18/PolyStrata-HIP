@@ -730,6 +730,7 @@ class Service:
         self.min_free_vram_mib = 0
         self.before_load = None
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
+        self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
 
@@ -2063,14 +2064,14 @@ def make_handler(svc: Service):
             """Anthropic's token count, which Claude Code asks for its context figures: the prompt this server would
             read for the same request, rendered and tokenized - the model does not run."""
             req = svc.with_shared(req, "anthropic")
-            messages, tools, kw = anthropic_to_messages(req)
+            messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             prompt = svc.template.render(messages, tools=tools, **kw)
             self._json(200, {"input_tokens": len(svc.tok.encode(prompt, parse_special=True))})
 
         def _anthropic(self, req):
             svc.load()
             req = svc.with_shared(req, "anthropic")
-            messages, tools, kw = anthropic_to_messages(req)
+            messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
@@ -2405,6 +2406,10 @@ def main() -> int:
     svc.min_free_vram_mib = a.min_free_vram_mib if a.min_free_vram_mib is not None else \
         int(cfg.get("min_free_vram_mib") or 0)
     svc.before_load = a.before_load or cfg.get("before_load") or None
+    mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
+    if mode not in ("model", "on_request"):
+        raise SystemExit(f"[strata] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
+    svc.anthropic_think_unasked = mode == "model"
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         try:
             svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]

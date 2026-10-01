@@ -69,7 +69,9 @@ class MaxTokens(unittest.TestCase):
         # #278: Anthropic's thinking is opt-in; "thinking", an effort or a reasoning_budget_tokens (#123) asks for it
         from serve.frontend import anthropic_to_messages
         msgs = [{"role": "user", "content": "u"}]
-        kw = lambda **r: anthropic_to_messages({"messages": msgs, **r})[2]   # noqa: E731
+        kw = lambda **r: anthropic_to_messages({"messages": msgs, **r}, think_unasked=False)[2]   # noqa: E731
+        # the default ("anthropic_thinking": "model") renders an unasked request as 0.1.31 did
+        self.assertNotIn("enable_thinking", anthropic_to_messages({"messages": msgs})[2])
         self.assertEqual(kw(), {"enable_thinking": False})
         self.assertEqual(kw(thinking={"type": "disabled"}), {"enable_thinking": False})
         self.assertNotIn("enable_thinking", kw(thinking={"type": "enabled", "budget_tokens": 2048}))

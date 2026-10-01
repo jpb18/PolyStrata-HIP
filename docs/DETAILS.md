@@ -424,6 +424,10 @@ print(r.choices[0].message.content)
   part of the thinking the client sees and counts as output tokens. `"reasoning_budget_tokens": N` in
   `strata-<model>.json` sets it for every request; a request's own value wins, and `0` means no budget. Off by default;
   Anthropic's `"thinking": {"budget_tokens": N}` still only chooses the level, as above.
+- **Anthropic requests that don't ask for thinking (opt-in, 0.1.32, #278).** By default a `/v1/messages` request
+  with no `"thinking"`, effort or budget thinks as the model's template does. `"anthropic_thinking": "on_request"` in
+  `strata-<model>.json` renders such a request without thinking - Anthropic's own rule, and what Claude Code's short
+  helper calls (a session title in a few dozen tokens) need; its real turns ask for thinking when it is on there.
 - **Streaming.** With `"stream": true` everything arrives as it is made: the thinking, the answer, and tool calls
   (the tool's name first, then its arguments piece by piece, like OpenAI and Anthropic do). While the model reads a
   long prompt the stream sends keep-alives, so agents do not time out; the server window prints progress every
