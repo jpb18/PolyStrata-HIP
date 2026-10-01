@@ -126,7 +126,8 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). You can 
   `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`).
 - **Thinking:** choose **off, low, medium or high** in the chat menu or your app's "reasoning effort". Off is
   fastest; high is best for hard questions.
-- **Pictures:** say yes to "Images?" in setup, then click **Picture** in the chat, or attach them in your app.
+- **Pictures:** say yes to "Images?" in setup, then click **Picture** in the chat, or attach them in your app
+  (AMD cards: on Linux through the processor, not on Windows yet).
 - **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>` - always with a key.
 - **Good to know:** it answers one request at a time. The first message of a chat is read in full (about 1 minute
   per 30,000 tokens); follow-ups start in seconds.
