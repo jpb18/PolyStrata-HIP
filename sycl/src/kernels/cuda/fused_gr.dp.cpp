@@ -315,6 +315,63 @@ auto &part =
 }
 
 
+// SYCL port: gr_norm_multi_kernel with one work-group per (token, stream) instead of per token: T groups left the
+// B70 nearly idle (16 us a call). rs is per stream, so a group owns its stream outright. Thread t visits the same
+// elements of stream c in the same order as in the per-token kernel (i = 4t + 1024k), and the warp and cross-warp
+// sums run in the same order, so rs and xn are bitwise the old kernel's. The scaled values stay in registers
+// (at most 3 float4 per thread) instead of a second pass over global memory.
+__dpct_inline__ void gr_norm_split_kernel(GrMulti m) {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    auto& part = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[WARPS]>(item.get_group());
+    auto& s_rs = *sycl::ext::oneapi::group_local_memory_for_overwrite<float>(item.get_group());
+    const int tok = (int) item.get_group(2) / HC, c = (int) item.get_group(2) % HC;
+    const FusedGrArgs& a = m.a[tok];
+    float* xn = m.xn + (size_t) tok * D;
+    const int t = (int) item.get_local_id(2), lane = t & 31, warp = t >> 5;
+    const float gw = a.apply ? 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC) : 0.0f;
+    constexpr int MAXK = (N + THREADS * 4 - 1) / (THREADS * 4) + 1;   // 3: float4s of one stream per thread
+    sycl::float4 keep[MAXK];
+    int kept = 0;
+    float ss = 0.0f;
+    for (int i = t * 4; i < D; i += THREADS * 4) {
+        if (i / N != c) continue;
+        const int d = i - c * N;
+        sycl::float4 r = *reinterpret_cast<const sycl::float4*>(a.R + i);
+        if (a.apply) {
+            const sycl::float4 b = *reinterpret_cast<const sycl::float4*>(a.bo_prev + d);
+            r.x() = sycl::fma((float) (b.x()), gw, r.x());
+            r.y() = sycl::fma((float) (b.y()), gw, r.y());
+            r.z() = sycl::fma((float) (b.z()), gw, r.z());
+            r.w() = sycl::fma((float) (b.w()), gw, r.w());
+        }
+        const sycl::float4 g = *reinterpret_cast<const sycl::float4*>(a.w_norm + i);
+        ss += r.x() * r.x() + r.y() * r.y() + r.z() * r.z() + r.w() * r.w();
+        if (kept < MAXK) keep[kept++] = sycl::float4(r.x() * g.x(), r.y() * g.y(), r.z() * g.z(), r.w() * g.w());
+    }
+    const float v = warp_sum(ss);
+    if (lane == 0) part[warp] = v;
+    item.barrier(sycl::access::fence_space::local_space);
+    if (t == 0) {
+        float sum = 0.0f;
+#pragma unroll
+        for (int w = 0; w < WARPS; ++w) sum += part[w];
+        s_rs = sycl::rsqrt(sum / (float) N + a.eps);
+        a.rs[c] = s_rs;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+    const float rs = s_rs;
+    int k = 0;
+    for (int i = t * 4; i < D && k < kept; i += THREADS * 4) {
+        if (i / N != c) continue;
+        const sycl::float4 x = keep[k++];
+        *reinterpret_cast<sycl::float4*>(xn + i) = sycl::float4(x.x() * rs, x.y() * rs, x.z() * rs, x.w() * rs);
+    }
+}
+bool gr_norm_split() {   // default; STRATA_GR_NORM_SPLIT=0: one work-group per token
+    static const bool v = std::getenv("STRATA_GR_NORM_SPLIT") == nullptr || std::atoi(std::getenv("STRATA_GR_NORM_SPLIT")) != 0;
+    return v;
+}
+
 // Step 2 of `gr_down_kernel` for T tokens.  One warp per row (so each lane accumulates the same chunks in the
 // same order as the single-token kernel); per tile the lane's 10 weight chunks are loaded BEFORE the activation
 // tile is staged, so the DRAM and L2 traffic are in flight together.
@@ -665,6 +722,11 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
+        if (gr_norm_split())
+            st->parallel_for<dpct_kernel_name<class gr_norm_split_k>>(
+                sycl::nd_range<3>(sycl::range(1, 1, n_tok * HC) * sycl::range(1, 1, THREADS), sycl::range(1, 1, THREADS)),
+                [=](sycl::nd_item<3>) [[sycl::reqd_sub_group_size(32)]] { gr_norm_split_kernel(m); });
+        else
         st->parallel_for<dpct_kernel_name<class gr_norm_multi_kernel_2f4d92>>(
             sycl::nd_range<3>(sycl::range(1, 1, n_tok) *
                                   sycl::range(1, 1, THREADS),

@@ -352,6 +352,19 @@ __dpct_inline__ sycl::int2 load8_a2(const uint8_t* p) {   // 8 bytes at a 2-byte
     const uint32_t w2 = q[2];   // only when unaligned: it then holds needed bytes, so it cannot cross a page
     return sycl::int2((int) ((w0 >> 16) | (w1 << 16)), (int) ((w1 >> 16) | (w2 << 16)));
 }
+__dpct_inline__ int load4_a2(const uint8_t* p) {   // 4 bytes at a 2-byte-aligned address (= get_int_b2)
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const uint32_t* q = reinterpret_cast<const uint32_t*>(a & ~uintptr_t(3));
+    const uint32_t w0 = q[0];
+    if (!(a & 2)) return (int) w0;
+    return (int) ((w0 >> 16) | (q[1] << 16));   // the second word holds needed bytes: page-safe
+}
+// SYCL port: the gate/up kernels can stage their format's codebook grid in local memory (STRATA_GRID_SLM=1, compile
+// time). Measured slower and off: copying the grid into each of ~1,200 work-groups per call costs more than the
+// lookups save (IQ2_S 52.5 -> 62.7 us, IQ3_S 60.8 -> 70.0, IQ3_XXS 60.3 -> 62.1 per call; unitrace 2026-10-01).
+#ifndef STRATA_GRID_SLM
+#define STRATA_GRID_SLM 0
+#endif
 #ifndef STRATA_IQ4NL_FAST
 #define STRATA_IQ4NL_FAST 1   // compile-time: -DSTRATA_IQ4NL_FAST=0 for ggml's table/16-bit-load path
 #endif
@@ -520,14 +533,21 @@ template <int TY> struct Multi { static constexpr bool has = false; static const
 
 template <> struct Multi<18> {   // iq3_xxs
     static constexpr bool has = true; static constexpr int NW = 8;
-    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m, const void* grid = nullptr) {
         const block_iq3_xxs* bq3 = (const block_iq3_xxs*) vbq + kbx;
+#if STRATA_IQ4NL_FAST
+        const sycl::int2 q3_packed = load8_a2(bq3->qs + 4 * iqs);
+        const uint32_t aux32 = (uint32_t) load4_a2(bq3->qs + 4 * (QK_K / 16 + iqs / 2));
+#else
         const sycl::int2 q3_packed = sycl::int2(get_int_b2(bq3->qs, iqs), get_int_b2(bq3->qs, iqs + 1));
-        const uint8_t* q3 = (const uint8_t*) &q3_packed;
         const uint32_t aux32 = get_int_b2(bq3->qs, QK_K / 16 + iqs / 2);
+#endif
+        const uint8_t* q3 = (const uint8_t*) &q3_packed;
+        const uint32_t* G = (const uint32_t*) grid;
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
-            const sycl::int2 grid_pos = sycl::int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
+            const sycl::int2 grid_pos = G ? sycl::int2(G[q3[l0 + 0]], G[q3[l0 + 1]])
+                                          : sycl::int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
             const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
             const int signs0 = swar_ne4(signs & 0x08040201);
             const int signs1 = swar_ne4(signs & 0x80402010);
@@ -550,16 +570,23 @@ template <> struct Multi<18> {   // iq3_xxs
 
 template <> struct Multi<22> {   // iq2_s
     static constexpr bool has = true; static constexpr int NW = 8;
-    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m, const void* grid = nullptr) {
         const block_iq2_s* bq2 = (const block_iq2_s*) vbq + kbx;
+#if STRATA_IQ4NL_FAST
+        const int qs_packed = load4_a2(bq2->qs + 4 * (iqs / 2));
+        const int signs_packed_32 = load4_a2(bq2->qs + 4 * (QK_K / 32 + iqs / 2));
+#else
         const int qs_packed = get_int_b2(bq2->qs, iqs / 2);
+        const int signs_packed_32 = get_int_b2(bq2->qs, QK_K / 32 + iqs / 2);
+#endif
         const uint8_t* qs = (const uint8_t*) &qs_packed;
         const int qh = bq2->qh[iqs / 2];
-        const int signs_packed_32 = get_int_b2(bq2->qs, QK_K / 32 + iqs / 2);
         const uint8_t* sp = (const uint8_t*) &signs_packed_32;
+        const uint64_t* G = (const uint64_t*) grid;
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
-            const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
+            const int gi = qs[l0 / 2] | ((qh << (8 - l0)) & 0x300);
+            const int* grid_pos = G ? (const int*) (G + gi) : (const int*) (iq2s_grid + gi);
             const int signs0 = swar_ne4(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21));
             const int signs1 = swar_ne4(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17));
             m.w[l0 + 0] = swar_sub4(grid_pos[0] ^ signs0, signs0);
@@ -581,17 +608,23 @@ template <> struct Multi<22> {   // iq2_s
 
 template <> struct Multi<21> {   // iq3_s
     static constexpr bool has = true; static constexpr int NW = 8;
-    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m, const void* grid = nullptr) {
         const block_iq3_s* bq3 = (const block_iq3_s*) vbq + kbx;
+#if STRATA_IQ4NL_FAST
+        const sycl::int2 qs_packed = load8_a2(bq3->qs + 4 * iqs);
+        const int signs_packed_32 = load4_a2(bq3->signs + 4 * (iqs / 2));
+#else
         const sycl::int2 qs_packed = sycl::int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
+        const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
+#endif
         const uint8_t* qs = (const uint8_t*) &qs_packed;
         const int qh = bq3->qh[iqs / 2];
-        const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
         const uint8_t* sp = (const uint8_t*) &signs_packed_32;
+        const uint32_t* G = (const uint32_t*) grid;
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
-            const sycl::int2 grid_pos = sycl::int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
-                                                   iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+            const int i0 = qs[l0 + 0] | ((qh << (8 - l0)) & 0x100), i1 = qs[l0 + 1] | ((qh << (7 - l0)) & 0x100);
+            const sycl::int2 grid_pos = G ? sycl::int2(G[i0], G[i1]) : sycl::int2(iq3s_grid[i0], iq3s_grid[i1]);
             const int signs0 = swar_ne4(((sp[l0 / 2] & 0x03) << 7) | ((sp[l0 / 2] & 0x0C) << 21));
             const int signs1 = swar_ne4(((sp[l0 / 2] & 0x30) << 3) | ((sp[l0 / 2] & 0xC0) << 17));
             m.w[l0 + 0] = swar_sub4(grid_pos.x() ^ signs0, signs0);
@@ -612,7 +645,7 @@ template <> struct Multi<21> {   // iq3_s
 
 template <> struct Multi<20> {   // iq4_nl (down)
     static constexpr bool has = true; static constexpr int NW = 4;
-    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m, const void* = nullptr) {
         const block_iq4_nl* bq4 = (const block_iq4_nl*) vbq + kbx;
 #if STRATA_IQ4NL_FAST
         const sycl::int2 qq = load8_a2(bq4->qs + 4 * iqs);
@@ -641,7 +674,7 @@ template <> struct Multi<20> {   // iq4_nl (down)
 
 template <> struct Multi<42> {   // q2_0 (down)
     static constexpr bool has = true; static constexpr int NW = 8;
-    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m) {
+    __dpct_inline__ static void prep(const void* vbq, int kbx, int iqs, MultiW& m, const void* = nullptr) {
         const block_q2_0* bq2_0 = (const block_q2_0*) vbq + kbx;
         const int16_t* qs = (const int16_t*) bq2_0->qs + iqs * 4;
 #pragma unroll
@@ -665,7 +698,8 @@ template <> struct Multi<42> {   // q2_0 (down)
 
 // One row against E activations at once, LANES lanes per row.
 template <int TY, int LANES, int E>
-__dpct_inline__ void row_dot_multi(const uint8_t* row, const block_q8_1* const* xs, int nb, int sub, float* out) {
+__dpct_inline__ void row_dot_multi(const uint8_t* row, const block_q8_1* const* xs, int nb, int sub, float* out,
+                                   const void* grid = nullptr) {
     using F = Fmt<TY>;
     using M = Multi<TY>;
     float s[E];
@@ -674,7 +708,7 @@ __dpct_inline__ void row_dot_multi(const uint8_t* row, const block_q8_1* const* 
     for (int k = sub; k < nb * F::ipb; k += LANES) {
         const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
         MultiW m;
-        M::prep(row, kbx, iqs, m);
+        M::prep(row, kbx, iqs, m, grid);
 #pragma unroll
         for (int e = 0; e < E; ++e) {
             int u[8];
@@ -695,14 +729,15 @@ __dpct_inline__ void row_dot_multi(const uint8_t* row, const block_q8_1* const* 
 // The entries e0..e1 of one row: chunks of 4 through the multi-entry dot, the rest one at a time.
 template <int TY, int LANES>
 __dpct_inline__ void row_entries(const uint8_t* wr, const block_q8_1* x, int x_stride, const int32_t* ent_idx,
-                                 int e0, int e1, int nb, int sub, float* dst, size_t dst_stride) {
+                                 int e0, int e1, int nb, int sub, float* dst, size_t dst_stride,
+                                 const void* grid = nullptr) {
     int e = e0;
     if constexpr (Multi<TY>::has) {
         for (; e + 4 <= e1; e += 4) {
             const block_q8_1* xs[4] = {x + (size_t) ent_idx[e] * x_stride, x + (size_t) ent_idx[e + 1] * x_stride,
                                        x + (size_t) ent_idx[e + 2] * x_stride, x + (size_t) ent_idx[e + 3] * x_stride};
             float o[4];
-            row_dot_multi<TY, LANES, 4>(wr, xs, nb, sub, o);
+            row_dot_multi<TY, LANES, 4>(wr, xs, nb, sub, o, grid);
             if (sub == 0)
 #pragma unroll
                 for (int i = 0; i < 4; ++i) dst[(size_t) (e + i) * dst_stride] = o[i];
@@ -710,7 +745,7 @@ __dpct_inline__ void row_entries(const uint8_t* wr, const block_q8_1* x, int x_s
         if (e + 2 <= e1) {
             const block_q8_1* xs[2] = {x + (size_t) ent_idx[e] * x_stride, x + (size_t) ent_idx[e + 1] * x_stride};
             float o[2];
-            row_dot_multi<TY, LANES, 2>(wr, xs, nb, sub, o);
+            row_dot_multi<TY, LANES, 2>(wr, xs, nb, sub, o, grid);
             if (sub == 0) { dst[(size_t) e * dst_stride] = o[0]; dst[(size_t) (e + 1) * dst_stride] = o[1]; }
             e += 2;
         }
@@ -731,7 +766,22 @@ __dpct_inline__ void native_gu_kernel(
     NativeExpertLayout L, float *__restrict__ gate, float *__restrict__ up) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     const int g = item_ct1.get_group(1);
-    if (g >= *n_groups) return;
+    if (g >= *n_groups) return;   // uniform over the work-group: before the barrier below is fine
+    const void* grid = nullptr;
+#if STRATA_GRID_SLM
+    if constexpr (TG == 18 || TG == 21 || TG == 22) {
+        using GT = std::conditional_t<TG == 22, uint64_t, uint32_t>;
+        constexpr int GN = TG == 22 ? 1024 : TG == 21 ? 512 : 256;
+        auto& sg = *sycl::ext::oneapi::group_local_memory_for_overwrite<GT[GN]>(item_ct1.get_group());
+        for (int i = (int) item_ct1.get_local_id(2); i < GN; i += (int) item_ct1.get_local_range(2)) {
+            if constexpr (TG == 22) sg[i] = iq2s_grid[i];
+            else if constexpr (TG == 21) sg[i] = iq3s_grid[i];
+            else sg[i] = iq3xxs_grid[i];
+        }
+        item_ct1.barrier(sycl::access::fence_space::local_space);
+        grid = &sg[0];
+    }
+#endif
     const int rib = item_ct1.get_local_id(2) / kExpertLanes,
               sub = item_ct1.get_local_id(2) % kExpertLanes;
     const int row = item_ct1.get_group(2) * kExpertRows + rib; // 0 .. 2*n_ff
@@ -742,7 +792,7 @@ __dpct_inline__ void native_gu_kernel(
     const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    row_entries<TG, kExpertLanes>(wr, xq, xb, ent_tok, e0, e1, nb, sub, (is_up ? up : gate) + r, (size_t) L.n_ff);
+    row_entries<TG, kExpertLanes>(wr, xq, xb, ent_tok, e0, e1, nb, sub, (is_up ? up : gate) + r, (size_t) L.n_ff, grid);
 }
 
 __dpct_inline__ void swiglu_entries_kernel(const float *__restrict__ gate,
