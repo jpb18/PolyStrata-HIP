@@ -2156,7 +2156,7 @@ def main() -> int:
                          "else read through the OS file cache (mmap); resident / mmap force one of the two")
     ap.add_argument("--backend", choices=["cuda", "hip"],
                     help="cuda = NVIDIA (default), hip = AMD RX 7900 / 7800 / 7700 XT, RX 9060 XT / 9070 / AI PRO R9700 on "
-                         "Linux (experimental; chosen by itself when the PC has no NVIDIA card Strata can use)")
+                         "Linux (chosen by itself when the PC has no NVIDIA card Strata can use)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.gpu is not None:                              # --gpu 0,2 means --gpus 0,2 (a user tried it: issue report)
@@ -2241,7 +2241,7 @@ def main() -> int:
         say("  1) NVIDIA: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB)" for g in found if gpu_problem(g) is None)
             + "   (recommended)")
         say("  2) AMD: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB)" for g in amd_ok)
-            + "   (experimental: compiled here, no images - docs/AMD_HIP.md)")
+            + "   (compiled here, images on the CPU - docs/AMD_HIP.md)")
         hip = ask("Which cards?", ["1", "2"], "1", a.yes or a.check) == "2"
         if a.check and not hip:
             say("  (the AMD card: ./setup.sh --backend hip)")
@@ -2273,7 +2273,7 @@ def main() -> int:
         a.gpu = gpu["index"] if len(amd) > 1 else a.gpu
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
-        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, {gpu['arch']} (AMD, experimental: docs/AMD_HIP.md)")
+        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, {gpu['arch']} (AMD: docs/AMD_HIP.md)")
     else:
         if not found:
             fail("no NVIDIA GPU found (nvidia-smi did not answer)",
