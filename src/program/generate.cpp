@@ -1016,7 +1016,7 @@ double probe_pcie_h2d_gbps(std::string* samples = nullptr) {
             *samples += buf;
         }
     }
-    if (!ok) cudaGetLastError();
+    if (!ok) (void) cudaGetLastError();
     cudaFree(d);
     cudaFreeHost(h);
     return bw;
