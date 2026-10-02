@@ -186,11 +186,20 @@ START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere 
 START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (setup picks the one with the most VRAM)
 START-HERE.bat --gpus 0,2                       several GPUs sharing the model
+START-HERE.bat --vram-reserve-mib 2048          leave 2 GB of VRAM free for other programs (remembered)
 START-HERE.bat --setup --backend hip            the AMD engine on a PC that also has an NVIDIA card
 START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>     reachable from other devices, with a key
 START-HERE.bat --calibrate                      tune the engine for this PC (about 5-10 minutes), then start
 START-HERE.bat --check                          only check this PC
 ```
+
+**Leaving VRAM for other programs (#493):** Strata fills the graphics card's free VRAM with experts (the expert cache)
+and leaves `--vram-reserve-mib` MiB free: 700 by default. For a game, a 3D program or another model beside it, leave
+more: `START-HERE.bat --vram-reserve-mib 2048` (Linux: `./setup.sh --vram-reserve-mib 2048`) writes it into the
+model's `strata-<model>.json` and starts it; at setup (`--setup --vram-reserve-mib 2048`) it goes into the new config.
+By hand: add `"--vram-reserve-mib", "2048"` to the config's `"args"` list and restart. The expert cache is then that
+much smaller, so answers can be a little slower. The engine sizes its cache from the VRAM free when it starts: what
+another program already holds then is left alone anyway; the reserve is room for what it takes later.
 
 **Model files downloaded by hand, or from a mirror (#495):** setup's step 5 prints the folder it expects them in
 (`Strata-data\models\<SIZE>\`, e.g. `Strata-data\models\IQ3_XXS\`): put them there with their original names, or

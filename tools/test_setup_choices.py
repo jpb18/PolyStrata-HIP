@@ -267,5 +267,68 @@ class HipVision(unittest.TestCase):
         self.assertNotIn("vision_src", meta)
 
 
+class VramReserve(unittest.TestCase):
+    """#493: --vram-reserve-mib N - VRAM the engine leaves free for other programs - goes into the config only when
+    given (the default config is tools/test_setup_golden.py's, unchanged), at setup and on a start."""
+
+    def setUp(self):
+        from test_setup_golden import PROFILES
+        self.ram, self.found = PROFILES["64GB-1x32GB"]
+
+    def install(self, *extra):
+        from test_setup_golden import install
+        return install(self.ram, self.found, ["--family", "qwen", "--model", "Q2_0", "--no-start", *extra])
+
+    def test_given_at_setup(self):
+        code, out, cfg, _ = self.install("--vram-reserve-mib", "2048")
+        self.assertEqual(code, 0, out)
+        a = cfg["args"]
+        self.assertEqual(a.count("--vram-reserve-mib"), 1)
+        self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "2048")
+        self.assertIn("VRAM kept free for other programs: 2048 MiB", out)
+        code, out, cfg, _ = self.install()
+        self.assertNotIn("--vram-reserve-mib", cfg["args"])          # not given: the engine's default, as before
+
+    def test_with_images_one_value(self):
+        code, out, cfg, _ = self.install("--vision", "cpu", "--vram-reserve-mib", "1500")
+        self.assertEqual(code, 0, out)
+        a = cfg["args"]
+        self.assertEqual(a.count("--vram-reserve-mib"), 1)
+        self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "1500")
+
+    def test_a_negative_value_is_refused(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code, out, cfg, _ = self.install("--vram-reserve-mib", "-1")
+        self.assertEqual(code, 2)
+        self.assertIn("--vram-reserve-mib takes a number of MiB", err.getvalue())
+
+    def test_kept_from_an_earlier_install(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "strata-q2_0.json"
+            p.write_text(json.dumps({"args": ["--max-context", "8192", "--vram-reserve-mib", "2048"]}))
+            self.assertEqual(setup.choices_from_config(p)["vram_reserve_mib"], 2048)
+            p.write_text(json.dumps({"args": ["--vision", "--vram-reserve-mib", "700"], "vision": {"gpu": True}}))
+            self.assertIsNone(setup.choices_from_config(p)["vram_reserve_mib"])   # the images' own reserve
+            p.write_text(json.dumps({"args": ["--max-context", "8192"]}))
+            self.assertIsNone(setup.choices_from_config(p)["vram_reserve_mib"])
+
+    def test_given_on_a_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "strata.exe"
+            exe.write_bytes(b"")
+            p = Path(d) / "strata-q2_0.json"
+            p.write_text(json.dumps({"exe": str(exe), "args": ["--kv", "int8"], "gpu": 0, "gpus_asked": True}))
+            call = mock.Mock(return_value=0)
+            with mock.patch.object(setup, "gpus", lambda: self.found), \
+                    mock.patch.object(setup, "is_wsl", lambda: False), \
+                    mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
+                    mock.patch.object(setup.subprocess, "call", call):
+                for n in ("2048", "1024"):
+                    _, out = quiet(setup.start, p, None, None, False, True, None, {"vram_reserve_mib": int(n)})
+                    self.assertEqual(json.loads(p.read_text())["args"], ["--kv", "int8", "--vram-reserve-mib", n])
+        self.assertIn("1024 MiB of VRAM kept free", out)
+        self.assertTrue(call.called)
+
+
 if __name__ == "__main__":
     unittest.main()

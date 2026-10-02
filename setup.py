@@ -2414,7 +2414,10 @@ def choices_from_config(cfg_path: Path) -> dict:
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
             "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
-            "layer_split": cfg.get("layer_split")}
+            "layer_split": cfg.get("layer_split"),
+            # #493: --vram-reserve-mib given at setup (images write the default 700 themselves)
+            "vram_reserve_mib": int(val("--vram-reserve-mib")) if (val("--vram-reserve-mib") or "").isdigit() and (
+                vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
 
 
 def find_in(roots: list, rel: str):
@@ -2566,12 +2569,22 @@ def update_install(have: list, a) -> int:
 
 def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
           layer_split=None, keep=None) -> int:
-    """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab)."""
+    """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab,
+    --vram-reserve-mib)."""
     cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
+    reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
+    if reserve is not None:
+        args = cfg["args"]
+        if "--vram-reserve-mib" in args[:-1]:
+            args[args.index("--vram-reserve-mib") + 1] = str(reserve)
+        else:
+            args += ["--vram-reserve-mib", str(reserve)]
+        write_config(cfg_path, cfg)
+        ok(f"saved for this model: {reserve} MiB of VRAM kept free for other programs (--vram-reserve-mib)")
     if keep and any(cfg.get(k) != v for k, v in keep.items()):   # #179: a --host/--api-key on a start was ignored
         cfg.update(keep)
         write_config(cfg_path, cfg)
@@ -2878,6 +2891,9 @@ def main() -> int:
     ap.add_argument("--resident-budget-gib", type=float, metavar="N",
                     help="UD-Q4_K_XL: the GiB of its experts kept in RAM (default: the RAM less 24 GB, 40 on 64 GB; "
                          "more is kept as you choose, with a note)")
+    ap.add_argument("--vram-reserve-mib", type=int, metavar="N",
+                    help="VRAM in MiB the engine leaves free for other programs (a game, another model; the engine's "
+                         "default: 700); the expert cache takes that much less")
     ap.add_argument("--kv-streaming", choices=["auto", "on", "off"], default="auto",
                     help="from a 64K context: keep the KV cache in RAM and only the attention's window in VRAM (more "
                          "experts fit on the GPU); auto: when the RAM has room for it")
@@ -2888,6 +2904,8 @@ def main() -> int:
     a = ap.parse_args()
     if a.resident_budget_gib is not None and not a.resident_budget_gib > 0:
         ap.error("--resident-budget-gib takes a number of GiB above 0, e.g. --resident-budget-gib 32")
+    if a.vram_reserve_mib is not None and a.vram_reserve_mib < 0:
+        ap.error("--vram-reserve-mib takes a number of MiB, 0 or more, e.g. --vram-reserve-mib 2048")
     if a.gpu is not None:                             # --gpu 0,2 means --gpus 0,2 (a user tried it: issue report)
         if "," in a.gpu:
             a.gpus, a.gpu = a.gpus or a.gpu, None
@@ -2919,6 +2937,8 @@ def main() -> int:
                 a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
                 a.host, a.api_key = a.host or ch["host"], a.api_key or ch["api_key"]
                 a.port = a.port or ch["port"]
+                if a.vram_reserve_mib is None:          # #493: an explicit reserve set up before
+                    a.vram_reserve_mib = ch.get("vram_reserve_mib")
                 if isinstance(ch.get("gpu"), list):     # a layer split: set up across the same cards again
                     a.gpus = a.gpus or ",".join(str(g) for g in ch["gpu"])
                     a.layer_split = a.layer_split or ch.get("layer_split")
@@ -2945,13 +2965,15 @@ def main() -> int:
             warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
                  + ("keeps" if a.no_start else "starts with") + " the default settings")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab})
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                           "vram_reserve_mib": a.vram_reserve_mib})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         if not a.build:
             update_installed_engine(a.prebuilt)
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab})
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                           "vram_reserve_mib": a.vram_reserve_mib})
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
@@ -2959,7 +2981,8 @@ def main() -> int:
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
             return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab})
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                           "vram_reserve_mib": a.vram_reserve_mib})
 
     # ---- 1. the PC
     step(1, "checking your PC")
@@ -3494,6 +3517,17 @@ def main() -> int:
         args += ["--resident-budget-gib", f"{budget:g}"]   # GiB kept in RAM (#498: a layer split has no budget)
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
+    if a.vram_reserve_mib is not None:                 # #493: VRAM left free for other programs (only when given)
+        if "--vram-reserve-mib" in args:
+            i = args.index("--vram-reserve-mib") + 1
+            if vision == "gpu" and a.vram_reserve_mib < int(args[i]):
+                warn(f"--vram-reserve-mib {a.vram_reserve_mib}: the image encoder on the GPU needs ~{args[i]} MiB of "
+                     "it; kept as you chose (it may run out of VRAM when it reads a picture)")
+            args[i] = str(a.vram_reserve_mib)
+        else:
+            args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
+        ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
+           "that much less)")
     if esp is not None:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
