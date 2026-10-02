@@ -145,8 +145,9 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
                             tag, us1, 2.0 * f.up_off / us1 / 1e3, usg, 2.0 * f.up_off / usg / 1e3);
                 std::printf("          gate+up %d tokens one thread: %s %.0f us vs ggml %d x %.0f us\n", NT, tag, usn, NT, usg);
             };
-            if (cpu::cpu_avx512_ok()) check("avx512", true);   // guarded: the binary runs on AVX-2 CPUs too
-            check("avx2", false);
+            // guarded: the binary runs on AVX-2 CPUs too, and IQ4_XS has no AVX-512 kernel (an empty switch)
+            if (cpu::cpu_avx512_ok() && cpu::iq512_supported(f.gu_type)) check("avx512", true);
+            if (cpu::iq256_supported(f.gu_type)) check("avx2", false);
         }
         for (int k = 0; k < NT; ++k) {
             cpu::native_quant_h(f, ff[k].data(), hq[k].data());
