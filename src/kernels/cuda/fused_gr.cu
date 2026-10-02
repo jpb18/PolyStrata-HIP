@@ -196,7 +196,7 @@ __global__ void __launch_bounds__(THREADS) gr_norm_multi_kernel(GrMulti m) {
 // which fits all eight tokens in one 40 KiB launch and stages 160 chunks of 8 (5 per lane, half the registers held
 // for the weight prefetch); smaller tiles raise how many blocks share an SM (the 41-block grid), e.g. three blocks
 // of four tokens instead of one on sm_75.
-template <int TILEV>
+template <int TILEV, int MAX_T = kFusedGrMaxT>
 __global__ void __launch_bounds__(THREADS) gr_down_multi_kernel(GrMulti m) {
     constexpr int TQ = TILEV / 8 / 32;      // uint4 weight chunks per lane per tile
     extern __shared__ __align__(16) float tile[];   // [T][TILEV]
@@ -207,9 +207,9 @@ __global__ void __launch_bounds__(THREADS) gr_down_multi_kernel(GrMulti m) {
     const bool active = !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
     const uint16_t* wrow = (inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) (active ? row : 0) * D;
     const uint4* w4 = reinterpret_cast<const uint4*>(wrow);
-    float acc[kFusedGrMaxT];
+    float acc[MAX_T];
 #pragma unroll
-    for (int k = 0; k < kFusedGrMaxT; ++k) acc[k] = 0.0f;
+    for (int k = 0; k < MAX_T; ++k) acc[k] = 0.0f;
     for (int base = 0; base < D; base += TILEV) {
         uint4 wv[TQ];
         if (active) {
@@ -229,17 +229,17 @@ __global__ void __launch_bounds__(THREADS) gr_down_multi_kernel(GrMulti m) {
         for (int q = 0; q < TQ; ++q) {
             const int j = lane + 32 * q;
 #pragma unroll
-            for (int k = 0; k < kFusedGrMaxT; ++k)
+            for (int k = 0; k < MAX_T; ++k)
                 if (k < T) acc[k] += dot8(wv[q], tile + k * TILEV + j * 8);
         }
     }
     if (!active) return;
-    float s[kFusedGrMaxT];
+    float s[MAX_T];
 #pragma unroll
-    for (int k = 0; k < kFusedGrMaxT; ++k) s[k] = k < T ? warp_sum(acc[k]) : 0.0f;
+    for (int k = 0; k < MAX_T; ++k) s[k] = k < T ? warp_sum(acc[k]) : 0.0f;
     // lane k writes token k (every lane holds every sum after the xor reduction)
 #pragma unroll
-    for (int k = 0; k < kFusedGrMaxT; ++k) {
+    for (int k = 0; k < MAX_T; ++k) {
         if (k >= T || lane != k) continue;
         if (inject_block) {
             m.a[k].inject_out[row] = s[k];
@@ -616,6 +616,7 @@ __device__ __forceinline__ void stage_htile(const GrMulti& m, int T, int h, floa
     }
 }
 
+template <int MAX_T = kFusedGrMaxT>
 __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
     extern __shared__ __align__(16) float4 hbuf[];      // 2 buffers x [T][2][160] float4
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
@@ -626,9 +627,9 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
     const uint16_t* wrow = (inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) (active ? row : 0) * D;
     const uint4* w4 = reinterpret_cast<const uint4*>(wrow);
     const size_t buf_f4 = (size_t) T * (H_TILE / 4);    // float4 per buffer (the second one follows the first)
-    float acc[kFusedGrMaxT];
+    float acc[MAX_T];
 #pragma unroll
-    for (int k = 0; k < kFusedGrMaxT; ++k) acc[k] = 0.0f;
+    for (int k = 0; k < MAX_T; ++k) acc[k] = 0.0f;
     uint4 wv[HQ], wnext[HQ];
     if (active) {
 #pragma unroll
@@ -653,7 +654,7 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
             for (int q = 0; q < HQ; ++q) {
                 const int j = lane + 32 * q;
 #pragma unroll
-                for (int k = 0; k < kFusedGrMaxT; ++k) {
+                for (int k = 0; k < MAX_T; ++k) {
                     if (k < T) {
                         const float4* pk = cur + (size_t) k * (H_TILE / 4);
                         acc[k] += dot8v(wv[q], pk[j], pk[H_TILE / 8 + j]);
@@ -670,12 +671,12 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
         }
     }
     if (!active) return;
-    float s[kFusedGrMaxT];
+    float s[MAX_T];
 #pragma unroll
-    for (int k = 0; k < kFusedGrMaxT; ++k) s[k] = k < T ? warp_sum(acc[k]) : 0.0f;
+    for (int k = 0; k < MAX_T; ++k) s[k] = k < T ? warp_sum(acc[k]) : 0.0f;
     // lane k writes token k (every lane holds every sum after the xor reduction)
 #pragma unroll
-    for (int k = 0; k < kFusedGrMaxT; ++k) {
+    for (int k = 0; k < MAX_T; ++k) {
         if (k >= T || lane != k) continue;
         if (inject_block) {
             m.a[k].inject_out[row] = s[k];
@@ -729,7 +730,7 @@ int down_chunk(bool staged, int* tile_out) {
         }
         int want_staged = (int) (2 * kFusedGrMaxT * H_TILE * sizeof(float));
         if (optin > 0 && want_staged > optin) want_staged = optin;
-        cudaFuncSetAttribute(gr_down_staged_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, want_staged);
+        cudaFuncSetAttribute(gr_down_staged_kernel<>, cudaFuncAttributeMaxDynamicSharedMemorySize, want_staged);
         cudaGetLastError();      // drop any error the attempt left behind
         // The opt-in is a promise a pre-Volta card does not keep: an sm_60 answers 65536 and accepts the
         // cudaFuncSetAttribute for 61440 B, then fails the LAUNCH with "invalid argument".  What such a card
@@ -778,9 +779,20 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             for (int k = 0; k < ct; ++k) c.a[k] = m.a[c0 + k];
         }
         const size_t smem = (size_t) ct * per_tok;
-        if (staged) gr_down_staged_kernel<<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
-        else if (tv == 1280) gr_down_multi_kernel<1280><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
-        else gr_down_multi_kernel<2560><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+        // Only bound per-thread token storage; retain the chosen tile, block
+        // size, accumulation order and upstream plain/split/staged path.
+        const char* max4_env = std::getenv("STRATA_GR_DOWN_MAX4");
+        const bool max4 = ct <= 4 && max4_env && std::atoi(max4_env) != 0;
+        if (staged) {
+            if (max4) gr_down_staged_kernel<4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else gr_down_staged_kernel<><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+        } else if (tv == 1280) {
+            if (max4) gr_down_multi_kernel<1280, 4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else gr_down_multi_kernel<1280><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+        } else {
+            if (max4) gr_down_multi_kernel<2560, 4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else gr_down_multi_kernel<2560><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+        }
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
     gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
