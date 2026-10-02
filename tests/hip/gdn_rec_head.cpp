@@ -1,4 +1,4 @@
-// tests/hip/gdn_rec_head.cpp - the prompt GDN recurrence's per-head kernel (gdn_recurrence_variant 1, the norm fused)
+// tests/hip/gdn_rec_head.cpp - the prompt GDN recurrence's four-lanes-per-column kernel + norm (gdn_recurrence_variant 1)
 // against the column-split kernels + the norm kernel (variant 0, the default before it):
 // y, its FP16 bits and the final state must be BITWISE equal, over chunk lengths around the 8-token staging and a
 // long one, from a nonzero state.  Synthetic inputs in the model's ranges (unit q/k rows, log-decay gates < 0).
@@ -61,7 +61,7 @@ int main() {
         const float* dgm = dev(gamma);
         std::vector<float> y_ref, st_ref;
         std::vector<uint16_t> y16_ref;
-        for (int variant : {0, 1}) {
+        for (int variant : {0, 3, 1}) {
             float* dst = dev(state);
             float* dy = nullptr;
             uint16_t* dy16 = nullptr;

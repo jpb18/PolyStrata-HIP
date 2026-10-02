@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -433,53 +434,52 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_cols_pipe_kernel(float* __res
 #pragma unroll
     for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
 }
-// Aurora (S23): the recurrence with ONE block per value head, a lane pair per value column (the two halves of the
-// column's 128 state rows in the two lanes' registers, lanes l and l + 16 of one wave), and the output norm fused in.
-// The same arithmetic in the same order as gdn_rec_cols_pipe_kernel + gdn_out_norm_kernel - the kv / o partials of
-// the four 32-row groups are kept apart and added as red[0] + red[1] + red[2] + red[3] (the two lanes swap theirs
-// within the wave); the norm's warp sums run over the same 32-column warps - so the same bits
-// (tests/hip/gdn_rec_head.cpp).  What changes is the schedule: no __syncthreads per token, one pair every HT tokens
-// (the chunk's q/k rows staged in LDS, the next chunk's loaded into registers while this one computes), instead of
-// four per token.  STRATA_GDN_HEAD=0: the old kernels.
-constexpr int HT = 8;                           // tokens per staged chunk
-constexpr int HTH = 2 * S;                      // threads per head block
-constexpr int HRS = S + 8;                      // staged q/k row stride: [rows 0..63, 4 pad, rows 64..127, 4 pad]
-constexpr int HPF = HT * 2 * S / 4 / HTH;       // float4 of q/k each thread prefetches per chunk (4)
-__device__ __forceinline__ int hrow(int r) { return r + (r >= S / 2 ? 4 : 0); }
-__global__ void __launch_bounds__(HTH) gdn_rec_head_kernel(float* __restrict__ state, const float* __restrict__ h,
+// Aurora (S23): the recurrence with the column-split grid of gdn_rec_cols_pipe_kernel (four 32-column blocks per value
+// head) but FOUR LANES per column, lane g holding the column's state rows 32g .. 32g + 31 in registers - exactly the
+// row group the old kernel's thread (col, rg = g) held - so a token needs no __syncthreads: the four kv / o partials
+// meet through wave shuffles and are added in the old order red[0] + red[1] + red[2] + red[3] (the same bits;
+// tests/hip/gdn_rec_head.cpp).  The q/k rows, v, gate and beta are staged in LDS HT tokens at a time, the next chunk
+// loaded into registers while this one computes, and a token's k and q rows are read into registers before its
+// products (one LDS latency per token, not one per load).  The old kernels took ~4 barriers per token and ~3.5 us
+// per token and layer on the Radeon 8060S; the output norm runs after it in gdn_out_norm_warp_kernel.
+// STRATA_GDN_HEAD=0: the old kernels.
+constexpr int HT = 4;                           // tokens per staged chunk (LDS ~10 KB: all 192 blocks resident)
+constexpr int QCB = 32;                         // columns per block
+constexpr int QTH = QCB * 4;                    // threads per block: 4 lanes per column
+constexpr int QRS = 36;                         // staged row-group stride (32 rows + 4 pad: the 4 groups' reads
+                                                // land in different LDS banks)
+constexpr int QPF = HT * 2 * S / 4 / QTH;       // float4 of q/k each thread prefetches per chunk (2)
+__global__ void __launch_bounds__(QTH) gdn_rec_quad_kernel(float* __restrict__ state, const float* __restrict__ h,
                                                            const float* __restrict__ gate, const float* __restrict__ beta,
-                                                           const float* __restrict__ z, const float* __restrict__ gamma,
-                                                           float eps, float* __restrict__ y, uint16_t* __restrict__ y16,
-                                                           int64_t T) {
-    __shared__ __align__(16) float sqk[2][HT][2][HRS];  // [buffer][token][q | k][row (padded)]
-    __shared__ float sgb[2][2][HT];                    // [buffer][gate | beta][token]
-    __shared__ float sv[2][HT][S];                     // [buffer][token][column] v
-    __shared__ float soc[HT][S];
-    __shared__ float swsum[HT][4];
-    const int head = blockIdx.x, tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
-    const int col = wave * 16 + (lane & 15), half = lane >> 4, r0 = half * (S / 2);   // this lane's rows r0 .. r0 + 63
+                                                           float* __restrict__ oc_out, int64_t T) {
+    __shared__ __align__(16) float sqk[2][HT][2][4 * QRS];   // [buffer][token][q | k][group][row (padded)]
+    __shared__ float sgb[2][2][HT];                         // [buffer][gate | beta][token]
+    __shared__ float sv[2][HT][QCB];                        // [buffer][token][column] v
+    const int head = blockIdx.x / (S / QCB), cb = blockIdx.x % (S / QCB);
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int g = lane >> 3, cl = wave * 8 + (lane & 7), col = cb * QCB + cl;   // row group, column in block / head
     const int qh = head % HK;
-    float s[S / 2];
+    float s[32];
     {
-        const float* base = state + (size_t) head * S + col;
+        const float* base = state + ((size_t) (g * 32) * HV + head) * S + col;
 #pragma unroll
-        for (int r = 0; r < S / 2; ++r) s[r] = base[(size_t) (r0 + r) * HV * S];
+        for (int r = 0; r < 32; ++r) s[r] = base[(size_t) r * HV * S];
     }
-    float4 pf[HPF];
+    float4 pf[QPF];
     float pv[HT], pgb = 0.0f;
-    // chunk c's inputs into registers: q/k rows (float4 i of the chunk's [token][q|k][row] block), the column's v (the
-    // lower lane of the pair), and gate (threads 0..HT-1) / beta (HT..2HT-1) of token `tid % HT`
+    // chunk c's inputs into registers: q/k (float4 i of the chunk's [token][q|k][S/4] block), the column's v (lanes of
+    // group 0) and gate (threads 0..HT-1) / beta (HT..2HT-1) of token `tid % HT`
     auto fetch = [&](int64_t c) {
         const int64_t t0 = c * HT;
 #pragma unroll
-        for (int u = 0; u < HPF; ++u) {
-            const int i = tid + u * HTH;
+        for (int u = 0; u < QPF; ++u) {
+            const int i = tid + u * QTH;
             const int tt = i / (2 * S / 4), rem = i % (2 * S / 4), part = rem / (S / 4), r4 = rem % (S / 4);
             const int64_t t = t0 + tt;
             pf[u] = t < T ? *reinterpret_cast<const float4*>(h + t * C + part * HK * S + qh * S + r4 * 4)
                           : make_float4(0.f, 0.f, 0.f, 0.f);
         }
-        if (half == 0) {
+        if (g == 0) {
 #pragma unroll
             for (int tt = 0; tt < HT; ++tt) {
                 const int64_t t = t0 + tt;
@@ -492,19 +492,21 @@ __global__ void __launch_bounds__(HTH) gdn_rec_head_kernel(float* __restrict__ s
         }
     };
     const float rs_s = rsqrtf((float) S);
+    const int src0 = lane & 7;                       // lane of group 0 for this column; group j is src0 + 8 j
     const int64_t nch = (T + HT - 1) / HT;
     if (nch > 0) fetch(0);
     for (int64_t c = 0; c < nch; ++c) {
         const int b = (int) (c & 1);
-        if (half == 0) {
+        if (g == 0) {
 #pragma unroll
-            for (int tt = 0; tt < HT; ++tt) sv[b][tt][col] = pv[tt];
+            for (int tt = 0; tt < HT; ++tt) sv[b][tt][cl] = pv[tt];
         }
 #pragma unroll
-        for (int u = 0; u < HPF; ++u) {
-            const int i = tid + u * HTH;
+        for (int u = 0; u < QPF; ++u) {
+            const int i = tid + u * QTH;
             const int tt = i / (2 * S / 4), rem = i % (2 * S / 4), part = rem / (S / 4), r4 = rem % (S / 4);
-            *reinterpret_cast<float4*>(&sqk[b][tt][part][hrow(r4 * 4)]) = pf[u];
+            const int row = r4 * 4;
+            *reinterpret_cast<float4*>(&sqk[b][tt][part][(row >> 5) * QRS + (row & 31)]) = pf[u];
         }
         if (tid < 2 * HT) sgb[b][tid / HT][tid % HT] = pgb;
         __syncthreads();                               // chunk c staged (buffer b was last read two chunks ago)
@@ -512,71 +514,62 @@ __global__ void __launch_bounds__(HTH) gdn_rec_head_kernel(float* __restrict__ s
         const int64_t t0 = c * HT;
         const int nt = (int) (T - t0 < HT ? T - t0 : HT);
         for (int tt = 0; tt < nt; ++tt) {
-            const float* sq = &sqk[b][tt][0][hrow(r0)];
-            const float* sk = &sqk[b][tt][1][hrow(r0)];
-            const float g = __expf(sgb[b][0][tt]);
-            float kva, kvb;                            // this lane's two 32-row groups
+            float k[32], q[32];
             {
-                float kv = 0.0f;
+                const float4* k4 = reinterpret_cast<const float4*>(&sqk[b][tt][1][g * QRS]);
+                const float4* q4 = reinterpret_cast<const float4*>(&sqk[b][tt][0][g * QRS]);
 #pragma unroll
-                for (int r = 0; r < 32; ++r) kv = fmaf(s[r], sk[r], kv);
-                kva = kv;
-                kv = 0.0f;
-#pragma unroll
-                for (int r = 32; r < 64; ++r) kv = fmaf(s[r], sk[r], kv);
-                kvb = kv;
+                for (int j = 0; j < 8; ++j) {
+                    const float4 kk = k4[j], qq = q4[j];
+                    k[4 * j] = kk.x; k[4 * j + 1] = kk.y; k[4 * j + 2] = kk.z; k[4 * j + 3] = kk.w;
+                    q[4 * j] = qq.x; q[4 * j + 1] = qq.y; q[4 * j + 2] = qq.z; q[4 * j + 3] = qq.w;
+                }
             }
-            asm volatile("" ::: "memory");             // re-read the k row below rather than hold it in VGPRs
-            // groups 0, 1 in the lower lane, 2, 3 in the upper: ((g0 + g1) + g2) + g3 in both
-            const float oa = __shfl_xor_sync(0xffffffffu, kva, 16), ob = __shfl_xor_sync(0xffffffffu, kvb, 16);
-            const float kv_col = half == 0 ? kva + kvb + oa + ob : oa + ob + kva + kvb;
-            const float cvt = sv[b][tt][col], cbt = sgb[b][1][tt];
-            const float delta = (cvt - g * kv_col) * cbt;
-            float opa = 0.0f, opb = 0.0f;
+            const float g_exp = __expf(sgb[b][0][tt]);
+            float kv = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 32; ++r) kv = fmaf(s[r], k[r], kv);
+            const float p0 = __shfl_sync(0xffffffffu, kv, src0), p1 = __shfl_sync(0xffffffffu, kv, src0 + 8),
+                        p2 = __shfl_sync(0xffffffffu, kv, src0 + 16), p3 = __shfl_sync(0xffffffffu, kv, src0 + 24);
+            const float kv_col = p0 + p1 + p2 + p3;
+            const float cvt = sv[b][tt][cl], cbt = sgb[b][1][tt];
+            const float delta = (cvt - g_exp * kv_col) * cbt;
+            float o = 0.0f;
 #pragma unroll
             for (int r = 0; r < 32; ++r) {
-                s[r] = fmaf(g, s[r], sk[r] * delta);
-                opa = fmaf(s[r], sq[r], opa);
+                s[r] = fmaf(g_exp, s[r], k[r] * delta);
+                o = fmaf(s[r], q[r], o);
             }
-#pragma unroll
-            for (int r = 32; r < 64; ++r) {
-                s[r] = fmaf(g, s[r], sk[r] * delta);
-                opb = fmaf(s[r], sq[r], opb);
-            }
-            const float pa = __shfl_xor_sync(0xffffffffu, opa, 16), pb = __shfl_xor_sync(0xffffffffu, opb, 16);
-            if (half == 0) soc[tt][col] = (opa + opb + pa + pb) * rs_s;
-        }
-        __syncthreads();                               // the chunk's outputs
-        if (tid < S) {                                 // the norm: thread = column, warps of 32 columns as before
-            const int nc = tid, nl = tid & 31, nw = tid >> 5;
-            for (int tt = 0; tt < nt; ++tt) {
-                const float sp = warp_sum(soc[tt][nc] * soc[tt][nc]);
-                if (nl == 0) swsum[tt][nw] = sp;
-            }
-        }
-        __syncthreads();
-        if (tid < S) {
-            const int nc = tid;
-            const float g_col = gamma[nc];
-            float cz[HT];
-#pragma unroll
-            for (int tt = 0; tt < HT; ++tt) cz[tt] = tt < nt ? z[(t0 + tt) * HV * S + head * S + nc] : 0.0f;
-#pragma unroll
-            for (int tt = 0; tt < HT; ++tt) {
-                if (tt >= nt) break;
-                const float oc = soc[tt][nc];
-                const float ss = swsum[tt][0] + swsum[tt][1] + swsum[tt][2] + swsum[tt][3];
-                const float v = oc * rsqrtf(ss / (float) S + eps) * g_col * sigm(cz[tt]);
-                const size_t at = (size_t) (t0 + tt) * HV * S + (size_t) head * S + nc;
-                y[at] = v;
-                y16[at] = hf(v);
-            }
+            const float o0 = __shfl_sync(0xffffffffu, o, src0), o1 = __shfl_sync(0xffffffffu, o, src0 + 8),
+                        o2 = __shfl_sync(0xffffffffu, o, src0 + 16), o3 = __shfl_sync(0xffffffffu, o, src0 + 24);
+            if (g == 0) oc_out[(t0 + tt) * HV * S + head * S + col] = (o0 + o1 + o2 + o3) * rs_s;
         }
     }
     {
-        float* base = state + (size_t) head * S + col;
+        float* base = state + ((size_t) (g * 32) * HV + head) * S + col;
 #pragma unroll
-        for (int r = 0; r < S / 2; ++r) base[(size_t) (r0 + r) * HV * S] = s[r];
+        for (int r = 0; r < 32; ++r) base[(size_t) r * HV * S] = s[r];
+    }
+}
+// gdn_out_norm_kernel's body over a grid-stride walk of the (token, head) rows: the old kernel launched a 128-thread
+// block per row (T * 48 blocks; ~45 GB/s on the 8060S).  The same code per row (the same compiled arithmetic: a wave
+// per row with four values per lane rounded differently in its first xor step).
+__global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
+                                                              float eps, float* __restrict__ y, uint16_t* __restrict__ y16,
+                                                              int64_t rows) {
+    __shared__ float wsum[4];
+    const int col = threadIdx.x;
+    for (int64_t row = blockIdx.x; row < rows; row += gridDim.x) {
+        const size_t at = (size_t) row * S + col;
+        const float oc = y[at];
+        float sp = warp_sum(oc * oc);
+        __syncthreads();                               // the previous row's sums are read
+        if ((col & 31) == 0) wsum[col >> 5] = sp;
+        __syncthreads();
+        const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
+        const float v = oc * rsqrtf(ss / (float) S + eps) * gamma[col] * sigm(z[at]);
+        y[at] = v;
+        y16[at] = hf(v);
     }
 }
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
@@ -890,10 +883,20 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 void gdn_recurrence_variant(int variant, float* state, const float* h, const float* gate, const float* beta,
                             const float* z, const float* gamma, float eps, float* y, uint16_t* y16, int64_t T,
                             void* stream) {
+    if (variant == 3) {   // diagnostics: the quad recurrence + the old norm kernel
+        if (T > 0) {
+            gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+            gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, (cudaStream_t) stream>>>(z, gamma, eps, y, y16);
+        }
+        return;
+    }
     if (variant == 1) {
-        if (T > 0)
-            gdn_rec_head_kernel<<<HV, HTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, z, gamma, eps, y, y16, T);
-        check("gdn_recurrence (head)");
+        if (T > 0) {
+            gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+            gdn_out_norm_loop_kernel<<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
+                z, gamma, eps, y, y16, T * HV);
+        }
+        check("gdn_recurrence (quad)");
         return;
     }
     static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
@@ -911,7 +914,7 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
 }
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream) {
-    // Aurora (S23): the per-head kernel with the norm fused, the same bits (tests/hip/gdn_rec_head.cpp);
+    // Aurora (S23): four lanes per column + the grid-stride norm, the same bits (tests/hip/gdn_rec_head.cpp);
     // STRATA_GDN_HEAD=0 (or STRATA_GDN_REC_HEADS) keeps the earlier kernels
     static const bool head = [] { const char* v = std::getenv("STRATA_GDN_HEAD"); return v == nullptr || std::atoi(v) != 0; }();
     static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;
