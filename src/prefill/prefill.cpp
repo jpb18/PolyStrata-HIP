@@ -79,14 +79,6 @@ void quantize_act_native(const float*, int64_t, int64_t, void*, void*) {}
 void experts_native(const Batch&, const NativeGeom&, int, int64_t, const void*, const void*, const int32_t*, void*,
                     float*, void*) {}
 }  // namespace strata::prefill::fused
-#elif defined(STRATA_PREFILL_FUSED_HIP)
-// HIP: moe_fused.cu's gfx11 kernels (the Q2_0 pack) are built, the native packs' (moe_fused_iq.cu) are not
-namespace strata::prefill::fused {
-bool native_supported(int, int) { return false; }
-void quantize_act_native(const float*, int64_t, int64_t, void*, void*) {}
-void experts_native(const Batch&, const NativeGeom&, int, int64_t, const void*, const void*, const int32_t*, void*,
-                    float*, void*) {}
-}  // namespace strata::prefill::fused
 #endif
 
 namespace strata::prefill {

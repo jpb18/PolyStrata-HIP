@@ -949,11 +949,11 @@ if(STRATA_NATIVE_EXPERTS)
     if(NOT EXISTS "${_strata_mmq}/common.cuh" OR NOT EXISTS "${_strata_mmq}/quantize.cu")
       message(FATAL_ERROR "The selected GGML source is missing the ggml-cuda MMQ sources: ${_strata_mmq}")
     endif()
-    # Aurora: moe_fused.cu's gfx11 WMMA kernels for the Q2_0 pack's prompt experts (opt-in STRATA_PF_FUSED=1); the
-    # native packs' fused kernels (moe_fused_iq.cu) stay CUDA-only
+    # Aurora: moe_fused.cu's and moe_fused_iq.cu's gfx11 WMMA kernels for the prompt experts (opt-in STRATA_PF_FUSED=1)
     set(_strata_mmq_sources
       src/prefill/moe_mmq.cu
       src/prefill/moe_fused.cu
+      src/prefill/moe_fused_iq.cu
       src/prefill/ggml_cuda_host.cu
       "${_strata_mmq}/quantize.cu")
     foreach(_t IN LISTS _strata_mmq_types)
@@ -961,7 +961,8 @@ if(STRATA_NATIVE_EXPERTS)
     endforeach()
     set_source_files_properties(${_strata_mmq_sources} PROPERTIES LANGUAGE HIP)
     # moe_fused.cu is Strata's own CUDA-shaped source: it takes the HIP compat headers, ggml's MMQ sources do not
-    set_source_files_properties(src/prefill/moe_fused.cu PROPERTIES INCLUDE_DIRECTORIES "${STRATA_HIP_COMPAT_INCLUDE_DIR}")
+    set_source_files_properties(src/prefill/moe_fused.cu src/prefill/moe_fused_iq.cu
+                                PROPERTIES INCLUDE_DIRECTORIES "${STRATA_HIP_COMPAT_INCLUDE_DIR}")
     add_library(strata_mmq STATIC ${_strata_mmq_sources})
     target_include_directories(strata_mmq
       PRIVATE "${_strata_gg}/include" "${_strata_gg}/src" "${_strata_mmq}"
@@ -972,7 +973,7 @@ if(STRATA_NATIVE_EXPERTS)
     endif()
     target_link_libraries(strata_mmq PUBLIC ggml-base hip::host roc::hipblas)
     target_link_libraries(strata_prefill PUBLIC strata_mmq)
-    target_compile_definitions(strata_prefill PUBLIC STRATA_PREFILL_MMQ=1 STRATA_PREFILL_FUSED=1 STRATA_PREFILL_FUSED_HIP=1)
+    target_compile_definitions(strata_prefill PUBLIC STRATA_PREFILL_MMQ=1 STRATA_PREFILL_FUSED=1)
     # Aurora: the gfx11 fused experts against the FP64 reference and MMQ (tests/cuda's test; exit 77 off gfx11)
     add_executable(hip_prefill_fused_moe tests/cuda/prefill_fused_moe_test.cpp)
     target_include_directories(hip_prefill_fused_moe PRIVATE "${_strata_gg}/include")
@@ -980,6 +981,12 @@ if(STRATA_NATIVE_EXPERTS)
     add_test(NAME hip_prefill_fused_moe COMMAND hip_prefill_fused_moe)
     set_tests_properties(hip_prefill_fused_moe PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     list(APPEND _strata_hip_tests hip_prefill_fused_moe)
+    add_executable(hip_prefill_fused_iq tests/cuda/prefill_fused_iq_test.cpp)
+    target_include_directories(hip_prefill_fused_iq PRIVATE "${_strata_gg}/include")
+    target_link_libraries(hip_prefill_fused_iq PRIVATE strata_mmq ggml-base strata_hip_runtime)
+    add_test(NAME hip_prefill_fused_iq COMMAND hip_prefill_fused_iq)
+    set_tests_properties(hip_prefill_fused_iq PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    list(APPEND _strata_hip_tests hip_prefill_fused_iq)
 
     # Numerical diagnostic: synthetic layouts by default, optional first-expert IQ3_XXS/IQ4_NL check with a pack.
     add_executable(hip_prefill_mmq_parity tests/hip/prefill_mmq_parity.cpp)
