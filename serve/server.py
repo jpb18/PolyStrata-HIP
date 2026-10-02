@@ -2269,10 +2269,40 @@ class Service:
         prompt, plain = unmark_think_literals(prompt)
         return self.tok.encode(prompt, parse_special=True, plain=plain)
 
+    def _note_unreadable_tool_images(self, messages):
+        """A picture a tool returned (Claude Code's Read of an image file) that this server cannot read - it has no
+        image encoder, or the encoder refuses that picture - becomes a short note in its place instead of a 400.
+        Clients resend the whole history every turn, so one unreadable tool picture would fail every later request of
+        the conversation; a picture the user sends keeps the 400.  A picture that encodes stays in the cache, so the
+        prompt's own encode below finds it."""
+        fetched = {}                     # a URL's bytes, so prepare() does not download the same picture again
+        for m in messages:
+            content = m.get("content")
+            if m.get("role") != "tool" or not isinstance(content, list):
+                continue
+            for n, item in enumerate(content):
+                if not isinstance(item, dict) or item.get("type") != "image":
+                    continue
+                why = "this server has no image encoder" if self.vision is None else None
+                if why is None:
+                    src = item["source"]
+                    try:
+                        if src.startswith(("http://", "https://")):
+                            src = fetched[item["source"]] = Vision.download(src)   # outside the FIFO, as in prepare()
+                        with self.fifo:          # the encoder takes its turn with the requests (see below)
+                            self.vision.encode(src)
+                    except (ValueError, OSError) as e:
+                        why = str(e)
+                if why is not None:
+                    print(f"[strata] a picture a tool returned was left out of the prompt: {why}", flush=True)
+                    content[n] = {"type": "text", "text": f"[image omitted: {why}]"}
+        return fetched
+
     def prepare(self, messages, tools, kwargs, max_new=None, force=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the
         prompt; with thinking, Service.run writes it once the thinking is over."""
+        fetched = self._note_unreadable_tool_images(messages)
         ids = self.encode_prompt(messages, tools, kwargs)
         if force and kwargs.get("enable_thinking", True) is False:
             ids = ids + self.tok.encode(force, parse_special=True)
@@ -2286,7 +2316,8 @@ class Service:
             start = self.tok.encode(VISION_START, parse_special=True)[0]
             # An image URL is downloaded first, outside the FIFO: under it, a slow server held every other request
             # for as long as urlopen waited.
-            images = [Vision.download(src) if src.startswith(("http://", "https://")) else src for src in images]
+            images = [fetched[src] if src in fetched else Vision.download(src) if src.startswith(("http://", "https://"))
+                      else src for src in images]
             # Encode only while the engine is idle: the engine and the image encoder (a separate process) must not
             # run on the GPU at the same time - an encode during a running request left that request stuck at
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
