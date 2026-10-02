@@ -766,6 +766,42 @@ class ClientShapes(unittest.TestCase):
             with self.subTest(calls=calls), self.assertRaisesRegex(ValueError, "tool_calls must be a list of objects"):
                 openai_to_messages({"messages": [{"role": "assistant", "content": "", "tool_calls": calls}]})
 
+    def test_tool_call_malformed_arguments_fallback(self):
+        from serve.frontend import openai_to_messages
+        bad_call = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{malformed_json"}}]
+        msgs, tools, kwargs = openai_to_messages({"messages": [{"role": "user", "content": "u"},
+                                                               {"role": "assistant", "content": "", "tool_calls": bad_call}]})
+        self.assertEqual(msgs[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"arguments": "{malformed_json"}}}])
+        tpl = ChatTemplate(ROOT / "serve/chat_template.jinja")
+        rendered = tpl.render(msgs, tools=tools, **kwargs)
+        self.assertIn("<function=f>", rendered)
+        self.assertIn("<parameter=arguments>\n{malformed_json", rendered)
+
+
+class ToolArguments(unittest.TestCase):
+    """#510: one helper for both frontends; a history whose arguments are not a JSON object is kept, not a 500."""
+
+    def test_helper(self):
+        from serve.frontend import tool_arguments
+        for raw, want in ((None, {}), ("", {}), ("  ", {}), ({"a": 1}, {"a": 1}), ('{"a": 1}', {"a": 1}),
+                          ("{cut", {"arguments": "{cut"}), ("[1, 2]", {"arguments": "[1, 2]"}),
+                          ("5", {"arguments": "5"}), ([1, 2], {"arguments": "[1, 2]"}), (7, {"arguments": "7"})):
+            with self.subTest(raw=raw):
+                self.assertEqual(tool_arguments(raw), want)
+
+    def test_both_frontends_render_it(self):
+        from serve.frontend import anthropic_to_messages, openai_to_messages
+        for bad in ("{cut", "[1]", "3"):
+            with self.subTest(bad=bad):
+                m = openai_to_messages({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": bad}}]}]})[0]
+                self.assertEqual(m[1]["tool_calls"][0]["function"]["arguments"], {"arguments": bad})
+        for bad in ([1], 3, "{cut"):
+            with self.subTest(anthropic=bad):
+                m = anthropic_to_messages({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t", "name": "f", "input": bad}]}]})[0]
+                self.assertIn("arguments", m[1]["tool_calls"][0]["function"]["arguments"])
+
 
 class SamplingKeys(unittest.TestCase):
     """The GEN line's sampling keys: top_k 0 ("off") or wider than the engine's 64 get the widest list, 64 (they used

@@ -264,6 +264,23 @@ def _tool_list(value, wrapper: str | None) -> list[dict]:
     return tools
 
 
+def tool_arguments(raw) -> dict:
+    """A call's arguments from a client's history -> the mapping the template renders (both APIs).  A JSON object
+    (as text or already parsed) is used as it is; empty is {}; anything else (cut-off or malformed JSON, a list, a
+    number) is kept as text under "arguments" instead of refusing the whole conversation (#510)."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return {"arguments": raw}
+        return value if isinstance(value, dict) else {"arguments": raw}
+    return {"arguments": json.dumps(raw, ensure_ascii=False)}
+
+
 def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     """OpenAI Chat Completions -> (template messages, template tools, template kwargs)."""
     messages = []
@@ -280,10 +297,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
                 fn = c.get("function", c)
                 if not isinstance(fn, dict):
                     raise ValueError("tool_calls must be a list of objects (each with a \"function\" object)")
-                args = fn.get("arguments")
-                if isinstance(args, str):               # the template requires a mapping, not a JSON string
-                    args = json.loads(args) if args.strip() else {}
-                calls.append({"function": {"name": fn.get("name"), "arguments": args or {}}})
+                calls.append({"function": {"name": fn.get("name"), "arguments": tool_arguments(fn.get("arguments"))}})
             out["tool_calls"] = calls
         messages.append(out)
     tools = [t.get("function", t) if t.get("type") == "function" else t
@@ -326,7 +340,7 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "thinking":
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
-                calls.append({"function": {"name": block.get("name"), "arguments": block.get("input") or {}}})
+                calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))}})
             elif kind == "tool_result":
                 messages.append({"role": "tool", "content": _text_of(block.get("content"))})
         if text or calls or reasoning:
