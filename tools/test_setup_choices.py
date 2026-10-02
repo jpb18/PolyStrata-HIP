@@ -330,5 +330,52 @@ class VramReserve(unittest.TestCase):
         self.assertTrue(call.called)
 
 
+class SmallCardReserve(unittest.TestCase):
+    """#496: a card under 8 GB (a 6 GB laptop RTX 3060) gets a 300 MiB VRAM reserve instead of the engine's 700, and a
+    tip for when the start still has no room for the expert cache; an 8 GB card's config is unchanged."""
+
+    def install(self, vram, *extra):
+        from test_setup_golden import card, install
+        return install(63.7, [card(0, "NVIDIA GeForce RTX 3060 Laptop GPU", vram, "86")],
+                       ["--family", "qwen", "--model", "Q2_0", "--no-start", *extra])
+
+    def test_a_6gb_card(self):
+        code, out, cfg, _ = self.install(6.0)
+        self.assertEqual(code, 0, out)
+        a = cfg["args"]
+        self.assertEqual(a.count("--vram-reserve-mib"), 1)
+        self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "300")
+        self.assertTrue(cfg.get("vram_reserve_auto"))
+        self.assertIn("300 MiB of VRAM kept free instead of 700", out)
+        self.assertIn("no VRAM is left for the expert cache", out)
+        self.assertIn("--draft-vocab en", out)
+        self.assertIn("--mtp", a)                                    # the draft layer stays: the server needs it
+        with tempfile.TemporaryDirectory() as d:                     # setup's own choice is not kept as the user's
+            p = Path(d) / "strata-q2_0.json"
+            p.write_text(json.dumps(cfg))
+            self.assertIsNone(setup.choices_from_config(p)["vram_reserve_mib"])
+
+    def test_an_8gb_card_is_unchanged(self):
+        for vram in (8188 / 1024, 8.0):                               # nvidia-smi lists an 8 GB card as 8188 MiB
+            code, out, cfg, _ = self.install(vram)
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("--vram-reserve-mib", cfg["args"])
+            self.assertNotIn("vram_reserve_auto", cfg)
+
+    def test_a_given_reserve_wins(self):
+        code, out, cfg, _ = self.install(6.0, "--vram-reserve-mib", "500")
+        self.assertEqual(code, 0, out)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "500")
+        self.assertNotIn("vram_reserve_auto", cfg)
+
+    def test_the_tip(self):
+        self.assertIn("an 8K context", " ".join(setup.small_card_note(32768, None)))
+        self.assertIn("--draft-vocab en", " ".join(setup.small_card_note(32768, "cjk")))
+        tip = " ".join(setup.small_card_note(8192, "en"))
+        self.assertNotIn("--draft-vocab", tip)
+        self.assertIn("close other programs", tip)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -339,6 +339,7 @@ struct Options {
     /// Plan v0.3 P4: `--expert-cache auto` sizes the VRAM tier from what is free after the weights, the session
     /// and the KV state, minus this reserve for the graphs, the hit scratch and the head.
     int vram_reserve_mib = 700;
+    bool vram_reserve_given = false;   ///< --vram-reserve-mib on the command line (#496: no smaller automatic reserve)
     /// Plan v0.3 P5: batched prompt processing in chunks of this many tokens (0 = the token path).
     int64_t prefill_chunk = 0;
     /// `--prefill auto`: the largest chunk (up to 8192) whose buffers the expert cache can lend.  Every expert a chunk
@@ -1191,7 +1192,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-cache-device3") o.expert_cache_remote[2] = std::atoi(next("--expert-cache-device3"));
         else if (a == "--expert-cache-remote-placement")
             o.expert_cache_remote_placement = next("--expert-cache-remote-placement");
-        else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(next("--vram-reserve-mib"));
+        else if (a == "--vram-reserve-mib") { o.vram_reserve_mib = std::atoi(next("--vram-reserve-mib")); o.vram_reserve_given = true; }
         else if (a == "--prefill") {
             const std::string v = next("--prefill");
             o.prefill_auto = v == "auto" || v.rfind("auto:", 0) == 0;
@@ -2823,15 +2824,61 @@ int main(int argc, char** argv) {
         const int64_t mtp_bind = (!o.mtp.empty() && native_head.loaded())
                                      ? (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) : 0;
         const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind;
-        int64_t slots = ((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+        const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+        int64_t slots = ((int64_t) free_b - reserve) / blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
         std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved (+%lld MiB for the "
                              "draft head) -> %d slots\n",
                      (double) free_b / 1073741824.0, o.vram_reserve_mib, (long long) (mtp_bind >> 20), o.expert_cache);
-        if (o.expert_cache == 0)   // the verify window cannot start without it (#174): say what makes room
-            std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: lower --max-context, use "
-                                 "--kv k8v4, run images on the CPU, or close other programs that use the GPU\n");
+        // #496: the verify window cannot start without a cache (#174), and a cache too small to lend the prompt path
+        // a 256-token chunk's buffers (plus the 128 slots a loan leaves; one slot without --prefill) makes it
+        // allocate its own on top - more than the reserve.  When the default reserve leaves less than that (a 6 GB
+        // card), the reserve shrinks to what leaves exactly that cache, down to kSmallReserveMib (what setup writes for
+        // cards under 8 GB): what is allocated after the cache - the prompt path's own part, the verify buffers, the
+        // draft head - comes out of the reserve, and below ~550 MiB a card ends with less than the 256 MiB the serve
+        // check calls LOW (IQ3_XXS, 32K, a 300 MiB reserve: 5 MiB left), so the cache gets no more than it needs.  A
+        // reserve given on the command line is kept.  No slot at all: the start stops, saying what is short and what
+        // makes room.  A card the default reserve leaves that much is sized as before.
+        constexpr int kSmallReserveMib = 300;
+        const int64_t min_slots = (o.prefill_chunk > 0 && pf_borrow)
+            ? ((int64_t) strata::prefill::Prefill::bytes_needed(g, ss, 256) + blob - 1) / blob + 128 : 1;
+        if (o.expert_cache < min_slots && !o.vram_reserve_given && o.vram_reserve_mib > kSmallReserveMib) {
+            // the largest reserve (in MiB) that still leaves min_slots
+            const int64_t fit_mib = ((int64_t) free_b - mtp_bind - min_slots * blob) / (1 << 20) - prefill_mib;
+            if (fit_mib >= kSmallReserveMib) {
+                const int r = (int) std::min<int64_t>(fit_mib, o.vram_reserve_mib);
+                int64_t s2 = ((int64_t) free_b - ((((int64_t) r + prefill_mib) << 20) + mtp_bind)) / blob;
+                if (!profile.empty()) s2 = std::min<int64_t>(s2, (int64_t) profile.size());
+                std::fprintf(stderr, "strata generate: expert cache auto: the %d MiB reserve leaves too few slots on "
+                                     "this card (a working cache needs %lld): a %d MiB reserve instead -> %lld slots\n",
+                             o.vram_reserve_mib, (long long) min_slots, r, (long long) s2);
+                o.vram_reserve_mib = r;
+                o.expert_cache = (int) s2;
+            }
+        }
+        if (o.expert_cache == 0) {
+            // what is short, and what makes room: the numbers a small card picks from
+            const int64_t at_reserve = o.vram_reserve_given ? o.vram_reserve_mib
+                                                            : std::min(o.vram_reserve_mib, kSmallReserveMib);
+            const int64_t need_b = (((int64_t) at_reserve + prefill_mib) << 20) + mtp_bind + min_slots * blob;
+            const int64_t short_mib = std::max<int64_t>(1, (need_b - (int64_t) free_b + (1 << 20) - 1) >> 20);
+            const int64_t session_mib =
+                (int64_t) (strata::core::session_bytes(g, o.max_context, K, 0, g.n_layers) >> 20);
+            const std::string reserve_tip =
+                o.vram_reserve_given && o.vram_reserve_mib > kSmallReserveMib
+                    ? ", a smaller --vram-reserve-mib (" + std::to_string(o.vram_reserve_mib) + " now; " +
+                          std::to_string(kSmallReserveMib) + " is enough on a small card)"
+                    : std::string();
+            std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: it needs at least %lld slots "
+                                 "(%lld MiB), about %lld MiB more than this card has free. To make room: a smaller "
+                                 "--max-context (the session, mostly its KV cache, takes %lld MiB at %lld tokens), "
+                                 "--kv q4_0, the English draft subset (setup --draft-vocab en; the draft head takes "
+                                 "%lld MiB now)%s, images on the CPU, or close other programs that use the GPU\n",
+                         (long long) min_slots, (long long) ((min_slots * blob) >> 20), (long long) short_mib,
+                         (long long) session_mib, (long long) o.max_context, (long long) (mtp_bind >> 20),
+                         reserve_tip.c_str());
+        }
     } else if (multi_gpu && o.expert_cache > 0) {
         // an explicit cache size leaves room for the prompt path's buffers and the reserve, or the first prompt
         // fails with "device buffers ... do not fit" (with borrowing - the default with a profile - the path lends

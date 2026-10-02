@@ -2416,8 +2416,10 @@ def choices_from_config(cfg_path: Path) -> dict:
             "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
             "layer_split": cfg.get("layer_split"),
             # #493: --vram-reserve-mib given at setup (images write the default 700 themselves)
+            # (#496: not the small card's reserve setup chose itself)
             "vram_reserve_mib": int(val("--vram-reserve-mib")) if (val("--vram-reserve-mib") or "").isdigit() and (
-                vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
+                vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) and
+                not cfg.get("vram_reserve_auto") else None}
 
 
 def find_in(roots: list, rel: str):
@@ -2722,6 +2724,29 @@ def draft_vocab_note(vram_gb: float, chosen: str | None) -> list[str]:
             f"  For English and code answers, {start} --draft-vocab en needs up to ~{DRAFT_VOCAB_MIB['en']} MiB "
             f"(cyrillic: ~{DRAFT_VOCAB_MIB['cyrillic']}) and leaves the rest to the expert cache - and it is the",
             "  fix when the start stops with \"the draft head does not fit\". The model keeps the choice."]
+
+
+SMALL_CARD_GB = 7.5            # #496: a card under 8 GB gets a smaller VRAM reserve (an 8 GB card lists 7.99)
+SMALL_CARD_RESERVE_MIB = 300
+
+
+def small_card_note(ctx: int, draft_vocab: str | None) -> list[str]:
+    """#496: what frees VRAM on a card under 8 GB when the start still stops with "no VRAM is left for the expert
+    cache" - a recommendation, setup changes none of it.  (The draft layer stays: the server needs it.)"""
+    start = "START-HERE.bat --setup" if WIN else "./setup.sh"
+    tips = []
+    if ctx > 8192:
+        tips.append("an 8K context (a smaller KV cache)")
+    if draft_vocab != "en":
+        tips.append(f"--draft-vocab en (a draft head of ~{DRAFT_VOCAB_MIB['en']} MiB instead of "
+                    f"~{DRAFT_VOCAB_MIB[draft_vocab or 'cjk']})")
+    lines = ["If the start stops with \"no VRAM is left for the expert cache\" (the engine's log says how much is "
+             "short):"]
+    if tips:
+        lines.append(f"  run {start} again with " + " and ".join(tips) + ", or close other programs that use the GPU.")
+    else:
+        lines.append("  close other programs that use the GPU.")
+    return lines
 
 
 def mtp_corrupt(mtp: Path, env=None) -> bool:
@@ -3528,6 +3553,19 @@ def main() -> int:
             args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
         ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
            "that much less)")
+    small_reserve = (a.vram_reserve_mib is None and not multi and vision != "gpu" and
+                     0 < gpu.get("vram_gb", 0.0) < SMALL_CARD_GB)
+    if small_reserve:
+        # #496: on a 6 GB card the engine's default 700 MiB reserve (plus the draft head) took all that the weights,
+        # the KV cache and the draft layer left, and the expert cache got no slot.  A card under 8 GB gets 300 MiB.
+        if "--vram-reserve-mib" in args:
+            args[args.index("--vram-reserve-mib") + 1] = str(SMALL_CARD_RESERVE_MIB)
+        else:
+            args += ["--vram-reserve-mib", str(SMALL_CARD_RESERVE_MIB)]
+        ok(f"a {gpu['vram_gb']:.0f} GB card: {SMALL_CARD_RESERVE_MIB} MiB of VRAM kept free instead of 700, so the "
+           "expert cache gets the rest (--vram-reserve-mib N changes it)")
+        for line in small_card_note(ctx, draft_vocab):   # a recommendation: nothing else changes
+            say("  " + line)
     if esp is not None:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
@@ -3535,6 +3573,8 @@ def main() -> int:
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port}
+    if small_reserve:   # #496: setup's own choice - a later setup decides again instead of keeping it as the user's
+        cfg["vram_reserve_auto"] = True
     if hip:
         cfg["backend"] = "hip"
         # the dense prompt GEMMs through hipBLASLt with kernels measured on this GPU generation (tools/hip; +40-60%
