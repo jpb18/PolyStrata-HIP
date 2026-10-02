@@ -277,6 +277,42 @@ class SmallCard(unittest.TestCase):
         self.assertEqual(cfg["gpu"], 0)                                   # one card: as before
 
 
+class SplitShortCard(unittest.TestCase):
+    """#448: a second card too small to lend a split's prompt chunk: the first card alone recommended, the pair kept
+    when named."""
+    FOUND = [card(0, "NVIDIA RTX PRO 4500 Blackwell", 31.8, "120"), card(1, "NVIDIA GeForce RTX 3080", 10.0, "86")]
+
+    def test_rule(self):
+        self.assertEqual([g["index"] for g in setup.split_short(self.FOUND)], [1])
+        self.assertEqual(setup.split_short(PROFILES["32GB-2x24GB"][1]), [])
+        self.assertEqual(setup.split_short(PROFILES["47GB-2x16GB"][1]), [])
+        eights = [card(i, "NVIDIA GeForce RTX 3070", 8.0, "86") for i in range(2)]
+        self.assertEqual(setup.split_short(eights), [])                   # neither card alone reads more
+
+    def test_yes_takes_the_first_card(self):
+        code, out, cfg, _ = install(127.8, self.FOUND, ["--family", "qwen", "--model", "Q2_0", "--no-start"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["gpu"], 0)
+        self.assertIn("too small to lend a split its prompt buffers", out)
+
+    def test_named_pair_is_kept(self):
+        code, out, cfg, _ = install(127.8, self.FOUND, ["--family", "qwen", "--model", "Q2_0", "--no-start",
+                                                        "--gpus", "0,1"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["gpu"], [0, 1])
+
+    def test_offer_together_defaults_to_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "strata-q2_0.json"
+            with mock.patch.object(setup, "gpus", lambda: self.FOUND), \
+                    mock.patch.object(setup, "engine_runs_on", lambda g: True):
+                code, out, asked = run(setup.offer_together, p, {"args": ["--mmap-experts"]}, True)
+            cfg = json.loads(p.read_text())
+        self.assertIsNone(code, out)
+        self.assertNotIn("gpu", cfg)
+        self.assertIn("#448", out)
+
+
 class RamFloor(unittest.TestCase):
     """S7: less RAM than the smallest model needs: a stop with --yes alone, a risk with --model."""
     FOUND = [card(0, "NVIDIA GeForce RTX 3060", 8.0, "86")]
