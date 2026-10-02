@@ -103,6 +103,14 @@ edit("include/strata/kernels/dp4a.hpp", lambda s: s.replace("    __nanosleep(100
 edit("src/kernels/cuda/fused_gr.dp.cpp", lambda s: s.replace(
     "        cudaDeviceGetAttribute(&per_block, cudaDevAttrMaxSharedMemoryPerBlock, dev);\n",
     "        per_block = (int) dpct::get_device(dev).get_local_mem_size();   // SYCL: the work-group local memory\n"))
+# upstream PR #413 / 0.1.36+: the key-head DeltaNet kernel's cp.async helpers keep CUDA's address conversion in the
+# non-NVPTX branch; the SYCL build takes the plain-copy form (upstream's own pre-sm_80 path)
+def gdn_plain_copies(s):
+    s = s.replace("#if defined(DPCT_COMPATIBILITY_TEMP) && DPCT_COMPATIBILITY_TEMP < 800\n#define STRATA_GDN_CP_ASYNC 0",
+                  "#if 1   // SYCL port: plain copies (no cp.async)\n#define STRATA_GDN_CP_ASYNC 0")
+    return s.replace("*reinterpret_cast<float4*>(smem) = *reinterpret_cast<const float4*>(gmem);",
+                     "*reinterpret_cast<sycl::float4*>(smem) = *reinterpret_cast<const sycl::float4*>(gmem);")
+edit("src/prefill/kernels.dp.cpp", gdn_plain_copies)
 edit("src/kernels/cuda/elementwise.dp.cpp", doorbell)
 edit("src/kernels/cuda/verify_kernels.dp.cpp", doorbell)
 

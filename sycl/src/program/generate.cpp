@@ -239,7 +239,7 @@ struct Options {
     /// Plan v0.3 P2: how the n-gram table is read. Direct (default) = unbuffered SSD reads, table never in RAM.
     std::string ple_io = "direct";
     int64_t ple_row_cache = 1 << 20;   ///< bounded row cache (rows of 90 B); 0 disables
-    int ple_inflight = 64;
+    int ple_inflight = 256;   // the prompt path reads a chunk's rows at once: 64 left the SSD half idle (32K: 303 -> 189 ms)
     double ple_delay_us = 0;           ///< fault injection: every row read completes no earlier than this
     bool ple_sync_submit = false;      ///< A/B arm: submit reads on the token thread, no I/O worker
     std::string kv = "fp16";           ///< plan v0.3 P7: KV storage, fp16 (default) or int8 (half the VRAM)
@@ -376,6 +376,11 @@ struct Options {
     /// Plan v0.3 P6: every `adapt_every` rounds, swap up to `adapt_swaps` of the most-routed missing experts into
     /// the VRAM tier in place of the least-routed resident ones (decayed counts).  0 = static residency.
     int adapt_every = 4;
+    float adapt_decay = 0.7f;   ///< the usage counts are multiplied by this after each adaptation (--adapt-decay)
+    /// --adapt-tuned (STRATA_ADAPT_TUNED=1): every 2 rounds, up to 192 swaps, x0.92 - where that was measured to help
+    /// (see where it is applied); explicit --adapt-* flags win
+    bool adapt_tuned = false;
+    bool adapt_given = false;
     /// Plan v0.3 P6: a draft enters the verify window only while every draft before it (and itself) has at least
     /// this probability under the draft layer; 0 = always --spec-1 drafts.
     double spec_min_p = 0.0;
@@ -447,7 +452,7 @@ void usage() {
                  "                       reads, the table never enters RAM or the file cache; mmap: A/B arm;\n"
                  "                       ram: mmap with the whole table locked in RAM at start (Linux/macOS)\n"
                  "  --ple-row-cache N    bounded cache of fetched rows, 90 B each (default 1048576; 0 = off)\n"
-                 "  --ple-inflight N     outstanding SSD reads (default 64)\n"
+                 "  --ple-inflight N     outstanding SSD reads (default 256)\n"
                  "  --ple-delay-us U     fault injection: each row read completes no earlier than U us\n"
                  "  --ple-sync-submit    A/B arm: submit table reads on the token thread (default: an I/O thread)\n"
                  "  --kv fp16|int8       KV storage (plan v0.3 P7): int8 codes + fp16 scale per 64 values, half the\n"
@@ -1193,7 +1198,9 @@ int main(int argc, char **argv) try {
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
-        else if (a == "--adapt-every") o.adapt_every = std::atoi(next("--adapt-every"));
+        else if (a == "--adapt-every") { o.adapt_every = std::atoi(next("--adapt-every")); o.adapt_given = true; }
+        else if (a == "--adapt-decay") { o.adapt_decay = (float) std::atof(next("--adapt-decay")); o.adapt_given = true; }
+        else if (a == "--adapt-tuned") o.adapt_tuned = true;
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
         else if (a == "--stop-eos") o.stop_eos = true;
         else if (a == "--spec-split") o.spec_split = true;
@@ -1262,7 +1269,7 @@ int main(int argc, char **argv) try {
             if (!parse_i64_list(next("--eos-ids"), o.eos_ids, e)) { std::fprintf(stderr, "--eos-ids: %s\n", e.c_str()); return 2; }
             o.stop_eos = true;
         }
-        else if (a == "--adapt-swaps") o.adapt_swaps = std::atoi(next("--adapt-swaps"));
+        else if (a == "--adapt-swaps") { o.adapt_swaps = std::atoi(next("--adapt-swaps")); o.adapt_given = true; }
         else if (a == "--expert-cache-cpu-order") o.expert_cache_cpu_order = true;
         else if (a == "--expert-cache-per-layer") o.expert_cache_per_layer = true;
         else if (a == "--no-hit-poke") o.no_hit_poke = true;
@@ -2370,10 +2377,10 @@ int main(int argc, char **argv) try {
                     st.mrope = sycl::malloc_device<int32_t>(
                         mrope_host.size(), dpct::get_in_order_queue())) != 0 ||
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                     st.mrope, mrope_host.data(),
@@ -2742,9 +2749,9 @@ int main(int argc, char **argv) try {
             DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) == 0 &&
             DPCT_CHECK_ERROR(dpct::get_device(dev).get_device_info(p)) == 0;
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         if (!named) 0;
         const char *name =
@@ -2764,8 +2771,8 @@ int main(int argc, char **argv) try {
             stderr, "strata generate: GPU %d: %s, compute capability %d.%d%s\n",
             dev, name,
             /*
-            DPCT1005: The SYCL device version is different from CUDA Compute
-            Compatibility. You may need to rewrite this code.
+            DPCT1005: The SYCL device version is different from CUDA
+            Compute Compatibility. You may need to rewrite this code.
             */
             strata::cc_major_of(p.get_major_version()),
             strata::cc_minor_of(p.get_minor_version()),
@@ -3430,8 +3437,8 @@ int main(int argc, char **argv) try {
             std::fprintf(stderr, "strata generate: routing-aware prefetch of the file tier on (the next layer's router)\n");
         } else {
             /*
-            DPCT1010: SYCL uses exceptions to report errors and does not use
-            the error codes. The cudaGetLastError function call was replaced
+            DPCT1010: SYCL uses exceptions to report errors and does not
+            use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
             (void)0;
@@ -3662,10 +3669,11 @@ int main(int argc, char **argv) try {
         } else {
             for (int64_t c = 0; c < g.hc; ++c)
                 /*
-                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
-                API. While the origin API might be synchronous, it depends on
-                the type of operand memory, so you may need to call wait() on
-                event return by memcpy API to ensure synchronization behavior.
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous
+                memcpy API. While the origin API might be synchronous, it
+                depends on the type of operand memory, so you may need to call
+                wait() on event return by memcpy API to ensure synchronization
+                behavior.
                 */
                 if (DPCT_CHECK_ERROR(strata::q_of(token_stream)->memcpy(
                         ss.R + (size_t)c * g.n_embd, d_emb,
@@ -3703,6 +3711,10 @@ int main(int argc, char **argv) try {
     }
 
     std::FILE* dump = nullptr;
+    // The logits header is written WITH THE FIRST ROW, not at open: a native pack never reaches the
+    // per-token dump site, and a header promising rows that were never written is worse than no file.
+    int32_t hdr[2] = {0, 0};
+    bool hdr_written = false;
     const int64_t dump_positions = (int64_t) o.tokens.size() - 1 + o.max_new;
     if (!o.dump_logits.empty()) {
         if (dump_positions > INT32_MAX || n_vocab > INT32_MAX) {
@@ -3722,12 +3734,7 @@ int main(int argc, char **argv) try {
         // of the size gets a wrong answer that looks authoritative.  `tools/logits_identical.py` caught it by
         // parsing the header and refusing the file.
         const int32_t n_rows = (int32_t) strata::program::logits_selection::row_count(dump_positions, o.logits_stride);
-        const int32_t hdr[2] = {(int32_t) n_vocab, n_rows};
-        if (std::fwrite(hdr, sizeof hdr, 1, dump) != 1) {
-            std::fprintf(stderr, "strata generate: cannot write logits header\n");
-            std::fclose(dump);
-            return 1;
-        }
+        hdr[0] = n_vocab; hdr[1] = n_rows;
     }
 
     // ---- THE C1 ORACLE: ONE RESIDUAL SNAPSHOT PER LAYER PER POSITION, so the engine can be bisected against
@@ -3957,8 +3964,8 @@ int main(int argc, char **argv) try {
             real error-handling function.
             */
             /*
-            DPCT1010: SYCL uses exceptions to report errors and does not use
-            the error codes. The cudaGetLastError function call was replaced
+            DPCT1010: SYCL uses exceptions to report errors and does not
+            use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
             std::fprintf(stderr,
@@ -4005,9 +4012,9 @@ int main(int argc, char **argv) try {
                     function.
                     */
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     dpct::get_error_string_dummy(0));
                 return 1;
@@ -4027,9 +4034,9 @@ int main(int argc, char **argv) try {
                     function.
                     */
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     dpct::get_error_string_dummy(0));
                 return 1;
@@ -4117,10 +4124,10 @@ int main(int argc, char **argv) try {
                     st->d_res = sycl::malloc_device<int32_t>(
                         host_res.size(), dpct::get_in_order_queue())) != 0 ||
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                     st->d_res, host_res.data(),
@@ -4314,6 +4321,28 @@ int main(int argc, char **argv) try {
             std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
             return 1;
         }
+    }
+    // --adapt-tuned: a longer memory and more frequent, larger steps for the adaptive tier, where they were measured
+    // to help - a cache that holds 20-60% of the experts, with every expert outside VRAM in RAM.  With fewer, a swap
+    // evicts experts that are needed again; with more, nearly everything hits already; with experts on the drive, a
+    // swap can read it.  It pays where the CPU's share of the misses is the round's critical path (large experts).
+    if (const char* v = std::getenv("STRATA_ADAPT_TUNED"); v != nullptr) o.adapt_tuned = v[0] != '0';
+    if (o.adapt_tuned && !o.adapt_given && o.expert_cache > 0 && !host_res.empty()) {
+        const double cover = (double) xcache.slots() / (double) (g.n_layers * g.n_expert);
+        bool in_ram = !(o.mmap_experts && !o.resident_cpu_experts);
+        if (o.resident_cpu_experts)   // the RAM budget must hold every expert the GPU cache does not
+            for (int64_t i = 0; i < g.n_layers * g.n_expert && in_ram; ++i)
+                if (host_res[(size_t) i] < 0 && !src.has_resident(i / g.n_expert, i % g.n_expert)) in_ram = false;
+        const bool fits = cover >= 0.2 && cover <= 0.6 && in_ram;
+        if (fits) {
+            o.adapt_every = 2;
+            o.adapt_swaps = 192;
+            o.adapt_decay = 0.92f;
+        }
+        std::fprintf(stderr, "strata generate: --adapt-tuned: the cache holds %.0f%% of the experts%s -> adaptive tier "
+                             "every %d rounds, %d swaps, x%.2f%s\n", 100.0 * cover,
+                     in_ram ? "" : ", some only on the drive", o.adapt_every, o.adapt_swaps, o.adapt_decay,
+                     fits ? "" : " (the defaults)");
     }
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
@@ -4646,16 +4675,16 @@ int main(int argc, char **argv) try {
                     const strata::core::OnDevice on(stp->dev);
                     stp->sp.reset();
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     (void)0;
                 }
                 sp.reset();
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 (void)0;
@@ -5081,10 +5110,10 @@ int main(int argc, char **argv) try {
             try {
         if (d_res != nullptr)
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 dpct::get_in_order_queue().memcpy(
                     d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait();
@@ -5193,7 +5222,7 @@ int main(int argc, char **argv) try {
                     const strata::core::OnDevice on(st->dev);
                     dpct::sync_barrier(st->adapt_ev, st->adapt_stream);
                 }
-            for (float& v : drive.d.usage) v *= 0.7f;
+            for (float& v : drive.d.usage) v *= o.adapt_decay;
             return true;
         };
         // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
@@ -6068,7 +6097,13 @@ int main(int argc, char **argv) try {
                 drive.d.layers = 0;
                 drive.d.experts = 0;
                 drive.d.failed = false;
-                apply_pending(false);
+            // THE WAIT IS THE FIX.  A non-blocking query here left the next window's residency table to
+            // depend on whether the previous round's expert copies had landed: an expert that is resident
+            // runs the GPU kernel and one that is not is computed on the CPU, and the two round
+            // differently enough to move a logit by ~0.26.  Waiting costs the copies' remaining time on a
+            // window that follows one that issued them, and buys a residency table that is a function of
+            // what was actually copied - which is what makes greedy decode reproducible.
+            apply_pending(true);
                 if (hist_n > 0) {
                     // the tails the penalties count over, ONE PER ROW: the tokens the state has consumed, the
                     // fed-back head `x` (it joins `consumed` only after this window commits), then the drafts
@@ -6634,8 +6669,8 @@ int main(int argc, char **argv) try {
                 function.
                 */
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 (long long)pos, dpct::get_error_string_dummy(0));
@@ -6669,6 +6704,17 @@ int main(int argc, char **argv) try {
                          (long long) n_vocab, (long long) pos);
             return 1;
         }
+        // THE HEADER IS WRITTEN WITH THE FIRST ROW, NOT AT OPEN.  A native pack leaves the per-token
+        // loop at `if (native_pack) { spec_pos = pos; break; }` and never reaches this site, so a header
+        // written at open promised 64 or 66 rows for a file that would contain none - and a reader that
+        // trusted it reported "0 differing positions" from a file with no positions in it.  Written here,
+        // a run that dumps nothing leaves an empty file, which is what actually happened.
+        if (emit_logits && !hdr_written && std::fwrite(hdr, sizeof hdr, 1, dump) != 1) {
+            std::fprintf(stderr, "strata generate: cannot write logits header\n");
+            std::fclose(dump);
+            return 1;
+        }
+        if (emit_logits) hdr_written = true;
         if (emit_logits && std::fwrite(logits.data(), sizeof(float), (size_t) n_vocab, dump) != (size_t) n_vocab) {
             std::fprintf(stderr, "strata generate: cannot write logits at position %lld\n", (long long) pos);
             std::fclose(dump);
@@ -6710,8 +6756,8 @@ int main(int argc, char **argv) try {
                 function.
                 */
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 dpct::get_error_string_dummy(0));
@@ -6844,22 +6890,36 @@ int main(int argc, char **argv) try {
         std::vector<std::pair<int32_t, int32_t>> pending;
         dpct::event_ptr adapt_ev = nullptr;
         adapt_ev = new sycl::event();
+        int64_t adapt_rounds = 0;   // counted here: `rounds` is declared below the adapt lambda
         auto apply_pending = [&](bool wait) {
             try {
         if (pending.empty()) return;
             if (wait) adapt_ev->wait_and_throw();
+            // STRATA_TRACE_ADAPT: a non-blocking query means the next window reads the residency table
+            // with whatever the copy has achieved.  Whether the incoming experts are RESIDENT for that
+            // window depends on copy latency, and a resident expert runs a different kernel than a
+            // CPU-computed one - a far bigger numerical difference than a rounding wobble.
+            static const bool trace_pending = std::getenv("STRATA_TRACE_ADAPT") != nullptr;
+            if (wait) adapt_ev->wait_and_throw();
             else if (adapt_ev->get_info<
                          sycl::info::event::command_execution_status>() !=
-                     sycl::info::event_command_status::complete) return;
+                     sycl::info::event_command_status::complete) {
+                if (trace_pending)
+                    std::fprintf(stderr, "strata: PENDING not landed, %zu stay non-resident this window\n",
+                                 pending.size());
+                return;
+            }
+            if (trace_pending)
+                std::fprintf(stderr, "strata: PENDING landed, %zu experts become resident\n", pending.size());
             src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
             for (const auto& [i, slot] : pending) host_res[(size_t) i] = slot;
             pending.clear();
             if (d_res != nullptr)
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 dpct::get_in_order_queue().memcpy(
                     d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait();
@@ -6875,7 +6935,18 @@ int main(int argc, char **argv) try {
         // routed clearly more often.  Copies run between rounds, when the GPU is idle.
         auto adapt = [&]() -> bool {
             const Clock::time_point ta = Clock::now();
-            if (!pending.empty()) return true;   // the previous swaps are still in flight
+            ++adapt_rounds;
+            // STRATA_TRACE_ADAPT: why an adapt round did or did not swap.  Default off, one getenv, and it
+            // reports the only thing that can make an adapt round a coin flip: whether the PREVIOUS round's
+            // asynchronous expert copies had landed by the time this round started.
+            static const bool trace_adapt = std::getenv("STRATA_TRACE_ADAPT") != nullptr;
+            if (!pending.empty()) {
+                if (trace_adapt)
+                    std::fprintf(stderr, "strata: ADAPT round=%lld SKIPPED, %zu swaps still in flight\n",
+                                 (long long) adapt_rounds, pending.size());
+                return true;   // the previous swaps are still in flight
+            }
+            if (trace_adapt) std::fprintf(stderr, "strata: ADAPT round=%lld considering\n", (long long) adapt_rounds);
             struct Swap { float gain; int32_t layer, in, out; };
             std::vector<Swap> swaps;
             std::vector<std::pair<float, int32_t>> cand, vict;
@@ -6928,7 +6999,10 @@ int main(int argc, char **argv) try {
                 pending.emplace_back((int32_t) in, slot);      // resident once the copy has landed
             }
             if (!swaps.empty()) dpct::sync_barrier(adapt_ev, adapt_stream);
-            for (float& v : drive.d.usage) v *= 0.7f;
+            if (trace_adapt)
+                std::fprintf(stderr, "strata: ADAPT round=%lld swapped %zu of %d slots, usage decayed\n",
+                             (long long) adapt_rounds, swaps.size(), o.adapt_swaps);
+            for (float& v : drive.d.usage) v *= o.adapt_decay;
             swaps_total += (int64_t) swaps.size();
             ms_adapt += std::chrono::duration<double, std::milli>(Clock::now() - ta).count();
             return true;
@@ -7010,7 +7084,13 @@ int main(int argc, char **argv) try {
             drive.d.layers = 0;
             drive.d.experts = 0;
             drive.d.failed = false;
-            apply_pending(false);
+            // THE WAIT IS THE FIX.  A non-blocking query here left the next window's residency table to
+            // depend on whether the previous round's expert copies had landed: an expert that is resident
+            // runs the GPU kernel and one that is not is computed on the CPU, and the two round
+            // differently enough to move a logit by ~0.26.  Waiting costs the copies' remaining time on a
+            // window that follows one that issued them, and buys a residency table that is a function of
+            // what was actually copied - which is what makes greedy decode reproducible.
+            apply_pending(true);
             if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;

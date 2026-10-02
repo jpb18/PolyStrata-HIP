@@ -273,10 +273,11 @@ struct Stager {
                 const int j = claim(seen);
                 if (j < 0) { active.fetch_sub(1, std::memory_order_acq_rel); break; }
                 const int b = j % kRing;
-                if (j >= kRing) {
+                if (j >= kRing)   // job j - kRing's DMA from this buffer is queued
                     while (issued.load(std::memory_order_acquire) <= j - kRing) std::this_thread::yield();
-                    while (!buffer_free(b)) std::this_thread::yield();
-                }
+                // and done (#385) - for a generation's first kRing jobs that is the previous generation's last DMA from
+                // the buffer, which nothing else waits for when a chunk ends without a sync (no MTP)
+                while (!buffer_free(b)) std::this_thread::yield();
                 const Job& jb = jobs[(size_t) j];
                 if (jb.gsrc != nullptr) {
                     if (!jb.gsrc->read_into(jb.l, jb.e, buf[b], jb.bytes)) {
@@ -416,6 +417,12 @@ struct Prefill::Impl {
     dpct::event_ptr ple_copied[2] =
         {}; // one runs; the event marks that buffer's upload done
     std::vector<uint32_t> ple_rows[2];
+    // SYCL port: each buffer's upload is marked by a sequence number the queue writes into page-locked memory after
+    // it, polled by the host - not a host wait on `ple_copied` (a host wait on a queue's event hung the prompt path
+    // under the Level Zero v2 adapter once #374 moved it inside the layer loop; see Stager::issued_one)
+    uint64_t* ple_done_seq = nullptr;
+    uint64_t ple_want[2] = {};
+    uint64_t ple_seq = 0;
     float* ple_norm = nullptr;
     uint8_t* region = nullptr;               // the attention/MoE scratch region (idle while the PLE block runs)
     uint64_t region_bytes = 0;
@@ -489,6 +496,7 @@ void Prefill::release() {
         if (impl_->hand[b])
             sycl::free(impl_->hand[b], dpct::get_in_order_queue());
         if (impl_->ple_copied[b]) dpct::destroy_event(impl_->ple_copied[b]);
+        if (b == 1 && impl_->ple_done_seq) { sycl::free(impl_->ple_done_seq, dpct::get_in_order_queue()); impl_->ple_done_seq = nullptr; }
         if (impl_->ple_emb_host[b] && impl_->ple_pageable[b].empty())
             sycl::free(impl_->ple_emb_host[b], dpct::get_in_order_queue());
     }
@@ -716,6 +724,11 @@ bool Prefill::init(const core::WeightTable &wt, const core::ModelGeometry &g,
         if (!m.ple_copied[b] &&
             DPCT_CHECK_ERROR(m.ple_copied[b] = new sycl::event()) != 0)
             ok = false;
+        if (!m.ple_done_seq) {
+            m.ple_done_seq = sycl::malloc_host<uint64_t>(2, dpct::get_in_order_queue());
+            if (m.ple_done_seq) m.ple_done_seq[0] = m.ple_done_seq[1] = 0;
+            else ok = false;
+        }
         m.ple_rows[b].resize(T * strata::kernels::PLE_N_HEADS);
     }
     if (ss.qsa_states[ss.qsa_primary()].kv_mode == 1) {   // KV streaming: the staging pool's identity page table
@@ -882,9 +895,14 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
                        std::string& err) {
     Impl& m = *impl_;
     static const bool off = [] { const char* v = std::getenv("STRATA_MTP_BATCH"); return v != nullptr && v[0] == '0'; }();
+    // A ring (KV streaming: the drafter's window, page p in slot p % n_slots over a host copy) takes the same appends
+    // with its own page table and host copy, as a streamed main layer does; the cells written are those the window can
+    // still reach (r0 below), which the ring holds, so no two of them share a slot.  STRATA_MTP_BATCH_RING=0: the
+    // drafter's own pass for a ring (the A/B).
+    static const bool ring_ok = [] { const char* v = std::getenv("STRATA_MTP_BATCH_RING"); return v == nullptr || v[0] != '0'; }();
     core::QsaState& st = mtp.kv_state_rw();
-    if (off || n <= 0 || m.g == nullptr || m.region == nullptr || st.kv_mode != 0 || st.kv_hybrid ||
-        mtp.device() != m.device)
+    if (off || n <= 0 || m.g == nullptr || m.region == nullptr || (st.kv_mode != 0 && !(st.kv_mode == 2 && ring_ok)) ||
+        st.kv_hybrid || mtp.device() != m.device)
         return false;
     const auto t0 = Clock::now();
     const core::ModelGeometry& g = *m.g;
@@ -921,7 +939,10 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
     // prompt gets 64-row buffers instead of the per-6-token fallback (19 tokens: 106 ms there, a few ms here)
     const int64_t cap = (int64_t) (m.region_bytes / per_row) & ~(int64_t) 63;
     if (cap < 64) return false;
-    const int64_t B = std::min<int64_t>(std::max<int64_t>(n - r0, 64), cap);
+    int64_t B = std::min<int64_t>(std::max<int64_t>(n - r0, 64), cap);
+    if (st.kv_mode == 2)   // #453: a ring: one batch's cells must not share a slot (a batch can straddle one page more)
+        B = std::min<int64_t>(B, ((st.n_slots - 1) * strata::kernels::qsa_real_shapes().page_size) & ~(int64_t) 63);
+    if (B < 64) return false;
     uint8_t* q = m.region;
     auto carve = [&](size_t bytes) { void* p = q; q += (bytes + 255) & ~(size_t) 255; return p; };
     float* emb = (float*) carve((size_t) B * Nn * 4);
@@ -945,7 +966,12 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
     int32_t* ident = q8 ? (int32_t*) carve((size_t) B * g.hc * 4) : nullptr;
     int32_t* bnd = q8 ? (int32_t*) carve(16) : nullptr;
     if ((uint64_t) (q - m.region) > m.region_bytes) return false;
+    static const bool timing = std::getenv("STRATA_DRAFT_TIMING") != nullptr;   // debug: where this pass's time goes
+    if (timing) m.cs->wait();
+    const auto ti0 = Clock::now();
     if (!mtp.idle(err)) return false;   // the drafter's own stream (its graph uploads) before this writes its K/V
+    const double ms_idle = ms_since(ti0);
+    const auto tl0 = Clock::now();
     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
     s.idx_dim = g.idx_key_dim;
@@ -1046,15 +1072,19 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
         real error-handling function.
         */
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use
-        the error codes. The cudaGetLastError function call was replaced with 0.
-        You need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use the
+        error codes. The cudaGetLastError function call was replaced with 0. You
+        need to rewrite this code.
         */
         err = std::string("prefill: the draft layer's K/V: ") +
               dpct::get_error_string_dummy(0);
         return false;
     }
     mtp.ms_prefill += ms_since(t0);
+    if (timing)
+        std::fprintf(stderr, "strata draft kv: %lld cells from %lld (first needed %lld), batch %lld: drafter idle %.1f ms, "
+                     "the batches %.1f ms, all %.1f ms\n", (long long) n, (long long) cell0, (long long) (cell0 + r0),
+                     (long long) B, ms_idle, ms_since(tl0), ms_since(t0));
     return true;
 }
 void Prefill::set_pinned_share(double share) { g_pinned_share = share; }
@@ -1331,11 +1361,10 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             const float* row = embd_rows ? embd_rows[p0 + t] : nullptr;
             if (row) {
                 /*
-                DPCT1124: cudaMemcpyAsync is migrated to asynchronous
-                memcpy API. While the origin API might be synchronous, it
-                depends on the type of operand memory, so you may need to call
-                wait() on event return by memcpy API to ensure synchronization
-                behavior.
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
+                API. While the origin API might be synchronous, it depends on
+                the type of operand memory, so you may need to call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 if (DPCT_CHECK_ERROR(
                         m.cs->memcpy(m.emb + t * N, row, (size_t)N * 4)) != 0) {
@@ -1348,12 +1377,20 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
         }
         if (hand_in_ == nullptr) gr_broadcast(m.emb, m.R, T, m.cs);
         lap("embeddings");
-        // ---- the PLE rows of the whole chunk, one batched SSD request (read ahead on a thread, see ple_gather)
-        if (ple_on) {
+        // ---- the PLE rows of the whole chunk, one batched SSD request on a thread (see ple_gather).  A later chunk's
+        // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
+        // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
+        if (ple_on && !ple_next.valid())
+            ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
+                return ple_gather(c0, b, ple_next_err);
+            });
+        bool ple_pending = ple_on;
+        // the chunk's rows onto the device just before layer 1 reads them, and the next chunk's gather started
+        auto ple_land = [&]() -> bool {
+            if (!ple_pending) return true;
+            ple_pending = false;
             const auto tp = Clock::now();
-            if (!ple_next.valid()) {
-                if (!ple_gather(c0, ple_buf, err)) return false;
-            } else if (!ple_next.get()) {
+            if (!ple_next.get()) {
                 err = ple_next_err;
                 return false;
             }
@@ -1363,19 +1400,62 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             type of operand memory, so you may need to call wait() on event
             return by memcpy API to ensure synchronization behavior.
             */
-            m.cs->memcpy(m.ple_emb, m.ple_emb_host[ple_buf], (size_t)T * N * 4);
-            dpct::sync_barrier(m.ple_copied[ple_buf], m.cs);
-            if (c0 + T < n) {
-                m.ple_copied[ple_buf ^ 1]
-                    ->wait_and_throw(); // the other buffer's upload (a chunk
-                                        // ago) is done
+            if (DPCT_CHECK_ERROR(m.cs->memcpy(m.ple_emb,
+                                              m.ple_emb_host[ple_buf],
+                                              (size_t)T * N * 4)) != 0 ||
+                /*
+                DPCT1024: The original code returned the error code that was
+                further consumed by the program logic. This original code was
+                replaced with 0. You may need to rewrite the program logic
+                consuming the error code.
+                */
+                DPCT_CHECK_ERROR((m.ple_want[ple_buf] = ++m.ple_seq,
+                                  m.cs->fill<uint64_t>(m.ple_done_seq + ple_buf, m.ple_want[ple_buf], 1))) != 0) {
+                /*
+                DPCT1009: SYCL reports errors using exceptions and does not
+                use error codes. Please replace the
+                "get_error_string_dummy(...)" with a real error-handling
+                function.
+                */
+                /*
+                DPCT1010: SYCL uses exceptions to report errors and does not
+                use the error codes. The cudaGetLastError function call was
+                replaced with 0. You need to rewrite this code.
+                */
+                err = std::string("prefill: the PLE rows' upload failed: ") +
+                      dpct::get_error_string_dummy(0);
+                return false;
+            }
+            if (c0 + T < n) {   // SYCL port: T, this chunk's length (the first chunk can be shorter: chunk_len)
+                // the other buffer's upload (a chunk ago) is done before the SSD thread refills it
+                if (DPCT_CHECK_ERROR([&] {
+                        while (*(volatile const uint64_t*) (m.ple_done_seq + (ple_buf ^ 1)) < m.ple_want[ple_buf ^ 1])
+                            std::this_thread::yield();
+                    }()) != 0) {
+                    /*
+                    DPCT1009: SYCL reports errors using exceptions and does
+                    not use error codes. Please replace the
+                    "get_error_string_dummy(...)" with a real error-handling
+                    function.
+                    */
+                    /*
+                    DPCT1010: SYCL uses exceptions to report errors and does
+                    not use the error codes. The cudaGetLastError function call
+                    was replaced with 0. You need to rewrite this code.
+                    */
+                    err =
+                        std::string("prefill: the PLE rows' upload failed: ") +
+                        dpct::get_error_string_dummy(0);
+                    return false;
+                }
                 ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c1 = c0 + T, b = ple_buf ^ 1] {
                     return ple_gather(c1, b, ple_next_err);
                 });
             }
             ple_buf ^= 1;
             stats_.ms_ple += ms_since(tp);
-        }
+            return true;
+        };
         for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
         lap("PLE rows");
         // ---- the QSA step records of every position in the chunk
@@ -1562,6 +1642,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             core::progress_at("reading the prompt (batched): layer", l, p0);   // #251: a stall names layer and chunk
             const core::LayerView v(*m.wt, l);
+            if (l == std::max<int64_t>(LB, 1) && !ple_land()) return false;   // the PLE rows, read from layer 1 on
             // ---- the PLE block at layer 1, token by token (its conv reads the previous tokens' rows)
             if (l == 1 && ple_on && ple_batch) {
                 // the whole chunk at once, in sub-batches carved from the idle scratch region: the key and value
@@ -2333,6 +2414,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
         }
+        if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
         if (issuer.joinable()) {
             issuer.join();
             stats_.ms_experts_host += iss_ms;
@@ -2361,8 +2443,8 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                 function.
                 */
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does
-                not use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does not
+                use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 err = std::string("prefill: the layer split's hand-off: ") +
@@ -2404,8 +2486,8 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                 function.
                 */
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does
-                not use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does not
+                use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 err =
@@ -2456,9 +2538,9 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
         real error-handling function.
         */
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use
-        the error codes. The cudaGetLastError function call was replaced with 0.
-        You need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use the
+        error codes. The cudaGetLastError function call was replaced with 0. You
+        need to rewrite this code.
         */
         err = std::string("prefill: ") + dpct::get_error_string_dummy(0);
         return false;

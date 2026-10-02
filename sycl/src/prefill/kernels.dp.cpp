@@ -763,9 +763,254 @@ __dpct_inline__ void gdn_rec_cols_pipe_kernel(float *__restrict__ state,
 #pragma unroll
     for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
 }
+#if !defined(__HIPCC__)
+// The recurrence with one thread for the three value heads that share a key head (head % HK): column c of heads
+// qh, qh + 16 and qh + 32, row group rg.  gdn_rec_cols_pipe_kernel spends its time in shared memory, not in
+// arithmetic: every thread of a warp needs the same 32 q and k values per token (the k twice), and a warp receives one
+// such broadcast value per clock however wide the load.  Here every q/k value a thread loads feeds three heads, and a
+// token's k row goes into registers once for both of its uses.  The inputs come in blocks of GDN_TB tokens, copied to
+// shared memory by cp.async while the block before computes (one token ahead is shorter than a load from L2 takes),
+// and the two cross-row-group sums have their own arrays, so a token needs 2 __syncthreads instead of 5: the second
+// one of a token orders every read of rkv before the next token's writes, the next token's first one every read of ro
+// before the writes after it.  64 blocks instead of 192.  Per value head and column the same arithmetic in the same
+// order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants: 1.41x on a 4080 Super).
+// sm_80+ with 32 to 47 or 64 and more SMs (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
+#if 1   // SYCL port: plain copies (no cp.async)
+#define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (never launched there, see gdn_keyhead_ok)
+#else
+#define STRATA_GDN_CP_ASYNC 1
+#endif
+__dpct_inline__ void gdn_cp4(float *smem, const float *gmem) {
+#if STRATA_GDN_CP_ASYNC
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(
+                     (unsigned)__cvta_generic_to_shared(smem)),
+                 "l"(gmem));
+#else
+    *smem = *gmem;
+#endif
+}
+__dpct_inline__ void gdn_cp16(float *smem, const float *gmem) {
+#if STRATA_GDN_CP_ASYNC
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__NVPTX__)
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(
+                     (unsigned)__cvta_generic_to_shared(smem)),
+                 "l"(gmem));
+#else
+    *(((uint32_t *)(uintptr_t)(unsigned)__cvta_generic_to_shared(smem))) =
+        *(((uint32_t *)(uintptr_t)gmem));
+    if (16 > 4)
+        *(((uint32_t *)(uintptr_t)(unsigned)__cvta_generic_to_shared(smem)) +
+          1) = *(((uint32_t *)(uintptr_t)gmem) + 1);
+    if (16 > 8)
+        *(((uint32_t *)(uintptr_t)(unsigned)__cvta_generic_to_shared(smem)) +
+          2) = *(((uint32_t *)(uintptr_t)gmem) + 2);
+    if (16 > 12)
+        *(((uint32_t *)(uintptr_t)(unsigned)__cvta_generic_to_shared(smem)) +
+          3) = *(((uint32_t *)(uintptr_t)gmem) + 3);
+#endif
+#else
+    *reinterpret_cast<sycl::float4*>(smem) = *reinterpret_cast<const sycl::float4*>(gmem);
+#endif
+}
+__dpct_inline__ void gdn_cp_commit() {
+#if STRATA_GDN_CP_ASYNC
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__NVPTX__)
+    asm volatile("cp.async.commit_group;\n" ::);
+#else
+
+#endif
+#endif
+}
+__dpct_inline__ void
+gdn_cp_wait_prev() { // every group but the newest has landed
+#if STRATA_GDN_CP_ASYNC
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__NVPTX__)
+    asm volatile("cp.async.wait_group 1;\n" ::);
+#else
+
+#endif
+#endif
+}
+constexpr int GDN_TB = 8, VPK = HV / HK;   // tokens per staged block, value heads per key head
+/*
+DPCT1110: The total declared local variable size in device function
+gdn_rec_kh_kernel exceeds 128 bytes and may cause high register pressure.
+Consult with your hardware vendor to find the total register size available and
+adjust the code, or use smaller sub-group size to avoid high register pressure.
+*/
+__dpct_inline__ void gdn_rec_kh_kernel(float *__restrict__ state,
+                                       const float *__restrict__ h,
+                                       const float *__restrict__ gate,
+                                       const float *__restrict__ beta,
+                                       float *__restrict__ oc_out, int64_t T) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    constexpr int TB = GDN_TB, NT = CB * RG, QKP = S / 4,
+                  VP = CB / 4; // threads, 16-byte pieces of a q/k row, of v
+    auto &sq =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[2][TB][S]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &sk =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[2][TB][S]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &sv = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        float[2][TB][VPK][CB]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &sg =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[2][TB][VPK]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &sb =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[2][TB][VPK]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &rkv = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        float[VPK][RG][CB]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &ro = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        float[VPK][RG][CB]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    const int qh = item_ct1.get_group(2) / NCB,
+              cb = item_ct1.get_group(2) % NCB;
+    const int c = item_ct1.get_local_id(2), rg = item_ct1.get_local_id(1),
+              tid = rg * CB + c, col = cb * CB + c;
+    float s[VPK][RPG];
+    const size_t rs = (size_t) HV * S;
+#pragma unroll
+    for (int j = 0; j < VPK; ++j) {
+        const float* base = state + ((size_t) (rg * RPG) * HV + qh + j * HK) * S + col;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) s[j][r] = base[r * rs];
+    }
+    const int64_t nblk = (T + TB - 1) / TB;
+    auto stage = [&](int64_t k) {   // tokens [k * TB, k * TB + TB) into buffer k & 1
+        const int bb = (int) (k & 1);
+        const int64_t t0 = k * TB;
+        for (int p = tid; p < TB * 2 * QKP; p += NT) {
+            const int i = p / (2 * QKP), w = p % (2 * QKP), isk = w / QKP, jj = (w % QKP) * 4;
+            if (t0 + i < T)
+                gdn_cp16(isk ? &sk[bb][i][jj] : &sq[bb][i][jj], h + (t0 + i) * C + (isk ? HK * S : 0) + qh * S + jj);
+        }
+        for (int p = tid; p < TB * VPK * VP; p += NT) {
+            const int i = p / (VPK * VP), w = p % (VPK * VP), j = w / VP, jj = (w % VP) * 4;
+            if (t0 + i < T)
+                gdn_cp16(&sv[bb][i][j][jj], h + (t0 + i) * C + 2 * HK * S + (qh + j * HK) * S + cb * CB + jj);
+        }
+        for (int p = tid; p < 2 * TB * VPK; p += NT) {
+            const int isb = p / (TB * VPK), w = p % (TB * VPK), i = w / VPK, j = w % VPK;
+            if (t0 + i < T)
+                gdn_cp4(isb ? &sb[bb][i][j] : &sg[bb][i][j], (isb ? beta : gate) + (t0 + i) * HV + qh + j * HK);
+        }
+    };
+    if (nblk > 0) stage(0);
+    gdn_cp_commit();
+    for (int64_t k = 0; k < nblk; ++k) {
+        // buffer (k + 1) & 1 was read by block k - 1, whose last token's second __syncthreads every thread has passed
+        if (k + 1 < nblk) stage(k + 1);
+        gdn_cp_commit();
+        gdn_cp_wait_prev();
+        /*
+        DPCT1118: SYCL group functions and algorithms must be encountered in
+        converged control flow. You may need to adjust the code.
+        */
+        /*
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
+        sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
+        better performance if there is no access to global memory.
+        */
+        item_ct1.barrier();
+        const int bb = (int) (k & 1);
+        const int n = (int) ((T - k * TB) < TB ? (T - k * TB) : TB);
+        for (int i = 0; i < n; ++i) {
+            const int64_t t = k * TB + i;
+            float kc[RPG];
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) kc[r] = sk[bb][i][rg * RPG + r];
+            float g[VPK], kv[VPK], delta[VPK], o[VPK];
+#pragma unroll
+            for (int j = 0; j < VPK; ++j) {
+                g[j] = sycl::native::exp(sg[bb][i][j]); kv[j] = 0.0f;
+                o[j] = 0.0f;
+            }
+#pragma unroll
+            for (int r = 0; r < RPG; ++r)
+#pragma unroll
+                for (int j = 0; j < VPK; ++j)
+                    kv[j] = sycl::fma(s[j][r], kc[r], kv[j]);
+#pragma unroll
+            for (int j = 0; j < VPK; ++j) rkv[j][rg][c] = kv[j];
+            /*
+            DPCT1118: SYCL group functions and algorithms must be
+            encountered in converged control flow. You may need to adjust the
+            code.
+            */
+            /*
+            DPCT1065: Consider replacing sycl::nd_item::barrier() with
+            sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
+            better performance if there is no access to global memory.
+            */
+            item_ct1.barrier();
+#pragma unroll
+            for (int j = 0; j < VPK; ++j) {
+                const float kv_col = rkv[j][0][c] + rkv[j][1][c] + rkv[j][2][c] + rkv[j][3][c];
+                delta[j] = (sv[bb][i][j][c] - g[j] * kv_col) * sb[bb][i][j];
+            }
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) {
+                const float qr = sq[bb][i][rg * RPG + r];
+#pragma unroll
+                for (int j = 0; j < VPK; ++j) {
+                    s[j][r] = sycl::fma(g[j], s[j][r], kc[r] * delta[j]);
+                    o[j] = sycl::fma(s[j][r], (float)qr, o[j]);
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < VPK; ++j) ro[j][rg][c] = o[j];
+            /*
+            DPCT1118: SYCL group functions and algorithms must be
+            encountered in converged control flow. You may need to adjust the
+            code.
+            */
+            /*
+            DPCT1065: Consider replacing sycl::nd_item::barrier() with
+            sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
+            better performance if there is no access to global memory.
+            */
+            item_ct1.barrier();
+            if (rg < VPK)   // row group j writes head j's output
+                oc_out[t * HV * S + (qh + rg * HK) * S + col] =
+                    (ro[rg][0][c] + ro[rg][1][c] + ro[rg][2][c] +
+                     ro[rg][3][c]) *
+                    sycl::rsqrt((float)S);
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < VPK; ++j) {
+        float* base = state + ((size_t) (rg * RPG) * HV + qh + j * HK) * S + col;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) base[r * rs] = s[j][r];
+    }
+}
+// gdn_rec_kh_kernel where it pays: a CUDA card with cp.async (sm_80+) that holds all 64 of its blocks at once (each
+// walks the whole chunk, so blocks left for a second wave would double the time), and not with 48 to 63 SMs.  The
+// busiest SM sets the pace: from 64 SMs up this kernel has one block per SM, below that two on some SMs (1.5 times as
+// long), while the kernel before has ceil(192 / SMs); two against at most four is a draw.  With the engine's grids on
+// a 4080 SUPER held to fewer SMs (gdn_rec_parity --bench): 1.40-1.42x at 64 to 80 SMs, 1.02-1.04x at 48 to 63,
+// 1.28-1.31x at 39 to 47, 1.53-1.57x at 32 to 38; an Ampere card gained less at 82 SMs (1.28x on a 3090 against
+// 1.41x here), so 48 to 63 SMs keep the kernel before.  Per call, from the current device (a layer split can mix
+// cards).
+bool gdn_keyhead_ok() {
+    // SYCL port: upstream picks it by SM count and occupancy (NVIDIA thresholds, measured on Ada/Ampere). On Xe the
+    // key-head kernel is an A/B until measured: STRATA_GDN_KEYHEAD=1 runs it, anything else keeps the kernel before.
+    static const bool on = [] { const char* v = std::getenv("STRATA_GDN_KEYHEAD"); return v != nullptr && std::atoi(v) == 1; }();
+    return on;
+}
+#endif
+// the output norm over a head's 128 columns, into the FP16 copy the out projection reads (the FP32 output before the
+// norm stays in its scratch buffer)
 __dpct_inline__ void gdn_out_norm_kernel(const float *__restrict__ z,
                                          const float *__restrict__ gamma,
-                                         float eps, float *__restrict__ y,
+                                         float eps, const float *__restrict__ y,
                                          uint16_t *__restrict__ y16) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 auto &wsum = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[4]>(
@@ -776,16 +1021,10 @@ auto &wsum = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[4]>(
     const float oc = y[at];
     float sp = warp_sum(oc * oc);
     if ((col & 31) == 0) wsum[col >> 5] = sp;
-    /*
-    DPCT1065: Consider replacing sycl::nd_item::barrier() with
-    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-    performance if there is no access to global memory.
-    */
-    item_ct1.barrier();
+    item_ct1.barrier(sycl::access::fence_space::local_space);
     const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
     const float v = oc * sycl::rsqrt(ss / (float)S + eps) * gamma[col] *
                     sigm(z[t * HV * S + head * S + col]);
-    y[at] = v;
     y16[at] = hf(v);
 }
 
@@ -1493,7 +1732,24 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
                     });
     } else {
         static const bool pipe = [] { const char* v = std::getenv("STRATA_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
-        if (pipe)   // the software-pipelined loads (same bits)
+#if !defined(__HIPCC__)
+        if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)
+        {
+            auto exp_props = sycl::ext::oneapi::experimental::properties{
+                sycl::ext::oneapi::experimental::use_root_sync};
+
+            strata::q_of(stream)
+                ->parallel_for<
+                    dpct_kernel_name<class gdn_rec_kh_kernel_c88399>>(
+                    sycl::nd_range<3>(sycl::range(1, 1, HK * NCB) *
+                                          sycl::range(1, RG, CB),
+                                      sycl::range(1, RG, CB)),
+                    exp_props, [=](sycl::nd_item<3> item_ct1) {
+                        gdn_rec_kh_kernel(state, h, gate, beta, y, T);
+                    });
+        } else
+#endif
+            if (pipe) // the software-pipelined loads (same bits)
         {
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};

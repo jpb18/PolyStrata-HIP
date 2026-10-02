@@ -28,7 +28,7 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
 on the text"). The SYCL numbers are greedy runs of the engine (as in "How to run it by hand" below, 256 new
-tokens) on engine 0.1.31-sycl (2026-10-01; 0.1.32-sycl reproduces them exactly);
+tokens) on engine 0.1.31-sycl (2026-10-01; 0.1.32-0.1.35-sycl reproduce them exactly);
 "Decode round 2" below lists what each change bought.
 
 ## Setup
@@ -549,6 +549,26 @@ admitted in profile order first (the same placement), the reads go in file order
 page-locked batches of 64, and a batch's copies run while the next one is read. Cold page cache: 76.2 s -> 18.8 s
 (0.33 -> 1.34 GB/s); a whole Coder start from the engine's launch to its first token 82 s -> 26 s, the IQ2_XS
 120 s -> 41 s (its 8.2 GB host mirror is ~9 s of the rest). Output identical. `STRATA_FILL_SERIAL=1` is the old fill.
+
+**0.1.35 and seven open upstream PRs (2026-10-02).** Upstream main 0.1.33 -> 0.1.35 merged as before, then seven open
+PRs ported into `sycl/` ahead of upstream (one dpct run of main + all of them, 3-way merged into only the files they
+touch; `sycl/tools/merge_upstream.py`). Their header changes live in `sycl/include` until upstream merges them.
+
+| PR | what | on the B70 |
+|---|---|---|
+| #385 (sergqwer) | stager: a buffer's first job of a generation waits for the previous DMA from it | race fix; same output |
+| #463 (constantindjonkam) | decode waits for an adaptive swap before reading the residency table | determinism fix |
+| #453 (architectds) | the drafter's batched K/V on the KV-streaming ring | 128K int8: 888 -> 895 tok/s prompt, 66.6 -> 67.0 decode |
+| #374 (sergqwer) | the first chunk's PLE rows read beside layer 0 | part of the 2,184-token prompt's 784 -> 825 tok/s |
+| #363 (BlueKingMuch) | the PCIe expert call: group stride, fused SwiGLU + q8_1 | IQ2_XS decode +1.7%; re-done on the port's lane kernels |
+| #407 (sergqwer) | `--adapt-tuned` (opt-in) | neutral here; stays opt-in |
+| #413 (BlueKingMuch) | DeltaNet recurrence per key head | bit-identical but 8% slower prompt here: off (`STRATA_GDN_KEYHEAD=1`) |
+
+#374 needed two port fixes: its next-chunk read assumed every chunk is the full chunk length (the port's first chunk
+is 256 tokens: the second chunk's rows were read from the wrong place), and its host wait on the PLE upload's event,
+now inside the layer loop, deadlocked the prompt past ~4K tokens under the Level Zero v2 adapter (the stager's bug
+again): the upload is marked by a polled sequence number now. #413's gate is an NVIDIA SM-count rule and its parity
+test an SM-holding NVIDIA bench (not built). Outputs identical to 0.1.33 (Coder 19 / 2,184 tokens, IQ2_XS, 40K).
 
 **Not ported yet (2026-10-01).**
 
