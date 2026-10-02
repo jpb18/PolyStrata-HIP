@@ -390,6 +390,10 @@ def gpus():
 GPU_PICK = None                                         # --gpu N (issue #51); None: the card with the most VRAM
 SPLIT_MIN_VRAM_GB = 8                                   # a card sharing a model holds the dense weights and its own
                                                         # prompt buffers too (docs/MULTI_GPU.md)
+SPLIT_PROMPT_VRAM_GB = 12                               # #448: a split stage lends a prompt chunk's buffers from its
+                                                        # own cache; below this one cannot fund a 4096-token chunk
+                                                        # (a 10 GB RTX 3080 beside a 32 GB card: 512 tokens, prompts
+                                                        # 6.2x slower), while the big card alone could
 
 
 def cc(g) -> str:
@@ -439,6 +443,20 @@ def together_ok(found) -> list:
     """The cards that can share one model, in the order they would (empty if fewer than two)."""
     ok_ = sorted([g for g in found if gpu_problem(g, together=True) is None], key=gpu_rank)
     return ok_ if len(ok_) >= 2 else []
+
+
+def split_short(cards) -> list:
+    """#448: the later cards of a split that would cap its prompt chunk below what the first card alone reads (a card
+    under SPLIT_PROMPT_VRAM_GB beside one that has it).  Empty: the split is recommended as before."""
+    if len(cards) < 2 or cards[0]["vram_gb"] < SPLIT_PROMPT_VRAM_GB - 0.5:
+        return []
+    return [g for g in cards[1:] if g["vram_gb"] < SPLIT_PROMPT_VRAM_GB - 0.5]
+
+
+def split_short_note(g) -> str:
+    return (f"GPU {g['index']} ({g['name']}, {g['vram_gb']:.0f} GB) is too small to lend a split its prompt buffers: "
+            "it would cap prompt reading at 512-2048-token chunks, several times slower than the first card alone "
+            "(#448). It can serve as a helper expert cache instead (docs/SECOND_GPU.md)")
 
 
 def parse_gpus(text, found) -> list:
@@ -549,13 +567,18 @@ def choose_gpus(a, found) -> list:
     say("  experts of its own layers, so together they hold about twice as many, and prompts are read about 20%")
     say("  faster (details: docs/MULTI_GPU.md). A much slower extra card can also make it slower.")
     opts = [can[:2]] + ([can] if len(can) > 2 else []) + [[g] for g in single]
+    # #448: a pair whose second card cannot lend a 4096-token chunk recommends the first card alone (still offered)
+    short = split_short(can[:2])
+    rec = next(i for i, o in enumerate(opts, 1) if o == [can[0]]) if short else 1
     for i, o in enumerate(opts, 1):
         label = (" + ".join(gpu_name(g) for g in o) + " together") if len(o) > 1 else gpu_name(o[0]) + " only"
-        say(f"  {i}) {label}" + ("   (recommended)" if i == 1 else ""))
+        say(f"  {i}) {label}" + ("   (recommended)" if i == rec else ""))
     for g in found:
         if gpu_problem(g, together=True) is not None:
             say(f"     (GPU {g['index']}, {g['name']}: {gpu_problem(g, together=True)})")
-    pick = opts[int(ask("Which GPUs?", [str(i) for i in range(1, len(opts) + 1)], "1", a.yes or a.check)) - 1]
+    for g in short:
+        say(f"     ({split_short_note(g)})")
+    pick = opts[int(ask("Which GPUs?", [str(i) for i in range(1, len(opts) + 1)], str(rec), a.yes or a.check)) - 1]
     return [g["index"] for g in pick]
 
 
@@ -595,12 +618,15 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
         say("  This model runs in the low-RAM mode with its experts kept in RAM, on one GPU (recommended: steady RAM")
         say("  use). On both, the experts the GPUs do not hold are read through the OS file cache instead: faster in")
         say("  two reports (#364, #384), but RAM can fill up to 0 free during long prompts.")
+    short = split_short(pair)             # #448: one card recommended (asked "n" by default), as for --resident
+    for g in short:
+        say(f"  {split_short_note(g)}.")
     missing = [g for g in pair if not engine_runs_on(g)]
     if missing:
         say("  The installed engine has no code for " + ", ".join(g["name"] for g in missing) + ": to use them "
             "together, run START-HERE.bat --setup --gpus " + ",".join(str(g["index"]) for g in pair))
     elif ask("  Use both from now on? (you can change it later: START-HERE.bat --gpu N for one card)",
-             ["y", "n"], "n" if resident else "y", yes) == "y":
+             ["y", "n"], "n" if resident or short else "y", yes) == "y":
         cfg["gpu"] = [g["index"] for g in pair]
         cfg["layer_split"] = cfg.get("layer_split") or "auto"
         split_mmap(cfg)

@@ -3905,24 +3905,62 @@ int main(int argc, char** argv) {
             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
             // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.
-            auto fits = [&](int64_t c, bool cap) -> bool {
-                for (const PfPart& p : pf_parts) {
-                    const int64_t k = part_slots(p, c);
-                    if (k <= 0 || k + 128 > p.cache->slots()) return false;
-                    if (cap && k * 100 > kAutoLendPct * p.cache->slots()) return false;
-                }
+            auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
+                const int64_t k = part_slots(p, c);
+                if (k <= 0 || k + 128 > p.cache->slots()) return false;
+                return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
+            };
+            // `only`: CUDA0's cache alone (#448: what one GPU would choose, for the log below); null: every one
+            auto fits = [&](int64_t c, bool cap, const PfPart* only = nullptr) -> bool {
+                if (only != nullptr) return fits_one(*only, c, cap);
+                for (const PfPart& p : pf_parts)
+                    if (!fits_one(p, c, cap)) return false;
                 return true;
             };
             static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
-            int64_t chunk = 0;
-            if (o.prefill_auto) {
-                for (const int64_t c : kAutoChunks) {
-                    if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;   // #282, as plan_lend
-                    if (fits(c, true)) { chunk = c; break; }
+            auto pick = [&](const PfPart* only) -> int64_t {
+                if (o.prefill_auto) {
+                    for (const int64_t c : kAutoChunks) {
+                        if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;   // #282, as plan_lend
+                        if (fits(c, true, only)) return c;
+                    }
+                } else {
+                    for (int64_t c = o.prefill_chunk; c >= 256; c /= 2)
+                        if (fits(c, false, only)) return c;
                 }
-            } else {
-                for (int64_t c = o.prefill_chunk; c >= 256; c /= 2)
-                    if (fits(c, false)) { chunk = c; break; }
+                return 0;
+            };
+            const int64_t chunk = pick(nullptr);
+            // #448: a small card in a layer split caps every stage's chunk (an RTX 3080's 512-slot cache held a
+            // 32 GB card's split to 512 tokens: prompts 6.2x slower, decode the same).  Named when it bites, so the
+            // regression is one log line: each stage that cannot fund the chunk CUDA0 alone would read in.
+            if (pf_parts.size() > 1) {
+                const int64_t alone = pick(&pf_parts[0]);
+                if (alone > chunk) {
+                    for (size_t i = 1; i < pf_parts.size(); ++i) {
+                        const PfPart& p = pf_parts[i];
+                        if (fits_one(p, alone, o.prefill_auto)) continue;
+                        const int dev = p.dev < 0 ? 0 : p.dev;
+                        cudaDeviceProp prop{};
+                        if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) {
+                            (void) cudaGetLastError();
+                            prop.name[0] = 0;
+                        }
+                        const std::string pct =
+                            o.prefill_auto ? ", and lend at most " + std::to_string(kAutoLendPct) + "%" : "";
+                        std::fprintf(stderr, "strata serve: WARNING: prompt chunk %lld tokens, not %lld: CUDA%d (%s) "
+                                             "has %lld expert-cache slots, and a %lld-token chunk borrows %lld of them "
+                                             "(it must keep 128%s) - prompts read slower than on CUDA0 alone (#448)\n",
+                                     (long long) chunk, (long long) alone, dev, prop.name,
+                                     (long long) p.cache->slots(), (long long) alone,
+                                     (long long) part_slots(p, alone), pct.c_str());
+                        // the helper tiers start at CUDA1 without a split (and are enabled in order)
+                        std::fprintf(stderr, "strata serve:   a card this small can serve as a helper expert cache "
+                                             "instead of a split stage: without --layer-split, with %s "
+                                             "(docs/SECOND_GPU.md)\n",
+                                     dev == 1 ? "--expert-cache-device1 N" : "--expert-cache-device1..3 N, in order");
+                    }
+                }
             }
             if (chunk > 0) {
                 if (o.prefill_auto)
