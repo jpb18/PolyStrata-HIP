@@ -1192,6 +1192,7 @@ def hip_devices(probe: Path | None = None, text: str | None = None) -> list[dict
         if not probe.exists() or not hip_engine:
             return None
         try:
+            hip_runtime_beside_exe(probe.parent)       # #468 #461: not the driver's System32 copy
             env = dict(os.environ)                     # the ready-made engine's ROCm DLLs (rocm/bin beside it)
             env["PATH"] = os.pathsep.join([str(d) for d in hip_lib_dirs(probe.parent)] + [env.get("PATH", "")])
             r = subprocess.run([str(probe), "--list-devices"], capture_output=True, text=True, timeout=120,
@@ -1230,6 +1231,31 @@ def hip_lib_dirs(eng: Path) -> list[Path]:
     except (OSError, ValueError):
         rel = []
     return [eng / d for d in rel if (eng / d).is_dir()]
+
+
+# #468 #461: the HIP runtime the ready-made engine was built with, next to strata.exe.  Windows looks for an imported
+# DLL in the exe's folder, then System32, and only then on PATH (where rocm/bin is): an AMD driver that installs its own
+# amdhip64_7.dll in System32 won, and the bundled rocBLAS/hipBLAS ran on that runtime - an access violation (W7900) or
+# hipErrorInvalidDeviceFunction (7900 XTX) on the first prompt.  Only the runtime and the compiler it loads by name:
+# rocBLAS/hipBLASLt stay in rocm/bin, where they find their kernel libraries and ../.kpack.
+HIP_RUNTIME_DLLS = ("amdhip64_*.dll", "amd_comgr*.dll")
+
+
+def hip_runtime_beside_exe(eng: Path) -> None:
+    """Copy the bundled HIP runtime DLLs from rocm/bin next to the engine's exes when missing or different (a 0.1.34
+    install, whose zip had them in rocm/bin only, is fixed on its next start)."""
+    for d in hip_lib_dirs(eng):
+        for pat in HIP_RUNTIME_DLLS:
+            for src in d.glob(pat):
+                dst = eng / src.name
+                try:
+                    if dst.exists() and dst.stat().st_size == src.stat().st_size and \
+                            dst.stat().st_mtime >= src.stat().st_mtime:
+                        continue
+                    shutil.copy2(src, dst)
+                except OSError as e:                   # e.g. the engine is running and holds the old copy
+                    warn(f"could not put {src.name} next to the AMD engine ({e}); if the engine stops on its first "
+                         "request, close Strata and run START-HERE.bat again")
 
 
 def hip_match(card: dict, listed: list[dict], hip: list[dict]) -> dict | None:
@@ -1324,6 +1350,7 @@ def get_prebuilt_hip(url_base, gpu, updating=False) -> Path | None:
         p.replace(dst)
     shutil.rmtree(tmp, ignore_errors=True)
     drop_archive(z)
+    hip_runtime_beside_exe(eng)                        # #468 #461
     ok(f"ready-made AMD engine {meta.get('version', '')} for {', '.join(meta.get('archs', []))} "
        f"(ROCm {meta.get('rocm', '?')})")
     return eng
@@ -2324,6 +2351,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
            "--port", str(port or cfg.get("port", 8080))]
     if cfg.get("backend") == "hip":                    # AMD, numbered as HIP numbers them (setup's KFD order)
+        if WIN:
+            hip_runtime_beside_exe(Path(cfg["exe"]).parent)   # #468 #461: also fixes a 0.1.34 install
         amd = amd_gpus()
         if isinstance(gpu, list):                      # --gpus: saved, this model runs on these cards from now on
             cards = amd_parse_gpus(",".join(str(i) for i in gpu), amd)

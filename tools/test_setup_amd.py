@@ -311,5 +311,32 @@ class WindowsHipVision(unittest.TestCase):
             self.assertEqual(setup.hip_vision("cpu"), "cpu")
 
 
+class HipRuntimeBesideExe(unittest.TestCase):
+    """#468 #461: the bundled HIP runtime (and amd_comgr) goes next to strata.exe, so an AMD driver's System32 copy is
+    not found first; rocBLAS and the rest stay in rocm/bin."""
+
+    def test_copies_only_the_runtime(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            eng = Path(d)
+            rb = eng / "rocm" / "bin"
+            rb.mkdir(parents=True)
+            (eng / "BUILD.json").write_text(json.dumps({"backend": "hip", "lib_dirs": ["rocm/bin"]}))
+            for n, data in (("amdhip64_7.dll", b"hip-3686"), ("amd_comgr.dll", b"comgr"), ("rocblas.dll", b"blas")):
+                (rb / n).write_bytes(data)
+            setup.hip_runtime_beside_exe(eng)
+            self.assertEqual((eng / "amdhip64_7.dll").read_bytes(), b"hip-3686")
+            self.assertEqual((eng / "amd_comgr.dll").read_bytes(), b"comgr")
+            self.assertFalse((eng / "rocblas.dll").exists())          # finds its kernels relative to rocm/bin
+            (rb / "amdhip64_7.dll").write_bytes(b"hip-3690-newer")    # a newer zip: replaced on the next start
+            setup.hip_runtime_beside_exe(eng)
+            self.assertEqual((eng / "amdhip64_7.dll").read_bytes(), b"hip-3690-newer")
+
+    def test_no_rocm_bin_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as d:
+            setup.hip_runtime_beside_exe(Path(d))                   # no BUILD.json (a CUDA or Linux engine)
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
