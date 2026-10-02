@@ -8,10 +8,15 @@ upstream merges stay clean); this wrapper adds, at run time:
   - the Monitor tab's GPU readings on an Intel Arc (sycl/serve/xe_telemetry.py) when no NVIDIA card answers;
   - a model menu in the web app's header, for a host that swaps models on one GPU: the config names the RPC that
     does the swap as "model_switcher" (it takes {"mode": m} and answers {"mode", "up", "starting", "choices",
-    "urls"}); the menu offers the models served on this server's port.  Without that key nothing changes.
+    "urls"}); the menu offers the models served on this server's port.  Without that key nothing changes;
+  - OpenAI `logprobs` / `top_logprobs` on /v1/chat/completions (streamed or not): the engine (the SYCL port,
+    `logprobs=K` on its GEN line) writes an `LP` line after each `T` line, which upstream's server would ignore.
+    The values are the model's log-probabilities from the verify window's logits, before sampling, temperature and
+    penalties; with thinking on, the thinking tokens are listed too (in order, under `reasoning_content`).
 """
 from __future__ import annotations
 
+import collections
 import json
 import sys
 import urllib.parse
@@ -126,7 +131,112 @@ def install_switcher(argv):
     S.make_handler = make
 
 
+def install_logprobs():
+    """`LP` lines next to their tokens, the request's `logprobs` to the engine, OpenAI's `logprobs` in the reply."""
+    Eng = S.StrataEngine
+
+    def _pump(self):   # serve/server.py's StrataEngine._pump, plus: an LP line goes beside its token, not in the queue
+        proc, lines = self.proc, self.lines
+        lp = self.__dict__.setdefault("lp_lines", collections.deque())
+        last_t = None
+        for line in proc.stdout:
+            if line.startswith("LP "):
+                lp.append((last_t, line))
+                continue
+            if line.startswith("T "):
+                try:
+                    last_t = int(line[2:])
+                except ValueError:
+                    last_t = None
+            lines.put(line)
+        if self.proc is proc:
+            self.ended = True
+        lines.put(None)
+    Eng._pump = _pump
+
+    keys = Eng.sampling_keys
+
+    def sampling_keys(sampling):
+        k = top_logprobs(sampling or {})
+        return keys(sampling) + (f" logprobs={k}" if k is not None else "")
+    Eng.sampling_keys = staticmethod(sampling_keys)
+
+    generate = Eng.generate
+
+    def gen(self, *a, **kw):
+        self.__dict__.setdefault("lp_lines", collections.deque()).clear()   # this request's lines only
+        return generate(self, *a, **kw)
+    Eng.generate = gen
+
+    def entry(tok, t, line):
+        f = line.split()
+        if len(f) < 2 or f[1] == "nan":
+            return None
+
+        def item(i, lp):
+            b = tok.token_bytes(i) if hasattr(tok, "token_bytes") else tok.decode([i]).encode()
+            return {"token": b.decode("utf-8", "replace"), "logprob": lp, "bytes": list(b)}
+        e = item(t, float(f[1])) if t is not None else {"token": "", "logprob": float(f[1]), "bytes": []}
+        e["top_logprobs"] = [item(int(i), float(v)) for i, _, v in (x.partition(":") for x in f[2:])]
+        return e
+
+    chunks = S.openai_chunks
+
+    def openai_chunks(svc, req, *a, **kw):
+        if top_logprobs(req) is None:
+            yield from chunks(svc, req, *a, **kw)
+            return
+        eng = svc.engine
+        for c in chunks(svc, req, *a, **kw):
+            lp = getattr(eng, "lp_lines", None)
+            if c and c.get("choices") and lp:
+                got = []
+                while lp:
+                    t, line = lp.popleft()
+                    if t in svc.stop_ids:   # the stop token ends the reply; OpenAI does not list it
+                        continue
+                    e = entry(svc.tok, t, line)
+                    if e is not None:
+                        got.append(e)
+                if got:
+                    d = c["choices"][0].get("delta") or {}
+                    key = "reasoning_content" if d.get("reasoning_content") and not d.get("content") else "content"
+                    c["choices"][0]["logprobs"] = {key: got}
+            yield c
+    S.openai_chunks = openai_chunks
+
+    collect = S.openai_collect
+
+    def openai_collect(cs):
+        merged = {"content": [], "reasoning_content": []}
+
+        def tap():
+            for c in cs:
+                if c and c.get("choices") and c["choices"][0].get("logprobs"):
+                    for k, v in c["choices"][0]["logprobs"].items():
+                        merged[k].extend(v)
+                yield c
+        out = collect(tap())
+        if merged["content"] or merged["reasoning_content"]:
+            out["choices"][0]["logprobs"] = {k: v for k, v in merged.items() if v} | {"content": merged["content"]}
+        return out
+    S.openai_collect = openai_collect
+
+
+def top_logprobs(req: dict):
+    """The K for the engine's logprobs=K, or None when the request did not ask (OpenAI: logprobs=true, top_logprobs
+    0..20; the legacy completions form, logprobs=N, is taken as N)."""
+    lp = req.get("logprobs")
+    if lp is True:
+        k = req.get("top_logprobs")
+        return max(0, min(20, int(k))) if isinstance(k, int) and not isinstance(k, bool) else 0
+    if isinstance(lp, int) and not isinstance(lp, bool) and lp >= 0:
+        return min(20, lp)
+    return None
+
+
 if __name__ == "__main__":
     install_xe_reader()
     install_switcher(sys.argv[1:])
+    install_logprobs()
     sys.exit(S.main())

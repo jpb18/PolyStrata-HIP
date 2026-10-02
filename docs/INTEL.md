@@ -344,6 +344,15 @@ with `--stream-experts` there is no host copy of the experts, so any expert left
 and computed on the CPU whenever it is routed. At 1,536 MiB the cache came up 128 experts short and decode fell to
 5-10 tok/s; 1,024 MiB fits all 12,288 with 2 GB of VRAM still free.
 
+**Logprobs (2026-10-02).** `/v1/chat/completions` takes OpenAI's `"logprobs": true` and `"top_logprobs": 0..20`,
+streamed or not, through `sycl/serve/server_intel.py`; the reply carries `choices[0].logprobs.content[]` (`token`,
+`logprob`, `bytes`, `top_logprobs`), and with thinking on the thinking tokens under `reasoning_content`. The engine
+(the port only) gets `logprobs=K` on its GEN line and writes an `LP logprob id:logprob ...` line after each `T`
+line, from the verify window's head logits - the distribution the token was taken from, before temperature,
+penalties and sampling. Upstream's server ignores the lines, and an engine never asked writes none. Each token
+costs one 1 MB logits row copy when asked. Measured (IQ2_XS, "capital of France"): "Paris" at -0.0019 (p 0.998), the
+same answer and no measurable time without it. Not on `/v1/completions` or the Anthropic endpoint yet.
+
 **The Monitor tab on Intel.** `sycl/serve/server_intel.py` is `serve/server.py` with two additions made at run
 time:
 

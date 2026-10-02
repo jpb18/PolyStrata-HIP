@@ -5421,6 +5421,10 @@ int main(int argc, char **argv) try {
             float req_min_p = 0.0f, req_penalty_repeat = 1.0f, req_penalty_freq = 0.0f, req_penalty_present = 0.0f;
             int req_penalty_last_n = 0;
             int req_cvec = 1;   // cvec=0|1: a loaded control vector for this request (on when absent)
+            // SYCL port: logprobs=K (0..20) - after each "T id" an "LP logprob id:logprob ..." line with the token's
+            // log-probability and the K most likely tokens', from the verify window's head logits (before sampling,
+            // penalties and temperature). -1 (absent): no LP lines; a server that does not ask never sees one.
+            int req_logprobs = -1;
             // tuning keys (setup's calibration measures settings without restarting the engine): the PCIe share of
             // the missed experts and the draft-probability floor, for this request only
             double req_pcie_frac = o.pcie_frac, req_spec_min_p = o.spec_min_p;
@@ -5446,6 +5450,7 @@ int main(int argc, char **argv) try {
                     else if (key == "penalty_freq") req_penalty_freq = fv;
                     else if (key == "penalty_present") req_penalty_present = fv;
                     else if (key == "seed") req_seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
+                    else if (key == "logprobs") req_logprobs = std::clamp(std::atoi(tok.c_str() + eq + 1), -1, 20);
                     else if (key == "pcie_frac") req_pcie_frac = std::clamp((double) fv, 0.0, 1.0);
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
                     // unknown keys are skipped: the ids start at the first token without '='
@@ -6144,6 +6149,30 @@ int main(int argc, char **argv) try {
                 bool eos = false;
                 for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {
                     std::printf("T %d\n", (int) outv[(size_t) i]);
+                    if (req_logprobs >= 0) {   // row i of this window's head logits is the distribution token i came from
+                        static std::vector<float> lrow;
+                        static std::vector<int32_t> lord;
+                        lrow.resize((size_t) ver.vocab());
+                        if (!ver.copy_logits(i, lrow.data())) {
+                            std::printf("LP nan\n");
+                        } else {
+                            float mx = -INFINITY;
+                            for (const float v : lrow) mx = std::max(mx, v);
+                            double se = 0.0;
+                            for (const float v : lrow) se += std::exp((double) v - mx);
+                            const double lse = (double) mx + std::log(se);
+                            std::printf("LP %.6f", (double) lrow[(size_t) outv[(size_t) i]] - lse);
+                            if (req_logprobs > 0) {
+                                lord.resize(lrow.size());
+                                for (size_t v = 0; v < lrow.size(); ++v) lord[v] = (int32_t) v;
+                                std::partial_sort(lord.begin(), lord.begin() + req_logprobs, lord.end(),
+                                                  [&](int32_t x1, int32_t x2) { return lrow[(size_t) x1] > lrow[(size_t) x2]; });
+                                for (int j = 0; j < req_logprobs; ++j)
+                                    std::printf(" %d:%.6f", lord[(size_t) j], (double) lrow[(size_t) lord[(size_t) j]] - lse);
+                            }
+                            std::printf("\n");
+                        }
+                    }
                     strata::core::progress_beat();
                     ++produced_n;
                     if (o.suffix_draft > 0) sfx.append(outv[(size_t) i]);
