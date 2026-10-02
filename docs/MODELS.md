@@ -30,6 +30,15 @@ Measured on an RTX 5070 (12 GB), a Ryzen 5 7600 and 64 GB of RAM:
 | **IQ3_S** | 53 tokens/s | 46 tokens/s | 1,620 tokens/s |
 | **Coder** (IQ1_M) | 55 tokens/s | 43 tokens/s | 2,180 tokens/s |
 
+Measured on an AMD RX 9070 XT (16 GB), a Ryzen 9 3900X and 47 GB of RAM (Linux, setup's own install; Q2_0 is
+above setup's RAM estimate for 47 GB and was installed with `--model Q2_0 --yes`):
+
+| Size | Writes answers (short chat) | Writes answers (128K context) | Reads your prompt |
+| --- | ---: | ---: | ---: |
+| **Q2_0** | 60 tokens/s | 48 tokens/s | 1,160 tokens/s |
+| **IQ2_XS** | 52 tokens/s | 36 tokens/s | 1,110 tokens/s |
+| **Coder** (IQ1_M) | 44 tokens/s | 33 tokens/s | 1,420 tokens/s |
+
 - **Writes answers** = how fast the reply appears (tokens per second; a token is about ¾ of a word).
 - **Reads your prompt** = how fast it takes in what you send (long documents, code, chat history), measured on a
   32K-token prompt; a 4K prompt reads at 910-1,580 tokens/s. A 32K prompt takes about 15 seconds with Q2_0.

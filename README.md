@@ -33,9 +33,9 @@ word, so 60 tokens per second is faster than you can read.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **Q2_0** | TODO-AMD | TODO-AMD |
-| **IQ2_XS** | TODO-AMD | TODO-AMD |
-| **Coder** | TODO-AMD | TODO-AMD |
+| **Q2_0** | 60 tokens/s | 1,160 tokens/s |
+| **IQ2_XS** | 52 tokens/s | 1,110 tokens/s |
+| **Coder** | 44 tokens/s | 1,420 tokens/s |
 
 </td></tr>
 </table>
