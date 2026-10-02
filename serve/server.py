@@ -174,6 +174,27 @@ def start_failure_hint(log: str | None, offset: int) -> str:
     return ". mtp: " + DRAFT_HEAD_FAIL + ". " + (" ".join(said) if said else "Hint: " + DRAFT_HEAD_HINT)
 
 
+def start_log_tail(log: str | None, offset: int, n: int = 20) -> str:
+    """#496: the last n lines this start wrote to the engine log, for the error when the engine ended before READY -
+    whatever the failure, the engine's own reason is in them (people posted the traceback without the log).  "" when
+    there is no log or nothing in it from this start."""
+    if not log:
+        return ""
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            start = max(offset, f.tell() - 64 * 1024)   # enough for 20 lines, never an earlier start's
+            f.seek(start)
+            text = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    lines = text.splitlines()[1 if start > offset else 0:]   # not a line cut in half
+    lines = [x.rstrip() for x in lines if x.strip()][-n:]
+    if not lines:
+        return ""
+    return "\nthe engine log's last lines:\n" + "\n".join("  " + x for x in lines)
+
+
 def echo_requests(log_path: str, offset: int) -> None:
     """STRATA_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
 
@@ -307,8 +328,16 @@ class StrataEngine:
                 break
         loading.set()
         if self.max_context <= 0:
+            try:                                        # its pipes and our handle on its log (the log stays)
+                self.proc.wait(timeout=5)
+                self.proc.stdin.close()
+                self.proc.stdout.close()
+                if log:
+                    self.log.close()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
             raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else "") +
-                               start_failure_hint(log, log_start))
+                               start_failure_hint(log, log_start) + start_log_tail(log, log_start))
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):

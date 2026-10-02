@@ -876,6 +876,48 @@ class DraftHeadHint(unittest.TestCase):
         self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
 
 
+class StartFailureLog(unittest.TestCase):
+    """#496: whatever stopped the engine before READY, the error carries this start's last log lines."""
+
+    def test_the_last_lines_of_this_start(self):
+        from serve.server import start_log_tail
+        d = tempfile.mkdtemp()
+        p = Path(d) / "engine.log"
+        before = "strata serve: an earlier start's line\n"
+        p.write_text(before + "".join(f"strata serve: line {i}\n" for i in range(30)) + "\n"
+                     "strata serve: cannot open the pack\n", encoding="utf-8")
+        tail = start_log_tail(str(p), len(before.encode()))
+        self.assertIn("the engine log's last lines:", tail)
+        self.assertIn("cannot open the pack", tail)
+        self.assertIn("line 29", tail)
+        self.assertNotIn("line 10\n", tail + "\n")                 # 20 lines: 11..29 and the last one
+        self.assertIn("line 11", tail)
+        self.assertNotIn("earlier start", tail)
+        short = start_log_tail(str(p), len(before.encode()), n=3)
+        self.assertEqual(short.count("\n  "), 3)
+        self.assertEqual(start_log_tail(str(p), p.stat().st_size), "")   # nothing from this start
+        self.assertEqual(start_log_tail(None, 0), "")
+        self.assertEqual(start_log_tail(str(Path(d) / "missing.log"), 0), "")
+
+    def test_the_start_error_has_them(self):
+        import serve.server as server
+        fake = "import sys\nsys.stderr.write('strata serve: cannot open the pack packs/x\\n')\nsys.exit(2)\n"
+        with tempfile.TemporaryDirectory() as d:
+            script, log = Path(d) / "fake_strata.py", Path(d) / "strata.log"
+            script.write_text(fake, encoding="utf-8")
+            log.write_text("an earlier start\n", encoding="utf-8")
+            real = server.subprocess.Popen
+            with mock.patch.object(server.subprocess, "Popen",
+                                   lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)), \
+                    mock.patch.object(server, "narrate_start", lambda *a, **k: None):
+                with self.assertRaises(RuntimeError) as cm:
+                    StrataEngine("strata", [], log=str(log))
+            text = str(cm.exception)
+            self.assertIn("exited before it was ready", text)
+            self.assertIn("cannot open the pack packs/x", text)
+            self.assertNotIn("an earlier start", text)
+
+
 class CancelledRead(unittest.TestCase):
     """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
     line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
