@@ -876,6 +876,31 @@ class DraftHeadHint(unittest.TestCase):
         self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
 
 
+class DesktopVramNote(unittest.TestCase):
+    """#560 #516: an AMD card on a Linux desktop with little VRAM left after the start gets a recommended reserve."""
+
+    def test_when_it_applies(self):
+        from serve.server import desktop_vram_note
+        note = desktop_vram_note("hip", 624, ["--kv", "int8"], True)
+        self.assertIn("624 MiB of VRAM free", note)
+        self.assertIn("--vram-reserve-mib 3072", note)
+        self.assertIn("2.3 GB less", note)
+
+    def test_when_it_does_not(self):
+        from serve.server import desktop_vram_note
+        self.assertEqual(desktop_vram_note(None, 624, [], True), "")               # NVIDIA
+        self.assertEqual(desktop_vram_note("hip", 624, [], False), "")             # no desktop session
+        self.assertEqual(desktop_vram_note("hip", 2994, [], True), "")             # room left
+        self.assertEqual(desktop_vram_note("hip", None, [], True), "")             # lazy start: no INFO yet
+        self.assertEqual(desktop_vram_note("hip", 900, ["--vram-reserve-mib", "4000"], True), "")   # already raised
+
+    def test_desktop_detection(self):
+        from serve import server
+        with mock.patch.object(server.os, "name", "posix"), mock.patch.object(server.sys, "platform", "linux"):
+            self.assertTrue(server.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}))
+            self.assertFalse(server.linux_desktop({}))
+
+
 class StartFailureLog(unittest.TestCase):
     """#496: whatever stopped the engine before READY, the error carries this start's last log lines."""
 

@@ -368,5 +368,23 @@ class SmallCardTip(unittest.TestCase):
         self.assertIn("close other programs", tip)
 
 
+class DesktopReserveTip(unittest.TestCase):
+    """#560 #516: an AMD card on a Linux desktop gets a recommended reserve (3072 MiB) - a tip, the config is not
+    changed."""
+
+    def test_desktop_detection(self):
+        with mock.patch.object(setup.sys, "platform", "linux"):
+            self.assertTrue(setup.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}))
+            self.assertTrue(setup.linux_desktop({"DISPLAY": ":0"}))
+            self.assertFalse(setup.linux_desktop({}))                 # a headless box / ssh
+        with mock.patch.object(setup.sys, "platform", "win32"):
+            self.assertFalse(setup.linux_desktop({"DISPLAY": ":0"}))  # Windows counts the desktop itself (#497)
+
+    def test_the_tip(self):
+        tip = " ".join(setup.desktop_reserve_note())
+        self.assertIn("--vram-reserve-mib 3072", tip)
+        self.assertIn("desktop", tip)
+
+
 if __name__ == "__main__":
     unittest.main()
