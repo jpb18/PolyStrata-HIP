@@ -876,6 +876,91 @@ class DraftHeadHint(unittest.TestCase):
         self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
 
 
+class StartFailureLog(unittest.TestCase):
+    """#496: whatever stopped the engine before READY, the error carries this start's last log lines."""
+
+    def test_the_last_lines_of_this_start(self):
+        from serve.server import start_log_tail
+        d = tempfile.mkdtemp()
+        p = Path(d) / "engine.log"
+        before = "strata serve: an earlier start's line\n"
+        p.write_text(before + "".join(f"strata serve: line {i}\n" for i in range(30)) + "\n"
+                     "strata serve: cannot open the pack\n", encoding="utf-8")
+        tail = start_log_tail(str(p), len(before.encode()))
+        self.assertIn("the engine log's last lines:", tail)
+        self.assertIn("cannot open the pack", tail)
+        self.assertIn("line 29", tail)
+        self.assertNotIn("line 10\n", tail + "\n")                 # 20 lines: 11..29 and the last one
+        self.assertIn("line 11", tail)
+        self.assertNotIn("earlier start", tail)
+        short = start_log_tail(str(p), len(before.encode()), n=3)
+        self.assertEqual(short.count("\n  "), 3)
+        self.assertEqual(start_log_tail(str(p), p.stat().st_size), "")   # nothing from this start
+        self.assertEqual(start_log_tail(None, 0), "")
+        self.assertEqual(start_log_tail(str(Path(d) / "missing.log"), 0), "")
+
+    def test_the_start_error_has_them(self):
+        import serve.server as server
+        fake = "import sys\nsys.stderr.write('strata serve: cannot open the pack packs/x\\n')\nsys.exit(2)\n"
+        with tempfile.TemporaryDirectory() as d:
+            script, log = Path(d) / "fake_strata.py", Path(d) / "strata.log"
+            script.write_text(fake, encoding="utf-8")
+            log.write_text("an earlier start\n", encoding="utf-8")
+            real = server.subprocess.Popen
+            with mock.patch.object(server.subprocess, "Popen",
+                                   lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)), \
+                    mock.patch.object(server, "narrate_start", lambda *a, **k: None):
+                with self.assertRaises(RuntimeError) as cm:
+                    StrataEngine("strata", [], log=str(log))
+            text = str(cm.exception)
+            self.assertIn("exited before it was ready", text)
+            self.assertIn("cannot open the pack packs/x", text)
+            self.assertNotIn("an earlier start", text)
+
+
+class StartNarrator(unittest.TestCase):
+    """#505: the start's words say what happens to the experts - --mmap-experts loads nothing into RAM up front."""
+
+    def test_the_words_follow_the_flags(self):
+        from serve.server import experts_loading_words
+        self.assertIn("loading the experts into RAM (about 38 GB)", experts_loading_words([], "about 38 GB"))
+        mapped = experts_loading_words(["--mmap-experts"], "about 47 GB")
+        self.assertIn("mapping the experts from the model files (about 47 GB", mapped)
+        self.assertIn("not loaded into RAM", mapped)
+        self.assertIn("the GPU does not hold", experts_loading_words(["--resident-experts"], "about 47 GB"))
+        budget = experts_loading_words(["--mmap-experts", "--resident-budget-gib", "71"], "about 50 GB")
+        self.assertIn("up to 71 GiB", budget)
+        self.assertNotIn("about 50 GB", budget)
+
+    def narrate(self, args, lines):
+        import contextlib
+        import io
+        from serve.server import narrate_start
+        d = tempfile.mkdtemp()
+        log = Path(d) / "engine.log"
+        log.write_text("".join(x + "\n" for x in lines), encoding="utf-8")
+        done, out = threading.Event(), io.StringIO()
+        with contextlib.redirect_stdout(out):
+            t = threading.Thread(target=narrate_start, args=(str(log), 0, args, done))
+            t.start()
+            time.sleep(0.8)
+            done.set()
+            t.join(5)
+        return out.getvalue()
+
+    def test_a_mapped_start(self):
+        said = self.narrate(["--mmap-experts"], ["strata generate: experts via mmap (--mmap-experts; the GGUF shards "
+                                                 "in place, no experts.bin)"])
+        self.assertIn("mapping the experts from the model files", said)
+        self.assertNotIn("loading the experts into RAM", said)
+
+    def test_an_arena_start(self):
+        said = self.narrate([], ["strata generate: expert arena: resident, 31.64 GiB",
+                                 "strata generate: loaded 31.64 GiB at 3.17 GiB/s"])
+        self.assertIn("loading the experts into RAM (tens of GB)", said)
+        self.assertIn("experts loaded: 31.64 GiB at 3.17 GiB/s", said)
+
+
 class CancelledRead(unittest.TestCase):
     """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
     line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
@@ -2041,6 +2126,164 @@ class AmdTelemetry(unittest.TestCase):
             self.tree(d)
             with mock.patch.object(telemetry, "SYSFS", d):
                 self.assertEqual(svc.free_vram_mib(), 26 << 10)
+
+
+class SilentEngine(unittest.TestCase):
+    """#481: an engine that prints nothing for engine_silence_s during a request (or never acknowledges a STOP) has
+    lost step with the server: it is ended and the request fails with EngineDied, instead of waiting forever."""
+
+    def bare(self, silence, can_stop=False):
+        import io
+        import queue
+        engine = StrataEngine.__new__(StrataEngine)
+        engine.proc = mock.Mock()
+        engine.proc.stdin = io.StringIO()
+        engine.proc.poll.return_value = None
+        engine.lines, engine.can_stop, engine.max_context = queue.Queue(), can_stop, 4096
+        engine.silence_s, engine.log_path = silence, None
+        return engine
+
+    def later(self, engine, delay, *lines):
+        def put():
+            time.sleep(delay)
+            for x in lines:
+                engine.lines.put(x)
+        threading.Thread(target=put, daemon=True).start()
+
+    def test_silence_mid_answer_ends_the_engine(self):
+        from serve.server import EngineSilent
+        engine = self.bare(0.3)
+        engine.lines.put("T 5")
+        gen = engine.generate([1], 10, {}, threading.Event())
+        self.assertEqual(next(gen), 5)
+        t0 = time.monotonic()
+        with self.assertRaises(EngineSilent) as cm:
+            next(gen)
+        self.assertIsInstance(cm.exception, EngineDied)          # every EngineDied path handles it
+        self.assertLess(time.monotonic() - t0, 5)
+        engine.proc.kill.assert_called_once()
+        self.assertFalse(engine.alive())                          # the next request restarts it
+        self.assertIn("#481", engine.death_note())
+        self.assertNotIn("STOP", engine.proc.stdin.getvalue())    # nothing is listening: no STOP, no drain
+
+    def test_prompt_chunks_set_the_wait(self):
+        # a PP line every second, at 100 tok/s: far over a 0.3 s silence, but each chunk is on time for its size
+        engine = self.bare(0.3)
+        engine.lines.put("RESUME 0")
+        engine.lines.put("PP 100 300 1000 100.0")
+        self.later(engine, 1.0, "PP 200 300 2000 100.0", "T 7", "DONE 1 300 2000 1 length")
+        self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [None, None, 7])
+        engine.proc.kill.assert_not_called()
+
+    def test_a_long_first_chunk_is_allowed(self):
+        # 100 prompt tokens at the slowest prompt reading (50 tok/s): 2 s on top of the silence before the first PP
+        engine = self.bare(0.3)
+        self.later(engine, 1.0, "PP 100 100 1000 100.0", "DONE 0 100 1000 0 length")
+        self.assertEqual(list(engine.generate([1] * 100, 10, {}, threading.Event())), [None])
+        engine.proc.kill.assert_not_called()
+
+    def test_a_stop_never_acknowledged(self):
+        from serve.server import EngineSilent
+        engine = self.bare(0.3, can_stop=True)
+        engine.lines.put("T 5")
+        gen = engine.generate([1], 10, {}, threading.Event())
+        self.assertEqual(next(gen), 5)
+        with self.assertRaises(EngineSilent):
+            gen.close()                                           # the consumer stopped: STOP, then the drain
+        self.assertIn("STOP", engine.proc.stdin.getvalue())
+        engine.proc.kill.assert_called_once()
+        self.assertFalse(engine.alive())
+
+    def test_zero_waits_as_before(self):
+        engine = self.bare(0)
+        self.later(engine, 0.5, "T 5", "DONE 1 1 1 1 length")
+        self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [5])
+
+    def test_config(self):
+        from serve.server import ENGINE_SILENCE_S, engine_silence_s
+        self.assertEqual(engine_silence_s({}), ENGINE_SILENCE_S)
+        self.assertEqual(engine_silence_s({"engine_silence_s": 0}), 0.0)
+        self.assertEqual(engine_silence_s({"engine_silence_s": 900}), 900.0)
+        for bad in (-1, "300", True):
+            with self.assertRaises(ValueError):
+                engine_silence_s({"engine_silence_s": bad})
+
+
+FAKE_LOST_STEP = '''import pathlib, sys, time
+mark = pathlib.Path(sys.argv[sys.argv.index("--mark") + 1])
+mode = sys.argv[sys.argv.index("--mode") + 1]
+print("READY 4096 stop", flush=True)
+for line in sys.stdin:
+    if line.startswith("QUIT"):
+        break
+    if line.startswith("GEN"):
+        if not mark.exists():                    # the first engine loses step (#481): it never says DONE
+            mark.touch()
+            print("T 104", flush=True)
+            if mode == "stop":
+                print("T 257", flush=True)       # <|im_end|>: the server STOPs and drains, and the engine is silent
+            time.sleep(3600)
+        print("T 111", flush=True)
+        print("T 107", flush=True)
+        print("DONE 2 5 1.0 1.0 length", flush=True)
+'''
+
+
+class LostStep(unittest.TestCase):
+    """#481 over HTTP, with a real process: the request with the silent engine ends with an error, and the next one
+    starts the engine again and is answered (the server used to wait forever, holding the request FIFO)."""
+
+    def run_mode(self, mode, stream):
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as d:
+            script, mark = Path(d) / "fake_strata.py", Path(d) / "lost"
+            script.write_text(FAKE_LOST_STEP, encoding="utf-8")
+            real = server.subprocess.Popen
+            with mock.patch.object(server.subprocess, "Popen",
+                                   lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
+                eng = StrataEngine("strata", ["--mark", str(mark), "--mode", mode])
+                eng.silence_s = 0.5
+                tok = ByteTokenizer()
+                svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+                httpd = serve(svc, port=0)
+                base = f"http://127.0.0.1:{httpd.server_address[1]}"
+                body = {"model": "m", "max_tokens": 2, "reasoning_effort": "none", "stream": stream,
+                        "messages": [{"role": "user", "content": "hi"}]}
+                try:
+                    first = eng.proc
+                    req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                                 headers={"Content-Type": "application/json"})
+                    try:
+                        with urllib.request.urlopen(req, timeout=60) as r:
+                            text = r.read().decode()
+                    except urllib.error.HTTPError as e:
+                        self.assertEqual(e.code, 503)
+                        text = e.read().decode()
+                    self.assertIn("the next request restarts it", text)
+                    self.assertIsNotNone(first.poll(), "the silent engine still runs")
+                    self.assertEqual(svc.history[-1]["finish"], "error")
+                    with urllib.request.urlopen(req, timeout=60) as r:
+                        text = r.read().decode()
+                    self.assertIsNot(eng.proc, first)
+                    if stream:
+                        answer = "".join(json.loads(x[6:])["choices"][0]["delta"].get("content") or ""
+                                         for x in text.splitlines() if x.startswith("data: {") and "choices" in x)
+                    else:
+                        answer = json.loads(text)["choices"][0]["message"]["content"]
+                    self.assertEqual(answer, "ok")
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    eng.unload()
+
+    def test_silent_mid_answer(self):
+        self.run_mode("silent", stream=False)
+
+    def test_silent_mid_stream(self):
+        self.run_mode("silent", stream=True)
+
+    def test_stop_never_acknowledged(self):
+        self.run_mode("stop", stream=False)
 
 
 if __name__ == "__main__":
