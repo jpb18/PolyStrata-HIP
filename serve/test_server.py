@@ -19,7 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, Service, StrataEngine,  # noqa: E402
-                          prompt_tokens_seen, request_timings, serve)
+                          prompt_tokens_seen, request_timings, serve, start_failure_hint)
 from types import SimpleNamespace  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -799,6 +799,39 @@ class DraftCounts(unittest.TestCase):
         rows = m["requests"]                                      # newest first
         self.assertEqual([(r["drafts_offered"], r["drafts_accepted"]) for r in rows], [(5, 3), (None, None), (12, 7)])
         self.assertEqual((m["totals"]["drafts_offered"], m["totals"]["drafts_accepted"]), (17, 10))
+
+
+class DraftHeadHint(unittest.TestCase):
+    """#474: a start that stopped at "the draft head does not fit" says what to change, from this start's log lines."""
+
+    def log(self, text, before=""):
+        d = tempfile.mkdtemp()
+        p = Path(d) / "engine.log"
+        p.write_text(before + text, encoding="utf-8")
+        return str(p), len(before.encode())
+
+    def test_the_engines_hint_is_relayed(self):
+        p, off = self.log("strata mtp: the draft head over 106299 tokens needs 348 MiB of VRAM and 120 MiB is free.\n"
+                          "strata mtp: hint: a smaller draft vocabulary needs less VRAM: --draft-vocab en (...)\n"
+                          "strata serve: mtp: the draft head does not fit\n")
+        h = start_failure_hint(p, off)
+        self.assertIn("the draft head does not fit", h)
+        self.assertIn("348 MiB", h)
+        self.assertIn("--draft-vocab en", h)
+
+    def test_an_older_engine_gets_the_advice_in_words(self):
+        p, off = self.log("strata serve: mtp: the draft head does not fit\n")
+        self.assertIn("--draft-vocab en", start_failure_hint(p, off))
+
+    def test_other_failures_and_earlier_starts_add_nothing(self):
+        p, off = self.log("strata serve: cannot open the pack\n")
+        self.assertEqual(start_failure_hint(p, off), "")
+        # an earlier start's failure (before this start's offset) is not this one's
+        p, off = self.log("strata serve: cannot open the pack\n",
+                          before="strata serve: mtp: the draft head does not fit\n")
+        self.assertEqual(start_failure_hint(p, off), "")
+        self.assertEqual(start_failure_hint(None, 0), "")
+        self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
 
 
 class CancelledRead(unittest.TestCase):

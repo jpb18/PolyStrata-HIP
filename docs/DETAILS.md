@@ -98,7 +98,10 @@ English/code subset from before (40,525 ids, ~110 MiB less VRAM, English answers
 almost no drafts). `--draft-vocab cyrillic` takes the English/code subset plus the whole Cyrillic script (58,963
 ids): the shipped subsets hold 142 of the vocabulary's 18,580 Cyrillic tokens, so Ukrainian or Russian answers got
 1.4 tokens a round; with it 2.1, and 83 -> 109 tokens/s (RTX 5090, the NVFP4 fork), English unchanged.
-`tools/draft_vocab.py` builds and inspects subsets.
+`tools/draft_vocab.py` builds and inspects subsets. When the start stops with "the draft head does not fit" (a
+12 GB card with a long context, #474), the engine says how much the head needs, how much VRAM is free and which
+smaller subset fits, and the server's start error repeats it; setup suggests `--draft-vocab en` on cards under
+14 GB (only a suggestion: nothing changes unless you pass it).
 
 **Low-RAM mode (engine 0.1.26, chosen by setup):** normally all of a model's experts are copied into RAM (23-50 GB,
 pinned) and the GPU holds a copy of the most-used ones. On a PC whose RAM cannot hold them beside the system (the

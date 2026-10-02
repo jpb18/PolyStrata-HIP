@@ -2572,6 +2572,25 @@ def saved_draft_vocab(cfg_path: Path) -> str | None:
     return v if v in DRAFT_VOCABS else None
 
 
+DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "en": 133}   # the draft head's VRAM per subset (IQ3_S: the largest)
+SMALL_DRAFT_VRAM_GB = 14   # #474: below this the default subset's head can be what does not fit
+
+
+def draft_vocab_note(vram_gb: float, chosen: str | None) -> list[str]:
+    """#474: on a card under 14 GB, the default draft subset (cjk, ~348 MiB of VRAM) can be what does not fit at the
+    start ("the draft head does not fit"), and the engine's expert cache gets what a smaller one leaves.  Setup
+    RECOMMENDS a smaller one here and changes nothing (the owner's rule, #403 #406): a subset chosen with
+    --draft-vocab, or kept from an earlier install, gets no note.  [] for every other case."""
+    if chosen or not 0 < vram_gb < SMALL_DRAFT_VRAM_GB:
+        return []
+    start = "START-HERE.bat" if WIN else "./setup.sh"
+    return [f"Tip for a {vram_gb:.0f} GB card: the draft layer's default token subset (with Chinese, Japanese and "
+            f"Korean) needs up to ~{DRAFT_VOCAB_MIB['cjk']} MiB of VRAM.",
+            f"  For English and code answers, {start} --draft-vocab en needs up to ~{DRAFT_VOCAB_MIB['en']} MiB "
+            f"(cyrillic: ~{DRAFT_VOCAB_MIB['cyrillic']}) and leaves the rest to the expert cache - and it is the",
+            "  fix when the start stops with \"the draft head does not fit\". The model keeps the choice."]
+
+
 def mtp_corrupt(mtp: Path, env=None) -> bool:
     """#327: True when the MTP tensors an install fetched are not the pinned checkpoint's (tools/mtp_fetch.py verify,
     which hashes only files that changed since they last checked out).  A mirror that ignored range requests left the
@@ -3274,6 +3293,8 @@ def main() -> int:
     draft_vocab = a.draft_vocab or saved_draft_vocab(ROOT / f"strata-{tag.lower()}.json")
     refresh_draft_vocab(rt, draft_vocab or "cjk")
     ok(f"MTP draft layer: {rt}")
+    for line in draft_vocab_note(gpu.get("vram_gb", 0.0), draft_vocab):   # #474: a recommendation, nothing changes
+        say("  " + line)
 
     # ---- 7. the start script
     step(7, "writing the start script")

@@ -131,6 +131,31 @@ ENGINE_REQUEST = re.compile(
 
 _echoing: set[str] = set()      # the logs echo_requests already follows (restart() runs StrataEngine.__init__ again)
 
+DRAFT_HEAD_FAIL = "the draft head does not fit"
+DRAFT_HEAD_HINT = ("a smaller draft vocabulary needs less VRAM: --draft-vocab cyrillic (English, code and the Cyrillic "
+                   "script) or --draft-vocab en (English and code, ~215 MiB less than the default). Start once with "
+                   "it - START-HERE.bat --draft-vocab en (Windows) or ./setup.sh --draft-vocab en - and the model "
+                   "keeps it; or a smaller --context in setup.")
+
+
+def start_failure_hint(log: str | None, offset: int) -> str:
+    """#474: what to change when the engine stopped at the start because the MTP draft head did not fit the VRAM
+    left: the engine's own `strata mtp:` lines after that failure (0.1.36+: what it needs, what is free, the smaller
+    subsets), else the same advice in words for an older engine.  "" for any other failure: the log says why."""
+    if not log:
+        return ""
+    try:
+        with open(log, "rb") as f:
+            f.seek(offset)
+            text = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    if DRAFT_HEAD_FAIL not in text:
+        return ""
+    said = [x.strip()[len("strata mtp: "):] for x in text.splitlines()
+            if x.strip().startswith("strata mtp: ") and ("draft head over" in x or "hint:" in x)]
+    return ". mtp: " + DRAFT_HEAD_FAIL + ". " + (" ".join(said) if said else "Hint: " + DRAFT_HEAD_HINT)
+
 
 def echo_requests(log_path: str, offset: int) -> None:
     """STRATA_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
@@ -238,6 +263,7 @@ class StrataEngine:
         self.unloaded = False            # `ended` stays True until READY (below): not alive while starting (#344)
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
+        log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
         if log:
             threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
                              daemon=True).start()
@@ -261,7 +287,8 @@ class StrataEngine:
                 break
         loading.set()
         if self.max_context <= 0:
-            raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
+            raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else "") +
+                               start_failure_hint(log, log_start))
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):
