@@ -779,10 +779,11 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             for (int k = 0; k < ct; ++k) c.a[k] = m.a[c0 + k];
         }
         const size_t smem = (size_t) ct * per_tok;
-        // Only bound per-thread token storage; retain the chosen tile, block
-        // size, accumulation order and upstream plain/split/staged path.
-        const char* max4_env = std::getenv("STRATA_GR_DOWN_MAX4");
-        const bool max4 = ct <= 4 && max4_env && std::atoi(max4_env) != 0;
+        // #443, opt-in STRATA_GR_DOWN_MAX4=1: launches of up to 4 tokens hold 4 tokens' sums per thread instead of
+        // kFusedGrMaxT - the same tile, block size, accumulation order and plain/split/staged path, so the same bits
+        // (read once: this runs per layer when decode is not captured)
+        static const bool max4_on = [] { const char* v = std::getenv("STRATA_GR_DOWN_MAX4"); return v && std::atoi(v) != 0; }();
+        const bool max4 = max4_on && ct <= 4;
         if (staged) {
             if (max4) gr_down_staged_kernel<4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
             else gr_down_staged_kernel<><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
