@@ -797,6 +797,55 @@ def gguf_dir_shards(folder: Path, fam: dict, model: str) -> list[Path]:
     return [first.with_name("%s-%05d-of-%05d.gguf" % (stem, i, total)) for i in range(1, total + 1)]
 
 
+# #444: the quantization in a GGUF's name (Unsloth's UD-IQ3_XXS, a K-quant's Q2_K_XL, a GSQ-RCO IQ3_S, ...)
+GGUF_QUANT = re.compile(r"(?<![A-Za-z0-9])((?:UD-)?(?:I?Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32))"
+                        r"(?=-\d{5}-of-\d{5}\.gguf$|\.gguf$)", re.I)
+SUPPORTED_GGUFS = ("Strata runs ISTA-DASLab's GSQ-RCO files (Qwen3.8-Flash-Next Q2_0, IQ2_XS, IQ3_XXS, IQ3_S; Swift "
+                   "1.5's; the Coder's IQ1_M) and Unsloth's UD-Q4_K_XL only: other GGUFs (Unsloth's UD-IQ3_XXS or "
+                   "UD-Q2_K_XL, K-quants) cannot be used")
+
+
+def gguf_unsupported(name: str) -> str | None:
+    """#444: the quantization a GGUF's name says, when it is one Strata cannot run (not a setup size); else None."""
+    m = GGUF_QUANT.search(name)
+    return m.group(1) if m and m.group(1).upper() not in MODELS and not name.lower().startswith("mmproj") else None
+
+
+def gguf_choice(name: str) -> tuple | None:
+    """#444: (--family, --model) whose published first shard this file is, or None (the Coder's IQ1_M is named like
+    the original's sizes: the size tells them apart)."""
+    for f, d in FAMILIES.items():
+        for m in MODELS:
+            if f in MODELS[m].get("families", ("qwen", "swift")) and name == d["file"].format(q=m, i=1):
+                return f, m
+    return None
+
+
+def gguf_dir_problem(folder: Path, first: Path, fam: dict, model: str) -> tuple | None:
+    """#444: (message, hint) when --gguf-dir has no file setup can use for this choice: the chosen shard is a GGUF
+    Strata cannot run (Unsloth's UD-IQ3_XXS taken for IQ3_XXS by its name), or it is missing and the folder holds
+    other GGUFs - then the hint names the --family/--model of the usable ones.  None otherwise (a missing shard in a
+    folder without GGUFs stays check_shards' "missing")."""
+    bad = gguf_unsupported(first.name) if first.exists() else None
+    if bad:
+        return f"{first.name} is {bad}, a GGUF Strata cannot run", SUPPORTED_GGUFS
+    if first.exists():
+        return None
+    firsts = sorted(p.name for p in folder.glob("*.gguf")
+                    if not p.name.lower().startswith("mmproj") and (not SHARD_NAME.search(p.name)
+                                                                     or SHARD_NAME.search(p.name).group(1) == "00001"))
+    usable = list(dict.fromkeys(c for c in map(gguf_choice, firsts) if c))
+    unusable = [n for n in firsts if gguf_unsupported(n)]
+    if not usable and not unusable:
+        return None
+    hint = SUPPORTED_GGUFS
+    if unusable:
+        hint += ".\n       Not usable here: " + ", ".join(unusable)
+    if usable:
+        hint += ".\n       Usable here: " + ", ".join(f"--family {f} --model {m}" for f, m in usable)
+    return f"{folder} has no {fam['title']} {model} file", hint
+
+
 def verify_sha256(s: Path, size: int, sha: str) -> None:
     """A shard's size and SHA-256 against the pinned values (the Unsloth file); the result is kept in its finish mark,
     so the ~5 minutes of hashing 111 GB happen once.  A wrong file is deleted, so the next run downloads it again."""
@@ -2844,7 +2893,12 @@ def main() -> int:
     say()
     names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
     if a.model and a.model not in names:
-        fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
+        # #444: say which family has that size, and (with --gguf-dir) which files Strata can run at all
+        elsewhere_fams = [f for f in FAMILIES if f in MODELS[a.model].get("families", ("qwen", "swift"))]
+        fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names)
+             + (f" (or {a.model}: " + ", ".join(f"--family {f} --model {a.model}" for f in elsewhere_fams) + ")"
+                if elsewhere_fams else "")
+             + (f".\n       {SUPPORTED_GGUFS}" if a.gguf_dir else ""))
     for i, m in enumerate(names, 1):
         d = MODELS[m]
         fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
@@ -3025,6 +3079,9 @@ def main() -> int:
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
     shards = gguf_dir_shards(models_dir, fam, model) if a.gguf_dir else \
         [models_dir / fam["file"].format(q=model, i=i) for i in range(1, fam.get("shards", 2) + 1)]
+    problem = gguf_dir_problem(models_dir, shards[0], fam, model) if a.gguf_dir else None
+    if problem:                                        # #444: files Strata cannot run, or another choice's files
+        fail(*problem)
     if not a.gguf_dir and not all(sh.exists() and done(sh) for sh in shards):
         for r in elsewhere:                            # already downloaded in a Strata folder on another drive
             cand = [r / "models" / tag / sh.name for sh in shards]
