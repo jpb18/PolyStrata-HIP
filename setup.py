@@ -2569,8 +2569,15 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
             pass
     say()
     say("  " + "-" * 100)
-    say(f"  Starting {cfg.get('model_name', 'the model')}: it loads {f'about {gb:.0f} GB' if gb >= 1 else '34-55 GB'} "
-        "into RAM and locks part of it for the GPU.")
+    size = f'about {gb:.0f} GB' if gb >= 1 else '34-55 GB'
+    a_ = cfg["args"]
+    if "--mmap-experts" in a_ and "--resident-budget-gib" not in a_ and "--resident-experts" not in a_:
+        # #505: the mapped low-RAM mode loads nothing into RAM up front (the server's narrator says the same)
+        say(f"  Starting {cfg.get('model_name', 'the model')}: it maps {size} of experts from the model files (the OS "
+            "file cache reads them).")
+    else:
+        say(f"  Starting {cfg.get('model_name', 'the model')}: it loads {size} into RAM and locks part of it for the "
+            "GPU.")
     say("  While it does, YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES (longer the first time after a")
     say("  restart). That is normal: please wait and don't close this window - the browser opens when it is ready.")
     say("  Later, closing this window stops the model.")

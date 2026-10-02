@@ -218,6 +218,27 @@ def echo_requests(log_path: str, offset: int) -> None:
                                                  m["tg"]), flush=True)
 
 
+def experts_loading_words(args: list, size: str) -> str:
+    """#505: what the start does with the experts, by the engine's flags (generate.cpp's option parsing): a RAM budget
+    copies the hottest N GiB into RAM (--resident-budget-gib), the resident low-RAM mode the ones the GPU does not hold
+    (--resident-experts), plain --mmap-experts reads them from the model files through the OS file cache (nothing is
+    loaded into RAM up front); otherwise all of them go into RAM."""
+    if "--resident-budget-gib" in args:
+        try:
+            n = f"up to {float(args[args.index('--resident-budget-gib') + 1]):g} GiB"
+        except (IndexError, ValueError):
+            n = "a RAM budget"
+        return (f"loading the most-used experts into RAM ({n}; the rest are read from the model files as needed) "
+                "and locking part of them for the GPU.")
+    if "--resident-experts" in args:
+        return (f"loading the experts the GPU does not hold into RAM (of {size}) and locking part of them for the "
+                "GPU.")
+    if "--mmap-experts" in args:
+        return (f"mapping the experts from the model files ({size}, --mmap-experts): they are not loaded into RAM - "
+                "the OS file cache reads them as the GPU's expert cache fills and as requests need them.")
+    return f"loading the experts into RAM ({size}) and locking part of them for the GPU."
+
+
 def narrate_start(log_path: str, offset: int, args: list, done: threading.Event, heartbeat=20.0) -> None:
     """While the engine starts, say in the server window what it is doing, from its log: the start reads tens of GB
     into RAM and locks part of it for the GPU, and on many PCs everything is slow or frozen for a minute or more -
@@ -229,6 +250,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
         except (OSError, IndexError):
             pass
     size = f"about {gb:.0f} GB" if gb >= 1 else "tens of GB"
+    loading = experts_loading_words(args, size)
     t0 = last = time.time()
     said = set()
 
@@ -252,8 +274,8 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             cut = chunk.rfind(b"\n") + 1
             pos += cut
             for line in chunk[:cut].decode("utf-8", "replace").splitlines():
-                if "PLE on" in line or "expert arena:" in line:
-                    say("arena", f"[strata] loading the experts into RAM ({size}) and locking part of them for the GPU.\n"
+                if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
+                    say("arena", f"[strata] {loading}\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
                                  "         Please wait and don't close this window; the browser opens when it is ready.")
                 elif " loaded " in line and "GiB at" in line:

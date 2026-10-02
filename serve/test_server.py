@@ -918,6 +918,49 @@ class StartFailureLog(unittest.TestCase):
             self.assertNotIn("an earlier start", text)
 
 
+class StartNarrator(unittest.TestCase):
+    """#505: the start's words say what happens to the experts - --mmap-experts loads nothing into RAM up front."""
+
+    def test_the_words_follow_the_flags(self):
+        from serve.server import experts_loading_words
+        self.assertIn("loading the experts into RAM (about 38 GB)", experts_loading_words([], "about 38 GB"))
+        mapped = experts_loading_words(["--mmap-experts"], "about 47 GB")
+        self.assertIn("mapping the experts from the model files (about 47 GB", mapped)
+        self.assertIn("not loaded into RAM", mapped)
+        self.assertIn("the GPU does not hold", experts_loading_words(["--resident-experts"], "about 47 GB"))
+        budget = experts_loading_words(["--mmap-experts", "--resident-budget-gib", "71"], "about 50 GB")
+        self.assertIn("up to 71 GiB", budget)
+        self.assertNotIn("about 50 GB", budget)
+
+    def narrate(self, args, lines):
+        import contextlib
+        import io
+        from serve.server import narrate_start
+        d = tempfile.mkdtemp()
+        log = Path(d) / "engine.log"
+        log.write_text("".join(x + "\n" for x in lines), encoding="utf-8")
+        done, out = threading.Event(), io.StringIO()
+        with contextlib.redirect_stdout(out):
+            t = threading.Thread(target=narrate_start, args=(str(log), 0, args, done))
+            t.start()
+            time.sleep(0.8)
+            done.set()
+            t.join(5)
+        return out.getvalue()
+
+    def test_a_mapped_start(self):
+        said = self.narrate(["--mmap-experts"], ["strata generate: experts via mmap (--mmap-experts; the GGUF shards "
+                                                 "in place, no experts.bin)"])
+        self.assertIn("mapping the experts from the model files", said)
+        self.assertNotIn("loading the experts into RAM", said)
+
+    def test_an_arena_start(self):
+        said = self.narrate([], ["strata generate: expert arena: resident, 31.64 GiB",
+                                 "strata generate: loaded 31.64 GiB at 3.17 GiB/s"])
+        self.assertIn("loading the experts into RAM (tens of GB)", said)
+        self.assertIn("experts loaded: 31.64 GiB at 3.17 GiB/s", said)
+
+
 class CancelledRead(unittest.TestCase):
     """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
     line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
