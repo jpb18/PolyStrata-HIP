@@ -45,6 +45,23 @@ void ck(int s, const char *what) {
     }
 }
 
+// #247/#325: on Windows (seen on gfx1201), hipBLAS can return success with the correct BF16/FP16 product for some
+// shapes (hc up once T >= 96, the router) and still leave hipErrorInvalidValue set, which the next kernel's error
+// check turns into an exit. The multiply has finished, so that one stale error is cleared after a GEMM that succeeded;
+// any other error still stops the engine. Windows only: on Linux a stale hipErrorInvalidValue is a real error from
+// an earlier call and keeps being reported. A no-op everywhere else (CUDA compiles none of it).
+#if defined(__HIPCC__) && defined(_WIN32)
+void absorb_hipblas_sticky(const char* what) {
+    const hipError_t sticky = hipGetLastError();
+    if (sticky == hipSuccess || sticky == hipErrorInvalidValue) return;
+    std::fprintf(stderr, "prefill gemm: %s left %s\n", what, hipGetErrorString(sticky));
+    std::exit(1);
+}
+#define STRATA_ABSORB_HIPBLAS_STICKY(what) absorb_hipblas_sticky(what)
+#else
+#define STRATA_ABSORB_HIPBLAS_STICKY(what) ((void) 0)
+#endif
+
 // A setup call whose failure the engine survives (the handle keeps its defaults), as before #240 - but said.
 void note(int s, const char *what) {
     if (s != 0) std::fprintf(
@@ -429,6 +446,7 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     if (try_hipblaslt(hipblaslt_state_, strata::prefill::hipblaslt::InputType::bf16, X, W, Y, T, N, K, ldy,
                       beta, stream_)) {
+        STRATA_ABSORB_HIPBLAS_STICKY("hipBLASLt bf16");
         return;
     }
 #endif
@@ -441,6 +459,7 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
            dpct::library_data_t::real_float, (int)ldy,
            dpct::compute_type::f32)),
        "cublasGemmEx");
+    STRATA_ABSORB_HIPBLAS_STICKY("cublasGemmEx");
 }
 
 void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K, int64_t ldy,
@@ -451,6 +470,7 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     if (try_hipblaslt(hipblaslt_state_, strata::prefill::hipblaslt::InputType::f16, X, W, Y, T, N, K, ldy,
                       beta, stream_)) {
+        STRATA_ABSORB_HIPBLAS_STICKY("hipBLASLt f16");
         return;
     }
 #endif
@@ -462,6 +482,7 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
            dpct::library_data_t::real_float, (int)ldy,
            dpct::compute_type::f32)),
        "cublasGemmEx f16");
+    STRATA_ABSORB_HIPBLAS_STICKY("cublasGemmEx f16");
 }
 
 void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float* Y, int64_t T, int64_t N, int64_t K,

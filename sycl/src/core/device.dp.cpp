@@ -90,6 +90,57 @@ const char* compiled_gpu_archs() {
 #endif
 }
 
+int device_count() try {
+    int count = 0;
+    if (DPCT_CHECK_ERROR(count = dpct::device_count()) !=
+        0) { // HIP without a usable device reports an error, not 0
+        /*
+        DPCT1026: The call to cudaGetLastError was removed because this
+        functionality is redundant in SYCL.
+        */
+        return 0;
+    }
+    return count < 0 ? 0 : count;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+bool device_summary(int ordinal, std::string &name, std::string &detail) try {
+    dpct::device_info p{};
+    if (ordinal < 0 || ordinal >= device_count() ||
+        DPCT_CHECK_ERROR(dpct::get_device(ordinal).get_device_info(p)) != 0) {
+        /*
+        DPCT1026: The call to cudaGetLastError was removed because this
+        functionality is redundant in SYCL.
+        */
+        return false;
+    }
+    char buf[160];
+#if defined(STRATA_USE_HIP)
+    std::snprintf(buf, sizeof(buf), "arch %s, %.1f GiB, wave%d", base_arch(p.gcnArchName).c_str(),
+                  (double) p.totalGlobalMem / (1024.0 * 1024 * 1024), p.warpSize);
+#else
+    /*
+    DPCT1005: The SYCL device version is different from CUDA Compute
+    Compatibility. You may need to rewrite this code.
+    */
+    std::snprintf(buf, sizeof(buf), "compute capability %d.%d, %.1f GiB",
+                  p.get_major_version(), p.get_minor_version(),
+                  (double)p.get_global_mem_size() / (1024.0 * 1024 * 1024));
+#endif
+    name = p.get_name();
+    detail = buf;
+    return true;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
 std::string gpu_arch_problem(int ordinal) {
 #if defined(STRATA_USE_HIP)
     int count = 0;
