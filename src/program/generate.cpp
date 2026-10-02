@@ -846,6 +846,12 @@ void mem_mark(const char* where) {
     std::fprintf(stderr, "strata trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
 }
 
+/// #463's A/B: STRATA_ADAPT_NOWAIT=1 lets a verify window start before the adaptive tier's copies have landed (0.1.37)
+bool adapt_nowait() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_ADAPT_NOWAIT"); return e && e[0] == '1'; }();
+    return v;
+}
+
 int argmax(const std::vector<float>& v) {
     int best = 0;
     for (size_t i = 1; i < v.size(); ++i)
@@ -5697,7 +5703,8 @@ int main(int argc, char** argv) {
                 drive.d.failed = false;
                 // #463: the previous adapt round's copies land first - with a non-blocking query, whether a swapped-in
                 // expert ran on the GPU or the CPU (they round differently) depended on the copy's timing
-                apply_pending(true);
+                // (STRATA_ADAPT_NOWAIT=1: 0.1.37's non-blocking query, the A/B)
+                apply_pending(!adapt_nowait());
                 if (hist_n > 0) {
                     // the tails the penalties count over, ONE PER ROW: the tokens the state has consumed, the
                     // fed-back head `x` (it joins `consumed` only after this window commits), then the drafts
@@ -6554,7 +6561,8 @@ int main(int argc, char** argv) {
             drive.d.failed = false;
             // #463: the previous adapt round's copies land first - with a non-blocking query, whether a swapped-in
             // expert ran on the GPU or the CPU (they round differently) depended on the copy's timing
-            apply_pending(true);
+            // (STRATA_ADAPT_NOWAIT=1: 0.1.37's non-blocking query, the A/B)
+            apply_pending(!adapt_nowait());
             if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
