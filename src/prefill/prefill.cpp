@@ -105,11 +105,12 @@ int g_ring_override = 0;   // #340: set by a layer split (Prefill::set_ring_over
 // #136: the fused experts (STRATA_PF_FUSED=1) launch on a batch of a layer's streamed experts at once, so the ring
 // should hold a whole layer's (~460 of 512 on Q2_0): with 384 slots a layer's last batch waits for slots its own
 // first batch frees.  Measured on the 5070, Q2_0, the 4K / 32K code-agent prompts (one run each): fused at 384 slots
-// +5% / +3% over MMQ, at 512 +19-22% / +11-12% (MMQ itself at 512: -2% / -1%).  1024 slots (RING_MAX 1024): 4K
-// +24-27%, but 32K -> +6%: its chunk falls from 8192 to 6144.
+// +5% / +3% over MMQ, at 512 +19-22% / +11-12% (MMQ itself at 512: -2% / -1%).  P3: with the fused path's smaller
+// buffers (moe_bufs) 1024 slots - two layers' experts - fit too; 2 pairs each, prompt tok/s at 512 / 1024 slots: 4K
+// 1,512 / 1,605, 32K 2,485 / 2,660 (both chunk 8192), 128K with KV streaming 2,346 / 2,392 (the chunk falls from
+// 8192 to 6144, but more experts stay resident).
 inline bool fused_ring() { return fused::enabled() && !strata::kernels::cpu::expert_layout().native; }
-// the largest ring: 512 slots (a layer's experts), 1024 with the fused experts (#136 P3: two layers' - their smaller
-// buffers leave the VRAM for it)
+// the largest ring: 512 slots, 1024 with the fused experts
 inline int ring_cap() { return fused_ring() ? RING_MAX : 512; }
 inline int ring_slots(size_t T) {
     const char* v = std::getenv("STRATA_PREFILL_RING");
@@ -122,7 +123,7 @@ inline int ring_slots(size_t T) {
     }();
     if (!v && g_ring_override <= 0 && wmma) return (int64_t) T >= stream_all_min() ? 96 : STAGE;
 #endif
-    const int pinned_ring = fused_ring() ? 512 : 384;
+    const int pinned_ring = fused_ring() ? 1024 : 384;
     const int r = v ? std::atoi(v) : g_ring_override > 0 ? g_ring_override : (g_pinned_share >= 0.9 ? pinned_ring : 96);
     if (v && r == STAGE) return STAGE; // Explicit opt-in to routed-only staging, including large chunks.
     const int big = r < 16 ? 16 : r > ring_cap() ? ring_cap() : r;
