@@ -31,7 +31,9 @@ import json
 import os
 import queue
 import re
+import select
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -631,12 +633,28 @@ def engine_args(cfg: dict) -> list[str]:
     return args
 
 
+def hip_visible(cfg: dict) -> list[int]:
+    """AMD: the devices the engine should see, as the HIP runtime numbers them (HIP_VISIBLE_DEVICES).
+
+    On Linux setup's KFD order is HIP's order, so the config's "gpu" is it.  On Windows setup finds the cards in the
+    display-adapter order, and an integrated Radeon that HIP also enumerates takes ordinal 0 and pushes the discrete
+    card to 1 (#325): setup records the ordinal `strata-device --list-devices` gave the card as "hip_ordinal", which
+    wins for a one-card config.  Without it (a config from before), the config's "gpu"."""
+    ordinal = cfg.get("hip_ordinal")
+    if ordinal is not None and str(ordinal).strip() != "" and len(gpu_list(cfg)) <= 1:
+        try:
+            return [int(str(ordinal).strip())]
+        except ValueError:
+            pass
+    return gpu_list(cfg)
+
+
 def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
     env = dict(os.environ)
-    if gpu_list(cfg) and cfg.get("backend") == "hip":   # AMD: numbered as HIP numbers them (setup's KFD order)
-        env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
+    if hip_visible(cfg) and cfg.get("backend") == "hip":   # AMD: numbered as HIP numbers them (hip_visible)
+        env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in hip_visible(cfg))
     elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
@@ -747,7 +765,8 @@ class Service:
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
-                       "prompt_ms": 0.0, "decode_ms": 0.0}
+                       "prompt_ms": 0.0, "decode_ms": 0.0,
+                       "drafts_offered": 0, "drafts_accepted": 0}   # #457: the MTP drafts, summed where reported
         self.last_timings = None                         # the last finished request's, llama.cpp's names (/v1/status)
         self.last_request_at = None                      # when a request last started or finished
         self.started_at = time.time()
@@ -1320,7 +1339,10 @@ class Service:
                                 "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                                 if n and last.get("generated") and last.get("decode_ms") else None,
                                 "hit_rate": hit_rate, "ram_blobs": last.get("ram_blobs"),
-                                "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb")})
+                                "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
+                                # #457: the speculative drafts from the DONE line (None: the engine did not say)
+                                "drafts_offered": last.get("drafts_offered"),
+                                "drafts_accepted": last.get("drafts_accepted")})
                             t = self.totals
                             t["requests"] += 1
                             t["prompt_tokens"] += len(ids)
@@ -1328,6 +1350,8 @@ class Service:
                             t["output_tokens"] += n
                             t["prompt_ms"] += last.get("prompt_ms") or 0.0
                             t["decode_ms"] += last.get("decode_ms") or 0.0
+                            t["drafts_offered"] += last.get("drafts_offered") or 0
+                            t["drafts_accepted"] += last.get("drafts_accepted") or 0
                             fresh = getattr(self.engine, "last", None)
                             if fresh is not None and fresh is not before:      # the engine's clock for THIS request
                                 timings = request_timings(len(ids), n, last)
@@ -1706,9 +1730,35 @@ def make_handler(svc: Service):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
         record = None                                       # #332: this request's monitor record, if kept
+        watch_done = None                                   # #430 #431: stops this request's disconnect watcher
 
         def log_message(self, fmt, *args):
             pass
+
+        def _watch_client(self, cancel: threading.Event) -> None:
+            """#430 #431: cancel the request as soon as its client hangs up.  A non-streamed request writes nothing
+            until it ends, and a streamed one only a keep-alive per prompt chunk (and the first write after a hang-up
+            usually still succeeds), so a dropped request kept the engine busy until its answer or the whole prompt
+            was done.  Every 0.5 s: the socket readable with nothing to read (EOF) means the client closed it.  A
+            request is HTTP/1.0 and fully read here, so no later bytes are expected - data is not a hang-up."""
+            done = self.watch_done = threading.Event()
+            sock = self.connection
+
+            def watch():
+                while not done.wait(0.5) and not cancel.is_set():
+                    try:
+                        readable, _, _ = select.select([sock], [], [], 0)
+                        gone = bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+                    except (ConnectionError, TimeoutError):
+                        gone = True
+                    except (OSError, ValueError):            # the socket was closed here: the request has ended
+                        return
+                    if gone:
+                        self._note(outcome="disconnected")
+                        cancel.set()
+                        return
+
+            threading.Thread(target=watch, daemon=True, name="strata-client-watch").start()
 
         def _note(self, **values):
             """#332: what the monitor shows about this request (nothing when the monitor is off)."""
@@ -1962,6 +2012,8 @@ def make_handler(svc: Service):
                 self._note(outcome="disconnected")
                 raise                                        # as before #332: the server's own handling
             finally:
+                if self.watch_done is not None:
+                    self.watch_done.set()
                 record = self.record
                 if record is not None:
                     with svc.status_lock:
@@ -2091,6 +2143,7 @@ def make_handler(svc: Service):
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
+            self._watch_client(cancel)                       # #430 #431
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
@@ -2142,6 +2195,7 @@ def make_handler(svc: Service):
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
+            self._watch_client(cancel)                       # #430 #431
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
             events = self._capture(events, "anthropic")
             if not req.get("stream"):
