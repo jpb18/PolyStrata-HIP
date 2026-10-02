@@ -117,6 +117,40 @@ class GpuLists(unittest.TestCase):
                 else:
                     setup.os.environ["ROCM_PATH"] = old
 
+    def test_runtime_only_system_rocm_falls_back_to_the_wheels(self):
+        """#446: a system ROCm 7 with hipcc and libhipblas but no HIP development files (no hip-lang CMake package, no
+        hip_runtime.h) is not used for the build: a warning says what is missing and the wheels path follows (here
+        it stops at the two-family check, which only the wheels path makes); with the files it is used as before."""
+        said = []
+        setup.say = lambda msg="": said.append(msg)          # tearDown puts the real one back
+        with tempfile.TemporaryDirectory() as d:
+            sysroot = Path(d)
+            for rel, text in (("bin/hipcc", ""), ("lib/libhipblas.so.3", ""),
+                              ("include/rocm-core/rocm_version.h",
+                               "#define ROCM_VERSION_MAJOR 7\n#define ROCM_VERSION_MINOR 14\n")):
+                (sysroot / rel).parent.mkdir(parents=True, exist_ok=True)
+                (sysroot / rel).write_text(text)
+            with mock.patch.dict(setup.os.environ, {"ROCM_PATH": d}):
+                with self.assertRaises(SystemExit):
+                    setup.rocm_root(["gfx1100", "gfx1201"])
+                self.assertIn(f"the ROCm in {sysroot} has no HIP development files (lib/cmake/hip-lang/hip-lang-"
+                              "config.cmake, include/hip/hip_runtime.h): using AMD's wheels", "\n".join(said))
+                self.assertIn("two GPU families", "\n".join(said))
+                for lib in ("lib64", "lib"):                 # either place CMake looks
+                    with self.subTest(lib=lib):
+                        cfg = sysroot / lib / "cmake/hip-lang/hip-lang-config.cmake"
+                        cfg.parent.mkdir(parents=True, exist_ok=True)
+                        cfg.write_text("")
+                        said.clear()
+                        with self.assertRaises(SystemExit):
+                            setup.rocm_root(["gfx1100", "gfx1201"])
+                        self.assertIn("(include/hip/hip_runtime.h)", "\n".join(said))
+                        (sysroot / "include/hip").mkdir(parents=True, exist_ok=True)
+                        (sysroot / "include/hip/hip_runtime.h").write_text("")
+                        self.assertEqual(setup.rocm_root(["gfx1100", "gfx1201"]), (sysroot, [str(sysroot / "lib")]))
+                        cfg.unlink()
+                        (sysroot / "include/hip/hip_runtime.h").unlink()
+
     def test_build_for_every_arch(self):
         """build_engine_hip compiles for the set of the chosen cards' archs and records it in BUILD.json."""
         calls = {}

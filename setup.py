@@ -1338,18 +1338,32 @@ def rocm_version(root):
         return None
 
 
+def rocm_dev_missing(sysroot: Path) -> list:
+    """#446: the HIP development files the engine's build needs that a system ROCm lacks (a runtime-only install has
+    hipcc and libhipblas but not these, and cmake's enable_language(HIP) then fails on the hip-lang package)."""
+    lang = "cmake/hip-lang/hip-lang-config.cmake"     # where CMake's HIP support looks for it
+    need = {"lib/" + lang: [sysroot / d / lang for d in ("lib", "lib64", "lib/x86_64-unknown-linux-gnu")],
+            "include/hip/hip_runtime.h": [sysroot / "include" / "hip" / "hip_runtime.h"]}
+    return [name for name, paths in need.items() if not any(p.is_file() for p in paths)]
+
+
 def rocm_root(archs):
     """ROCm for compiling and running the HIP engine for `archs` (one arch or a list: the cards of a layer split):
-    (root, library folders).  A system ROCm 7 with hipcc and hipBLAS, else AMD's TheRock wheels (ROCM_VERSION, from the
-    card family's index) installed into .venv."""
+    (root, library folders).  A system ROCm 7 with hipcc, hipBLAS and the HIP development files (#446), else AMD's
+    TheRock wheels (ROCM_VERSION, from the card family's index) installed into .venv."""
     archs = [archs] if isinstance(archs, str) else list(archs)
     sysroot = Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
     if (sysroot / "bin" / "hipcc").exists() and list((sysroot / "lib").glob("libhipblas.so*")):
         ver = rocm_version(sysroot)
-        if ver is None or ver >= ROCM_SYSTEM_MIN:
+        missing = rocm_dev_missing(sysroot)
+        if (ver is None or ver >= ROCM_SYSTEM_MIN) and not missing:
             return sysroot, [str(sysroot / "lib")]
-        warn(f"the ROCm in {sysroot} is {ver[0]}.{ver[1]}; Strata needs {ROCM_SYSTEM_MIN[0]}.{ROCM_SYSTEM_MIN[1]} or "
-             "newer: using AMD's wheels in .venv instead")
+        if ver is not None and ver < ROCM_SYSTEM_MIN:
+            warn(f"the ROCm in {sysroot} is {ver[0]}.{ver[1]}; Strata needs {ROCM_SYSTEM_MIN[0]}.{ROCM_SYSTEM_MIN[1]} "
+                 "or newer: using AMD's wheels in .venv instead")
+        else:                                          # #446: a runtime-only ROCm (no -dev packages): cmake would fail
+            warn(f"the ROCm in {sysroot} has no HIP development files ({', '.join(missing)}): using AMD's wheels in "
+                 ".venv instead (or install them, e.g. AMD's amdrocm-core-dev package for your ROCm and card)")
     indexes = list(dict.fromkeys(rocm_index(a) for a in archs))
     if len(indexes) > 1:                               # TheRock's wheels hold one GPU family's libraries
         fail(f"cards of two GPU families ({', '.join(archs)}) need a system ROCm 7 (in /opt/rocm): AMD's Python "
