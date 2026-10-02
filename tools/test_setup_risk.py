@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -133,6 +134,53 @@ class Context(unittest.TestCase):
         self.assertEqual(arg(cfg, "--max-context"), "262144")
         self.assertIn("Kept as you chose", out)
         self.assertTrue(started.called)
+
+
+class BrokenEarlierConfig(unittest.TestCase):
+    """#459: a new copy of Strata set up like an earlier install skips an earlier config that does not parse (an
+    empty strata-*.json crashed START-HERE with JSONDecodeError) and goes on as a fresh install; configs are written
+    whole (a temporary file moved over the old one)."""
+    RAM64, GPU32 = PROFILES["64GB-1x32GB"]
+
+    def setup_with(self, files):
+        with tempfile.TemporaryDirectory() as d:
+            for i, (name, text) in enumerate(files):                  # in order, oldest first
+                (Path(d) / name).write_text(text, encoding="utf-8")
+                os.utime(Path(d) / name, (1_700_000_000 + i, 1_700_000_000 + i))
+            return install(self.RAM64, self.GPU32, [], extra=[
+                mock.patch.object(setup, "other_installs", lambda settings: [Path(d)]),
+                mock.patch.object(setup, "start", mock.Mock(return_value=0))])
+
+    def test_an_empty_config_is_skipped(self):
+        for text, why in (("", "the file is empty"), ("{\"args\": [", "not valid JSON"), ("[1]", "not a JSON object")):
+            with self.subTest(text=text):
+                code, out, cfg, _ = self.setup_with([("strata-iq3_s.json", text)])
+                self.assertEqual(code, 0, out)
+                self.assertIn("skipped the earlier config ", out)
+                self.assertIn(f"strata-iq3_s.json ({why}): setting this copy up without it", out)
+                self.assertNotIn("Found your earlier install", out)
+                self.assertIsNotNone(cfg)                                # the fresh install's config
+
+    def test_the_newest_readable_config_is_used(self):
+        good = json.dumps({"args": ["--max-context", "262144", "--kv", "int8"], "port": 8080})
+        code, out, cfg, _ = self.setup_with([("strata-iq3_s.json", good), ("strata-q2_0.json", "")])
+        self.assertEqual(code, 0, out)
+        self.assertIn("strata-q2_0.json (the file is empty)", out)
+        self.assertIn("Found your earlier install", out)
+        self.assertIn("(iq3_s)", out)
+        self.assertEqual(arg(cfg, "--max-context"), "262144")
+
+    def test_write_config_leaves_no_partial_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "strata-iq3_s.json"
+            p.write_text("old", encoding="utf-8")
+            setup.write_config(p, {"args": ["--kv", "int8"]})
+            self.assertEqual(p.read_text(encoding="utf-8"), json.dumps({"args": ["--kv", "int8"]}, indent=1))
+            self.assertEqual([f.name for f in Path(d).iterdir()], ["strata-iq3_s.json"])   # no .tmp left
+            with mock.patch.object(Path, "write_text", side_effect=OSError(28, "No space left on device")):
+                with self.assertRaises(OSError):
+                    setup.write_config(p, {"args": []})
+            self.assertEqual(json.loads(p.read_text(encoding="utf-8")), {"args": ["--kv", "int8"]})   # kept whole
 
 
 class LowRamGpus(unittest.TestCase):
