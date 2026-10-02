@@ -2429,8 +2429,25 @@ def find_in(roots: list, rel: str):
 
 
 # ------------------------------------------------------------------------------------------------ start
+def model_config(path: Path) -> bool:
+    """#549: a model's run config (a JSON object with "exe" and "args"). Any other strata-*.json in the folder (a
+    file of the user's own, a cut-off one) is skipped with a warning naming it instead of stopping setup."""
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(cfg, dict) and cfg.get("exe") and isinstance(cfg.get("args"), list):
+            return True
+        why = 'no "exe" or "args"'
+    except OSError as e:
+        why = e.strerror or str(e)
+    except ValueError:
+        why = "not valid JSON"
+    warn(f"skipped {path.name} ({why}): it is not a Strata model config")
+    return False
+
+
 def installed_configs():
-    return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [p for p in sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if model_config(p)]
 
 
 def source_version() -> str:
@@ -2545,6 +2562,7 @@ def update_install(have: list, a) -> int:
     setup needs a newer one (MIN_ENGINE; a compiled engine when its source changed), each installed model's config
     upgrades and its draft subset.  No question is asked and the model files are not touched; a model still running
     keeps its engine (update_installed_engine says to close it and run this again)."""
+    have = [p for p in have if model_config(p)]        # #549: a strata-*.json that is no model config is skipped
     if not have:
         say("  No model is installed in this Strata folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
         say("  it finds an earlier install's model files next to it and reuses them.")

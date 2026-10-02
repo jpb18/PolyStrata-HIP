@@ -69,6 +69,29 @@ class Update(unittest.TestCase):
             m.assert_not_called()
         self.assertIn("START-HERE.bat", out)
 
+    def test_a_json_that_is_no_model_config_is_skipped(self):
+        """#549: a strata-*.json without "args" (not written by setup) stopped update.sh with KeyError: 'args'."""
+        with tempfile.TemporaryDirectory() as d:
+            p = self.config(Path(d))
+            other = Path(d) / "strata-notes.json"
+            other.write_text(json.dumps({"note": "mine"}), encoding="utf-8")
+            broken = Path(d) / "strata-cut.json"
+            broken.write_text("{\"args\": [", encoding="utf-8")
+            rc, pip, eng, dv, start, call, out = self.run_update([other, broken, p])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('skipped strata-notes.json (no "exe" or "args"): it is not a Strata model config', out)
+        self.assertIn("skipped strata-cut.json (not valid JSON)", out)
+        dv.assert_called_once()                                     # the real model is still refreshed
+        self.assertIn("Qwen IQ3_S: up to date", out)
+        self.assertIn("Strata is updated", out)
+
+    def test_installed_configs_lists_only_model_configs(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.config(Path(d))
+            (Path(d) / "strata-notes.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(setup, "ROOT", Path(d)), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(setup.installed_configs(), [p])
+
     def test_main_update_never_starts(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.config(Path(d))
