@@ -34,6 +34,7 @@ import re
 import select
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -661,6 +662,44 @@ def engine_args(cfg: dict) -> list[str]:
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if len(gpu_list(cfg)) > 1 and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
+    return learned_profile_args(cfg, args)
+
+
+def profile_shape(path: str) -> tuple[int, int] | None:
+    """An expert profile's (layers, experts per layer), from its header (tools/make_profile.py's format), or None
+    when the file is missing, is not one or is shorter than the pairs its header promises."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+            size = os.fstat(f.fileno()).st_size
+    except OSError:
+        return None
+    if len(head) < 24 or head[:4] != b"STRP":
+        return None
+    _, nl, ne, _, n = struct.unpack("<5I", head[4:])
+    return (nl, ne) if size >= 24 + 4 * n else None
+
+
+def learned_profile_args(cfg: dict, args: list[str]) -> list[str]:
+    """#477 (opt-in): "expert_profile_save": "<path>" in the config has the engine (0.1.36+) save what its adaptive
+    tier learned there - on QUIT and every "expert_profile_save_every" minutes (10 by default, 0 = at QUIT only) -
+    and the next start begins from it instead of the config's --expert-profile, when it is a profile of the same
+    model (its header's layers and experts match); otherwise from the config's own, as before.  A relative path is
+    the engine's (the config's "cwd").  Without the key, the arguments are the config's, unchanged."""
+    save = cfg.get("expert_profile_save")
+    if not isinstance(save, str) or not save.strip() or "--expert-profile-save" in args:
+        return args
+    args = args + ["--expert-profile-save", save]
+    every = cfg.get("expert_profile_save_every")
+    if isinstance(every, (int, float)) and not isinstance(every, bool) and every >= 0:
+        args += ["--expert-profile-save-every", str(every)]
+    if "--expert-profile" in args[:-1]:
+        i = args.index("--expert-profile") + 1
+        here = cfg.get("cwd") or "."
+        learned = profile_shape(save if os.path.isabs(save) else os.path.join(here, save))
+        base = profile_shape(args[i] if os.path.isabs(args[i]) else os.path.join(here, args[i]))
+        if learned is not None and learned == base:
+            args[i] = save
     return args
 
 

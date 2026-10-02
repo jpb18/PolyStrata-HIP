@@ -404,6 +404,17 @@ the OS file cache, so loading again takes seconds while that RAM is not needed e
 16 GB with Q2_0 in the low-RAM mode: unloading takes ~0.3 s, and a request to an unloaded model answered after
 4.6 s (text) or 14.7 s (a picture, image encoder on the CPU).
 
+**Keep what the expert cache learned across restarts (opt-in, engine 0.1.36, #477):** a start fills the GPU's expert
+cache from the shipped profile, and the adaptive tier (`--adapt-every`) then moves in the experts your requests use.
+With `"expert_profile_save": "expert-profile-learned.bin"` in `strata-<model>.json` the engine saves that as a
+profile - the experts in VRAM first, then the routing it counted since the start, then the shipped order - on a
+clean exit and every 10 minutes between requests (`"expert_profile_save_every": 5` for another interval, `0` for
+exit only), written to a temporary file and renamed, so a crash never leaves half a file. The next start begins from
+it instead of the config's `--expert-profile` when it is a profile of the same model (else from the config's, as
+before). A relative path is in the Strata folder; one file per model, and a profile per project works the same way
+(point the key at another file). The file is a fingerprint of what you used the model for: it stays on your PC.
+Without the key nothing is counted or written. Setup rewrites the config when run again: add the key again then.
+
 ---
 
 ## Using it
