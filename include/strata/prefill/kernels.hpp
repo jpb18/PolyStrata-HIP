@@ -47,6 +47,12 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 /// (FP32 and FP16 bits: the out projection is quantized).
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream);
+/// The kernels behind gdn_recurrence, for the parity test: 0 = the column-split kernels + the norm kernel (or the
+/// one-block-per-head kernel under STRATA_GDN_REC_HEADS), 1 = the per-head kernel with the norm fused, 2 = the
+/// one-block-per-head kernel (its fused norm rounds differently).  0 and 1 give the same bits.
+void gdn_recurrence_variant(int variant, float* state, const float* h, const float* gate, const float* beta,
+                            const float* z, const float* gamma, float eps, float* y, uint16_t* y16, int64_t T,
+                            void* stream);
 
 // ---- MoE
 /// softmax over 512, top-10 (ties to the lower id), weights renormalised over the ten (the native router).

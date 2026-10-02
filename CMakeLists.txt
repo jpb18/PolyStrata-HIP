@@ -455,6 +455,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       add_test(NAME hip_prefill_native_batch COMMAND hip_prefill_native_batch)
       list(APPEND _strata_hip_tests hip_prefill_native_batch)
     endif()
+    # Aurora: the prompt GDN recurrence's per-head kernel against the column-split + norm kernels, bitwise
+    add_executable(hip_gdn_rec_head tests/hip/gdn_rec_head.cpp)
+    target_link_libraries(hip_gdn_rec_head PRIVATE strata_prefill strata_hip_runtime)
+    add_test(NAME hip_gdn_rec_head COMMAND hip_gdn_rec_head)
+    list(APPEND _strata_hip_tests hip_gdn_rec_head)
     # S6: the AMD fast router against the portable kernel, bitwise
     add_executable(hip_router_fast tests/hip/router_fast.cpp)
     target_link_libraries(hip_router_fast PRIVATE strata_kernels strata_hip_runtime)
