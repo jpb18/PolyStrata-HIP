@@ -69,14 +69,23 @@ HF_REVISIONS = {
 }
 
 
+HF_DEFAULT = "https://huggingface.co"
+
+
+def hf_endpoint() -> str:
+    """#495: the Hugging Face host - HF_ENDPOINT as huggingface_hub reads it (a mirror, e.g. https://hf-mirror.com),
+    else huggingface.co.  The pinned revisions and the SHA-256 checks are the same whichever host serves the files."""
+    return (os.environ.get("HF_ENDPOINT") or "").strip().rstrip("/") or HF_DEFAULT
+
+
 def hf(repo: str) -> str:
     """The download folder of a Hugging Face repository at its pinned revision."""
-    return f"https://huggingface.co/{repo}/resolve/{HF_REVISIONS[repo]}/"
+    return f"{hf_endpoint()}/{repo}/resolve/{HF_REVISIONS[repo]}/"
 
 
 def hf_unpinned(url: str) -> str:
     """The same file at the repository's current revision (main)."""
-    return re.sub(r"(https://huggingface\.co/.+?/resolve/)[0-9a-f]{40}/", r"\1main/", url, count=1)
+    return re.sub(r"^(https?://[^/]+/.+?/resolve/)[0-9a-f]{40}/", r"\1main/", url, count=1)
 
 
 HF = hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF")
@@ -3261,6 +3270,13 @@ def main() -> int:
     # ---- 5. the model files
     step(5, f"downloading {fam['title']} {model}")
     if not a.gguf_dir:
+        missing = [s.name for s in shards if not (s.exists() and done(s))]
+        if missing:                                    # #495: files downloaded by hand go here, or --gguf-dir
+            say(f"  The model files go in {models_dir}")
+            say(f"  Files you already have: put them here with their original names ({', '.join(missing)}), or use "
+                "--gguf-dir <their folder>.")
+            if hf_endpoint() != HF_DEFAULT:
+                say(f"  Downloading from {hf_endpoint()} (HF_ENDPOINT)")
         for s in shards:
             if s.exists() and done(s):
                 ok(f"{s.name} already downloaded")

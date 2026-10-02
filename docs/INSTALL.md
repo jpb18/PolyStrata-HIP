@@ -192,5 +192,11 @@ START-HERE.bat --calibrate                      tune the engine for this PC (abo
 START-HERE.bat --check                          only check this PC
 ```
 
+**Model files downloaded by hand, or from a mirror (#495):** setup's step 5 prints the folder it expects them in
+(`Strata-data\models\<SIZE>\`, e.g. `Strata-data\models\IQ3_XXS\`): put them there with their original names, or
+point setup at them with `--gguf-dir`. To let setup download from a Hugging Face mirror itself, set `HF_ENDPOINT`
+first (Windows: `set HF_ENDPOINT=https://hf-mirror.com`, Linux: `export HF_ENDPOINT=https://hf-mirror.com`): the same
+pinned revisions and checks apply, and the MTP draft layer comes from there too.
+
 On Linux the same options go to `./setup.sh`. `START-HERE.bat --help` lists them all. The server's own settings
 (sharing the GPU with games, MCP tools, CORS, API keys, the API itself) are in the [details](DETAILS.md#using-it).
