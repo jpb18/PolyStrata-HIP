@@ -2521,8 +2521,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                     consumed = ++k;
                                     if (!group_gather || gg_nslots == 0) give_back(consumed);   // its group was gathered
                                 } else {
-                                    const bool r0 = m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0;
-                                    const uint8_t* bp = r0 ? m.cache->device_slot(m.host_res[(size_t) l * NE + e])
+                                    const bool r0 = m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0;
+                                    const uint8_t* bp = r0 ? m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e])
                                                            : (m.pp ? m.pp->peer->slot_ptr(l, e) : nullptr);   // over the cap: P2P
                                     if (bp == nullptr) { err = "prefill: an expert is neither resident, streamed nor on the peer"; return false; }
                                     ++stats_.experts_resident;
