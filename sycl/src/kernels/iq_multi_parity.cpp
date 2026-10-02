@@ -106,6 +106,32 @@ std::vector<double> dequant_q8_1(const std::vector<uint8_t>& q, size_t n) {
     return v;
 }
 
+#include "iq2xs_host_tables.inc"
+// IQ2_XS decoded on the CPU from ggml's tables (dequantize_row_iq2_xs), a reference independent of the GPU dequantizer
+std::vector<float> host_iq2_xs(const std::vector<uint8_t>& w, size_t n) {
+    std::vector<float> y(n);
+    const size_t nb = n / 256;
+    for (size_t i = 0; i < nb; ++i) {
+        const uint8_t* b = w.data() + i * 74;   // fp16 d, 32 x uint16 qs, 8 scales
+        uint16_t dh; std::memcpy(&dh, b, 2);
+        const float d = k::f32_from_f16(dh);
+        const uint8_t* sc = b + 66;
+        for (int ib = 0; ib < 8; ++ib) {
+            const float db[2] = {d * (0.5f + (sc[ib] & 0xf)) * 0.25f, d * (0.5f + (sc[ib] >> 4)) * 0.25f};
+            for (int l = 0; l < 4; ++l) {
+                uint16_t q; std::memcpy(&q, b + 2 + 2 * (4 * ib + l), 2);
+                const uint64_t g = host_iq2xs_grid[q & 511];
+                const uint8_t signs = host_ksigns_iq2xs[q >> 9];
+                for (int j = 0; j < 8; ++j) {
+                    const float v = (float) ((g >> (8 * j)) & 0xff);
+                    y[i * 256 + ib * 32 + l * 8 + j] = db[l / 2] * v * ((signs >> j) & 1 ? -1.f : 1.f);
+                }
+            }
+        }
+    }
+    return y;
+}
+
 // ------------------------------------------------------------------------------------------------ (1) iq_mmvq
 void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
                 std::mt19937 &rng) {
@@ -148,6 +174,19 @@ void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
            (dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue()).memcpy(xq.data(), dxq, xq_bytes).wait()),
        "xq");
     const auto xd = dequant_q8_1(xq, (size_t) max_cols * n_in);
+    std::vector<float> hw;
+    if (t == 17) {   // IQ2_XS: the GPU dequantizer against the CPU decode
+        hw = host_iq2_xs(w, (size_t) n_out * n_in);
+        double md = 0, mx = 0;
+        size_t nd = 0;
+        for (size_t i = 0; i < hw.size(); ++i) {
+            md = std::max(md, (double) std::fabs(hw[i] - wf[i]));
+            mx = std::max(mx, (double) std::fabs(hw[i]));
+            nd += hw[i] != wf[i];
+        }
+        std::printf("  IQ2_XS GPU dequant vs CPU decode: %zu of %zu differ, worst %.3g (max |w| %.3g); w[0..3] cpu %g %g %g %g gpu %g %g %g %g\n",
+                    nd, hw.size(), md, mx, hw[0], hw[1], hw[2], hw[3], wf[0], wf[1], wf[2], wf[3]);
+    }
     float* dy_old = dalloc<float>((size_t) max_cols * n_out);
     float* dy_new = dalloc<float>((size_t) max_cols * n_out);
     std::vector<float> y_old((size_t) max_cols * n_out), y_new(y_old.size());
@@ -190,6 +229,16 @@ void check_mmvq(int t, int n_in, int n_out, dpct::queue_ptr s,
                 den += std::fabs(acc);
             }
         const double rel = num / (den + 1e-30);
+        if (t == 17 && nc == 1) {
+            double hn = 0, hd = 0;
+            for (int r = 0; r < n_out; ++r) {
+                double acc = 0;
+                for (int i = 0; i < n_in; ++i) acc += (double) hw[(size_t) r * n_in + i] * xd[(size_t) i];
+                hn += std::fabs(y_new[(size_t) r] - acc); hd += std::fabs(acc);
+            }
+            std::printf("  IQ2_XS mmvq vs the CPU-decode reference: rel %.2e; y[0..2] gpu %g %g %g\n", hn / (hd + 1e-30),
+                        y_new[0], y_new[1], y_new[2]);
+        }
         worst = std::max(worst, rel);
         if (diff != 0 || !finite || !(rel < 1e-2)) {
             std::printf("  %-8s %5d x %5d  ncols %2d: %zu outputs differ from the old kernel, ref rel %.2e%s  FAIL\n",

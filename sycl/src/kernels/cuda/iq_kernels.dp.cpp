@@ -156,9 +156,11 @@ __dpct_inline__ float vec_dot_iq2_xs_q8_1(const void *__restrict__ vbq,
                                           const block_q8_1 *__restrict__ bq8_1,
                                           const int &kbx, const int &iqs) {
     const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
-    const sycl::int2 q2_packed =
-        sycl::int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
-    const uint16_t* q2 = (const uint16_t*) &q2_packed;
+    // SYCL port: the four 16-bit codes by shifts. ggml reads them through a uint16_t* to an int2, which is type
+    // punning the SYCL device compiler does not honour (non-char aliasing): IQ2_XS products came out garbage
+    // (iq_multi_parity, Swift 1.5 IQ2_XS) while the dequantizer, reading the codes directly, was exact.
+    const uint32_t q2_lo = (uint32_t) get_int_b2(bq2->qs, iqs + 0), q2_hi = (uint32_t) get_int_b2(bq2->qs, iqs + 1);
+    const uint16_t q2[4] = {(uint16_t) q2_lo, (uint16_t) (q2_lo >> 16), (uint16_t) q2_hi, (uint16_t) (q2_hi >> 16)};
     const int ls0 = bq2->scales[iqs / 2] & 0x0F;
     const int ls1 = bq2->scales[iqs / 2] >> 4;
     int sumi0 = 0, sumi1 = 0;
@@ -766,9 +768,9 @@ template<> inline constexpr bool kSplit<17> = true;
 template<> struct Split<17> : SplitLs2 {   // IQ2_XS
     static W load(const void* __restrict__ vbq, int kbx, int iqs) {
         const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
-        const sycl::int2 q2_packed = sycl::int2(get_int_b2(bq2->qs, iqs + 0),
-                                                get_int_b2(bq2->qs, iqs + 1));
-        const uint16_t* q2 = (const uint16_t*) &q2_packed;
+        // SYCL port: the codes by shifts, not through a uint16_t* to an int2 (see vec_dot_iq2_xs_q8_1)
+        const uint32_t q2_lo = (uint32_t) get_int_b2(bq2->qs, iqs + 0), q2_hi = (uint32_t) get_int_b2(bq2->qs, iqs + 1);
+        const uint16_t q2[4] = {(uint16_t) q2_lo, (uint16_t) (q2_lo >> 16), (uint16_t) q2_hi, (uint16_t) (q2_hi >> 16)};
         W r;
         r.ls0 = bq2->scales[iqs / 2] & 0x0F;
         r.ls1 = bq2->scales[iqs / 2] >> 4;

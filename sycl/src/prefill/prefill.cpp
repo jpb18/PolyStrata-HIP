@@ -2276,7 +2276,29 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                         };
                         const int64_t bgu = bad(m.GU, T * K * 1280), bdm = bad(m.Dm, T * K * N), bbo = bad(m.bo, T * N);
                         const int64_t bh = m.H ? bad(m.H, T * K * 640) : -1;
+                        // the fp16 inputs of the experts' GEMMs: the gathered activations and the last dequantized
+                        // gate/up (non-finite count, largest finite magnitude)
+                        auto bad16 = [&](const uint16_t* d, int64_t n, double& mx) {
+                            std::vector<uint16_t> h((size_t) n);
+                            dpct::get_in_order_queue().memcpy(h.data(), d, (size_t) n * 2).wait();
+                            int64_t c = 0;
+                            mx = 0;
+                            for (uint16_t v : h) {
+                                if ((v & 0x7c00) == 0x7c00) { ++c; continue; }
+                                const int e = (v >> 10) & 0x1f;
+                                const double a = e ? std::ldexp(1.0 + (v & 0x3ff) / 1024.0, e - 15) : std::ldexp((v & 0x3ff) / 1024.0, -14);
+                                mx = std::max(mx, a);
+                            }
+                            return c;
+                        };
+                        double mxs = 0, mxq = 0;
+                        const int64_t bxs = (!use_mmq && m.Xs) ? bad16(m.Xs, T * K * N, mxs) : -1;
+                        const int64_t bdq = (!use_mmq && m.dq_gu[0]) ? bad16(m.dq_gu[0], (int64_t) 1280 * N, mxq) : -1;
                         static int64_t reported = -1;
+                        if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks)
+                            std::fprintf(stderr, "strata dbg: layer %lld fp16 inputs: activations %lld non-finite (max %.3g), "
+                                         "dequantized gate/up %lld non-finite (max %.3g)\n", (long long) l, (long long) bxs, mxs,
+                                         (long long) bdq, mxq);
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;
                             std::fprintf(stderr, "strata dbg: layer %lld (mmq %d, types %d/%d, %zu experts): non-finite GU %lld "

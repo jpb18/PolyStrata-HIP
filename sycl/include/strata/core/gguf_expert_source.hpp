@@ -55,13 +55,13 @@ public:
     uint64_t mirrored_bytes() const { return mirror_bytes_; }
 
 private:
-    int fd_of(int64_t layer, std::string& err);
+    int fd_of(int64_t layer, int role, std::string& err);
 
     std::string shard_;
     std::string dir_;
     std::vector<int> fds_;              ///< per distinct file name, opened once
     std::vector<std::string> names_;
-    std::vector<int> layer_fd_;         ///< per layer: index into fds_
+    std::vector<int> layer_fd_;         ///< per layer and role (3 * layer + role): index into fds_
     std::vector<std::vector<uint8_t>> ring_;
     std::vector<int64_t> ring_key_;                 ///< (layer << 20 | expert) held by each slot, -1 = empty
     std::unordered_map<int64_t, size_t> where_;     ///< key -> slot

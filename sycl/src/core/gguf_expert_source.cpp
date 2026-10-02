@@ -44,27 +44,32 @@ bool GgufExpertSource::open(const std::string& shard1, int64_t n_layers, int64_t
     dir_ = cut == std::string::npos ? std::string() : shard1.substr(0, cut + 1);
     n_layers_ = n_layers;
     n_expert_ = n_expert;
-    layer_fd_.assign((size_t) n_layers, -1);
+    layer_fd_.assign((size_t) (3 * n_layers), -1);
     for (int64_t l = 0; l < n_layers; ++l)
-        if (fd_of(l, err) < 0) { close(); return false; }
+        for (int r = 0; r < 3; ++r)
+            if (fd_of(l, r, err) < 0) { close(); return false; }
     ring_.resize(kRing);
     for (auto& b : ring_) b.resize((size_t) lay.max_blob);
     ring_key_.assign(kRing, -1);
     return true;
 }
 
-int GgufExpertSource::fd_of(int64_t layer, std::string& err) {
-    if (layer_fd_[(size_t) layer] >= 0) return fds_[(size_t) layer_fd_[(size_t) layer]];
+// The file of role `role` (0 gate, 1 up, 2 down) of `layer`. ExpertLayout::gguf_file is per layer AND role
+// (`3 * layer + role`) since upstream 0.1.31; indexing it by layer alone read a shard-2 layer from shard 1 (Swift 1.5,
+// whose layers 13-47 are in shard 2: garbage IQ1_M scales, NaN logits - 2026-10-01).
+int GgufExpertSource::fd_of(int64_t layer, int role, std::string& err) {
+    const size_t i = (size_t) (3 * layer + role);
+    if (layer_fd_[i] >= 0) return fds_[(size_t) layer_fd_[i]];
     const auto& lay = strata::kernels::cpu::expert_layout();
     std::string name = shard_;
-    if (!lay.gguf_file.empty() && !lay.gguf_file[(size_t) layer].empty()) name = dir_ + lay.gguf_file[(size_t) layer];
-    for (size_t i = 0; i < names_.size(); ++i)
-        if (names_[i] == name) { layer_fd_[(size_t) layer] = (int) i; return fds_[i]; }
+    if (lay.gguf_file.size() > i && !lay.gguf_file[i].empty()) name = dir_ + lay.gguf_file[i];
+    for (size_t k = 0; k < names_.size(); ++k)
+        if (names_[k] == name) { layer_fd_[i] = (int) k; return fds_[k]; }
     const int fd = ::open(name.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) { err = "--stream-experts: cannot open " + name; return -1; }
     names_.push_back(name);
     fds_.push_back(fd);
-    layer_fd_[(size_t) layer] = (int) fds_.size() - 1;
+    layer_fd_[i] = (int) fds_.size() - 1;
     return fd;
 }
 
@@ -80,7 +85,6 @@ const uint8_t* GgufExpertSource::blob(int64_t layer, int64_t expert) {
     // the arena loader's gather, for one expert: [gate | up | down] from the three tensors
     const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
     const uint64_t at[3] = {0, fm.up_off, fm.down_off};
-    const int fd = fds_[(size_t) layer_fd_[(size_t) layer]];
     const int64_t key = ((int64_t) layer << 20) | expert;
     size_t slot;
     {
@@ -95,6 +99,7 @@ const uint8_t* GgufExpertSource::blob(int64_t layer, int64_t expert) {
     }
     std::vector<uint8_t>& buf = ring_[slot];
     for (int r = 0; r < 3; ++r) {
+        const int fd = fds_[(size_t) layer_fd_[(size_t) (3 * layer + r)]];
         const uint64_t src = lay.gguf_off[(size_t) (3 * layer + r)] + per[r] * (uint64_t) expert;
         uint64_t done = 0;
         while (done < per[r]) {
@@ -184,8 +189,8 @@ bool GgufExpertSource::read_into(int64_t layer, int64_t expert, uint8_t* dst, si
     if (bytes < blob) return false;
     const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
     const uint64_t at[3] = {0, fm.up_off, fm.down_off};
-    const int fd = fds_[(size_t) layer_fd_[(size_t) layer]];
     for (int r = 0; r < 3; ++r) {
+        const int fd = fds_[(size_t) layer_fd_[(size_t) (3 * layer + r)]];
         const uint64_t src = lay.gguf_off[(size_t) (3 * layer + r)] + per[r] * (uint64_t) expert;
         uint64_t done = 0;
         while (done < per[r]) {

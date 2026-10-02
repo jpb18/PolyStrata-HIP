@@ -486,8 +486,7 @@ part of the procedure now: it caught a dropped mirror hook and four doorbell wai
   gate/up 8 or 16 x down 4 or 8 all decode in 37.7-38.6 ms per verify round (2 runs each, Coder, both prompts); tok/s
   differences between them are draft acceptance (each split rounds differently). The default (8 / 8) stays.
 - **Speed after the merge:** Coder 78.2 / 75.7 tok/s (as before), IQ2_XS 58.6 / 64.2 (from 50.8 / 60.6).
-- **Still failing:** `iq_multi_parity` on IQ2_XS (type 17: the port's mmvq disagrees with the reference, old and new
-  kernel alike; no model here uses it), `s2_expert_grouped_parity` (the s2 path), `kv_hybrid_parity`'s last step
+- **Still failing:** (`iq_multi_parity` on IQ2_XS: fixed later, see "Two model-specific bugs"), `s2_expert_grouped_parity` (the s2 path), `kv_hybrid_parity`'s last step
   (needs the unported tensor-core prompt kernel). `ple_parity` and `native_expert_parity` need model files.
 
 **The 0.1.32 merge (2026-10-01).** Upstream 0.1.31 -> 0.1.32 (89 commits) by the same steps; the hash-only
@@ -526,6 +525,22 @@ queue's barrier that also listed it, and the GPU waited forever - only once a la
 after every phase (`STRATA_PREFILL_SYNC=1`, kept as a debug switch). The fix: the copy queue writes a sequence
 number into page-locked host memory after each DMA and the stager polls it - no host thread waits on a queue's
 event. Output is bit-identical to the run without borrowing; borrowing is the default above 32K again.
+
+**Two model-specific bugs found with Swift 1.5 (fixed 2026-10-01).** UkisAI's Swift 1.5 IQ2_XS (setup's `swift`
+family, the same GSQ-RCO layout) decoded token 0 forever: NaN logits from layer 13 on.
+
+- **`--stream-experts` read the wrong shard.** Since upstream 0.1.31, `ExpertLayout::gguf_file` is per layer AND role
+  (`3 * layer + role`; a shard boundary can fall inside a layer). The port's `GgufExpertSource` still indexed it by
+  layer, so a layer in shard 2 was read from shard 1 at shard 2's offsets: garbage IQ1_M scales, infinities after the
+  fp16 dequantization. The original model keeps every expert in shard 1 and never noticed; Swift's layers 13-47 are
+  in shard 2. `STRATA_DBG_NAN=1` now also reports the experts' fp16 GEMM inputs (activations, dequantized gate/up).
+- **IQ2_XS products were garbage** (the long-failing `iq_multi_parity` IQ2_XS case): ggml's `vec_dot_iq2_xs` reads
+  its four 16-bit codes through a `uint16_t*` to an `int2`, type punning the SYCL device compiler does not honour;
+  the dequantizer, which reads the codes directly, was exact. The codes are extracted by shifts now (the dot and the
+  expert kernels' `Split<17>`); the test checks against a CPU decode from ggml's tables too and passes. No model here
+  uses IQ2_XS tensors, Swift included - this was not Swift's bug, only found on the way.
+
+Swift 1.5 IQ2_XS after both: correct answers, 51-118 words of thinking on short questions, 48 tok/s raw decode.
 
 **Not ported yet (2026-10-01).**
 
