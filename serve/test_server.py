@@ -474,6 +474,18 @@ class ClientShapes(unittest.TestCase):
                                                        "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(status, 200, b)                            # the server goes on
 
+    def test_messages_as_a_json_string_over_http(self):
+        # #460: a double-encoded "messages" is answered; one that is not a list of objects is a 400, not a 500
+        encoded = json.dumps([{"role": "user", "content": "1+1?"}])
+        for path in ("/v1/chat/completions", "/v1/messages"):
+            with self.subTest(path=path):
+                status, b = self.post(path, {"model": "x", "max_tokens": 20, "messages": encoded})
+                self.assertEqual(status, 200, b)
+                self.assertIn("1+1?", self.prompt_text())
+                status, b = self.post(path, {"model": "x", "max_tokens": 20, "messages": ["hi"]})
+                self.assertEqual(status, 400, b)
+                self.assertIn("messages must be a list of objects", b["error"]["message"])
+
     def test_vision_temp_image_removed_when_the_pipe_fails(self):
         # #352: the temporary image goes even when the encoder's pipe raises
         from serve.server import Vision
@@ -498,6 +510,32 @@ class ClientShapes(unittest.TestCase):
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
+
+    def test_messages_sent_as_a_json_string(self):
+        # #460: a client that double-encodes "messages" (and "tool_calls") as a JSON string gets them decoded; what is
+        # still not a list of objects is a ValueError (the server's 400), not an AttributeError on m.get
+        from serve.frontend import anthropic_to_messages, openai_to_messages
+        call = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{\"x\": 1}"}}]
+        listed = [{"role": "user", "content": "u"}, {"role": "assistant", "content": "", "tool_calls": call}]
+        encoded = [listed[0], dict(listed[1], tool_calls=json.dumps(call))]
+        want = openai_to_messages({"messages": listed})[0]
+        self.assertEqual(want[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"x": 1}}}])
+        self.assertEqual(openai_to_messages({"messages": json.dumps(listed)})[0], want)
+        self.assertEqual(openai_to_messages({"messages": json.dumps(encoded)})[0], want)
+        anth = [{"role": "user", "content": "u"}]
+        self.assertEqual(anthropic_to_messages({"messages": json.dumps(anth)})[0],
+                         anthropic_to_messages({"messages": anth})[0])
+        self.assertEqual(openai_to_messages({})[0], [])                     # no field: nothing, as before
+        self.assertEqual(openai_to_messages({"messages": None})[0], [])
+        for bad in ("not json", "\"a string\"", json.dumps({"role": "user"}), ["hi"], [{"role": "user"}, 3], 5,
+                    {"role": "user", "content": "u"}):
+            for fn in (openai_to_messages, anthropic_to_messages):
+                with self.subTest(bad=bad, fn=fn.__name__):
+                    with self.assertRaisesRegex(ValueError, "messages must be a list of objects"):
+                        fn({"messages": bad})
+        for calls in (["f"], "[1]", [{"function": "f"}], "{"):
+            with self.subTest(calls=calls), self.assertRaisesRegex(ValueError, "tool_calls must be a list of objects"):
+                openai_to_messages({"messages": [{"role": "assistant", "content": "", "tool_calls": calls}]})
 
 
 class SamplingKeys(unittest.TestCase):
