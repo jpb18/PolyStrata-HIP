@@ -2454,6 +2454,34 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     return cfg
 
 
+def update_install(have: list, a) -> int:
+    """#475: `setup.py --update` (UPDATE.bat / update.sh, after their git pull): what a plain START-HERE.bat does to
+    an install before it starts the model, without starting it - the Python packages, the ready-made engine when this
+    setup needs a newer one (MIN_ENGINE; a compiled engine when its source changed), each installed model's config
+    upgrades and its draft subset.  No question is asked and the model files are not touched; a model still running
+    keeps its engine (update_installed_engine says to close it and run this again)."""
+    if not have:
+        say("  No model is installed in this Strata folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
+        say("  it finds an earlier install's model files next to it and reuses them.")
+        return 0
+    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
+                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+    if not a.build:
+        update_installed_engine(a.prebuilt)
+    for cfg_path in have:
+        cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
+        if "--mtp" in cfg["args"][:-1]:
+            refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
+        if cfg.get("backend") == "hip" and WIN:
+            hip_runtime_beside_exe(Path(cfg["exe"]).parent)   # #468 #461
+        ok(f"{cfg.get('model_name', cfg_path.stem)}: up to date")
+    ver = engine_version(Path(json.loads(have[0].read_text(encoding="utf-8-sig"))["exe"]))
+    say()
+    ok("Strata is updated" + (f" (engine {'.'.join(map(str, ver))})" if any(ver) else "") +
+       ". Start the model with " + ("START-HERE.bat" if WIN else "./setup.sh") + " when you want it.")
+    return 0
+
+
 def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
           layer_split=None, keep=None) -> int:
     """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab)."""
@@ -2737,6 +2765,9 @@ def main() -> int:
     ap.add_argument("--yes", action="store_true", help="accept the recommended answers")
     ap.add_argument("--setup", action="store_true", help="install another model or change settings")
     ap.add_argument("--no-start", action="store_true", help="install only, do not start the model")
+    ap.add_argument("--update", action="store_true",
+                    help="update the installed engine, Python packages and model settings as a start would, without "
+                         "starting the model (UPDATE.bat / update.sh run it after a git pull)")
     ap.add_argument("--build", action="store_true", help="compile the engine instead of using the ready-made one")
     ap.add_argument("--prebuilt", default=os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
                     help="where the ready-made engine is (a URL folder or a local folder)")
@@ -2780,6 +2811,8 @@ def main() -> int:
 
     # ---- 0. already installed: just start it
     have = installed_configs()
+    if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
+        return update_install(have, a)
     explicit = a.setup or a.model or a.family or a.check or a.no_start
     if not have and not explicit:                      # a new copy of Strata (an update unzipped elsewhere): set it
         prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already here

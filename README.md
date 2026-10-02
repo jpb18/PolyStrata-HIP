@@ -87,7 +87,8 @@ it left off) and starts it. Your browser opens the Strata app at `http://127.0.0
 > window. The window tells you what it is doing.
 
 **Next time**, run `START-HERE.bat` (or `./setup.sh`) again: it starts right away, nothing is downloaded twice. Close
-its window to stop the model. Updating, Docker, several cards, where the files go and every option:
+its window to stop the model. `UPDATE.bat` (`./update.sh`) updates Strata without starting it. Updating, Docker,
+several cards, where the files go and every option:
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Which model should I pick?
