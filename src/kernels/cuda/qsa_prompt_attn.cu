@@ -1063,7 +1063,8 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             const char* v = std::getenv("STRATA_PROMPT_ATTN_Q4");
             return v != nullptr && v[0] == '0';
         }();
-        if (q4_off || pools.v_q4 == nullptr) return false;
+        // sm_80+ only: on Turing mode 4 would run as pairs of m16n8k8 MMAs, which no parity run has checked yet
+        if (q4_off || turing || pools.v_q4 == nullptr) return false;
         return launch<4>(q, pools, ids, steps, cap, s, attn, n_q, st);
     }
     if (pools.k_q != nullptr && pools.v_q4 != nullptr) {   // hybrid K8V4: int8 K + dequantized-q4 V
