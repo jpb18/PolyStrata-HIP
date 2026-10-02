@@ -5517,13 +5517,9 @@ int main(int argc, char** argv) {
                 drive.d.layers = 0;
                 drive.d.experts = 0;
                 drive.d.failed = false;
-            // THE WAIT IS THE FIX.  A non-blocking query here left the next window's residency table to
-            // depend on whether the previous round's expert copies had landed: an expert that is resident
-            // runs the GPU kernel and one that is not is computed on the CPU, and the two round
-            // differently enough to move a logit by ~0.26.  Waiting costs the copies' remaining time on a
-            // window that follows one that issued them, and buys a residency table that is a function of
-            // what was actually copied - which is what makes greedy decode reproducible.
-            apply_pending(true);
+                // #463: the previous adapt round's copies land first - with a non-blocking query, whether a swapped-in
+                // expert ran on the GPU or the CPU (they round differently) depended on the copy's timing
+                apply_pending(true);
                 if (hist_n > 0) {
                     // the tails the penalties count over, ONE PER ROW: the tokens the state has consumed, the
                     // fed-back head `x` (it joins `consumed` only after this window commits), then the drafts
@@ -6072,11 +6068,7 @@ int main(int argc, char** argv) {
                          (long long) n_vocab, (long long) pos);
             return 1;
         }
-        // THE HEADER IS WRITTEN WITH THE FIRST ROW, NOT AT OPEN.  A native pack leaves the per-token
-        // loop at `if (native_pack) { spec_pos = pos; break; }` and never reaches this site, so a header
-        // written at open promised 64 or 66 rows for a file that would contain none - and a reader that
-        // trusted it reported "0 differing positions" from a file with no positions in it.  Written here,
-        // a run that dumps nothing leaves an empty file, which is what actually happened.
+        // the header with the first row (see `hdr`): a run that dumps nothing leaves an empty file
         if (emit_logits && !hdr_written && std::fwrite(hdr, sizeof hdr, 1, dump) != 1) {
             std::fprintf(stderr, "strata generate: cannot write logits header\n");
             std::fclose(dump);
@@ -6234,11 +6226,7 @@ int main(int argc, char** argv) {
         int64_t adapt_rounds = 0;   // counted here: `rounds` is declared below the adapt lambda
         auto apply_pending = [&](bool wait) {
             if (pending.empty()) return;
-            if (wait) cudaEventSynchronize(adapt_ev);
-            // STRATA_TRACE_ADAPT: a non-blocking query means the next window reads the residency table
-            // with whatever the copy has achieved.  Whether the incoming experts are RESIDENT for that
-            // window depends on copy latency, and a resident expert runs a different kernel than a
-            // CPU-computed one - a far bigger numerical difference than a rounding wobble.
+            // STRATA_TRACE_ADAPT=1: whether a round's copies had landed when the next window read the table
             static const bool trace_pending = std::getenv("STRATA_TRACE_ADAPT") != nullptr;
             if (wait) cudaEventSynchronize(adapt_ev);
             else if (cudaEventQuery(adapt_ev) != cudaSuccess) {
@@ -6386,12 +6374,8 @@ int main(int argc, char** argv) {
             drive.d.layers = 0;
             drive.d.experts = 0;
             drive.d.failed = false;
-            // THE WAIT IS THE FIX.  A non-blocking query here left the next window's residency table to
-            // depend on whether the previous round's expert copies had landed: an expert that is resident
-            // runs the GPU kernel and one that is not is computed on the CPU, and the two round
-            // differently enough to move a logit by ~0.26.  Waiting costs the copies' remaining time on a
-            // window that follows one that issued them, and buys a residency table that is a function of
-            // what was actually copied - which is what makes greedy decode reproducible.
+            // #463: the previous adapt round's copies land first - with a non-blocking query, whether a swapped-in
+            // expert ran on the GPU or the CPU (they round differently) depended on the copy's timing
             apply_pending(true);
             if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
