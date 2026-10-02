@@ -18,7 +18,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, Service, StrataEngine, request_timings, serve  # noqa: E402
+from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, Service, StrataEngine,  # noqa: E402
+                          prompt_tokens_seen, request_timings, serve)
+from types import SimpleNamespace  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
@@ -95,6 +97,13 @@ class MaxTokens(unittest.TestCase):
         m = ENGINE_REQUEST.search(line)
         self.assertIsNotNone(m)
         self.assertEqual((m["prompt"], m["reused"], m["gen"], m["tg"]), ("1200", "1000", "30", "100.0"))
+        # #471: a request cancelled while its prompt was read says how far it got
+        m = ENGINE_REQUEST.search("strata serve: prompt 98179 tokens = 0 reused + 12288 of 98179 read in 17565 ms "
+                                  "(699.6 tok/s), 0 generated in 0 ms (0.0 tok/s), drafts accepted 0 of 0, "
+                                  "0 checkpoints (cancelled)")
+        self.assertIsNotNone(m)
+        self.assertEqual((m["prompt"], m["reused"], m["read"], m["pp"], m["gen"]),
+                         ("98179", "0", "17565", "699.6", "0"))
 
     def test_unset_budget_is_the_rest_of_the_context(self):
         cases = {"openai": [{"max_tokens": -1}, {"max_tokens": 0}, {}, {"max_tokens": None},
@@ -790,6 +799,54 @@ class DraftCounts(unittest.TestCase):
         rows = m["requests"]                                      # newest first
         self.assertEqual([(r["drafts_offered"], r["drafts_accepted"]) for r in rows], [(5, 3), (None, None), (12, 7)])
         self.assertEqual((m["totals"]["drafts_offered"], m["totals"]["drafts_accepted"]), (17, 10))
+
+
+class CancelledRead(unittest.TestCase):
+    """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
+    line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
+
+    def test_parse_done_read_field(self):
+        e = SimpleNamespace()
+        StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0 12288")
+        self.assertEqual((e.last["prompt_tokens"], e.last["prompt_read"], e.last["finish"]), (98179, 12288, "cancel"))
+        StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0")
+        self.assertNotIn("prompt_read", e.last)
+
+    def test_prompt_tokens_seen(self):
+        last = {"finish": "cancel", "reused": 1000, "prompt_read": 2000}
+        self.assertEqual(prompt_tokens_seen(98179, last), 3000)
+        self.assertEqual(prompt_tokens_seen(98179, {**last, "finish": "stop"}), 98179)   # read in full: all of it
+        self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0}), 98179)   # an older engine
+        self.assertEqual(prompt_tokens_seen(98179, {}), 98179)                          # no DONE at all
+        self.assertEqual(prompt_tokens_seen(10, {**last, "prompt_read": 50}), 10)       # never past the prompt
+
+    def test_history_and_totals(self):
+        tok = ByteTokenizer()
+        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
+            "DONE 0 20 400.0 0.0 cancel 0 0 0 0 0 0 0 0.0 8",      # stopped after 8 prompt tokens
+            "DONE 4 20 40.0 30.0 stop 0 0 0 0 0 0 0 0.0 20",
+            "DONE 0 20 400.0 0.0 cancel 0 0 0"])                   # an older engine: no read count
+        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            for _ in range(3):
+                body = json.dumps({"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]})
+                with urllib.request.urlopen(urllib.request.Request(base + "/v1/chat/completions", data=body.encode(),
+                                                                   headers={"Content-Type": "application/json"}),
+                                            timeout=30) as r:
+                    self.assertEqual(r.status, 200)
+            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
+                m = json.loads(r.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        rows = m["requests"][::-1]                                # oldest first
+        total = rows[0]["prompt_total"]
+        self.assertGreater(total, 8)
+        self.assertEqual([r["prompt_total"] for r in rows], [total] * 3)
+        self.assertEqual([(r["prompt_tokens"], r["prompt_read"]) for r in rows], [(8, 8), (total, 20), (total, None)])
+        self.assertEqual(m["totals"]["prompt_tokens"], 8 + 2 * total)
 
 
 class LiveRate(unittest.TestCase):

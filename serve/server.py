@@ -123,7 +123,9 @@ class GpuBusy(RuntimeError):
 
 
 ENGINE_REQUEST = re.compile(
-    r"prompt (?P<prompt>\d+) tokens = (?P<reused>\d+) reused \+ \d+ read in (?P<read>[\d.]+) ms \((?P<pp>[\d.]+) tok/s\), "
+    # "+ 12288 of 98179 read": a request cancelled while its prompt was read (#471)
+    r"prompt (?P<prompt>\d+) tokens = (?P<reused>\d+) reused \+ \d+(?: of \d+)? read in (?P<read>[\d.]+) ms "
+    r"\((?P<pp>[\d.]+) tok/s\), "
     r"(?P<gen>\d+) generated in (?P<gen_ms>[\d.]+) ms \((?P<tg>[\d.]+) tok/s\)")
 
 
@@ -338,6 +340,8 @@ class StrataEngine:
             self.last.update(hits=int(f[9]), lookups=int(f[10]))
         if len(f) >= 14:                                  # the expert tiers (engine 0.1.31+): RAM / file blobs, file MB
             self.last.update(ram_blobs=int(f[11]), file_blobs=int(f[12]), file_mb=float(f[13]))
+        if len(f) >= 15:                                  # #471 (engine 0.1.36+): the prompt tokens actually read
+            self.last.update(prompt_read=int(f[14]))
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -1329,11 +1333,14 @@ class Service:
                             cvec = (getattr(self.engine, "info", {}) or {}).get("cvec", 0)
                             loaded = str(cvec) not in ("0", "", "None")
                             hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
+                            seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
                             self.history.append({
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
-                                "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
+                                "prompt_tokens": seen, "reused": last.get("reused"), "output_tokens": n,
+                                # the request's whole prompt, and the tokens read of it (None: an older engine)
+                                "prompt_total": len(ids), "prompt_read": last.get("prompt_read"),
                                 "engine_generated": last.get("generated"),
                                 "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                                 "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
@@ -1345,7 +1352,7 @@ class Service:
                                 "drafts_accepted": last.get("drafts_accepted")})
                             t = self.totals
                             t["requests"] += 1
-                            t["prompt_tokens"] += len(ids)
+                            t["prompt_tokens"] += seen
                             t["reused"] += last.get("reused") or 0
                             t["output_tokens"] += n
                             t["prompt_ms"] += last.get("prompt_ms") or 0.0
@@ -1354,7 +1361,7 @@ class Service:
                             t["drafts_accepted"] += last.get("drafts_accepted") or 0
                             fresh = getattr(self.engine, "last", None)
                             if fresh is not None and fresh is not before:      # the engine's clock for THIS request
-                                timings = request_timings(len(ids), n, last)
+                                timings = request_timings(seen, n, last)
                                 self.last_timings = dict(timings, at=int(time.time())) if timings else None
                             self.last_request_at = time.time()
                             now = time.time()
@@ -1376,6 +1383,17 @@ class Service:
             yield "event", ev
         yield "done", {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
                        "timings": timings}
+
+
+def prompt_tokens_seen(prompt_tokens: int, last: dict) -> int:
+    """#471: the prompt tokens a request got through - all of them, unless the engine's DONE line says a cancel stopped
+    its prompt read part-way (then the reused ones plus those read).  /metrics' history and totals count these, so a
+    cancelled read is neither recorded as the whole prompt nor given a rate from tokens it never read.  An engine
+    before 0.1.36 does not say (no `prompt_read`): the whole prompt, as before."""
+    read = last.get("prompt_read")
+    if read is None or last.get("finish") != "cancel":
+        return prompt_tokens
+    return min(prompt_tokens, int(last.get("reused") or 0) + int(read))
 
 
 def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | None:
