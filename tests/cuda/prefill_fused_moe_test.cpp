@@ -269,10 +269,14 @@ void reference_part(cudaStream_t s) {
     ck(cudaMemcpy(src_dev.p, r.src.data(), r.src.size() * 4, cudaMemcpyHostToDevice), "src");
     mmq::Context ctx;
     MmqBufs mb(rows, E);
+    // the uploads (legacy stream) must land before the non-blocking stream reads them (S20 found the kernels could run
+    // on all-zero routing otherwise - every pair on one expert: fast and wrong)
+    ck(cudaDeviceSynchronize(), "uploads");
     run_mmq(ctx, mb, r, x_dev.as<float>(), src_dev.as<int32_t>(), blob, rows, s);
     FusedBufs fb(T, rows, E);
     ck(cudaMemcpy(fb.ids.p, ids.data(), ids.size() * 4, cudaMemcpyHostToDevice), "ids");
     ck(cudaMemset(fb.dm.p, 0xff, (size_t) rows * N * 4), "sentinel");   // an unwritten row is NaN
+    ck(cudaDeviceSynchronize(), "uploads");
     run_fused(fb, x_dev.as<float>(), T, E, {0, 1, 20, E}, blob, s);
     ck(cudaStreamSynchronize(s), "sync");
     const std::vector<float> y_mmq = download(mb.dm, (size_t) rows * N), y_f = download(fb.dm, (size_t) rows * N);
@@ -354,6 +358,7 @@ void timing_part(cudaStream_t s) {
     MmqBufs mb(rows, E);
     FusedBufs fb(T, rows, E);
     ck(cudaMemcpy(fb.ids.p, ids.data(), ids.size() * 4, cudaMemcpyHostToDevice), "ids");
+    ck(cudaDeviceSynchronize(), "uploads");   // the legacy-stream uploads before the timed non-blocking stream
     cudaEvent_t a, b;
     ck(cudaEventCreate(&a), "event");
     ck(cudaEventCreate(&b), "event");

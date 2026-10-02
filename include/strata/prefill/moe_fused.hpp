@@ -29,8 +29,10 @@ constexpr int kMaxBatch = 128;
 bool built();
 /// built(), and the current device is sm_80 or newer (mma.sync with s8 operands at m16n8k32).
 bool available();
-/// STRATA_PF_FUSED=1 (read once) and available().
+/// available(), unless STRATA_PF_FUSED=0 (read once): the Q2_0 pack's fused experts, on by default since 0.1.36.
 bool enabled();
+/// STRATA_PF_FUSED=1 given explicitly, and available(): the native IQ packs' fused kernels (opt-in).
+bool requested();
 
 /// Bytes of `rows` activation rows of `cols` values (a multiple of 64) in the kernels' int8 form: per 64 values 64
 /// codes and {d, c} of each half (c = -(1.5 * 2^23 + the half's code sum), what the epilogue adds back).
