@@ -507,6 +507,14 @@ files with real conflicts. What it needed:
   `kv_hybrid_parity` and `qsa_prompt_attn_parity` pass (the tests now turn on the XMX prompt attention they
   check); `iq_multi_parity` (IQ2_XS) and `s2_expert_grouped_parity` as before.
 
+**The 0.1.33 merge (2026-10-01).** Upstream 0.1.32 -> 0.1.33 (17 commits): no shared file conflicted (the Intel
+code is all in `sycl/`); six engine files changed upstream and were merged by the same re-migration (only those six:
+the other files dpct produced differently were left alone). Two conflicts: `--resident-cpu-experts` (upstream's new
+`resident_cpu_explicit` beside the port's `--stream-experts`) and the prompt attention's compute-capability check
+(the port keeps its XMX dispatch). `sycl/setup_intel.py` and `sycl/serve/server_intel.py` ran unchanged against the
+new setup.py and server.py. Every output identical (Coder, IQ2_XS, the 40K prompt with borrowing); `gr_parity` and
+`qsa_prompt_attn_parity` pass.
+
 **Prompt-slot borrowing: the hang (fixed 2026-10-01).** From 0.1.31 on, a prompt that borrowed cache slots stopped
 in its first full chunk with the GPU at 100% and the host waiting on the compute queue. It was never a borrowing
 bug: borrowing is just the only way the Coder streams experts during a prompt (every expert is resident otherwise),

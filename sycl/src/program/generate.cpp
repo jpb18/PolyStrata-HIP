@@ -291,6 +291,7 @@ struct Options {
     bool resident_pin = false;
     uint64_t resident_headroom = 8ull << 30;
     bool resident_soft = false;
+    bool resident_cpu_explicit = false;   ///< #384: --resident-cpu-experts given by itself (not only implied)
     /// CS-T `--resident-budget-gib N`: the resident mode with a RAM budget - the N GiB of experts the GPU cache does
     /// not hold that the expert profile ranks hottest are copied into RAM, the rest are read from the files in place
     /// (the GGUF shards when the pack has no experts.bin).  0 = the whole complement (--resident-experts).
@@ -1269,7 +1270,7 @@ int main(int argc, char **argv) try {
         else if (a == "--gpu-stages") o.gpu_stages = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
         else if (a == "--shared-expert-arena") o.shared_expert_arena = next("--shared-expert-arena");
-        else if (a == "--resident-cpu-experts") o.resident_cpu_experts = true;
+        else if (a == "--resident-cpu-experts") o.resident_cpu_experts = o.resident_cpu_explicit = true;
         else if (a == "--stream-experts") o.stream_experts = true;
         else if (a == "--resident-experts") {
             o.mmap_experts = o.resident_cpu_experts = o.resident_pin = o.resident_soft = true;
@@ -1382,9 +1383,20 @@ int main(int argc, char **argv) try {
         std::fprintf(stderr, "strata generate: --resident-cpu-experts requires --mmap-experts and a static --expert-profile\n");
         return 2;
     }
-    if (o.resident_cpu_experts &&
-        (!o.layer_split.empty() || o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
-         o.expert_cache_remote[2] > 0)) {
+    const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
+                               o.expert_cache_remote[2] > 0;
+    if (o.resident_cpu_experts && !o.layer_split.empty() && !remote_caches && o.resident_soft &&
+        !o.resident_cpu_explicit && o.resident_budget == 0) {
+        // #364 #384: setup's --resident-experts with a layer split (--gpus at start, or a config edited by hand) runs
+        // as the plain mmap mode - the placement those users measured 1.3-1.6x faster than one GPU - instead of
+        // refusing.  Exactly --mmap-experts: nothing else reads these flags (the headroom only sizes the copy).
+        std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode (--resident-experts) does not support a "
+                             "layer split yet: the experts the GPUs do not hold are read through the OS file cache "
+                             "(--mmap-experts), and RAM may fill up during long prompts\n");
+        o.resident_cpu_experts = o.resident_pin = o.resident_soft = false;
+        o.resident_headroom = 8ull << 30;
+    }
+    if (o.resident_cpu_experts && (!o.layer_split.empty() || remote_caches)) {
         std::fprintf(stderr, "strata generate: --resident-cpu-experts does not support layer splits or remote expert caches\n");
         return 2;
     }
@@ -2358,10 +2370,10 @@ int main(int argc, char **argv) try {
                     st.mrope = sycl::malloc_device<int32_t>(
                         mrope_host.size(), dpct::get_in_order_queue())) != 0 ||
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                     st.mrope, mrope_host.data(),
@@ -2730,9 +2742,9 @@ int main(int argc, char **argv) try {
             DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) == 0 &&
             DPCT_CHECK_ERROR(dpct::get_device(dev).get_device_info(p)) == 0;
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         if (!named) 0;
         const char *name =
@@ -2744,8 +2756,8 @@ int main(int argc, char **argv) try {
             stderr, "strata generate: GPU %d: %s, compute capability %d.%d%s\n",
             dev, name,
             /*
-            DPCT1005: The SYCL device version is different from CUDA Compute
-            Compatibility. You may need to rewrite this code.
+            DPCT1005: The SYCL device version is different from CUDA
+            Compute Compatibility. You may need to rewrite this code.
             */
             strata::cc_major_of(p.get_major_version()),
             strata::cc_minor_of(p.get_minor_version()),
@@ -2925,16 +2937,20 @@ int main(int argc, char **argv) try {
         const int64_t reserve = ((int64_t) o.vram_reserve_mib + prefill_mib) << 20;
         const int64_t fit = std::max<int64_t>(((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob, 0);
         if (o.expert_cache > fit) {
-            std::fprintf(stderr, "strata generate: layer split: --expert-cache %d leaves no room for the prompt path's "
-                                 "buffers (%lld MiB) on CUDA0: %lld slots\n", o.expert_cache, (long long) prefill_mib,
-                         (long long) fit);
+            // a WARNING that names the knob: the user asked for this size, and gets fewer slots
+            std::fprintf(stderr, "strata generate: WARNING: layer split: --expert-cache %d leaves no room for the "
+                                 "prompt path's buffers (%lld MiB) and the %d MiB reserve on CUDA0: %lld slots instead "
+                                 "(a smaller --vram-reserve-mib leaves more of them)\n", o.expert_cache,
+                         (long long) prefill_mib, o.vram_reserve_mib, (long long) fit);
             o.expert_cache = (int) fit;
         }
     }
     // plan v0.3 P6: a native pack's blobs differ per layer, so with a profile its slots are sized per pair: the
     // same VRAM holds ~30% more IQ3_XXS experts than slots of the largest blob would
+    // #369: not with --expert-cache-per-layer - its per-layer slot ranges ignore the profile rank a sized slot was cut
+    // for, so a layer's larger blob could land in a smaller slot: that mode keeps slots of the largest blob
     std::vector<int64_t> sized_slots;
-    if (native_pack && o.expert_cache > 0 && !profile.empty()) {
+    if (native_pack && o.expert_cache > 0 && !profile.empty() && !o.expert_cache_per_layer) {
         size_t free_b = 0, total_b = 0;
         /*
         DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
@@ -3085,10 +3101,17 @@ int main(int argc, char **argv) try {
     // the policy rather than a hint.
     int64_t prefilled = 0;
     if (!profile.empty() && srcp != nullptr) {
-        const int64_t want = std::min<int64_t>((int64_t) profile.size(), xcache.slots());
+        // #369 (dag08): per layer, a full layer skips only its own pairs - each layer takes its hottest experts until
+        // its range is full (one full layer used to end the whole fill, leaving most layers empty)
+        const bool per_layer = xcache.per_layer_admission();
+        const int64_t want = per_layer ? (int64_t) profile.size()
+                                       : std::min<int64_t>((int64_t) profile.size(), xcache.slots());
         for (int64_t i = 0; i < want; ++i) {
             const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
-            if (slot == strata::core::kNotResident) break;
+            if (slot == strata::core::kNotResident) {
+                if (per_layer) continue;
+                break;
+            }
             const uint8_t* b = srcp->blob(profile[(size_t) i].first, profile[(size_t) i].second);
             if (b == nullptr || !xcache.fill_slot_blocking(slot, b, err,
                     (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))) {
@@ -3109,7 +3132,7 @@ int main(int argc, char **argv) try {
         }
         mem_mark("the profile fill");
         std::fprintf(stderr, "strata generate: pre-filled %lld of %lld slots from the profile; slot 0 verified\n",
-                     (long long) prefilled, (long long) want);
+                     (long long) prefilled, (long long) (per_layer ? xcache.slots() : want));
     }
     // SYCL port, plan item 2: the experts that did not fit VRAM, mirrored once in pinned host memory the GPU reads
     // over PCIe (--stream-experts has no host copy otherwise: each routed miss was an SSD read). The share of misses
@@ -3330,8 +3353,8 @@ int main(int argc, char **argv) try {
             std::fprintf(stderr, "strata generate: routing-aware prefetch of the file tier on (the next layer's router)\n");
         } else {
             /*
-            DPCT1010: SYCL uses exceptions to report errors and does not use
-            the error codes. The cudaGetLastError function call was replaced
+            DPCT1010: SYCL uses exceptions to report errors and does not
+            use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
             (void)0;
@@ -3562,10 +3585,11 @@ int main(int argc, char **argv) try {
         } else {
             for (int64_t c = 0; c < g.hc; ++c)
                 /*
-                DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy
-                API. While the origin API might be synchronous, it depends on
-                the type of operand memory, so you may need to call wait() on
-                event return by memcpy API to ensure synchronization behavior.
+                DPCT1124: cudaMemcpyAsync is migrated to asynchronous
+                memcpy API. While the origin API might be synchronous, it
+                depends on the type of operand memory, so you may need to call
+                wait() on event return by memcpy API to ensure synchronization
+                behavior.
                 */
                 if (DPCT_CHECK_ERROR(strata::q_of(token_stream)->memcpy(
                         ss.R + (size_t)c * g.n_embd, d_emb,
@@ -3857,8 +3881,8 @@ int main(int argc, char **argv) try {
             real error-handling function.
             */
             /*
-            DPCT1010: SYCL uses exceptions to report errors and does not use
-            the error codes. The cudaGetLastError function call was replaced
+            DPCT1010: SYCL uses exceptions to report errors and does not
+            use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
             std::fprintf(stderr,
@@ -3905,9 +3929,9 @@ int main(int argc, char **argv) try {
                     function.
                     */
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     dpct::get_error_string_dummy(0));
                 return 1;
@@ -3927,9 +3951,9 @@ int main(int argc, char **argv) try {
                     function.
                     */
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     dpct::get_error_string_dummy(0));
                 return 1;
@@ -4017,10 +4041,10 @@ int main(int argc, char **argv) try {
                     st->d_res = sycl::malloc_device<int32_t>(
                         host_res.size(), dpct::get_in_order_queue())) != 0 ||
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 DPCT_CHECK_ERROR(dpct::get_in_order_queue().memcpy(
                     st->d_res, host_res.data(),
@@ -4186,6 +4210,12 @@ int main(int argc, char **argv) try {
             std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode does not fit (%s); the experts the "
                                  "GPU does not hold are read from the model folder through the OS file cache "
                                  "(--mmap-experts), which is slower when the RAM cannot keep them\n", err.c_str());
+        } else if (o.resident_budget > 0) {
+            // #403: a RAM budget that cannot be kept is not a reason to stop - the experts it would have held are
+            // read from the files like the ones outside it (pin_cache_complement leaves nothing half-built)
+            std::fprintf(stderr, "strata generate: WARNING: the RAM budget (--resident-budget-gib) cannot be kept (%s); "
+                                 "every expert the GPU does not hold is read from the model files through the OS file "
+                                 "cache (--mmap-experts), which is slower\n", err.c_str());
         } else {
             std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
             return 1;
@@ -4470,16 +4500,16 @@ int main(int argc, char **argv) try {
                     const strata::core::OnDevice on(stp->dev);
                     stp->sp.reset();
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     (void)0;
                 }
                 sp.reset();
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 (void)0;
@@ -4905,10 +4935,10 @@ int main(int argc, char **argv) try {
             try {
         if (d_res != nullptr)
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 dpct::get_in_order_queue().memcpy(
                     d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait();
@@ -6458,8 +6488,8 @@ int main(int argc, char **argv) try {
                 function.
                 */
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 (long long)pos, dpct::get_error_string_dummy(0));
@@ -6534,8 +6564,8 @@ int main(int argc, char **argv) try {
                 function.
                 */
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 dpct::get_error_string_dummy(0));
@@ -6680,10 +6710,10 @@ int main(int argc, char **argv) try {
             pending.clear();
             if (d_res != nullptr)
                 /*
-                DPCT1114: cudaMemcpy is migrated to asynchronization memcpy,
-                assuming in the original code the source host memory is pageable
-                memory. If the memory is not pageable, call wait() on event
-                return by memcpy API to ensure synchronization behavior.
+                DPCT1114: cudaMemcpy is migrated to asynchronization
+                memcpy, assuming in the original code the source host memory is
+                pageable memory. If the memory is not pageable, call wait() on
+                event return by memcpy API to ensure synchronization behavior.
                 */
                 dpct::get_in_order_queue().memcpy(
                     d_res, host_res.data(), host_res.size() * sizeof(int32_t)).wait();

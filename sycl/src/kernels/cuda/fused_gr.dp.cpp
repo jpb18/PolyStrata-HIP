@@ -1545,14 +1545,11 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
                 */
                 0 == 0)
                 split = 1;
-            else if (need2 <= limit &&
-                     /*
-                     DPCT1027: The call to cudaFuncSetAttribute was replaced
-                     with 0 because SYCL currently does not support
-                     corresponding setting.
-                     */
-                     0 == 0)
-                split = 2;
+            else if (need2 <= limit)
+                // #375 (kenh0u): the S = 2 split (a 64 KB opt-in card: Turing) disagrees with itself in gr_parity
+                // (graph replay vs direct call) - such a card keeps the default read until that split is fixed
+                std::fprintf(stderr, "strata: STRATA_GR_V3=1 needs the two-half split on this card, which fails its "
+                                     "checks (#375): the default read is used\n");
             /*
             DPCT1026: The call to cudaGetLastError was removed because this
             functionality is redundant in SYCL.

@@ -10,7 +10,7 @@
 #
 # Device code is JIT-compiled from SPIR-V unless STRATA_SYCL_AOT names a device (bmg-g31 for the Arc Pro B70).
 cmake_minimum_required(VERSION 3.24)
-project(strata_sycl VERSION 0.1.32 LANGUAGES C CXX)   # the upstream engine version this port tracks
+project(strata_sycl VERSION 0.1.33 LANGUAGES C CXX)   # the upstream engine version this port tracks
 set(STRATA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -182,9 +182,9 @@ prompt_attn_kernel(const float *__restrict__ q, QsaAttnPools p,
                     sycl::fmax(S.qmax[2], S.qmax[3]));
     int qe = 0;
     /*
-    DPCT1017: The sycl::frexp call is used instead of the frexpf call.
-    These two calls do not provide exactly the same functionality. Check the
-    potential precision and/or performance issues for the generated code.
+    DPCT1017: The sycl::frexp call is used instead of the frexpf call. These
+    two calls do not provide exactly the same functionality. Check the potential
+    precision and/or performance issues for the generated code.
     */
     if (qm > 0.0f) sycl::frexp(
         qm, sycl::address_space_cast<sycl::access::address_space::generic_space,
@@ -705,9 +705,9 @@ prompt_attn_i8_kernel(const float *__restrict__ q, QsaAttnPools p,
                     sycl::fmax(S.qmax[2], S.qmax[3]));
     int qe = 0;
     /*
-    DPCT1017: The sycl::frexp call is used instead of the frexpf call.
-    These two calls do not provide exactly the same functionality. Check the
-    potential precision and/or performance issues for the generated code.
+    DPCT1017: The sycl::frexp call is used instead of the frexpf call. These
+    two calls do not provide exactly the same functionality. Check the potential
+    precision and/or performance issues for the generated code.
     */
     if (qm > 0.0f) sycl::frexp(
         qm, sycl::address_space_cast<sycl::access::address_space::generic_space,
@@ -1467,7 +1467,8 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
     {   // sm_75 or newer: the MMA above compiles for both.  sm_80+ runs the cp.async kernel (launch_i8); Turing has
         // no cp.async, so it runs the v1 kernel (launch<1>, same accuracy, another summation order).  An older card
         // keeps the old kernel.
-        static int cc_major[64] = {};
+        // #371: the compute capability with its minor - sm_70 (V100) has no m16n8k8 (the kernels trap below sm_75)
+        static int cc[64] = {};
         int dev = 0;
         /*
         DPCT1026: The call to cudaGetLastError was removed because this
@@ -1477,10 +1478,12 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
             dev < 0 || dev >= 64) {
             ; return false;
         }
-        if (cc_major[dev] == 0) {
-            int major = 0;
+        if (cc[dev] == 0) {
+            int major = 0, minor = 0;
             if (DPCT_CHECK_ERROR(
-                    major = dpct::get_device(dev).get_major_version()) != 0) {
+                    major = dpct::get_device(dev).get_major_version()) != 0 ||
+                DPCT_CHECK_ERROR(
+                    minor = dpct::get_device(dev).get_minor_version()) != 0) {
                 /*
                 DPCT1026: The call to cudaGetLastError was removed because
                 this functionality is redundant in SYCL.
@@ -1489,9 +1492,10 @@ bool qsa_prompt_attn_batch(const float *q, const QsaAttnPools &pools,
             }
             // STRATA_QSA_WARP=1|attn (an A/B arm): the pre-sm_80 kernels on any card, as RTX 20 runs them
             const char* w = std::getenv("STRATA_QSA_WARP");
-            cc_major[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "attn")) ? 7 : strata::cc_major_of(major);
+            cc[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "attn")) ? 75
+                      : 10 * strata::cc_major_of(major) + strata::cc_minor_of(minor);
         }
-        (void) cc_major[dev];
+        (void) cc[dev];
         // SYCL: the mma.sync kernel below is not ported (upstream's Turing/sm_80 split - `turing` - does not
         // apply); its XMX port takes the same arguments
         if (qsa_prompt_attn_xmx(q, pools, ids, steps, cap, s, attn, n_q, stream)) return true;
