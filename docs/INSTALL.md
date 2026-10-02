@@ -201,9 +201,10 @@ By hand: add `"--vram-reserve-mib", "2048"` to the config's `"args"` list and re
 much smaller, so answers can be a little slower. The engine sizes its cache from the VRAM free when it starts: what
 another program already holds then is left alone anyway; the reserve is room for what it takes later.
 
-**A card under 8 GB (#496):** setup writes a 300 MiB reserve there, and the engine itself tries 300 when the default
-leaves the expert cache no slot. If the start still stops with "no VRAM is left for the expert cache", that log line
-says how much is short; an 8K context and `--draft-vocab en` at setup free the most.
+**A card under 8 GB (#496):** when the default reserve leaves the expert cache too little room, the engine lowers the
+reserve (down to 300 MiB) until it fits, and warns if the card then ends nearly full. If the start stops with "no VRAM
+is left for the expert cache", that log line says how much is short; an 8K context and `--draft-vocab en` at setup
+free the most.
 
 **Model files downloaded by hand, or from a mirror (#495):** setup's step 5 prints the folder it expects them in
 (`Strata-data\models\<SIZE>\`, e.g. `Strata-data\models\IQ3_XXS\`): put them there with their original names, or

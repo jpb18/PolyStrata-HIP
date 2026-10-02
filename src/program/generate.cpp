@@ -2811,6 +2811,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     const bool auto_cache = o.expert_cache < 0;
+    bool reserve_adapted = false;   // #496: the auto sizing lowered the reserve so a small card's cache fits
     if (o.expert_cache < 0) {
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
@@ -2834,12 +2835,13 @@ int main(int argc, char** argv) {
         // #496: the verify window cannot start without a cache (#174), and a cache too small to lend the prompt path
         // a 256-token chunk's buffers (plus the 128 slots a loan leaves; one slot without --prefill) makes it
         // allocate its own on top - more than the reserve.  When the default reserve leaves less than that (a 6 GB
-        // card), the reserve shrinks to what leaves exactly that cache, down to kSmallReserveMib (what setup writes for
-        // cards under 8 GB): what is allocated after the cache - the prompt path's own part, the verify buffers, the
-        // draft head - comes out of the reserve, and below ~550 MiB a card ends with less than the 256 MiB the serve
-        // check calls LOW (IQ3_XXS, 32K, a 300 MiB reserve: 5 MiB left), so the cache gets no more than it needs.  A
-        // reserve given on the command line is kept.  No slot at all: the start stops, saying what is short and what
-        // makes room.  A card the default reserve leaves that much is sized as before.
+        // card), the reserve shrinks to what leaves exactly that cache, down to kSmallReserveMib: what is allocated
+        // after the cache - the prompt path's own part, the verify buffers, the draft head - comes out of the reserve,
+        // and below ~550 MiB a card ends with less than the 256 MiB the serve check calls LOW (IQ3_XXS, 32K, a 300 MiB
+        // reserve: 5 MiB left), so the cache gets no more than it needs, and the serve check says so plainly when it
+        // ends LOW (`reserve_adapted`).  A reserve given on the command line is kept.  No slot at all: the start
+        // stops, saying what is short and what makes room.  A card the default reserve leaves that much is sized as
+        // before.
         constexpr int kSmallReserveMib = 300;
         const int64_t min_slots = (o.prefill_chunk > 0 && pf_borrow)
             ? ((int64_t) strata::prefill::Prefill::bytes_needed(g, ss, 256) + blob - 1) / blob + 128 : 1;
@@ -2855,6 +2857,7 @@ int main(int argc, char** argv) {
                              o.vram_reserve_mib, (long long) min_slots, r, (long long) s2);
                 o.vram_reserve_mib = r;
                 o.expert_cache = (int) s2;
+                reserve_adapted = true;
             }
         }
         if (o.expert_cache == 0) {
@@ -4916,6 +4919,12 @@ int main(int argc, char** argv) {
             const int64_t free_mib = (int64_t) (free_b >> 20);
             if (free_mib >= 256) {
                 std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded\n", (long long) free_mib);
+            } else if (reserve_adapted) {
+                // #496: the reserve was already lowered to make the cache fit - a bigger one would leave it no room
+                std::fprintf(stderr, "strata serve: WARNING: %lld MiB of VRAM free with everything loaded - this card "
+                                     "only just fits the model (the VRAM reserve was lowered to %d MiB so the expert "
+                                     "cache fits): requests may stall. Close other programs that use the GPU, or lower "
+                                     "--max-context\n", (long long) free_mib, o.vram_reserve_mib);
             } else {
                 std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
                                      " add --vram-reserve-mib %lld to the config's args (or lower --max-context)\n",

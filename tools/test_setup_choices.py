@@ -330,9 +330,9 @@ class VramReserve(unittest.TestCase):
         self.assertTrue(call.called)
 
 
-class SmallCardReserve(unittest.TestCase):
-    """#496: a card under 8 GB (a 6 GB laptop RTX 3060) gets a 300 MiB VRAM reserve instead of the engine's 700, and a
-    tip for when the start still has no room for the expert cache; an 8 GB card's config is unchanged."""
+class SmallCardTip(unittest.TestCase):
+    """#496: a card under 8 GB (a 6 GB laptop RTX 3060) gets a tip for when the start has no room for the expert cache;
+    the engine chooses its own reserve there, so the config is the one any card gets.  An 8 GB card: no tip."""
 
     def install(self, vram, *extra):
         from test_setup_golden import card, install
@@ -342,32 +342,23 @@ class SmallCardReserve(unittest.TestCase):
     def test_a_6gb_card(self):
         code, out, cfg, _ = self.install(6.0)
         self.assertEqual(code, 0, out)
-        a = cfg["args"]
-        self.assertEqual(a.count("--vram-reserve-mib"), 1)
-        self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "300")
-        self.assertTrue(cfg.get("vram_reserve_auto"))
-        self.assertIn("300 MiB of VRAM kept free instead of 700", out)
+        self.assertNotIn("--vram-reserve-mib", cfg["args"])          # the engine decides (no fixed reserve)
         self.assertIn("no VRAM is left for the expert cache", out)
         self.assertIn("--draft-vocab en", out)
-        self.assertIn("--mtp", a)                                    # the draft layer stays: the server needs it
-        with tempfile.TemporaryDirectory() as d:                     # setup's own choice is not kept as the user's
-            p = Path(d) / "strata-q2_0.json"
-            p.write_text(json.dumps(cfg))
-            self.assertIsNone(setup.choices_from_config(p)["vram_reserve_mib"])
+        self.assertIn("--mtp", cfg["args"])                          # the draft layer stays: the server needs it
 
-    def test_an_8gb_card_is_unchanged(self):
+    def test_an_8gb_card_has_no_tip(self):
         for vram in (8188 / 1024, 8.0):                               # nvidia-smi lists an 8 GB card as 8188 MiB
             code, out, cfg, _ = self.install(vram)
             self.assertEqual(code, 0, out)
+            self.assertNotIn("no VRAM is left for the expert cache", out)
             self.assertNotIn("--vram-reserve-mib", cfg["args"])
-            self.assertNotIn("vram_reserve_auto", cfg)
 
-    def test_a_given_reserve_wins(self):
+    def test_a_given_reserve_is_kept(self):
         code, out, cfg, _ = self.install(6.0, "--vram-reserve-mib", "500")
         self.assertEqual(code, 0, out)
         a = cfg["args"]
         self.assertEqual(a[a.index("--vram-reserve-mib") + 1], "500")
-        self.assertNotIn("vram_reserve_auto", cfg)
 
     def test_the_tip(self):
         self.assertIn("an 8K context", " ".join(setup.small_card_note(32768, None)))
