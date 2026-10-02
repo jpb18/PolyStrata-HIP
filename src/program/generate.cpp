@@ -53,6 +53,7 @@
 #include "strata/program/logits_selection.hpp"
 #include "strata/program/conv_cache.hpp"
 #include "strata/spec/draft_policy.hpp"
+#include "strata/spec/draft_source.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/kernels/cvec.hpp"
 #include "strata/core/progress.hpp"
@@ -410,6 +411,14 @@ struct Options {
     int suffix_draft = 3;
     /// The MTP's own window cap (0 = --spec): with --spec 6 --mtp-max-t 4 the long windows come from suffix matches.
     int mtp_max_t = 0;
+    /// --lookup-chain K (opt-in, 0 = off): prompt lookup CHAINED after the MTP's proposal.  The suffix drafter matches
+    /// the context followed by the MTP's drafts and appends up to K of the tokens that followed that match to the same
+    /// verify window (the window grows to at most 8).  Greedy verification keeps the output; its own counts are kept.
+    int lookup_chain = 0;
+    int lookup_chain_min = 3;   ///< --lookup-chain-min M: the shortest match (in tokens, drafts included) it extends on
+    /// --mtp-hnorm stream (opt-in): the draft layer's pre_fc_norm_hidden normalizes each hyper-connection stream on
+    /// its own (llama.cpp's qwen4exp MTP graph) instead of one RMS over all four (the default, tools/mtp_probe.py).
+    bool mtp_hnorm_stream = false;
     /// A control vector on the residual stream (strata/kernels/cvec.hpp), with llama.cpp's flags: the
     /// `experimental-speed-projection` profile passes `--control-vector-scaled FILE:1.0 --control-vector-layer-range
     /// 4 44 --cvec-mode project --cvec-dir per-layer`.  None by default; --serve switches a loaded one per request.
@@ -508,6 +517,11 @@ void usage() {
                  "  --suffix-draft N     prompt lookup: draft from an earlier repeat of the last N+ tokens of context\n"
                  "                       when it pays (default 3; 0 = MTP only)\n"
                  "  --mtp-max-t M        cap the MTP's windows at M tokens (0 = --spec; longer ones come from suffixes)\n"
+                 "  --lookup-chain K     opt-in: after the MTP's drafts, add up to K prompt-lookup drafts that continue\n"
+                 "                       them (the window grows to at most 8; default 0 = off)\n"
+                 "  --lookup-chain-min M  the shortest context match --lookup-chain extends on (default 3)\n"
+                 "  --mtp-hnorm pooled|stream  the draft layer's hidden-input norm: one RMS over all four streams\n"
+                 "                       (default) or one per stream (llama.cpp's MTP graph)\n"
                  "  --control-vector-scaled FILE:SCALE[,...]  a control vector GGUF on the residual stream (llama.cpp's\n"
                  "                       format; --control-vector FILE = scale 1).  --serve: requests switch it (cvec=0|1)\n"
                  "  --control-vector-layer-range A B  the layers it follows (inclusive; default 1 .. the last)\n"
@@ -582,6 +596,23 @@ void usage() {
                  "  --resident-experts   the low-RAM PC's resident mode (setup): --mmap-experts --resident-cpu-experts\n"
                  "                       with the copy page-locked when possible, 4 GiB headroom, plain mmap if it\n"
                  "                       does not fit.  Same answers as --mmap-experts for the same placement.\n");
+}
+
+// --lookup-chain: the context's last tokens for the draft sources (at most 64), the MTP's pending drafts last
+int chain_tail(const strata::spec::SuffixDrafter& sfx, const int32_t* pending, int n_pending, std::vector<int32_t>& tail) {
+    const std::vector<int32_t>& h = sfx.history();
+    const int keep = std::max(0, std::min((int) h.size(), 64 - n_pending));
+    tail.assign(h.end() - keep, h.end());
+    tail.insert(tail.end(), pending, pending + n_pending);
+    return (int) tail.size();
+}
+
+// --lookup-chain: the registered extra draft sources (strata/spec/draft_source.hpp) see the committed context too
+void extra_sources_reset() {
+    for (auto& src : strata::spec::extra_draft_sources()) src->reset();
+}
+void extra_sources_append(const int32_t* t, size_t n) {
+    for (auto& src : strata::spec::extra_draft_sources()) src->append(t, n);
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -1176,6 +1207,16 @@ int main(int argc, char** argv) {
         else if (a == "--short-read") o.short_read = std::max(0LL, std::atoll(next("--short-read")));
         else if (a == "--suffix-draft") o.suffix_draft = std::max(0, std::atoi(next("--suffix-draft")));
         else if (a == "--mtp-max-t") o.mtp_max_t = std::max(0, std::atoi(next("--mtp-max-t")));
+        else if (a == "--lookup-chain") o.lookup_chain = std::clamp(std::atoi(next("--lookup-chain")), 0, 7);
+        else if (a == "--lookup-chain-min") o.lookup_chain_min = std::max(3, std::atoi(next("--lookup-chain-min")));
+        else if (a == "--mtp-hnorm") {
+            const std::string v = next("--mtp-hnorm");
+            if (v != "pooled" && v != "stream") {
+                std::fprintf(stderr, "strata generate: --mtp-hnorm takes pooled or stream\n");
+                return 2;
+            }
+            o.mtp_hnorm_stream = v == "stream";
+        }
         else if (a == "--control-vector") o.cvec_files.push_back({next("--control-vector"), 1.0f});
         else if (a == "--control-vector-scaled") {
             // FILE:SCALE, comma-separated; the LAST colon splits, so a Windows path (C:\...) keeps its drive
@@ -1505,6 +1546,11 @@ int main(int argc, char** argv) {
     if (o.suffix_draft > 0 && o.spec >= 2 && o.mtp_max_t == 0) {
         o.mtp_max_t = o.spec;
         o.spec = std::min(o.spec + 2, 8);   // kVerifyMaxT
+    }
+    // --lookup-chain (opt-in): the MTP keeps its windows; a lookup chained after its drafts may lengthen one by up to K
+    if (o.lookup_chain > 0 && o.spec >= 2) {
+        if (o.mtp_max_t == 0) o.mtp_max_t = o.spec;
+        o.spec = std::max(o.spec, std::min(o.mtp_max_t + o.lookup_chain, 8));   // kVerifyMaxT
     }
     strata::core::layer_set_shared_early(!o.shared_late);
     if (!o.native_preset.empty()) {
@@ -2520,6 +2566,7 @@ int main(int argc, char** argv) {
             o.mtp.clear();
         }
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
+        mtp.set_hnorm_per_stream(o.mtp_hnorm_stream);   // --mtp-hnorm stream (opt-in), before any capture
         // the draft layer is the canonical model's MTP head (512 experts) even when the target is pruned,
         // so it always sees the canonical geometry; `static` because MtpDrafter keeps a reference
         static const strata::core::ModelGeometry draft_geometry{};
@@ -5409,12 +5456,21 @@ int main(int argc, char** argv) {
             std::vector<int32_t> drafts((size_t) S, 0), window((size_t) S), outv((size_t) S);
             std::vector<float> dprob((size_t) S, 0.0f);
             std::vector<int32_t> sbuf((size_t) S, 0);
-            if (o.suffix_draft > 0) {
+            const bool sfx_on = o.suffix_draft > 0 || o.lookup_chain > 0;
+            if (sfx_on) {
                 sfx.reset();
                 for (int64_t t : ids) sfx.append((int32_t) t);
             }
+            if (o.lookup_chain > 0) {
+                extra_sources_reset();
+                for (int64_t t : ids) { const int32_t t32 = (int32_t) t; extra_sources_append(&t32, 1); }
+            }
             bool first_window = true;
             int64_t produced_n = 0, sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
+            int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts
+            int64_t t2_rej[8] = {}, t2_hit[8] = {};   // STRATA_MTP_TOP2: rejections inside the MTP drafts by depth, runner-up hits
+            std::vector<int32_t> cbuf((size_t) S, 0), ctail;
+            strata::spec::PromptLookupSource lookup_src(sfx);
             int64_t draft_offered = 0, draft_accepted = 0;
             // what the session holds once this request is done: the prompt read so far, then every committed token
             std::vector<int32_t> consumed;
@@ -5461,11 +5517,23 @@ int main(int argc, char** argv) {
                         if (pk.lookup) { T = pk.t; from_sfx = true; }
                     }
                 }
+                // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
+                int chain_n = 0;
+                if (o.lookup_chain > 0 && !first_window && !from_sfx && T < S) {
+                    int cm = 0, csrc = -1;
+                    const int nt = chain_tail(sfx, drafts.data(), T - 1, ctail);
+                    chain_n = strata::spec::propose_from_sources(lookup_src, ctail.data(), nt, T - 1,
+                                                                 std::min(o.lookup_chain, S - T), o.lookup_chain_min,
+                                                                 cbuf.data(), &cm, &csrc);
+                }
+                const int T_mtp = T;
+                T += chain_n;
                 const bool timed_round = !first_window;
                 const Clock::time_point round0 = Clock::now();
                 if (p + T > o.max_context) break;
                 window[0] = x;
-                for (int i = 1; i < T; ++i) window[(size_t) i] = from_sfx ? sbuf[(size_t) i - 1] : drafts[(size_t) i - 1];
+                for (int i = 1; i < T_mtp; ++i) window[(size_t) i] = from_sfx ? sbuf[(size_t) i - 1] : drafts[(size_t) i - 1];
+                for (int i = 0; i < chain_n; ++i) window[(size_t) (T_mtp + i)] = cbuf[(size_t) i];
                 drive.d.layers = 0;
                 drive.d.experts = 0;
                 drive.d.failed = false;
@@ -5490,6 +5558,11 @@ int main(int argc, char** argv) {
                 int a = 0;
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
                 if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
+                if (chain_n > 0) { ++chain_windows; chain_drafts += chain_n; chain_ok += std::max(0, a - (T_mtp - 1)); }
+                if (strata::core::MtpDrafter::top2_env() && !from_sfx && !first_window && a < T_mtp - 1 && a < 8) {
+                    ++t2_rej[a];
+                    if (mtp.top2(a) == outv[(size_t) a]) ++t2_hit[a];
+                }
                 const Clock::time_point tw1 = Clock::now();
                 std::thread adapt_thr;   // the adaptive tier beside the commit and the draft (as in generate)
                 bool adapt_ok = true;
@@ -5510,7 +5583,8 @@ int main(int argc, char** argv) {
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     strata::core::progress_beat();
                     ++produced_n;
-                    if (o.suffix_draft > 0) sfx.append(outv[(size_t) i]);
+                    if (sfx_on) sfx.append(outv[(size_t) i]);
+                    if (o.lookup_chain > 0) extra_sources_append(&outv[(size_t) i], 1);
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
@@ -5537,7 +5611,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR %s\n", err.c_str());
                     return 1;
                 }
-                if (timed_round && !eos)
+                if (timed_round && !eos && chain_n == 0)   // a chained window is neither an MTP nor a lookup window
                     policy.observe(from_sfx, T, a, sfx_match,
                                    std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
                 if (eos) { finish = "stop"; break; }
@@ -5692,11 +5766,17 @@ int main(int argc, char** argv) {
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
             //      [RAM blobs] [file blobs] [file MB]   (CS-T tiers; appended, so an older server reads the rest)
             //      [prompt tokens read]   (#471: fewer than <prompt> - <reused> when a cancel stopped the read)
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld\n", (long long) produced_n,
+            //      [lookup-chain accepted] [lookup-chain offered] [suffix accepted] [suffix offered] [windows]
+            //      (only with --lookup-chain)
+            char chain_txt[128] = "";
+            if (o.lookup_chain > 0)
+                std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
+                              (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld%s\n", (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
                         (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
-                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n);
+                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n, chain_txt);
             std::fflush(stdout);
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             // "12288 of 98179" when cancelled mid-read (#471), the rate from what was read
@@ -5759,6 +5839,14 @@ int main(int argc, char** argv) {
             if (sfx_windows > 0)
                 std::fprintf(stderr, "strata serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
+            if (o.lookup_chain > 0)
+                std::fprintf(stderr, "strata serve: lookup chain: %lld of %lld windows, %lld of %lld chained drafts accepted\n",
+                             (long long) chain_windows, (long long) dec_windows, (long long) chain_ok, (long long) chain_drafts);
+            if (strata::core::MtpDrafter::top2_env())
+                std::fprintf(stderr, "strata serve: mtp top2: rejected/runner-up by depth %lld/%lld %lld/%lld %lld/%lld %lld/%lld "
+                                     "of %lld windows\n", (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
+                             (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
+                             (long long) t2_hit[3], (long long) dec_windows);
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
@@ -6252,9 +6340,18 @@ int main(int argc, char** argv) {
         strata::spec::DraftPolicy policy(o.spec);   // MTP or lookup window (see draft_policy.hpp)
         std::vector<int32_t> sbuf((size_t) o.spec, 0);
         int64_t sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
-        if (o.suffix_draft > 0) {
+        int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts
+        std::vector<int32_t> cbuf((size_t) o.spec, 0), ctail;
+        strata::spec::PromptLookupSource lookup_src(sfx);
+        const bool sfx_on = o.suffix_draft > 0 || o.lookup_chain > 0;
+        if (sfx_on) {
             for (int64_t t : o.tokens) sfx.append((int32_t) t);
             for (int64_t t : produced) sfx.append((int32_t) t);
+        }
+        if (o.lookup_chain > 0) {
+            extra_sources_reset();
+            for (int64_t t : o.tokens) { const int32_t t32 = (int32_t) t; extra_sources_append(&t32, 1); }
+            for (int64_t t : produced) { const int32_t t32 = (int32_t) t; extra_sources_append(&t32, 1); }
         }
         const double pool_ms0 = drive.cpu_ms;
         const int64_t misses0 = drive.d.multi_misses, entries0 = drive.d.multi_entries;
@@ -6276,6 +6373,17 @@ int main(int argc, char** argv) {
                     if (pk.lookup) { T = pk.t; from_sfx = true; }
                 }
             }
+            // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
+            int chain_n = 0;
+            if (o.lookup_chain > 0 && use_mtp && !first_window && !from_sfx && T < o.spec) {
+                int cm = 0, csrc = -1;
+                const int nt = chain_tail(sfx, drafts.data(), T - 1, ctail);
+                chain_n = strata::spec::propose_from_sources(lookup_src, ctail.data(), nt, T - 1,
+                                                             std::min(o.lookup_chain, o.spec - T), o.lookup_chain_min,
+                                                             cbuf.data(), &cm, &csrc);
+            }
+            const int T_mtp = T;
+            T += chain_n;
             const bool timed_round = !first_window;
             ++window_hist[(size_t) T];
             if (p + T > o.max_context) {
@@ -6287,6 +6395,7 @@ int main(int argc, char** argv) {
                 const size_t at = produced.size() - 1 + (size_t) i;
                 int32_t d = from_sfx ? sbuf[(size_t) i - 1] : use_mtp ? drafts[(size_t) i - 1]
                                                     : at < oracle.size() ? (int32_t) oracle[at] : 0;
+                if (i >= T_mtp) d = cbuf[(size_t) (i - T_mtp)];
                 if (o.spec_corrupt > 0 && (++corrupt_counter % o.spec_corrupt) == 0) d = (d + 1) % (int32_t) n_vocab;
                 window[(size_t) i] = d;
             }
@@ -6336,10 +6445,12 @@ int main(int argc, char** argv) {
             drafts_ok += a;
             ++accepted_hist[(size_t) a];
             if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
+            if (chain_n > 0) { ++chain_windows; chain_drafts += chain_n; chain_ok += std::max(0, a - (T_mtp - 1)); }
             bool eos = false;
             for (int i = 0; i <= a && (int64_t) produced.size() < o.max_new && !eos; ++i) {
                 produced.push_back(outv[(size_t) i]);
-                if (o.suffix_draft > 0) sfx.append(outv[(size_t) i]);
+                if (sfx_on) sfx.append(outv[(size_t) i]);
+                if (o.lookup_chain > 0) extra_sources_append(&outv[(size_t) i], 1);
                 eos = o.stop_eos && std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
             }
             if (eos) {
@@ -6359,7 +6470,7 @@ int main(int argc, char** argv) {
             p += a + 1;
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             total_ms += round_ms;
-            if (timed_round) policy.observe(from_sfx, T, a, sfx_match, round_ms);
+            if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
             if (rounds % 64 == 0)
                 std::fprintf(stderr, "strata generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);
@@ -6381,6 +6492,9 @@ int main(int argc, char** argv) {
         if (o.suffix_draft > 0)
             std::printf("%-24s %lld windows, drafts accepted %lld of %lld\n", "suffix drafts", (long long) sfx_windows,
                         (long long) sfx_ok, (long long) sfx_drafts);
+        if (o.lookup_chain > 0)
+            std::printf("%-24s %lld windows, chained drafts accepted %lld of %lld\n", "lookup chain",
+                        (long long) chain_windows, (long long) chain_ok, (long long) chain_drafts);
         std::printf("%-24s", "accepted per round");
         for (size_t i = 0; i < accepted_hist.size(); ++i) std::printf(" %zu:%lld", i, (long long) accepted_hist[i]);
         std::printf("\n");
