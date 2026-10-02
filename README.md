@@ -23,7 +23,7 @@ word, so 60 tokens per second is faster than you can read.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **Q2_0** | 93 tokens/s | 2,170 tokens/s |
+| **Q2_0** | 94 tokens/s | 2,650 tokens/s |
 | **IQ2_XS** | 79 tokens/s | 2,090 tokens/s |
 | **IQ3_XXS** | 62 tokens/s | 1,750 tokens/s |
 | **IQ3_S** | 53 tokens/s | 1,620 tokens/s |
