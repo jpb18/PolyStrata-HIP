@@ -607,6 +607,33 @@ def split_mmap(cfg: dict) -> bool:
     return True
 
 
+def unsloth_split_need_gb(model="UD-Q4_K_XL") -> float:
+    """#498: the RAM UD-Q4_K_XL needs on several GPUs, where it has no RAM budget (the engine refuses
+    --resident-budget-gib with a layer split): its GGUF files and UNSLOTH_RAM_LEFT_GB more (~135 GB).  Measured safe
+    at 165 GiB (2x RTX 3090: MemAvailable never under 68 GiB); the 0-free case of #384 was 47 GB with a 70 GB model."""
+    return MODELS[model]["download_gb"] + UNSLOTH_RAM_LEFT_GB
+
+
+def split_budget(cfg: dict) -> bool:
+    """#498: a UD-Q4_K_XL config (its RAM budget, --resident-budget-gib) started on several GPUs.  The engine refuses
+    the budget with a layer split (it exited with code 2), so the split runs without it - all the experts loaded into
+    RAM at start - where the RAM holds the GGUFs and 24 GB more; else setup stops, before the config is saved.  True
+    when the config changed."""
+    a = cfg.get("args", [])
+    if "--resident-budget-gib" not in a:
+        return False
+    need, ram = unsloth_split_need_gb(), ram_gb()
+    if ram < need:
+        fail(f"UD-Q4_K_XL cannot share its RAM budget across GPUs (the engine has no layer split with it), and without "
+             f"the budget it needs ~{need:.0f} GB of RAM (its GGUF files and {UNSLOTH_RAM_LEFT_GB} GB more); this PC "
+             f"has {ram:.0f} GB", "start it on one GPU: START-HERE.bat --gpu N (Linux: ./setup.sh --gpu N)")
+    i = a.index("--resident-budget-gib")
+    del a[i:i + 2]
+    ok("UD-Q4_K_XL on several GPUs: no RAM budget (the engine has none with a layer split) - all its experts are "
+       "loaded into RAM from the model files at start, and the files pass through the OS file cache (#498)")
+    return True
+
+
 def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
     """Starting a model set up for one card on a PC with two or more that can share it: asked once (the answer is
     saved in its config)."""
@@ -615,6 +642,10 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
     found = gpus()
     can = together_ok(found)
     if not can:
+        return cfg
+    # #498: UD-Q4_K_XL's RAM budget has no layer split; without it the RAM must hold the GGUFs and 24 GB more
+    budget = "--resident-budget-gib" in cfg.get("args", [])
+    if budget and ram_gb() < unsloth_split_need_gb():
         return cfg
     pair = can[:2]
     cfg["gpus_asked"] = True
@@ -627,6 +658,10 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
         say("  This model runs in the low-RAM mode with its experts kept in RAM, on one GPU (recommended: steady RAM")
         say("  use). On both, the experts the GPUs do not hold are read through the OS file cache instead: faster in")
         say("  two reports (#364, #384), but RAM can fill up to 0 free during long prompts.")
+    if budget:
+        say("  This model (UD-Q4_K_XL) runs on one GPU with a RAM budget of its experts (recommended: the tested")
+        say("  setup). On both it has no budget: all its experts are loaded into RAM at start, which this PC's RAM")
+        say("  holds - about twice as fast in #498 (2x RTX 3090: 31 -> 64-78 tokens/s).")
     short = split_short(pair)             # #448: one card recommended (asked "n" by default), as for --resident
     for g in short:
         say(f"  {split_short_note(g)}.")
@@ -635,10 +670,11 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
         say("  The installed engine has no code for " + ", ".join(g["name"] for g in missing) + ": to use them "
             "together, run START-HERE.bat --setup --gpus " + ",".join(str(g["index"]) for g in pair))
     elif ask("  Use both from now on? (you can change it later: START-HERE.bat --gpu N for one card)",
-             ["y", "n"], "n" if resident or short else "y", yes) == "y":
+             ["y", "n"], "n" if resident or short or budget else "y", yes) == "y":
         cfg["gpu"] = [g["index"] for g in pair]
         cfg["layer_split"] = cfg.get("layer_split") or "auto"
         split_mmap(cfg)
+        split_budget(cfg)
         ok("from now on this model runs on " + " + ".join(gpu_name(g) for g in pair))
     else:
         ok("staying on one GPU (START-HERE.bat --gpus " + ",".join(str(g["index"]) for g in pair) + " switches)")
@@ -2077,6 +2113,43 @@ def low_ram_together(a, model, ram, gpu, chosen) -> bool:
     return False
 
 
+def unsloth_together(a, model, ram, gpu, chosen) -> bool:
+    """#498: UD-Q4_K_XL with several GPUs chosen.  Its RAM budget (--resident-budget-gib) has no layer split, so a
+    split runs without it: all its experts loaded into RAM from the GGUFs at start, as with the 2-3-bit models - only
+    where the RAM holds the GGUF files and 24 GB more (unsloth_split_need_gb; 165 GiB, 2x RTX 3090: 31 -> 64-78
+    tok/s).  An explicit --gpus is honoured there; otherwise asked, one GPU by default (--yes: one GPU, as before); an
+    explicit --resident-budget-gib keeps one GPU.  True: all of them."""
+    names = " + ".join(gpu_name(g) for g in chosen)
+    need = unsloth_split_need_gb(model)
+    if ram < need:
+        warn(f"{model} runs on one GPU here: on several it has no RAM budget and needs ~{need:.0f} GB of RAM (its GGUF "
+             f"files and {UNSLOTH_RAM_LEFT_GB} GB more), this PC has {ram:.0f} - using {gpu_name(gpu)} only")
+        return False
+    if a.resident_budget_gib is not None:
+        warn(f"--resident-budget-gib has no layer split: {model} runs on one GPU with it - using {gpu_name(gpu)} only "
+             f"(leave the budget out to use {names} together)")
+        return False
+    note = (f"no RAM budget - all of its experts (~{MODELS[model]['arena_gb']:.0f} GB) are loaded into RAM from the "
+            f"model files at start, and the files pass through the OS file cache (needs ~{need:.0f} GB of RAM, this "
+            f"PC has {ram:.0f})")
+    if a.gpus:
+        ok(f"{model} on {names}, as you chose (--gpus): {note}")
+        return True
+    if not a.yes:
+        say()
+        say(f"  {model} can run on one GPU with a RAM budget of its experts, or on {names} together without one:")
+        say(f"  1) {gpu_name(gpu)} only: the most-used experts kept in RAM, the rest read from the SSD   (recommended: "
+            "the tested setup)")
+        say(f"  2) {names} together: {note};")
+        say("     about twice as fast in #498 (2x RTX 3090: 31 -> 64-78 tokens/s)")
+        if ask(f"{model}: which GPUs?", ["1", "2"], "1", a.yes) == "2":
+            ok(f"{model} on {names}: {note}")
+            return True
+    warn(f"{model} runs on one GPU: using {gpu_name(gpu)} only (--gpus " + ",".join(str(g["index"]) for g in chosen) +
+         f" shares it across {names} without the RAM budget: this PC's RAM holds it)")
+    return False
+
+
 def confirm_risk(msg, explicit, yes, stop, hint=None, question="  Go on anyway?", default="n") -> None:
     """The owner's rule: setup recommends, it never forces.  A choice setup expects to fail or run badly is said
     plainly (msg), then asked (default n; `default` keeps an older question's own default), or with --yes taken as
@@ -2522,6 +2595,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
                      "set it up for these cards: ./setup.sh --setup --backend hip --gpus " + ",".join(map(str, gpu)))
             cfg["gpu"], cfg["gpus_asked"] = gpu, True
             cfg["layer_split"] = layer_split or cfg.get("layer_split") or "auto"
+            split_budget(cfg)                          # #498: before it is saved (it stops when the RAM is short)
             write_config(cfg_path, cfg)
             gpu = None
         elif gpu is not None:
@@ -2545,6 +2619,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         check_gpus(gpu, found, yes=yes, named=True)
         cfg["gpu"], cfg["gpus_asked"] = gpu, True
         cfg["layer_split"] = layer_split or cfg.get("layer_split") or "auto"
+        split_budget(cfg)                              # #498: before it is saved (it stops when the RAM is short)
         write_config(cfg_path, cfg)
         gpu = None
     elif gpu is not None:                              # --gpu N: this start only, on that card
@@ -2553,7 +2628,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     else:
         cfg = offer_together(cfg_path, cfg, yes)
     use = gpu if gpu is not None else cfg.get("gpu")
-    if isinstance(use, list) and split_mmap(cfg):     # #364 #384: a resident low-RAM config on several GPUs
+    # #364 #384: a resident low-RAM config on several GPUs; #498: a UD-Q4_K_XL config with its RAM budget (by hand)
+    if isinstance(use, list) and (split_mmap(cfg) | split_budget(cfg)):
         write_config(cfg_path, cfg)
     if cfg.get("backend") == "hip":
         pass
@@ -3035,10 +3111,11 @@ def main() -> int:
         say(f"  {i}) {m:8s} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
     rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 and "IQ3_XXS" in names else "1"
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
-    budget = None
+    budget, q4_split = None, False
     if MODELS[model].get("budget"):
         # Unsloth's UD-Q4_K_XL: a RAM budget of experts, the rest from the GGUF on the SSD - not the low-RAM mode (no
-        # experts.bin: it would be another 77 GB on the disk), and one GPU (the budget mode has no layer split)
+        # experts.bin: it would be another 77 GB on the disk), and one GPU (the budget mode has no layer split) unless
+        # the RAM holds the GGUFs and 24 GB more: then several, without the budget, if asked for (#498)
         warn(f"{model} is EXPERIMENTAL (docs/UNSLOTH_Q4.md): most of its experts are read from the SSD while it "
              "answers, so it is several times slower than the 2-3-bit models; quality checked against llama.cpp")
         if hip:
@@ -3058,12 +3135,13 @@ def main() -> int:
                          "install it anyway", "  Install it anyway?")
             warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
         budget = budget_choice(model, ram, a.resident_budget_gib)
-        ok(f"RAM budget: {budget:g} GiB of {model}'s experts in RAM, the rest read from the model files on the SSD")
+        if multi and not unsloth_together(a, model, ram, gpu, chosen):
+            multi, sel, chosen = [], [gpu["index"]], [gpu]
+        q4_split = bool(multi)                         # #498: on several GPUs without the RAM budget
+        if not q4_split:
+            ok(f"RAM budget: {budget:g} GiB of {model}'s experts in RAM, the rest read from the model files on the SSD")
         if a.low_ram not in ("auto", "off"):
             warn(f"--low-ram {a.low_ram} does not apply to {model}: it always reads part of its experts from the files")
-        if multi:
-            warn(f"{model} runs on one GPU: using " + gpu_name(gpu) + " only")
-            multi, sel, chosen = [], [gpu["index"]], [gpu]
     elif a.resident_budget_gib is not None:
         warn(f"--resident-budget-gib is for UD-Q4_K_XL: {model} keeps all of its experts in RAM or in the low-RAM mode")
     low_ram = budget is None and (a.low_ram in ("on", "resident", "mmap") or
@@ -3402,7 +3480,9 @@ def main() -> int:
             warn(f"KV streaming needs ~{kv_ram_gb:.1f} GB of RAM beside the ~{MODELS[model]['ram_gb']} GB {model} "
                  f"uses; this PC has {ram:.0f}. Kept as you chose (--kv-streaming on): it may page or run out of RAM "
                  "under load")
-        if budget is not None and a.resident_budget_gib is None:   # its RAM comes out of the experts' budget
+        if q4_split:                                   # #498: no budget to take it out of
+            pass
+        elif budget is not None and a.resident_budget_gib is None:   # its RAM comes out of the experts' budget
             budget = resident_budget_gib(model, ram, kv_ram_gb)
             ok(f"RAM budget: {budget} GiB (less the KV cache's RAM)")
         elif budget is not None and budget > resident_budget_gib(model, ram, kv_ram_gb):
@@ -3410,8 +3490,8 @@ def main() -> int:
                  f"would take them out of it: {resident_budget_gib(model, ram, kv_ram_gb)} GiB); kept as you chose")
     elif a.kv_streaming == "on":
         warn("--kv-streaming on: a context under 64K is not streamed (the attention's window holds all of it): off")
-    if budget is not None:     # UD-Q4_K_XL: the experts read from the GGUF in place, the most-used N GiB kept in RAM
-        args += ["--resident-budget-gib", f"{budget:g}"]
+    if budget is not None and not q4_split:   # UD-Q4_K_XL: the experts read from the GGUF in place, the most-used N
+        args += ["--resident-budget-gib", f"{budget:g}"]   # GiB kept in RAM (#498: a layer split has no budget)
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
     if esp is not None:
