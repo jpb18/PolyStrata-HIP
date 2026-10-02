@@ -3106,7 +3106,71 @@ int main(int argc, char **argv) try {
         const bool per_layer = xcache.per_layer_admission();
         const int64_t want = per_layer ? (int64_t) profile.size()
                                        : std::min<int64_t>((int64_t) profile.size(), xcache.slots());
-        for (int64_t i = 0; i < want; ++i) {
+        const auto tfill = std::chrono::steady_clock::now();
+        uint64_t fill_bytes = 0;
+        // SYCL port: from the GGUF (--stream-experts) the fill is a pipeline. The serial form read each expert's three
+        // slices, copied it, and waited for the copy before the next read (~18,000 experts, neither the SSD nor PCIe
+        // kept busy). Here the slots are admitted first (the same profile order, so the same placement), the reads go
+        // in file order by worker threads into page-locked batches, and a batch's copies run while the next batch is
+        // read. STRATA_FILL_SERIAL=1: the serial form.
+        const bool piped = srcp == &gguf_src && !per_layer && std::getenv("STRATA_FILL_SERIAL") == nullptr;
+        if (piped) {
+            struct Fill { int32_t slot; int32_t l, e; };
+            std::vector<Fill> fills;
+            fills.reserve((size_t) want);
+            for (int64_t i = 0; i < want; ++i) {
+                const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
+                if (slot == strata::core::kNotResident) break;
+                fills.push_back({slot, (int32_t) profile[(size_t) i].first, (int32_t) profile[(size_t) i].second});
+            }
+            std::sort(fills.begin(), fills.end(), [](const Fill& a, const Fill& b) {
+                return a.l != b.l ? a.l < b.l : a.e < b.e;   // file order: each tensor read front to back
+            });
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            constexpr size_t kBatch = 64;
+            const size_t blob_cap = (size_t) lay.max_blob;
+            sycl::queue& q = dpct::get_in_order_queue();
+            uint8_t* pin = sycl::malloc_host<uint8_t>(2 * kBatch * blob_cap, q);
+            if (pin == nullptr) {
+                std::fprintf(stderr, "strata generate: the profile fill could not pin %zu MiB\n",
+                             (2 * kBatch * blob_cap) >> 20);
+                return 1;
+            }
+            const int nthreads = std::max(2, std::min(8, (int) std::thread::hardware_concurrency()));
+            sycl::event done[2];
+            bool read_ok = true;
+            for (size_t b0 = 0, k = 0; b0 < fills.size() && read_ok; b0 += kBatch, ++k) {
+                const size_t n = std::min(kBatch, fills.size() - b0);
+                uint8_t* set = pin + (k % 2) * kBatch * blob_cap;
+                done[k % 2].wait();                       // the copies that last read this half are finished
+                std::atomic<size_t> next{0};
+                std::atomic<bool> ok{true};
+                std::vector<std::thread> ts;
+                for (int t = 0; t < nthreads; ++t)
+                    ts.emplace_back([&] {
+                        for (size_t j; (j = next.fetch_add(1)) < n;) {
+                            const Fill& f = fills[b0 + j];
+                            if (!gguf_src.read_into(f.l, f.e, set + j * blob_cap, blob_cap)) ok = false;
+                        }
+                    });
+                for (auto& t : ts) t.join();
+                if (!ok) { read_ok = false; break; }
+                for (size_t j = 0; j < n; ++j) {
+                    const Fill& f = fills[b0 + j];
+                    const size_t nb = (size_t) lay.blob_bytes(f.l);
+                    done[k % 2] = q.memcpy(xcache.device_slot(f.slot), set + j * blob_cap, nb);
+                    fill_bytes += nb;
+                }
+            }
+            q.wait();
+            sycl::free(pin, q);
+            if (!read_ok) {
+                std::fprintf(stderr, "strata generate: the profile fill could not read an expert from the GGUF\n");
+                return 1;
+            }
+            prefilled = (int64_t) fills.size();
+        }
+        for (int64_t i = 0; i < want && !piped; ++i) {
             const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
             if (slot == strata::core::kNotResident) {
                 if (per_layer) continue;
@@ -3120,7 +3184,12 @@ int main(int argc, char **argv) try {
                 return 1;
             }
             ++prefilled;
+            fill_bytes += (uint64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first);
         }
+        const double fill_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tfill).count();
+        std::fprintf(stderr, "strata generate: profile fill: %.2f GiB in %.1f s (%.2f GB/s, %s)\n",
+                     (double) fill_bytes / 1073741824.0, fill_s, fill_s > 0 ? (double) fill_bytes / 1e9 / fill_s : 0.0,
+                     piped ? "pipelined" : "serial");
         // **AND ONE SLOT IS READ BACK AND COMPARED.**  A residency table that is right about indices and wrong
         // about bytes produces a plausible token, which is this project's most expensive failure mode; the
         // cache's own `verify_slot` is the check and it costs one 1.38 MB D2H at startup.

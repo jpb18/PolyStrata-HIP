@@ -542,6 +542,14 @@ family, the same GSQ-RCO layout) decoded token 0 forever: NaN logits from layer 
 
 Swift 1.5 IQ2_XS after both: correct answers, 51-118 words of thinking on short questions, 48 tok/s raw decode.
 
+**Load time (2026-10-02).** Starting a model is mostly the expert cache's fill from the GGUF (`--stream-experts`):
+the Coder's 23.4 GiB of experts took 64-76 s, the IQ2_XS's 24.9 GiB 91 s, because the fill read each expert's
+three slices, copied the blob and waited for the copy before the next read. It is a pipeline now: the slots are
+admitted in profile order first (the same placement), the reads go in file order by up to 8 threads into
+page-locked batches of 64, and a batch's copies run while the next one is read. Cold page cache: 76.2 s -> 18.8 s
+(0.33 -> 1.34 GB/s); a whole Coder start from the engine's launch to its first token 82 s -> 26 s, the IQ2_XS
+120 s -> 41 s (its 8.2 GB host mirror is ~9 s of the rest). Output identical. `STRATA_FILL_SERIAL=1` is the old fill.
+
 **Not ported yet (2026-10-01).**
 
 - Three kernels carry inline PTX (`mma.sync` tensor-core matrix ops, `ldmatrix`, `cp.async`):
