@@ -588,6 +588,14 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   set_tests_properties(sampler_parity_one_block PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=1")
   add_test(NAME sampler_parity_old COMMAND sampler_parity --selftest)
   set_tests_properties(sampler_parity_old PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=1;STRATA_SAMPLER_ONE_BLOCK=0")
+  # S19: the decode QSA top-k and the greedy argmax on thread-block clusters (sm_90+) vs the one-CTA kernels, bitwise,
+  # captured in a graph too (GPU, synthetic, no model; skips below sm_90); --bench: per-call times
+  if(STRATA_ENABLE_CUDA)
+    add_executable(decode_cluster_parity src/kernels/decode_cluster_parity.cpp)
+    target_include_directories(decode_cluster_parity PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(decode_cluster_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME decode_cluster_parity COMMAND decode_cluster_parity --selftest)
+  endif()
 
   add_executable(rope_parity src/kernels/rope_parity.cpp)
   target_include_directories(rope_parity PRIVATE ${_strata_gpu_include_directories})
