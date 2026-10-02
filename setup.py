@@ -2296,9 +2296,16 @@ def calibrate_config(cfg_path: Path) -> bool:
     say("  Tuning Strata for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
     say("  draft depth, the CPU threads). It takes about 5-10 minutes; the PC is busy meanwhile.")
     try:
+        since = os.path.getsize(cfg["log"]) if cfg.get("log") and os.path.isfile(cfg["log"]) else 0
+    except OSError:
+        since = 0
+    try:
         res = CAL.run(cfg, say=say)
     except Exception as e:                             # never stops an install: the defaults stay
         warn(f"the tuning did not finish ({e}): the default settings stay")
+        why = CAL.engine_error(cfg.get("log"), since)  # #447: the engine's own reason, not only "see the log"
+        if why:
+            say(f"       the engine said: {why}")
         return False
     cfg["args"] = CAL.apply(cfg["args"], res["settings"])
     write_config(cfg_path, cfg)
@@ -2685,7 +2692,10 @@ def main() -> int:
             for i, c in enumerate(have, 1):
                 say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        calibrate_config(pick_cfg)
+        if not calibrate_config(pick_cfg):             # #447: said again where it is not lost above the start
+            say()
+            warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
+                 + ("keeps" if a.no_start else "starts with") + " the default settings")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
@@ -3263,7 +3273,9 @@ def main() -> int:
     if cal is None and not hip and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 5-10 minutes; the PC is busy "
             "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
-        calibrate_config(cfg_path)
+        tuned = calibrate_config(cfg_path)
+    else:
+        tuned = None                                   # not asked for: nothing to repeat below
     ok(f"start script: {script.name}")
 
     say()
@@ -3276,6 +3288,9 @@ def main() -> int:
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
+    if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
+        say("  Tuning:           FAILED (the reason is above): the default settings stay - "
+            f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
     if a.no_start:
         return 0
     return start(cfg_path, port)
