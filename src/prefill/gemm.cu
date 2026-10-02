@@ -2,6 +2,10 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/kernels/dequant_bf16.hpp"
 
+#ifdef STRATA_USE_HIP
+#include "wmma_gemm.h"
+#endif
+
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -376,6 +380,16 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
                 float beta) {
     if (T <= 0 || N <= 0) return;
     if (ldy <= 0) ldy = N;
+#ifdef STRATA_USE_HIP
+    // #313 (opt-in STRATA_WMMA_GEMM=1; STRATA_WMMA_BF16=0 excludes bf16): RDNA3 / RDNA3.5 WMMA dense GEMM, before
+    // hipBLASLt; it returns false for shapes it does not take (and off gfx11) and this falls through
+    static const bool wmma_on = [] { const char* v = std::getenv("STRATA_WMMA_GEMM"); return v && v[0] != 0 && v[0] != '0'; }();
+    static const bool bf16_on = [] { const char* v = std::getenv("STRATA_WMMA_BF16"); return !v || (v[0] != 0 && v[0] != '0'); }();
+    if (wmma_on && bf16_on && T >= 16 && (beta == 0.0f || beta == 1.0f) &&
+        strata_wmma_gemm_bf16(X, W, Y, T, N, K, ldy, beta, stream_)) {
+        return;
+    }
+#endif
     const float alpha = 1.0f;
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     if (try_hipblaslt(hipblaslt_state_, strata::prefill::hipblaslt::InputType::bf16, X, W, Y, T, N, K, ldy,
@@ -396,6 +410,14 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
                float beta) {
     if (T <= 0 || N <= 0) return;
     if (ldy <= 0) ldy = N;
+#ifdef STRATA_USE_HIP
+    // #313 (opt-in STRATA_WMMA_GEMM=1): RDNA3 / RDNA3.5 WMMA dense GEMM, before hipBLASLt (falls through when false)
+    static const bool wmma_on = [] { const char* v = std::getenv("STRATA_WMMA_GEMM"); return v && v[0] != 0 && v[0] != '0'; }();
+    if (wmma_on && T >= 16 && (beta == 0.0f || beta == 1.0f) &&
+        strata_wmma_gemm_f16(X, W, Y, T, N, K, ldy, beta, stream_)) {
+        return;
+    }
+#endif
     const float alpha = 1.0f;
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     if (try_hipblaslt(hipblaslt_state_, strata::prefill::hipblaslt::InputType::f16, X, W, Y, T, N, K, ldy,

@@ -68,6 +68,11 @@ add_library(strata_hip_runtime INTERFACE)
 target_include_directories(strata_hip_runtime BEFORE INTERFACE
   "${STRATA_HIP_COMPAT_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_definitions(strata_hip_runtime INTERFACE STRATA_USE_HIP=1 "STRATA_HIP_ARCHS=\"${STRATA_HIP_ARCHS}\"")
+# #313: the RDNA3 WMMA GEMM's intrinsics only compile for gfx11 targets and the host pass does not define
+# __gfx11xx__, so the build supplies the macro for gfx11 configs (the kernels also gate on the device at runtime)
+if(CMAKE_HIP_ARCHITECTURES MATCHES "gfx11")
+  target_compile_definitions(strata_hip_runtime INTERFACE STRATA_WMMA_GFX11=1)
+endif()
 target_link_libraries(strata_hip_runtime INTERFACE hip::host)
 # The shim renames the CUDA runtime to HIP, force-included into every host and device source. On Windows the host
 # compiler is ROCm's clang++ too (tools/hip/build_windows.bat: CMake refuses to mix cl.exe with Clang HIP), which takes
