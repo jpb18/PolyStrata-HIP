@@ -106,5 +106,40 @@ class Update(unittest.TestCase):
         start.assert_not_called()
 
 
+class SettingsLine(unittest.TestCase):
+    """#564: a start prints the settings it uses (the engine options without the model's paths, and the server's
+    fields), so a change made by hand to strata-<model>.json shows without reading the log."""
+
+    CFG = {"exe": "x", "host": "0.0.0.0", "port": 8081, "api_key": "secret", "gpu": [0, 1], "fit_max_tokens": True,
+           "args": ["--native", "E:\\Strata\\packs\\iq3_s", "--mtp", "/s/mtp/rt", "m.gguf", "--kv", "int8",
+                    "--kv-resident", "32768", "--spec-min-p", "0.5", "--vram-reserve-mib", "2048", "--mmap-experts",
+                    "--prefill", "auto"]}
+
+    def test_summary(self):
+        s = setup.settings_summary(self.CFG)
+        self.assertEqual(s, "--kv int8 --kv-resident 32768 --spec-min-p 0.5 --vram-reserve-mib 2048 --mmap-experts "
+                            "--prefill auto; server 0.0.0.0:8081, api key set, gpu 0,1, fit_max_tokens true")
+        self.assertNotIn("secret", s)
+        self.assertIn("127.0.0.1:9000", setup.settings_summary({"args": []}, 9000))
+
+    def test_a_start_prints_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "strata.exe"
+            exe.write_bytes(b"")
+            p = Path(d) / "strata-iq3_s.json"
+            args = [x for x in self.CFG["args"] if x != "m.gguf"]           # no model file here
+            p.write_text(json.dumps({**self.CFG, "exe": str(exe), "gpu": 0, "args": args}), encoding="utf-8")
+            out = io.StringIO()
+            with mock.patch.object(setup, "gpus", lambda: []), \
+                    mock.patch.object(setup, "refresh_draft_vocab"), \
+                    mock.patch.object(setup, "is_wsl", lambda: False), \
+                    mock.patch.object(setup.subprocess, "call", return_value=0), \
+                    contextlib.redirect_stdout(out):
+                setup.start(p, None, open_browser=False, yes=True)
+        text = " ".join(out.getvalue().split())
+        self.assertIn("Settings (strata-iq3_s.json): --kv int8 --kv-resident 32768", text)
+        self.assertIn("--vram-reserve-mib 2048", text)
+
+
 if __name__ == "__main__":
     unittest.main()
