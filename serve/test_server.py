@@ -747,6 +747,51 @@ class EngineDeath(unittest.TestCase):
             httpd.server_close()
 
 
+class DoneLineEngine(MockEngine):
+    """The mock engine whose `last` comes from a DONE line, parsed as StrataEngine parses it."""
+
+    def __init__(self, *a, done_lines=(), **kw):
+        super().__init__(*a, **kw)
+        self.done_lines = list(done_lines)
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        try:
+            yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+        finally:
+            StrataEngine._parse_done(self, self.done_lines.pop(0))
+
+
+class DraftCounts(unittest.TestCase):
+    """#457: GET /metrics gives each request's speculative draft counts (offered / accepted, from the engine's DONE
+    line; None when the line has no such fields) and their running sums in the totals."""
+
+    def test_drafts_in_history_and_totals(self):
+        tok = ByteTokenizer()
+        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
+            "DONE 4 20 40.0 30.0 stop 7 12 0",                  # 7 of 12 drafts accepted
+            "DONE 4 20 40.0 30.0 stop",                          # an engine that reports no drafts
+            "DONE 4 20 40.0 30.0 stop 3 5 0 9 10"])
+        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.assertEqual((svc.totals["drafts_offered"], svc.totals["drafts_accepted"]), (0, 0))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            for _ in range(3):
+                body = json.dumps({"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]})
+                with urllib.request.urlopen(urllib.request.Request(base + "/v1/chat/completions", data=body.encode(),
+                                                                   headers={"Content-Type": "application/json"}),
+                                            timeout=30) as r:
+                    self.assertEqual(r.status, 200)
+            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
+                m = json.loads(r.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        rows = m["requests"]                                      # newest first
+        self.assertEqual([(r["drafts_offered"], r["drafts_accepted"]) for r in rows], [(5, 3), (None, None), (12, 7)])
+        self.assertEqual((m["totals"]["drafts_offered"], m["totals"]["drafts_accepted"]), (17, 10))
+
+
 class LiveRate(unittest.TestCase):
     """The Monitor's Speed readout: live.tok_s is a rate, and a request that never got a DONE keeps no counters.
 
