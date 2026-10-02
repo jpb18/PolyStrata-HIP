@@ -123,12 +123,16 @@ inline bool fused_ring() {
     if (core::peer_portable()) return false;   // multi-GPU: --peer-device keeps the MMQ path and its buffer sizes
     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
     if (!lay.native) return true;
-    static const bool any = [&lay] {
+    // EVERY layer: fused_layout() shrinks the MoE buffers to the fused path's needs, so a layer the native kernels do
+    // not cover (Unsloth UD-IQ4_XS's Q8_0 down projections) would run MMQ in them at the full chunk and overflow them
+    // (garbage, an illegal memory access or a hung prompt on gfx1151).  A pack with such a layer keeps MMQ's buffers;
+    // its covered layers still take the fused kernels.
+    static const bool all = [&lay] {
         for (const auto& f : lay.fmt)
-            if (fused::native_supported(f.gu_type, f.d_type)) return true;
-        return false;
+            if (!fused::native_supported(f.gu_type, f.d_type)) return false;
+        return !lay.fmt.empty();
     }();
-    return any;
+    return all;
 }
 // the largest ring: 512 slots; 1024 with the Q2_0 pack's fused experts (P3's smaller buffers, measured there) - the
 // native packs' fused layers were measured at 512
