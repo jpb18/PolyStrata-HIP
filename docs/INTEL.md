@@ -20,11 +20,11 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 | model files | the same GGUFs | the same GGUFs + a native pack | the same GGUFs |
 | where the model lives | experts in RAM, hot ones on the card | every expert in VRAM (`--stream-experts`: no host copy), shard 2's lookup table read from the SSD by row | all of shard 1 on the card, shard 2 paged from disk |
 | RAM needed | 32-64 GB | little (23 GB is fine) | little (23 GB is fine) |
-| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **78.2 tok/s** (19-token prompt, 256 greedy tokens), **75.7** after a 2,184-token prompt, 59.5 after 128K, 48.7 after 256K; 48-72 through the API | 23-25 tok/s |
-| prompt reading | ~1,870 tok/s | **780 tok/s** at 2,184 tokens, 1,189 at 40K, 934 at 128K, 784 at 256K | ~150 tok/s (424 at 105K) |
+| decode, Coder IQ1_M | 44-51 tok/s on an RTX 5070 | **78.2 tok/s** (19-token prompt, 256 greedy tokens), **75.7** after a 2,184-token prompt, 69 after 40K, 66.6 after 128K, 55.9 after 256K; 48-72 through the API | 23-25 tok/s |
+| prompt reading | ~1,870 tok/s | **790 tok/s** at 2,184 tokens, 1,117 at 40K, 888 at 128K, 757 at 256K | ~150 tok/s (424 at 105K) |
 | speculative decoding (MTP) | yes | yes (the base checkpoint's draft layer; 70-85% of drafts accepted on code) | no |
 | images | yes | not yet | not yet |
-| context | up to 262K | 256K measured, 49 tok/s decode there (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
+| context | up to 262K | 256K measured, 56 tok/s decode there (`--kv-resident`: the KV in pinned host memory, the attended window in VRAM) | 131K measured ceiling |
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
 on the text"). The SYCL numbers are greedy runs of the engine (as in "How to run it by hand" below, 256 new
@@ -282,22 +282,23 @@ output tokens between paths, never only timings.
   It costs ~1 s on short prompts (2,184 tokens: 610 vs 792 tok/s), so the port borrows by default only above a
   32K context (`--prefill-borrow` / `--no-prefill-borrow` decide explicitly).
 
-**Long contexts (2026-10-01, engine 0.1.31-sycl, setup's flags: `--kv-resident 32768 --vram-reserve-mib 2048
---prefill 4096`, prompt-slot borrowing off - see the 0.1.31 merge below).** Same text repeated to length, then 256
-greedy tokens:
+**Long contexts (2026-10-01, engine 0.1.32-sycl, setup's flags: `--kv-resident 32768 --vram-reserve-mib 2048
+--prefill 4096`, the prompt path borrowing cache slots - the default above 32K).** Same text repeated to length,
+then 256 greedy tokens:
 
 | context | KV | prompt | decode after | peak VRAM | experts in the host mirror |
 |---|---|---|---|---|---|
-| 128K | int8 | 934 tok/s (137 s) | **59.5 tok/s** | 29.7 GB | 1,040 (2.0 GB) |
-| 128K | q4_0 | 887 tok/s (144 s) | 53.4 tok/s | 29.3 GB | 1,073 |
-| 128K | k8v4, KV in VRAM | **1,026 tok/s** (125 s) | 54.4 tok/s | 29.5 GB | 1,523 (2.9 GB) |
-| 256K | int8 | 784 tok/s (327 s) | **48.7 tok/s** | 29.7 GB | 1,288 (2.5 GB) |
-| 256K | q4_0 | 763 tok/s (336 s) | 43.2 tok/s | 29.6 GB | 1,188 |
-| 256K | k8v4, KV in VRAM | 838 tok/s (305 s) | 42.3 tok/s | 29.5 GB | 2,327 (4.5 GB) |
+| 128K | int8 | 888 tok/s (144 s) | **66.6 tok/s** | 29.9 GB | none |
+| 128K | q4_0 | 848 tok/s (151 s) | 62.8 tok/s | 29.7 GB | none |
+| 128K | k8v4, KV in VRAM | **1,006 tok/s** (127 s) | **66.8 tok/s** | 30.7 GB | 103 (0.2 GB) |
+| 256K | int8 | 757 tok/s (338 s) | **55.9 tok/s** | 30.2 GB | none |
+| 256K | q4_0 | 737 tok/s (347 s) | 51.7 tok/s | 30.0 GB | none |
+| 256K | k8v4, KV in VRAM | 823 tok/s (311 s) | 52.2 tok/s | 30.9 GB | 865 (1.7 GB) |
 
-Before the merge, with borrowing (every expert in VRAM): 128K int8 856 / 66.1, 256K int8 740 / 54.1 tok/s. Without
-borrowing the prompt buffers keep their own VRAM, ~1,000-2,300 experts move to the pinned host mirror (planned item
-2) and decode pays ~10-17% for reading them over PCIe; the prompt is 4-9% faster.
+Borrowing keeps every expert in VRAM (the prompt buffers live in lent cache slots, refilled after the prompt).
+Without it (`--no-prefill-borrow`) the buffers keep their own VRAM and ~1,000-2,300 experts move to the pinned host
+mirror: the prompt is 2-5% faster, decode after it 10-23% slower (0.1.31 without borrowing: 128K int8 934 / 59.5,
+q4_0 887 / 53.4, k8v4 1,026 / 54.4; 256K int8 784 / 48.7, q4_0 763 / 43.2, k8v4 838 / 42.3 tok/s).
 
 KV streaming (`--kv-resident`) keeps the whole KV in pinned host memory and only the attended window in VRAM, so
 the KV pushes no experts out; setup.py turns it on from 64K up and keeps INT8 (the faster of the
@@ -470,9 +471,8 @@ part of the procedure now: it caught a dropped mirror hook and four doorbell wai
   group); the port's grid is sized for its own kernels (8 lanes a row, 32 rows a group), so only a quarter of each
   expert's rows were written and the output was end-of-text tokens. The port's kernels stay the default (they also
   serve upstream's new Q4_K/Q5_K/Q5_1/Q8_0 experts); `STRATA_EXPERT_SPLIT=1` runs upstream's, with their grid.
-- **Prompt-slot borrowing hangs** in the first chunk of any prompt with it on (40K, 128K; GPU busy, no chunk ends)
-  since upstream's borrow rework. Off by default on SYCL (`--prefill-borrow` opts in); long prompts are faster
-  without it, decode after them ~10-17% slower (the table above). Open.
+- **Prompt-slot borrowing hung** in the first chunk of any prompt with it on (40K, 128K; GPU busy) - fixed after
+  the 0.1.32 merge, see "Prompt-slot borrowing: the hang" below.
 - **Upstream's new tests found three dpct mistranslations from the first migration.** dpct writes `__fadd_rn(a, b)`
   as `a + b` without parentheses, so `__fadd_rn(sum, c ? x : y)` became `sum + c ? x : y` (replaced, not added): in
   the native QSA indexer's per-token pooled key (the decode path: blocks completed while generating got wrong
@@ -506,6 +506,18 @@ files with real conflicts. What it needed:
   same speeds (Coder 77.7-78.1 / 75.7 tok/s, IQ2_XS 58.5), 40K prompt 1,201 tok/s then 65.1 tok/s decode.
   `kv_hybrid_parity` and `qsa_prompt_attn_parity` pass (the tests now turn on the XMX prompt attention they
   check); `iq_multi_parity` (IQ2_XS) and `s2_expert_grouped_parity` as before.
+
+**Prompt-slot borrowing: the hang (fixed 2026-10-01).** From 0.1.31 on, a prompt that borrowed cache slots stopped
+in its first full chunk with the GPU at 100% and the host waiting on the compute queue. It was never a borrowing
+bug: borrowing is just the only way the Coder streams experts during a prompt (every expert is resident otherwise),
+and the streamed path's stager deadlocked. Its threads read experts into a ring of 16 page-locked buffers and, to
+reuse one, waited on the copy queue's event for the DMA that last read it (the CUDA form, `cudaEventSynchronize`).
+Under the Level Zero v2 adapter that event, once a host thread had waited on it, no longer released the other
+queue's barrier that also listed it, and the GPU waited forever - only once a layer streamed more than 16 experts
+(the ring wrapped). The v1 adapter (`SYCL_UR_USE_LEVEL_ZERO_V2=0`) and a 256-buffer ring both ran; so did a sync
+after every phase (`STRATA_PREFILL_SYNC=1`, kept as a debug switch). The fix: the copy queue writes a sequence
+number into page-locked host memory after each DMA and the stager polls it - no host thread waits on a queue's
+event. Output is bit-identical to the run without borrowing; borrowing is the default above 32K again.
 
 **Not ported yet (2026-10-01).**
 

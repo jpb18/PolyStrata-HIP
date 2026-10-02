@@ -1486,10 +1486,11 @@ int main(int argc, char **argv) try {
     // 610 vs 792 tok/s) but is what keeps every expert in VRAM at a long context - 80,000 tokens without it: the
     // reserve for the KV and the chunk buffers evicts ~1,900 experts, prompt 790 tok/s and decode 2 tok/s after it;
     // with it: 1,062 tok/s and 39.5 tok/s. So by default only above a 32K context; the flags still decide.
-    // SYCL port (0.1.31 merge): borrowing hangs in the first chunk of a long prompt (GPU busy, no chunk ever finishes;
-    // 2026-10-01, 40K and 128K prompts, with and without --kv-resident) since upstream's borrow rework; without it the
-    // same prompts read at 1,017-1,189 tok/s. Off by default until that is found; --prefill-borrow opts in.
-    if (!borrow_explicit) o.no_prefill_borrow = true;
+    // (0.1.31-0.1.32: borrowing hung in the first chunk of a long prompt; the prompt path's stager waited on the copy
+    // queue's events from its own threads, which the Level Zero v2 adapter did not survive once its ring wrapped -
+    // prefill.cpp, Stager::issued_one. Fixed 2026-10-01: a 40K prompt borrowing reads at 1,144 tok/s and decodes at
+    // 69 tok/s after it, against 1,201 / 65 with its own buffers.)
+    if (!borrow_explicit) o.no_prefill_borrow = o.max_context <= 32768;
 #if defined(STRATA_USE_HIP)
     {
         // every GPU this run uses must be an architecture the binary has code for (a gfx1100 build on a gfx1201

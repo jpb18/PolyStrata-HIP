@@ -190,6 +190,9 @@ struct Stager {
     std::vector<char> pinned;
     std::vector<std::vector<uint8_t>> pageable;   // the fallback when no more RAM can be pinned
     std::vector<dpct::event_ptr> dma_done;
+    uint64_t* done_seq = nullptr;            // page-locked: the copy queue's last finished DMA per buffer
+    std::vector<uint64_t> want;              // the sequence number each buffer's last DMA writes
+    uint64_t issue_seq = 0;
     std::vector<Job> jobs;
     std::unique_ptr<std::atomic<int>[]> ready;
     size_t ready_cap = 0;
@@ -209,6 +212,10 @@ struct Stager {
         buf.assign((size_t) kRing, nullptr);
         pinned.assign((size_t) kRing, 0);
         dma_done.assign((size_t) kRing, nullptr);
+        want.assign((size_t) kRing, 0);
+        done_seq = sycl::malloc_host<uint64_t>((size_t) kRing, dpct::get_in_order_queue());
+        if (done_seq == nullptr) return false;
+        for (int i = 0; i < kRing; ++i) done_seq[i] = 0;
         pageable.resize(kRing);
         for (int i = 0; i < kRing; ++i) {
             /*
@@ -239,6 +246,7 @@ struct Stager {
         { std::lock_guard<std::mutex> lk(mu); quit = true; }
         cv.notify_all();
         for (auto& t : threads) t.join();
+        if (done_seq) sycl::free(done_seq, dpct::get_in_order_queue());
         for (int i = 0; i < kRing; ++i) {
             if (dma_done[i]) dpct::destroy_event(dma_done[i]);
             if (buf[i] && pinned[i])
@@ -266,7 +274,7 @@ struct Stager {
                 const int b = j % kRing;
                 if (j >= kRing) {
                     while (issued.load(std::memory_order_acquire) <= j - kRing) std::this_thread::yield();
-                    dma_done[b]->wait_and_throw();
+                    while (!buffer_free(b)) std::this_thread::yield();
                 }
                 const Job& jb = jobs[(size_t) j];
                 if (jb.gsrc != nullptr) {
@@ -315,9 +323,20 @@ struct Stager {
         return buf[j % kRing];
     }
     /// The launching thread queued job j's DMA on `copy`: its buffer is free once that is done.
+    /// The launching thread queued job j's DMA on `copy`: its buffer is free once that is done.
+    // SYCL port: the copy queue writes a sequence number into page-locked host memory after the DMA and the stager
+    // thread polls it, instead of waiting on an event. A stager thread's host wait on the copy queue's events (the
+    // CUDA form, cudaEventSynchronize) hung a lent-slot prompt in its first full chunk under the Level Zero v2 adapter
+    // once the ring wrapped: no thread was waiting by then, the GPU sat busy - the event a host thread had waited on
+    // was still in a queue's wait list (the v1 adapter and a 256-buffer ring, which never waits, both ran). 2026-10-01
     void issued_one(int j, dpct::queue_ptr copy) {
-        dpct::sync_barrier(dma_done[j % kRing], copy);
+        const uint64_t s = ++issue_seq;
+        want[(size_t) (j % kRing)] = s;
+        copy->fill<uint64_t>(done_seq + j % kRing, s, 1);
         issued.store(j + 1, std::memory_order_release);
+    }
+    bool buffer_free(int b) const {
+        return *(volatile const uint64_t*) (done_seq + b) >= want[(size_t) b];
     }
     /// No job is running after this (the end of a layer, or an early return in the middle of one).
     void finish() {
@@ -1118,7 +1137,18 @@ struct PfTimer {
     std::vector<int> ph;
     size_t used = 0;
     double ms[kPfCount] = {};
+    // STRATA_PREFILL_SYNC=1 (debug): wait for the GPU at every mark and log the phase that just finished, so a hang
+    // names the stage that never completes
+    bool sync = std::getenv("STRATA_PREFILL_SYNC") != nullptr;
+    long long n_sync = 0;
     void mark(int phase, dpct::queue_ptr s) {
+        if (sync) {
+            const auto t0 = std::chrono::steady_clock::now();
+            s->wait();
+            std::fprintf(stderr, "strata prefill sync: mark %lld phase %s done (waited %.1f ms)\n", ++n_sync,
+                         phase < kPfCount ? kPfNames[phase] : "?",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
         if (!on) return;
         if (used == ev.size()) {
             dpct::event_ptr e = nullptr;
@@ -2072,8 +2102,7 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                             return by memcpy API to ensure synchronization
                             behavior.
                             */
-                            m.copy->memcpy(m.stage_dev[sl], hb,
-                                           (size_t)lay.blob_bytes(l));
+                            m.copy->memcpy(m.stage_dev[sl], hb, (size_t)lay.blob_bytes(l));
                             m.stager->issued_one(job_of[j], m.copy);
                         }
                         dpct::sync_barrier(m.copied[sl], m.copy);
