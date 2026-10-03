@@ -56,6 +56,11 @@ Or edit an existing config (`strata-*.json`), then restart:
 "layer_split": "auto"
 ```
 
+`"layer_split"` is `"auto"` (placed by each card's free VRAM) or the **first layer of each later card**: one rising
+number per card after the first, not a count of layers per card. With 4 cards and a 48-layer model, `"24,36,42"`
+(or `[24, 36, 42]`) puts layers 0-23 on the first card, 24-35 on the second, 36-41 on the third and 42-47 on the last.
+The server checks it before the start and says what is wrong (0.1.39, #644).
+
 **Skip the split when the first card holds everything** (opt-in, 0.1.31): `"split_skip_if_fits": true` in the config
 (engine flag `--split-skip-if-fits`, with `--layer-split auto`) runs on the first card alone when it holds every
 profiled expert plus the context's KV, the draft layer and the reserve, and says so in the log; otherwise the split

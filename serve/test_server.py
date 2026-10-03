@@ -21,7 +21,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, Service, StrataEngine,  # noqa: E402
-                          engine_args, prompt_tokens_seen, request_timings, serve, start_failure_hint)
+                          engine_args, layer_split_value, prompt_tokens_seen, request_timings, serve,
+                          start_failure_hint)
 from types import SimpleNamespace  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -845,6 +846,38 @@ class LearnedProfile(unittest.TestCase):
     def test_no_profile_in_the_args(self):
         cfg = {"args": ["--native", "x"], "expert_profile_save": "learned.bin"}
         self.assertEqual(engine_args(cfg), ["--native", "x", "--expert-profile-save", "learned.bin"])
+
+
+class LayerSplit(unittest.TestCase):
+    """#644: "layer_split" is the first layer of each later GPU; a list is accepted, counts per card are not."""
+
+    def cfg(self, split, gpus=(2, 0, 1, 3)):
+        c = {"args": ["--native", "x"], "gpu": list(gpus)}
+        if split is not ...:
+            c["layer_split"] = split
+        return c
+
+    def test_auto_and_absent(self):
+        for v in (..., None, "", "auto", "AUTO"):
+            self.assertEqual(engine_args(self.cfg(v))[-2:], ["--layer-split", "auto"])
+
+    def test_string_and_list(self):
+        self.assertEqual(engine_args(self.cfg("24,36,42"))[-2:], ["--layer-split", "24,36,42"])
+        self.assertEqual(engine_args(self.cfg(" 24, 36 ,42 "))[-2:], ["--layer-split", "24,36,42"])
+        self.assertEqual(engine_args(self.cfg([24, 36, 42]))[-2:], ["--layer-split", "24,36,42"])
+        self.assertEqual(engine_args(self.cfg(18, gpus=(0, 1)))[-2:], ["--layer-split", "18"])
+        self.assertEqual(engine_args(self.cfg([18], gpus=(0, 1)))[-2:], ["--layer-split", "18"])
+
+    def test_counts_per_card_are_refused_with_the_format(self):
+        for bad in ("24,16,12,12", [24, 16, 12, 12], "24,16,12", "24,36", "x", [24.5, 30, 40], "1,20,30", [True]):
+            with self.assertRaises(ValueError) as e:
+                layer_split_value(self.cfg(bad))
+            self.assertIn("first layer of each later GPU", str(e.exception))
+            self.assertIn('"12,24,36"', str(e.exception))   # the example for 4 GPUs
+
+    def test_one_gpu_ignores_it(self):
+        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0], "layer_split": "24,16"}),
+                         ["--native", "x"])
 
 
 class DraftHeadHint(unittest.TestCase):

@@ -789,12 +789,46 @@ def engine_silence_s(cfg: dict) -> float:
     return float(v)
 
 
+def layer_split_value(cfg: dict) -> str:
+    """#644: the config's "layer_split" as the engine's --layer-split value: "auto" (the default), or the FIRST LAYER of
+    each later GPU's share - one rising number per GPU after the first, e.g. "24,36,42" for 4 GPUs (layers 0-23 on the
+    first card, 24-35, 36-41, 42 to the end) - as a string or a JSON list ([24, 36, 42]).  ValueError with the format
+    and an example for anything else, such as per-card layer counts ("24,16,12,12")."""
+    v = cfg.get("layer_split")
+    if v is None or (isinstance(v, str) and v.strip().lower() in ("", "auto")):
+        return "auto"
+    n = len(gpu_list(cfg))
+    items = v if isinstance(v, (list, tuple)) else str(v).split(",") if isinstance(v, (str, int)) else None
+    vals = []
+    for x in items or []:
+        try:
+            if isinstance(x, bool) or isinstance(x, float):
+                raise ValueError
+            vals.append(int(str(x).strip()))
+        except ValueError:
+            vals = None
+            break
+    want = max(n - 1, 1)
+    example = ",".join(str(round(48 * (i + 1) / (want + 1))) for i in range(want))
+    hint = (f'"layer_split" is the first layer of each later GPU, one rising number per GPU after the first '
+            f'({want} for {n} GPUs), not a count of layers per card - e.g. "{example}" (or [{example.replace(",", ", ")}])'
+            f' for an even share of 48 layers, or "auto" (the default) to place them by each card\'s free VRAM')
+    if not vals:
+        raise ValueError(f"{hint}; got {v!r}")
+    if n > 1 and len(vals) != n - 1:
+        raise ValueError(f"{hint}; got {len(vals)} number(s) ({v!r}) for {n} GPUs")
+    if vals[0] < 2 or any(b <= a for a, b in zip(vals, vals[1:])):
+        raise ValueError(f"{hint}; got {v!r}, which does not rise from 2 or more")
+    return ",".join(str(x) for x in vals)
+
+
 def engine_args(cfg: dict) -> list[str]:
     """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
-    config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32")."""
+    config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32"; see
+    layer_split_value)."""
     args = list(cfg["args"])
     if len(gpu_list(cfg)) > 1 and "--layer-split" not in args:
-        args += ["--layer-split", str(cfg.get("layer_split") or "auto")]
+        args += ["--layer-split", layer_split_value(cfg)]
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if len(gpu_list(cfg)) > 1 and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
@@ -2914,7 +2948,11 @@ def main() -> int:
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         if len(gpu_list(cfg)) > 1:
-            print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
+            try:
+                split = layer_split_value(cfg)          # #644: before the (minutes-long) start
+            except ValueError as e:
+                raise SystemExit(f"[strata] config {e}")
+            print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
         # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
         # it is told about (WinError 2), so it is made absolute here
         exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
