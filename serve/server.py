@@ -1380,7 +1380,9 @@ class Service:
         elif max_new > room:
             if not self.fit_max_tokens:
                 raise ValueError(f"prompt ({len(ids)} tokens) + max tokens ({max_new}) exceeds the context "
-                                 f"({self.engine.max_context}); requests are never truncated")
+                                 f"({self.engine.max_context}); requests are never truncated. Send a smaller "
+                                 f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
+                                 "model's strata-<model>.json to shorten it to the room left (#545)")
             max_new = max(1, room)          # --fit-max-tokens: a shorter completion beats a 400
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
@@ -1585,6 +1587,10 @@ class Service:
                             hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                                   f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
+                            if finish == "length" and parser.state == "reasoning":   # #530
+                                print("[strata] the reply reached max tokens while still thinking, so it has no "
+                                      "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
+                                      "strata-<model>.json for every request) leaves room to answer", flush=True)
                             if os.environ.get("STRATA_DEBUG") and raw_ids:
                                 print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                         self.status["busy"] = False

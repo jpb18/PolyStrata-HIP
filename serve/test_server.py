@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -135,6 +137,8 @@ class MaxTokens(unittest.TestCase):
                 s, b, _, _ = self.call(api, max_tokens=CTX)
                 self.assertEqual(s, 400)
                 self.assertIn("exceeds the context", b["error"]["message"])
+                self.assertIn("\"fit_max_tokens\": true", b["error"]["message"])     # #545: says how to get past it
+                self.assertRegex(b["error"]["message"], r"at most \d+ here")
 
     def test_unset_budget_with_a_near_full_prompt(self):
         _, _, pt0, _ = self.call("openai", max_tokens=1)
@@ -1810,6 +1814,20 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(b["choices"][0]["finish_reason"], "length")
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT[:20])
+
+    def test_a_reply_cut_while_thinking_is_named_in_the_log(self):
+        """#530: max tokens reached inside the thinking gives an empty answer; the server log says what helps."""
+        hint = "reached max tokens while still thinking"
+        for extra, said in (({"max_tokens": 10}, True), ({}, False)):
+            with self.subTest(extra=extra):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code, b = self.openai(**extra)
+                self.assertEqual(code, 200, b)
+                self.assertEqual(b["choices"][0]["finish_reason"], "length" if said else "stop")
+                self.assertEqual(hint in out.getvalue(), said, out.getvalue())
+                if said:
+                    self.assertIn("reasoning_budget_tokens", out.getvalue())
 
     def test_a_bad_value_is_a_400(self):
         for bad in ("lots", 2.5, True, [1]):

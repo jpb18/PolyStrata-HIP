@@ -50,6 +50,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -2429,8 +2430,25 @@ def find_in(roots: list, rel: str):
 
 
 # ------------------------------------------------------------------------------------------------ start
+def model_config(path: Path) -> bool:
+    """#549: a model's run config (a JSON object with "exe" and "args"). Any other strata-*.json in the folder (a
+    file of the user's own, a cut-off one) is skipped with a warning naming it instead of stopping setup."""
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(cfg, dict) and cfg.get("exe") and isinstance(cfg.get("args"), list):
+            return True
+        why = 'no "exe" or "args"'
+    except OSError as e:
+        why = e.strerror or str(e)
+    except ValueError:
+        why = "not valid JSON"
+    warn(f"skipped {path.name} ({why}): it is not a Strata model config")
+    return False
+
+
 def installed_configs():
-    return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [p for p in sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if model_config(p)]
 
 
 def source_version() -> str:
@@ -2545,6 +2563,7 @@ def update_install(have: list, a) -> int:
     setup needs a newer one (MIN_ENGINE; a compiled engine when its source changed), each installed model's config
     upgrades and its draft subset.  No question is asked and the model files are not touched; a model still running
     keeps its engine (update_installed_engine says to close it and run this again)."""
+    have = [p for p in have if model_config(p)]        # #549: a strata-*.json that is no model config is skipped
     if not have:
         say("  No model is installed in this Strata folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
         say("  it finds an earlier install's model files next to it and reuses them.")
@@ -2565,6 +2584,29 @@ def update_install(have: list, a) -> int:
     ok("Strata is updated" + (f" (engine {'.'.join(map(str, ver))})" if any(ver) else "") +
        ". Start the model with " + ("START-HERE.bat" if WIN else "./setup.sh") + " when you want it.")
     return 0
+
+
+def settings_summary(cfg: dict, port=None) -> str:
+    """#564: the settings a start uses, in one line: the config's engine options (the model's file paths left out)
+    and the server's own fields, so a change made by hand to strata-<model>.json can be checked without the log."""
+    a, out, i = [str(x) for x in cfg.get("args") or []], [], 0
+    while i < len(a):
+        flag = a[i]
+        val = a[i + 1] if i + 1 < len(a) and not a[i + 1].startswith("--") else None
+        i += 1 if val is None else 2
+        if not flag.startswith("--"):
+            continue                                   # a positional: the model file
+        if val is not None and ("/" in val or "\\" in val or val.lower().endswith((".gguf", ".bin"))):
+            continue                                   # a path: --native, --mtp, --profile ...
+        out.append(flag if val is None else f"{flag} {val}")
+    srv = [f"{cfg.get('host', '127.0.0.1')}:{port or cfg.get('port', 8080)}"]
+    if cfg.get("api_key"):
+        srv.append("api key set")
+    for k in ("gpu", "layer_split", "draft_vocab", "fit_max_tokens", "reasoning_budget_tokens", "anthropic_thinking"):
+        if cfg.get(k) is not None:
+            v = cfg[k]
+            srv.append(f"{k} {','.join(map(str, v)) if isinstance(v, list) else str(v).lower() if isinstance(v, bool) else v}")
+    return " ".join(out) + ("; " if out else "") + "server " + ", ".join(srv)
 
 
 def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
@@ -2680,6 +2722,9 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     say("  restart). That is normal: please wait and don't close this window - the browser opens when it is ready.")
     say("  Later, closing this window stops the model.")
     say("  " + "-" * 100)
+    for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(cfg, port)}", 100,
+                                           break_on_hyphens=False)):   # #564: what this start uses
+        say(("  " if n == 0 else "    ") + line)
     if not WIN and os.environ.get("STRATA_EXECV"):
         # Replace this process instead of spawning a child. The Docker image sets STRATA_EXECV=1,
         # so there the server is PID 1 and docker stop's SIGTERM reaches the process that can

@@ -482,6 +482,40 @@ print(r.choices[0].message.content)
   15 s, and `GET /status` says what it is doing (`reading the prompt`, `answering`, tokens so far). Closing the
   connection or pressing stop in your app really stops the model, so the next request starts at once.
 - **Chat apps.** Any app with an "OpenAI-compatible" provider works: base URL `http://127.0.0.1:8080/v1`, any API key.
+- **OpenCode** (#543). A starting point for `opencode.jsonc` (in your project, or `~/.config/opencode/`); the field
+  names are OpenCode's, so check its config docs if your version differs:
+
+  ```jsonc
+  {
+    "$schema": "https://opencode.ai/config.json",
+    "provider": {
+      "strata": {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Strata (local)",
+        "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "none" },  // or your api_key
+        "models": {
+          "strata": {
+            "name": "Qwen3.8-Flash-Next (Strata)",
+            // context: what you chose in setup; output: what one reply may use (prompt + output must fit)
+            "limit": { "context": 262144, "output": 32768 },
+            "options": { "reasoningEffort": "high" },                  // sent as reasoning_effort
+            "variants": {                                              // switch between them in OpenCode
+              "low": { "reasoningEffort": "low" },
+              "medium": { "reasoningEffort": "medium" },
+              "none": { "reasoningEffort": "none" }
+            }
+          }
+        }
+      }
+    },
+    "model": "strata/strata"
+  }
+  ```
+
+  Set `limit.context` to the context you chose in setup: OpenCode compacts the conversation before it gets there.
+  Keep `limit.output` well under it: a request whose prompt plus `max_tokens` runs past the context is refused (see
+  **Context** below), or add `"fit_max_tokens": true` to `strata-<model>.json`. For a hard cap on the thinking, add
+  `"reasoning_budget_tokens": N` to `strata-<model>.json` (see above).
 - **Claude Code** (Strata 0.1.17 or newer): set `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and
   `ANTHROPIC_MODEL` to a Claude model name it knows (it refuses names it doesn't; Strata ignores the name), plus any
   `ANTHROPIC_AUTH_TOKEN` (or your `api_key`, if you set one).
