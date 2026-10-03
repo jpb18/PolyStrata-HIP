@@ -121,11 +121,20 @@ bool under_wddm() {
 // a copy from a range only PART of which is registered fails ("invalid argument"), so the page ranges are merged
 // first and each merged span is registered once.  A span that does not register is copied through the staging
 // path.  Portable: a layer split copies to either card.
+// Whether pin_blobs locks anything (AMD on Linux with STRATA_ARENA_MMAP=1): the callers only gather the swaps' spans
+// then - `blob()` is not free (it counts reads, and the file tier may assemble the blob), so the default runs skip it.
+bool pin_blobs_on() {
+#if (defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)) && !defined(_WIN32)
+    static const bool on = std::getenv("STRATA_ARENA_MMAP") && std::getenv("STRATA_ARENA_MMAP")[0] == '1';
+    return on;
+#else
+    return false;
+#endif
+}
 int pin_blobs(std::vector<std::pair<uintptr_t, uintptr_t>> r, std::vector<void*>& live) {
     int failed = 0;   // ranges left pageable (a copy from them still works, through the driver's staging)
 #if (defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)) && !defined(_WIN32)
-    static const bool on = std::getenv("STRATA_ARENA_MMAP") && std::getenv("STRATA_ARENA_MMAP")[0] == '1';
-    if (!on || r.empty()) return 0;
+    if (!pin_blobs_on() || r.empty()) return 0;
     for (auto& [a, e] : r) { a &= ~(uintptr_t) 4095; e = (e + 4095) & ~(uintptr_t) 4095; }
     std::sort(r.begin(), r.end());
     size_t k = 0;
@@ -4963,7 +4972,7 @@ int main(int argc, char** argv) {
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
             if (!resident_stage_swaps(src, xcache, host_res, g.n_expert, swaps, adapt_stream)) return false;
-            {   // lock the batch's source pages (a file-backed arena on AMD; see pin_blobs)
+            if (pin_blobs_on()) {   // lock the batch's source pages (a file-backed arena on AMD; see pin_blobs)
                 std::vector<std::pair<uintptr_t, uintptr_t>> spans;
                 for (const Swap& s : swaps)
                     if (const uint8_t* b = srcp->blob(s.layer, s.in))
@@ -6661,7 +6670,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: an adaptive refill failed (copying evicted experts back)\n");
                 return false;
             }
-            {   // lock the batch's source pages (a file-backed arena on AMD; see pin_blobs)
+            if (pin_blobs_on()) {   // lock the batch's source pages (a file-backed arena on AMD; see pin_blobs)
                 std::vector<std::pair<uintptr_t, uintptr_t>> spans;
                 for (const Swap& s : swaps)
                     if (const uint8_t* b = srcp->blob(s.layer, s.in))
