@@ -145,7 +145,11 @@ says so and starts the engine you had.
   kept, only their names. Another browser or a private window starts empty; clearing the site's data deletes them.
 - **How the model starts:** `strata-<model>.json` in the Strata folder (context, GPUs, host, API key, ...), written
   by setup; next to it `run-<model>.bat` / `.sh`, the log `strata-<model>.log` and, when you use "Use for other
-  apps too", `strata-<model>.shared-settings.json`.
+  apps too", `strata-<model>.shared-settings.json`. Running setup again for the same model (another context, say)
+  rewrites the keys setup writes (`exe`, `args`, `port`, `gpu`, `host`, `api_key`, `vision`, ...) and keeps the
+  ones you added (`sampling`, `mcp_servers`, `mcp`, `cors_origins`, ...); the earlier file is kept as
+  `strata-<model>.json.bak` (0.1.39). Engine options you added to `"args"` by hand are not carried over: setup names
+  them, and you add them again.
 - **The model files** (`models/`, `packs/`, `mtp/`, 70-120 GB): in **`Strata-data` next to the Strata folder**, or
   wherever `--data-dir` put them.
 - **Where that data folder is:** `%APPDATA%\Strata\settings.json` on Windows, `~/.config/strata/settings.json` on
