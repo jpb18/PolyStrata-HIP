@@ -104,6 +104,15 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
+# Older NVIDIA GPUs (experimental): CUDA 13 dropped Pascal (sm_60/61) and Volta (sm_70), so a model whose GPUs include
+# one runs a second engine, built with CUDA 12.9 (-DSTRATA_EXPERIMENTAL_SM60=ON) and kept in its own folder: the
+# ready-made one is CUDA12_ASSET (Windows; on Linux it is compiled here with a CUDA 12.x toolkit).  One engine runs per
+# model, so the choice is per model config, by its oldest GPU; --cuda 12|13 overrides it (docs/OLDER_GPUS.md).
+CUDA13_MIN_ARCH = 75                   # the oldest compute capability CUDA 13 compiles for (sm_75, RTX 20)
+CUDA12_ASSET = "strata-windows-x64-cuda12.zip" if WIN else "strata-linux-x64-cuda12.zip"
+CUDA12_WHEELS = ["nvidia-cublas-cu12==12.9.1.4", "nvidia-cuda-runtime-cu12==12.9.79"]
+CUDA12_MIN_DRIVER = 525                # CUDA 12.x with minor-version compatibility (NVIDIA's table: 525.60 / 527.41)
+ENGINE12_DIR = "engine-cuda12"
 MIN_ENGINE = (0, 1, 39)                # v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
 REQUIREMENTS = ROOT / "requirements.txt"   # the same packages and their dependencies, pinned (#214)
@@ -497,22 +506,84 @@ def cc(g) -> str:
     return f"{g['arch'][:-1]}.{g['arch'][-1]}"
 
 
+OLD_GPUS = None       # why Pascal / Volta cards are admitted in this run (old_gpus_opt_in), None: they are not
+
+
 def experimental_sm60() -> bool:
-    """#295: STRATA_EXPERIMENTAL_SM60=1 admits Pascal (6.x) and Volta (7.0) cards: the community build
-    (-DSTRATA_EXPERIMENTAL_SM60=ON, compiled here with a CUDA 12.x toolkit), not the ready-made engine."""
-    return os.environ.get("STRATA_EXPERIMENTAL_SM60", "").strip() == "1"
+    """#295: STRATA_EXPERIMENTAL_SM60=1 admits Pascal (6.x) and Volta (7.0) cards, run by the experimental CUDA 12
+    engine (-DSTRATA_EXPERIMENTAL_SM60=ON).  So does naming such a card (--gpu N / --gpus), --cuda 12, or a PC that
+    has no newer card (old_gpus_opt_in)."""
+    return os.environ.get("STRATA_EXPERIMENTAL_SM60", "").strip() == "1" or OLD_GPUS is not None
 
 
 def sm60_card(arch) -> bool:
     return 60 <= int(arch) <= 70
 
 
+def old_gpus_opt_in(found, named=(), cuda=None, other=False):
+    """Why this run may use Pascal / Volta cards (the experimental CUDA 12 engine), or None.  The cards are an opt-in:
+    the user named one (`named`: --gpu / --gpus), asked for --cuda 12, set STRATA_EXPERIMENTAL_SM60=1, or the PC has
+    no card the ready-made engine runs on and no supported AMD card (`other`; it used to stop there).  A PC with a
+    newer card keeps recommending it."""
+    old = [g for g in found if sm60_card(g["arch"])]
+    if not old:
+        return None
+    if os.environ.get("STRATA_EXPERIMENTAL_SM60", "").strip() == "1":
+        return "STRATA_EXPERIMENTAL_SM60=1"
+    if str(cuda) == "12":
+        return "--cuda 12"
+    picked = [g for g in old if g["index"] in set(named)]
+    if picked:
+        return "you chose " + ", ".join(f"GPU {g['index']} ({g['name']})" for g in picked)
+    if not other and not any(int(g["arch"]) >= CUDA13_MIN_ARCH for g in found):
+        return "it is the only kind of NVIDIA GPU in this PC"
+    return None
+
+
+def named_gpus(gpu, gpus) -> list:
+    """The card numbers --gpu / --gpus name (an unreadable value: none; parse_gpus says what is wrong later)."""
+    try:
+        if gpus and str(gpus).strip().lower() != "all":
+            return [int(x) for x in str(gpus).split(",") if x.strip()]
+        return [int(gpu)] if gpu is not None else []
+    except ValueError:
+        return []
+
+
+def cuda_choice(archs, cuda=None):
+    """The CUDA toolkit of one model's engine: (12 or 13, why).  13 (the ready-made engine) unless a card is older
+    than CUDA 13 supports (Pascal / Volta: CUDA 13 cannot compile for them) - one engine runs per model, so its oldest
+    card decides.  `cuda` (--cuda 12|13) overrides it; setup recommends, it does not refuse (the caller warns)."""
+    archs = sorted({int(x) for x in archs})
+    old = [a for a in archs if a < CUDA13_MIN_ARCH]
+    if str(cuda) == "13":
+        return 13, ("--cuda 13 (as you chose)" + (f"; CUDA 13 has no code for sm_{old[0]}: the engine will not run "
+                                                   "on that card" if old else ""))
+    if str(cuda) == "12":
+        return 12, "--cuda 12 (as you chose" + ("; RTX 50 (sm_120) engines built with CUDA 12.8 crashed on long "
+                                                  "prompts, #220" if archs and archs[-1] >= 120 else "") + ")"
+    if old:
+        return 12, (f"sm_{old[0]} is older than CUDA 13 supports (it dropped Pascal and Volta): this model runs the "
+                    "experimental CUDA 12 engine")
+    return 13, None
+
+
+def engine_dir(toolkit=13) -> Path:
+    """The folder of the engine a model runs: engine/ (CUDA 13, or HIP), engine-cuda12/ (the experimental one)."""
+    return ROOT / (ENGINE12_DIR if int(toolkit) == 12 else "engine")
+
+
+def config_toolkit(cfg: dict) -> int:
+    """12 when a model config runs the experimental CUDA 12 engine (its exe is in engine-cuda12/), else 13."""
+    return 12 if cfg.get("cuda") == 12 or Path(str(cfg.get("exe", ""))).parent.name == ENGINE12_DIR else 13
+
+
 def gpu_problem(g, together=False):
     """Why Strata cannot use this card, in plain words (None: it can)."""
     if int(g["arch"]) < 75 and not (sm60_card(g["arch"]) and experimental_sm60()):
         return (f"not supported - older than the RTX 20 series (compute capability {cc(g)}; Strata needs 7.5 or "
-                "newer" + ("; STRATA_EXPERIMENTAL_SM60=1 tries the community build for it" if sm60_card(g["arch"])
-                          else "") + ")")
+                "newer" + ("; experimental: choose it with --gpu " + str(g["index"]) + " (the CUDA 12 engine, "
+                          "docs/OLDER_GPUS.md)" if sm60_card(g["arch"]) else "") + ")")
     if together and g["vram_gb"] < SPLIT_MIN_VRAM_GB - 0.5:
         return (f"not supported together with other GPUs - {g['vram_gb']:.0f} GB of VRAM (a card sharing the model "
                 f"needs {SPLIT_MIN_VRAM_GB} GB or more)")
@@ -602,9 +673,9 @@ def check_gpus(sel, found, what="", yes=False, named=False) -> None:
         fail(f"GPU {i}{'' if g is None else ' (' + g['name'] + ')'} {what}cannot be used: {p}", hint)
 
 
-def engine_archs():
+def engine_archs(toolkit=13):
     """The GPU generations the installed engine has code for: (archs, ptx), or None when there is none."""
-    info = ROOT / "engine" / "BUILD.json"
+    info = engine_dir(toolkit) / "BUILD.json"
     try:
         meta = json.loads(info.read_text())
     except (OSError, ValueError):
@@ -621,8 +692,8 @@ def engine_archs_hip():
     return [str(x) for x in meta.get("archs", [])] if meta.get("backend") == "hip" else None
 
 
-def engine_runs_on(g) -> bool:
-    ea = engine_archs()
+def engine_runs_on(g, toolkit=13) -> bool:
+    ea = engine_archs(toolkit)
     if ea is None or not ea[0]:
         return True
     archs, ptx = ea
@@ -1182,14 +1253,19 @@ def pip_install(packages, what):
     ok(f"{what} installed")
 
 
-def cuda_lib_dirs():
-    """Where pip put NVIDIA's CUDA libraries (nvidia/cu13/bin/x86_64 on Windows, nvidia/cu13/lib on Linux)."""
-    pattern = "cublas64_13.dll" if WIN else "libcublas.so.13*"
+def cuda_lib_dirs(toolkit=13):
+    """Where pip put NVIDIA's CUDA libraries (nvidia/cu13/bin/x86_64 on Windows, nvidia/cu13/lib on Linux).
+    toolkit 12: the CUDA 12 wheels' cuBLAS and runtime, in two folders (nvidia/cublas/bin, nvidia/cuda_runtime/bin)."""
+    if int(toolkit) == 12:
+        patterns = ("cublas64_12.dll", "cudart64_12.dll") if WIN else ("libcublas.so.12*", "libcudart.so.12*")
+    else:
+        patterns = ("cublas64_13.dll",) if WIN else ("libcublas.so.13*",)
     dirs = []
     for sp in {Path(p) for p in sys.path if p.endswith("site-packages")}:
-        for hit in (sp / "nvidia").rglob(pattern) if (sp / "nvidia").is_dir() else []:
-            if hit.parent not in dirs:
-                dirs.append(hit.parent)
+        for pattern in patterns:
+            for hit in (sp / "nvidia").rglob(pattern) if (sp / "nvidia").is_dir() else []:
+                if hit.parent not in dirs:
+                    dirs.append(hit.parent)
     return [str(d) for d in dirs]
 
 
@@ -1792,10 +1868,12 @@ def prebuilt_bases(url_base) -> list[str]:
     return [PREBUILT_TAG_URL.format(version=source_version()), base]
 
 
-def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
+def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | None:
     """The ready-made engine in engine/ (kept between runs), or None when there is none for this PC.
-    updating: called to replace an installed engine, which starts instead when this fails (no compile)."""
-    eng = ROOT / "engine"
+    updating: called to replace an installed engine, which starts instead when this fails (no compile).
+    toolkit 12: the experimental CUDA 12 engine (CUDA12_ASSET) in engine-cuda12/."""
+    eng = engine_dir(toolkit)
+    asset = CUDA12_ASSET if int(toolkit) == 12 else PREBUILT_ASSET
     info = eng / "BUILD.json"
     if info.exists() and (eng / EXE).exists() and json.loads(info.read_text()).get("backend") != "hip":
         meta = json.loads(info.read_text())
@@ -1816,13 +1894,14 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
         info.unlink()
     if not url_base:
         return None
-    z = ROOT / "engine" / PREBUILT_ASSET
+    eng.mkdir(exist_ok=True)
+    z = eng / asset
     bases = prebuilt_bases(url_base)
     for i, base in enumerate(bases):
         if not base.startswith(("http://", "https://")):
             break
         try:                                           # not published (yet), or no internet: compile instead
-            req = urllib.request.Request(base + PREBUILT_ASSET, method="HEAD", headers={"User-Agent": "strata-setup"})
+            req = urllib.request.Request(base + asset, method="HEAD", headers={"User-Agent": "strata-setup"})
             urllib.request.urlopen(req, timeout=60).close()
             break
         except OSError as e:
@@ -1831,9 +1910,9 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
                 continue
             warn(f"no ready-made engine at {base} ({e})" + ("" if updating else ": compiling instead"))
             return None
-    say("  Downloading the ready-made Strata engine ...")
-    download(base + PREBUILT_ASSET, z, "Strata engine")
-    tmp = ROOT / "engine" / "_unpack"
+    say("  Downloading the ready-made Strata engine" + (" (CUDA 12, experimental)" if int(toolkit) == 12 else "") + " ...")
+    download(base + asset, z, "Strata engine")
+    tmp = eng / "_unpack"
     shutil.rmtree(tmp, ignore_errors=True)
     with zipfile.ZipFile(z) as f:
         f.extractall(tmp)
@@ -1876,11 +1955,17 @@ def get_prebuilt(url_base, gpu, vision, updating=False) -> Path | None:
     return eng
 
 
-def update_installed_engine(url_base) -> None:
+def update_installed_engine(url_base, toolkit=None) -> None:
     """An installed ready-made engine older than MIN_ENGINE is replaced before the model starts, so a plain
     START-HERE.bat on an existing install picks up a new release.  If that cannot happen (no internet, the model
-    still running, no ready-made engine for this GPU) the installed engine is kept and starts as before."""
-    eng = ROOT / "engine"
+    still running, no ready-made engine for this GPU) the installed engine is kept and starts as before.
+    toolkit None: engine/, then the experimental CUDA 12 engine in engine-cuda12/ when one is installed."""
+    if toolkit is None:
+        update_installed_engine(url_base, 13)
+        if (engine_dir(12) / "BUILD.json").exists():
+            update_installed_engine(url_base, 12)
+        return
+    eng = engine_dir(toolkit)
     info = eng / "BUILD.json"
     if not info.exists() or not (eng / EXE).exists():
         return
@@ -1938,14 +2023,19 @@ def update_installed_engine(url_base) -> None:
             if gpu is None:
                 raise RuntimeError("no NVIDIA GPU found")
             gpu = {**gpu, "archs": sorted({int(gpu["arch"]), *(int(x) for x in meta.get("archs", []))})}
-            build_engine(gpu, vision, False, get_llama_cpp())
+            if int(toolkit) == 12:                     # the cards it was compiled for (the main GPU may be newer)
+                gpu["archs"] = sorted({int(x) for x in meta.get("archs", [])}) or gpu["archs"]
+            build_engine(gpu, vision, False, get_llama_cpp(), toolkit=toolkit)
         except (Exception, SystemExit) as e:
             warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the installed one")
         return
     new = None
     if gpu is not None:
         try:
-            new = get_prebuilt(url_base, gpu, "gpu", updating=True)
+            if int(toolkit) == 12:                     # the cards the CUDA 12 engine serves, not the newest one
+                gpu = {**gpu, "archs": [x for x in (int(a) for a in meta.get("archs", [])) if x < CUDA13_MIN_ARCH]
+                       or [int(gpu["arch"])]}
+            new = get_prebuilt(url_base, gpu, "gpu", updating=True, toolkit=toolkit)
         except Exception as e:                         # a failed download must not stop the model from starting
             warn(f"updating the engine failed ({e})")
     if new is None:
@@ -1953,25 +2043,36 @@ def update_installed_engine(url_base) -> None:
             info.write_text(meta_text)                 # get_prebuilt drops it before downloading: put it back
         warn(f"could not update the engine: starting the installed {meta.get('version')}")
         return
-    pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
+    pip_cuda_libs(toolkit)
+
+
+def pip_cuda_libs(toolkit=13) -> None:
+    """NVIDIA's cuBLAS and CUDA runtime for a ready-made engine, from pip: CUDA 13's, or the CUDA 12 engine's."""
+    if int(toolkit) == 12:
+        pip_install(CUDA12_WHEELS, "NVIDIA CUDA 12 libraries for the experimental engine (cuBLAS, CUDA runtime; ~0.7 GB)")
+    else:
+        pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
 
 
 def install_build_tools(gpu, yes):
     """The compiler and the CUDA toolkit, installed for the user (asks once).  Returns (nvcc, vcvars)."""
     archs = [int(x) for x in gpu.get("archs", [gpu["arch"]])]
-    # #295: Pascal / Volta (STRATA_EXPERIMENTAL_SM60=1) need a CUDA 12.x toolkit - CUDA 13 cannot build sm_60/sm_70
-    old = min(archs) < 75
+    # #295: Pascal / Volta need a CUDA 12.x toolkit - CUDA 13 cannot build sm_60/sm_70; gpu["toolkit"] = 12: the
+    # experimental CUDA 12 engine for any cards (--cuda 12, docs/OLDER_GPUS.md)
+    old = int(gpu.get("toolkit") or (12 if min(archs) < CUDA13_MIN_ARCH else 13)) == 12
+    need12 = (12, 8) if max(archs) >= 120 else (12, 0)     # sm_120 needs CUDA 12.8 or newer
     if old and max(archs) >= 120:
-        fail("one engine cannot be built for both an RTX 50 card (CUDA 13) and a Pascal/Volta card (CUDA 12.x)",
-             "choose the cards of one kind with --gpu / --gpus")
+        warn("an RTX 50 card (sm_120) in a CUDA 12 engine: engines built with CUDA 12.8 crashed on long prompts there "
+             "(#220, #224); the RTX 50 card alone (--gpu N) runs the ready-made CUDA 13 engine")
     nvcc, cuda_v = find_nvcc(below=(13, 0)) if old else find_nvcc()
-    if old and (nvcc is None or cuda_v < (12, 0)):
-        fail("the experimental Pascal/Volta build (STRATA_EXPERIMENTAL_SM60=1) needs the NVIDIA CUDA Toolkit 12.x "
-             "(CUDA 13 cannot compile for these cards)",
-             "install CUDA 12.9 (or another 12.x; it can sit next to a newer one) from "
-             "https://developer.nvidia.com/cuda-toolkit-archive and run it again")
+    if old and (nvcc is None or cuda_v < need12):
+        fail("the experimental CUDA 12 engine (Pascal / Volta, or --cuda 12) is compiled here with the NVIDIA CUDA "
+             f"Toolkit {need12[0]}.{need12[1]} or a newer 12.x (CUDA 13 cannot compile for these cards)" +
+             (f"; found CUDA {cuda_v[0]}.{cuda_v[1]}" if nvcc else ""),
+             "install CUDA 12.9 (it can sit next to a newer one) from https://developer.nvidia.com/cuda-toolkit-archive "
+             "and run it again (STRATA_NVCC=<its nvcc> picks one toolkit)")
     # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220)
-    need_cuda = (13, 0) if max(archs) >= 120 else (12, 0)
+    need_cuda = need12 if old else (13, 0) if max(archs) >= 120 else (12, 0)
     vcvars = find_vcvars() if WIN else None
     have_cc = vcvars is not None if WIN else shutil.which("g++") is not None
     missing = []
@@ -2067,9 +2168,10 @@ def source_hash(parts) -> str:
     return h.hexdigest()[:16]
 
 
-def engine_defs(archs) -> list:
-    """Extra CMake definitions for the engine: the experimental Pascal/Volta build (#295) for cards below sm_75."""
-    return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 else []
+def engine_defs(archs, toolkit=13) -> list:
+    """Extra CMake definitions for the engine: the experimental Pascal/Volta build (#295) for cards below sm_75, and
+    for every CUDA 12 engine (the same build as the ready-made CUDA 12 one: it admits the older cards)."""
+    return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 or int(toolkit) == 12 else []
 
 
 def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
@@ -2086,10 +2188,15 @@ def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
     return vision
 
 
-def build_engine(gpu, vision, yes, llama) -> Path:
+def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
-    engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes."""
-    eng = ROOT / "engine"
+    engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes.
+    toolkit 12 (default: 12 for a card older than CUDA 13 supports): the experimental CUDA 12 engine, in
+    engine-cuda12/ with its own build folders."""
+    if toolkit is None:
+        toolkit = 12 if min(int(x) for x in gpu.get("archs", [gpu["arch"]])) < CUDA13_MIN_ARCH else 13
+    t12 = int(toolkit) == 12
+    eng = engine_dir(toolkit)
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
@@ -2108,29 +2215,31 @@ def build_engine(gpu, vision, yes, llama) -> Path:
         return eng
     if local:
         archs = sorted(built | set(archs))
-    nvcc, vcvars = install_build_tools({**gpu, "archs": archs}, yes)
+    nvcc, vcvars = install_build_tools({**gpu, "archs": archs, "toolkit": toolkit}, yes)
     cuda_archs = ";".join(str(x) for x in archs)
+    bdir, vdir = (ROOT / "build-cuda12", ROOT / "build-vision-cuda12") if t12 else (ROOT / "build", ROOT / "build-vision")
     if not engine_ok:
         say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) + " (a card it had no code for; "
             "10-20 minutes, once) ..." if new_arch else
             "  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
-        cmake_build(ROOT, ROOT / "build", "strata",
+        cmake_build(ROOT, bdir, "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
-                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}", *engine_defs(archs)],
-                    vcvars, "build-strata.bat")
-        shutil.copy2(ROOT / "build" / EXE, eng / EXE)
+                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}", *engine_defs(archs, toolkit)],
+                    vcvars, "build-strata-cuda12.bat" if t12 else "build-strata.bat")
+        shutil.copy2(bdir / EXE, eng / EXE)
     if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
         defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}"]
         if vision == "gpu":
             defs += [f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}", f"-DCMAKE_CUDA_COMPILER={nvcc}"]
-        cmake_build(ROOT / "tools" / "vision", ROOT / "build-vision", "strata-vision", defs, vcvars, "build-vision.bat")
-        shutil.copy2(ROOT / "build-vision" / "bin" / VEXE, eng / VEXE)
+        cmake_build(ROOT / "tools" / "vision", vdir, "strata-vision", defs, vcvars,
+                    "build-vision-cuda12.bat" if t12 else "build-vision.bat")
+        shutil.copy2(vdir / "bin" / VEXE, eng / VEXE)
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs,
-                                 "vision": vision,
+                                 "vision": vision, **({"toolkit": 12} if t12 else {}),
                                  "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
@@ -2619,7 +2728,7 @@ def choices_from_config(cfg_path: Path) -> dict:
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
             "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
-            "layer_split": cfg.get("layer_split"),
+            "layer_split": cfg.get("layer_split"), "cuda": 12 if config_toolkit(cfg) == 12 else None,
             # #493: --vram-reserve-mib given at setup (images write the default 700 themselves)
             "vram_reserve_mib": int(val("--vram-reserve-mib")) if (val("--vram-reserve-mib") or "").isdigit() and (
                 vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
@@ -2927,6 +3036,10 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
                 ok(f"GPU: {g['name']} ({g['vram_gb']:.0f} GB, AMD)")
     else:
         found = gpus()
+        global OLD_GPUS                                # Pascal / Volta: named on this start, or this model's CUDA 12 engine
+        OLD_GPUS = OLD_GPUS or old_gpus_opt_in(found, gpu if isinstance(gpu, list) else [gpu] if gpu is not None else
+                                               cfg.get("gpu") if isinstance(cfg.get("gpu"), list) else [cfg.get("gpu")],
+                                               12 if config_toolkit(cfg) == 12 else None)
     if cfg.get("backend") == "hip":
         pass
     elif isinstance(gpu, list):                        # --gpus: saved, this model runs on these cards from now on
@@ -3133,22 +3246,65 @@ def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
 def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     """The installed engine must have code for every card the model starts on: a card added later (--gpus with an
     older or newer generation, #128) or a new GPU in the PC otherwise stops the start with 'no kernel image'.  Such a
-    card gets the engine compiled for all of them, before the start."""
-    missing = [g for g in cards if not engine_runs_on(g)]
+    card gets the engine compiled for all of them, before the start.  A Pascal / Volta card added to a model on the
+    CUDA 13 engine moves the model to the experimental CUDA 12 engine (CUDA 13 has no code for it)."""
+    tk = config_toolkit(cfg)
+    if tk == 13 and any(int(g["arch"]) < CUDA13_MIN_ARCH for g in cards):
+        return use_cuda12(cards, cfg_path, cfg, yes)
+    missing = [g for g in cards if not engine_runs_on(g, tk)]
     if not missing:
         return cfg
-    info = ROOT / "engine" / "BUILD.json"
+    eng = engine_dir(tk)
+    info = eng / "BUILD.json"
     meta = json.loads(info.read_text())
     say()
     say("  The installed engine has no code for " + ", ".join(f"{g['name']} (sm_{g['arch']})" for g in missing) +
         ": it is compiled for " + ("these cards" if len(cards) > 1 else "it") + " now.")
     main = gpu_info(cards[0]["index"])
     archs = sorted({int(x) for x in meta.get("archs", [])} | {int(g["arch"]) for g in cards})
-    vision = meta.get("vision") or ("gpu" if (ROOT / "engine" / VEXE).exists() else "none")
-    build_engine({**main, "archs": archs}, vision, yes, get_llama_cpp())
+    vision = meta.get("vision") or ("gpu" if (eng / VEXE).exists() else "none")
+    build_engine({**main, "archs": archs}, vision, yes, get_llama_cpp(), toolkit=tk)
     dirs = json.loads(info.read_text()).get("cuda_dirs") or []
     cfg["lib_dirs"] = dirs + [d for d in cfg.get("lib_dirs") or [] if d not in dirs]
     write_config(cfg_path, cfg)
+    return cfg
+
+
+def get_cuda12_engine(url_base, gpu, vision, yes, build=False) -> Path:
+    """The experimental CUDA 12 engine for these cards (gpu["archs"]): the ready-made one (Windows) with NVIDIA's
+    CUDA 12 libraries, or compiled here with a CUDA 12.x toolkit (Linux, --build, or no ready-made one)."""
+    eng = None if build else get_prebuilt(url_base, gpu, vision, toolkit=12)
+    if eng is not None and json.loads((eng / "BUILD.json").read_text()).get("source") != "local":
+        pip_cuda_libs(12)
+        if vision != "none" and not (eng / VEXE).exists():
+            eng = None
+    return eng if eng is not None else build_engine(gpu, vision, yes, get_llama_cpp(), toolkit=12)
+
+
+def engine_lib_dirs(eng: Path, toolkit=13) -> list:
+    """The library folders a CUDA engine loads from: its own (a compiled one: the toolkit's), else pip's wheels."""
+    meta = json.loads((eng / "BUILD.json").read_text())
+    return meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(toolkit)
+
+
+def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
+    """A model on the CUDA 13 engine now has a Pascal / Volta card (a --gpus at start): the model's config moves to
+    the experimental CUDA 12 engine (one engine per model; its other models keep theirs)."""
+    old = min(int(g["arch"]) for g in cards)
+    say()
+    warn(f"sm_{old} is older than CUDA 13 supports (it dropped Pascal and Volta): this model moves to the experimental "
+         "CUDA 12 engine (docs/OLDER_GPUS.md; START-HERE.bat --setup --cuda 13 and newer cards only moves it back)")
+    main = gpu_info(cards[0]["index"]) or cards[0]
+    vision = "gpu" if cfg.get("vision") else "none"
+    eng = get_cuda12_engine(os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
+                            {**main, "archs": sorted({int(g["arch"]) for g in cards})}, vision, yes)
+    cfg["exe"] = str(eng / EXE)
+    cfg["cuda"] = 12
+    cfg["lib_dirs"] = engine_lib_dirs(eng, 12)
+    if cfg.get("vision") and (eng / VEXE).exists():
+        cfg["vision"]["exe"] = str(eng / VEXE)
+    write_config(cfg_path, cfg)
+    ok(f"engine: {eng / EXE} (CUDA 12, experimental)")
     return cfg
 
 
@@ -3259,6 +3415,10 @@ def main() -> int:
                     help="update the installed engine, Python packages and model settings as a start would, without "
                          "starting the model (UPDATE.bat / update.sh run it after a git pull)")
     ap.add_argument("--build", action="store_true", help="compile the engine instead of using the ready-made one")
+    ap.add_argument("--cuda", choices=["12", "13", "auto"], default=os.environ.get("STRATA_CUDA") or None,
+                    help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13, the ready-made "
+                         "engine; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
+                         "Volta). 12 also runs with an older driver (525+). docs/OLDER_GPUS.md")
     ap.add_argument("--prebuilt", default=os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
                     help="where the ready-made engine is (a URL folder or a local folder)")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
@@ -3329,13 +3489,15 @@ def main() -> int:
                 a.port = a.port or ch["port"]
                 if a.vram_reserve_mib is None:          # #493: an explicit reserve set up before
                     a.vram_reserve_mib = ch.get("vram_reserve_mib")
+                if a.cuda is None and ch.get("cuda") == 12:   # the experimental CUDA 12 engine, as before
+                    a.cuda = "12"
                 if isinstance(ch.get("gpu"), list):     # a layer split: set up across the same cards again
                     a.gpus = a.gpus or ",".join(str(g) for g in ch["gpu"])
                     a.layer_split = a.layer_split or ch.get("layer_split")
                 else:
                     a.gpu = a.gpu if a.gpu is not None else ch.get("gpu")
                 a.yes = True
-    global GPU_PICK
+    global GPU_PICK, OLD_GPUS
     # starting an installed model: --gpus 0,2 (or all) saves those cards for it and starts on them (it used to start
     # on the first one alone unless given with --setup), --gpu N runs this start on one card; neither: the saved
     # choice, and asked once when the PC has cards that could share the model
@@ -3378,8 +3540,14 @@ def main() -> int:
     step(1, "checking your PC")
     found = gpus()
     amd = amd_gpus()
-    nv_ok = any(gpu_problem(g) is None for g in found)
     amd_ok = [g for g in amd if amd_problem(g) is None]
+    # older NVIDIA GPUs (Pascal / Volta): the experimental CUDA 12 engine, when chosen (docs/OLDER_GPUS.md)
+    OLD_GPUS = OLD_GPUS or old_gpus_opt_in(found, named_gpus(a.gpu, a.gpus), a.cuda,
+                                           other=bool(amd_ok) or a.backend == "hip")
+    if OLD_GPUS and a.backend != "hip":
+        warn(f"older NVIDIA GPUs (Pascal / Volta) can be used ({OLD_GPUS}): experimental, through a second engine "
+             "built with CUDA 12 (docs/OLDER_GPUS.md)")
+    nv_ok = any(gpu_problem(g) is None for g in found)
     hip = a.backend == "hip" or (a.backend is None and not nv_ok and bool(amd_ok))
     if a.backend is None and nv_ok and amd_ok:
         # both kinds of card: asked (a first run on such a PC used to take NVIDIA without mentioning the Radeon)
@@ -3393,6 +3561,7 @@ def main() -> int:
         hip = ask("Which cards?", ["1", "2"], "1", a.yes or a.check) == "2"
         if a.check and not hip:
             say(f"  (the AMD card: {'START-HERE.bat' if WIN else './setup.sh'} --backend hip)")
+    cuda_tk = 13                                       # NVIDIA: the toolkit of this model's engine (cuda_choice)
     if hip:                                            # AMD: compiled here; Windows: ready-made
         if WIN and a.gpus:
             fail("several AMD cards sharing one model (--gpus) is Linux-only for now", "use one card: --gpu N")
@@ -3440,9 +3609,15 @@ def main() -> int:
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
         ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
-        if driver_major(gpu) < MIN_DRIVER:
-            fail(f"the NVIDIA driver is too old ({gpu['driver']}; {MIN_DRIVER} or newer is needed)",
-                 "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again")
+        cuda_tk, why = cuda_choice(gpu["archs"], a.cuda)   # one engine per model: its oldest card decides
+        if why:
+            (warn if cuda_tk == 13 or str(a.cuda) == "12" else ok)(f"CUDA {cuda_tk}: {why}")
+        min_driver = CUDA12_MIN_DRIVER if cuda_tk == 12 else MIN_DRIVER
+        if driver_major(gpu) < min_driver:
+            fail(f"the NVIDIA driver is too old ({gpu['driver']}; {min_driver} or newer is needed)",
+                 "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again" +
+                 ("" if cuda_tk == 12 else f" (or --cuda 12: the experimental CUDA 12 engine runs with driver "
+                                           f"{CUDA12_MIN_DRIVER} or newer, docs/OLDER_GPUS.md)"))
     if gpu["vram_gb"] < 11:
         warn("less than 12 GB of VRAM: Strata will run, but most experts stay on the CPU and it will be slow")
     ram = ram_gb()
@@ -3738,21 +3913,22 @@ def main() -> int:
         gpu = hip_card(eng, gpu, amd)
         a.gpu = gpu["index"] if gpu["count"] > 1 else a.gpu
     else:
-        eng = None if a.build or hip else get_prebuilt(a.prebuilt, gpu, vision)
+        eng = None if a.build or hip else get_prebuilt(a.prebuilt, gpu, vision, **({"toolkit": 12} if cuda_tk == 12
+                                                                                    else {}))
     if eng is not None and not hip and json.loads((eng / "BUILD.json").read_text()).get("source") != "local":
-        pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
+        pip_cuda_libs(cuda_tk)
         if vision != "none" and not (eng / VEXE).exists():
             warn("the ready-made engine has no image encoder: compiling it")
             eng = None
         else:
             vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text()), gpu, vision)
     if eng is None:
-        eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama)
+        eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
     meta = json.loads((eng / "BUILD.json").read_text())
     if hip and WIN:                                    # the ready-made engine's rocm/bin, first on the engine's PATH
         lib_dirs = [str(d) for d in hip_lib_dirs(eng)]
     else:
-        lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs()
+        lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(cuda_tk)
     engine_ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
     need_engine = MODELS[model].get("engine", UNSLOTH_ENGINE)
     if budget is not None and engine_ver < need_engine:      # checked before the 94-111 GB download
@@ -3952,6 +4128,8 @@ def main() -> int:
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port}
+    if cuda_tk == 12:                                  # the experimental CUDA 12 engine (engine-cuda12/)
+        cfg["cuda"] = 12
     if hip:
         cfg["backend"] = "hip"
         # the dense prompt GEMMs through hipBLASLt with kernels measured on this GPU generation (tools/hip; +40-60%

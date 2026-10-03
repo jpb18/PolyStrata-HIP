@@ -162,8 +162,8 @@ class ExperimentalSm60(unittest.TestCase):
             for arch in ("60", "61", "70"):
                 p = setup.gpu_problem(self.card(arch))
                 self.assertIn("not supported", p)
-                self.assertIn("STRATA_EXPERIMENTAL_SM60=1", p)
-            self.assertNotIn("STRATA_EXPERIMENTAL_SM60", setup.gpu_problem(self.card("52")))
+                self.assertIn("choose it with --gpu 0", p)              # the CUDA 12 engine (docs/OLDER_GPUS.md)
+            self.assertNotIn("--gpu", setup.gpu_problem(self.card("52")))
             self.assertIsNone(setup.gpu_problem(self.card("75")))
         with mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": "1"}):
             for arch in ("60", "61", "70", "75", "120"):
