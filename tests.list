@@ -3,6 +3,7 @@ expert_profile_save_test expert_profile_save_test
 dequant_s2_parity dequant_s2_parity --selftest
 s2_gemv_parity s2_gemv_parity --selftest
 mmvq_multi_parity mmvq_multi_parity
+mmvq_multi_parity_cuda_layout env STRATA_MMVQ_WAVE=0 ./mmvq_multi_parity
 iq_multi_parity iq_multi_parity
 native_grouped_parity native_grouped_parity
 shared_expert_parity shared_expert_parity --selftest

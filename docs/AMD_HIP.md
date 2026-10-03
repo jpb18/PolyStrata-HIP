@@ -380,11 +380,11 @@ container with `--device=/dev/kfd --device=/dev/dri --group-add video --ipc=host
 
 | | gfx906 | switch |
 |---|---|---|
-| grouped native experts | mode 7: signs as `dp4a(g ^ m, u) - dp4a(m, u)` (no byte SIMD), grids and activations in LDS, one weight load per group | `STRATA_EXP_MODE=2` (previous AMD layout) |
+| grouped native experts | mode 7: signs as `dp4a(g ^ m, u) - dp4a(m, u)` (no byte SIMD), grids and activations in LDS, one weight load per group; the IQ formats only (Unsloth's K-quant / Q5_1 / Q8_0 experts take the CUDA layout) | `STRATA_EXP_MODE=2` (previous AMD layout) |
 | MMVQ | one wavefront per row, 64-lane butterfly, no LDS | `STRATA_MMVQ_WAVE=0` |
 | router top-10 | one wavefront, register argmax | - |
-| `gr_down_multi` | split along K (8 rows x 5 slices of 2048) | `STRATA_GR_SPLIT=0` |
 | hyper-connection read | norm loads in flight, 8 lanes per row for `up` | `STRATA_GR_FAST=0` |
+| `gr_down_multi`, opt-in | split along K (8 rows x 5 slices of 2048), ~3% per window; sums in another order than the single-token read, so off by default | `STRATA_GR_SPLIT=1` |
 | IQ4 table lookup | llama.cpp's `v_perm_b32` sequence (HIP's `__byte_perm` is a scratch array) | - |
 | QSA prompt attention | the FP32 kernel (no tensor cores / WMMA) | - |
 

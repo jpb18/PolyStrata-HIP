@@ -763,9 +763,24 @@ int down_chunk(bool staged, int* tile_out) {
 // many tokens as fit the card, the up projection; the profile's stamps after the norm and after the down projection.
 // kHcPlain is the default read exactly as before (never main's opt-in STRATA_GR_V3 path, which fused_gr_read_multi
 // takes first).
+#if defined(STRATA_HIP_GFX906)
+__global__ void __launch_bounds__(THREADS) gr_norm_fast_kernel(GrMulti m);   // below, with the AMD fast path
+__global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m);
+}  // namespace
+static bool gr_fast();
+namespace {
+#endif
 void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
     const int n_tok = m.T;
+#if defined(STRATA_HIP_GFX906)
+    // gfx906: the latency-hidden norm/up (STRATA_GR_FAST=0: off) - the same sums in the same order as the kernels
+    // they replace (gr_parity checks the multi-token read against single-token calls bitwise)
+    const bool fast = gr_fast();
+#else
+    const bool fast = false;
+#endif
     if (variant >= kHcSplit) gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+    else if (fast) gr_norm_fast_kernel<<<n_tok, THREADS, 0, st>>>(m);
     else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
     const bool staged = variant >= kHcStaged;
@@ -800,7 +815,8 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         }
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
-    gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    if (fast) gr_up_fast_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    else gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
 }
 
 /// STRATA_HC_SPLIT: unset or 2 = the newest the check accepts (staged), 1 = at most split, 0 = the plain read
@@ -1102,9 +1118,12 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         return;
     }
 #if defined(STRATA_HIP_GFX906)
-    // gfx906: the latency-hidden norm/up (STRATA_GR_FAST) and the K-split down (STRATA_GR_SPLIT=0: the CUDA layout's read)
-    static const bool split_off = std::getenv("STRATA_GR_SPLIT") && std::string(std::getenv("STRATA_GR_SPLIT")) == "0";
-    if (!split_off) {
+    // gfx906, opt-in STRATA_GR_SPLIT=1: the latency-hidden norm/up (STRATA_GR_FAST) with the K-split down (~3% faster
+    // per verify window).  Its fixed-order finish sums the K slices in another order than the single-token
+    // fused_gr_read, so the multi-token read is then no longer bitwise equal to T single-token calls (gr_parity's
+    // contract); off by default for that reason.
+    static const bool split_on = std::getenv("STRATA_GR_SPLIT") && std::string(std::getenv("STRATA_GR_SPLIT")) == "1";
+    if (split_on) {
         const bool fast = gr_fast();
         if (fast) gr_norm_fast_kernel<<<n_tok, THREADS, 0, st>>>(m);
         else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
