@@ -680,8 +680,9 @@ class Strata:
         ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
         if vram < 11:
             notes.append("less than 12 GB of VRAM: it runs, but slowly (most experts stay on the CPU)")
-        if hw.get("cpu", {}).get("avx2") is False:
-            return {"family": None, "model": None, "why": "this CPU has no AVX2; Strata needs at least AVX2"}
+        if hw.get("cpu", {}).get("avx2") is False:      # #623: a warning, not a stop (setup compiles for it)
+            notes.append("this CPU has no AVX2: EXPERIMENTAL and slow - setup compiles the engine on this PC for the "
+                         "older CPU (10-20 minutes), and the CPU's share of the experts runs a few times slower")
         if backend == "hip":
             notes.append("AMD (experimental, Linux): the engine is compiled during setup; no images")
         cmd = (("START-HERE.bat --setup" if WIN else "./setup.sh --setup") +
