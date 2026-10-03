@@ -2921,6 +2921,7 @@ int main(int argc, char **argv) try {
         try {
     const strata::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
+        dpct::get_current_device().get_memory_info(fb, tb);   // #423 (tmking01): dpct dropped cudaMemGetInfo here
         /*
         DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions
         for device information which may not be supported by all compilers or

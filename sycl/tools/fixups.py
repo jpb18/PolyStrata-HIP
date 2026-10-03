@@ -297,3 +297,9 @@ edit("src/core/native_head.cpp", lambda s: s.replace("sycl::free(dev_, dpct::get
 for p in sorted((root / "src" / "kernels").glob("*_parity.cpp")):
     edit(str(p.relative_to(root)), sub(r"(?<!queues_wait_and_throw\(\), )dpct::get_in_order_queue\(\)(\s*)\.(memcpy|memset)\(",
                                        r"(dpct::get_current_device().queues_wait_and_throw(), dpct::get_in_order_queue())\1.\2("))
+
+# 0.1.39 (#423, tmking01): generate.cpp's stage_room (the expert cache of every later stage of a layer split) lost its
+# cudaMemGetInfo in the migration - the DPCT1106 note stayed, the call did not - so every later GPU read 0 bytes free.
+edit("src/program/generate.cpp", sub(
+    r"(    const strata::core::OnDevice on\(dev\);\n        size_t fb = 0, tb = 0;\n)(?!        dpct::get_current_device)",
+    r"\1        dpct::get_current_device().get_memory_info(fb, tb);   // #423 (tmking01): dpct dropped cudaMemGetInfo here\n"))
