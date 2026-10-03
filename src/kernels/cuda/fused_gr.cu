@@ -776,12 +776,13 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     // gfx906: the latency-hidden norm/up (STRATA_GR_FAST=0: off) - the same sums in the same order as the kernels
     // they replace (gr_parity checks the multi-token read against single-token calls bitwise)
     const bool fast = gr_fast();
-#else
-    const bool fast = false;
-#endif
     if (variant >= kHcSplit) gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
     else if (fast) gr_norm_fast_kernel<<<n_tok, THREADS, 0, st>>>(m);
     else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
+#else
+    if (variant >= kHcSplit) gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+    else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
+#endif
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
     const bool staged = variant >= kHcStaged;
     int tv = 2560;
@@ -815,8 +816,11 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         }
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
+#if defined(STRATA_HIP_GFX906)
     if (fast) gr_up_fast_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
-    else gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    else
+#endif
+    gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
 }
 
 /// STRATA_HC_SPLIT: unset or 2 = the newest the check accepts (staged), 1 = at most split, 0 = the plain read
