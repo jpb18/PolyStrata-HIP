@@ -126,7 +126,7 @@ class FakeGGUF:
         self.tensors = [types.SimpleNamespace(name=n) for n in names]
 
 
-class Main(unittest.TestCase):
+class Base(unittest.TestCase):
     """setup.main() for the Unsloth choice, every outside effect mocked."""
 
     def setUp(self):
@@ -139,7 +139,7 @@ class Main(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def main(self, argv, ram=63.7, version="0.1.32", n_gpus=1, model=True, amd=(), free=500.0):
+    def main(self, argv, ram=63.7, version="0.1.32", n_gpus=1, model=True, amd=(), free=500.0, m=M):
         eng = self.t / "engine"
         eng.mkdir(exist_ok=True)
         (eng / "BUILD.json").write_text(json.dumps({"version": version, "source": "local"}))
@@ -166,6 +166,7 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, True)),
             mock.patch.object(setup, "page_file_gb", lambda: 16.0),
             mock.patch.object(setup, "free_gb", lambda p: free),
+            mock.patch.object(setup, "rotational_disk", lambda p: None),   # #605: not the test PC's disk
             mock.patch.object(setup, "pip_install", lambda *a, **k: None),
             mock.patch.object(setup, "get_llama_cpp", lambda: self.t / "llama.cpp"),
             mock.patch.object(setup, "get_prebuilt", lambda *a, **k: eng),
@@ -178,7 +179,7 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "saved_calibration", lambda cfg: None),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
             mock.patch.dict(sys.modules, {"gguf_reader": types.SimpleNamespace(GGUFFile=FakeGGUF)}),
-            mock.patch.object(sys, "argv", ["setup.py", "--family", "unsloth", *(["--model", M] if model else []),
+            mock.patch.object(sys, "argv", ["setup.py", "--family", "unsloth", *(["--model", m] if model else []),
                                             "--yes", "--no-start",
                                             "--models-dir", str(self.t / "models"), *argv]),
             mock.patch("builtins.input", mock.Mock(side_effect=AssertionError("asked"))),
@@ -187,8 +188,11 @@ class Main(unittest.TestCase):
             for p in patches:
                 st.enter_context(p)
             code, out = quiet(setup.main)
-        cfg = self.t / "strata-unsloth-ud-q4_k_xl.json"
+        cfg = self.t / f"strata-unsloth-{m.lower()}.json"
         return code, out, (json.loads(cfg.read_text()) if cfg.exists() else None)
+
+class Main(Base):
+    """UD-Q4_K_XL."""
 
     def test_install(self):
         code, out, cfg = self.main(["--context", "8192"])
@@ -355,6 +359,76 @@ class Main(unittest.TestCase):
         self.assertIn("--gpus 0,1 shares it", out)
         self.assertNotIn("layer_split", cfg)
         self.assertIn("--resident-budget-gib", cfg["args"])
+
+
+X = "UD-IQ4_XS"
+
+
+class IQ4XS(Base):
+    """#621 (EXPERIMENTAL): Unsloth's UD-IQ4_XS - three pinned shards, the same RAM-budget setup as UD-Q4_K_XL (the
+    pack with --compat-bf16, never experts.bin, one GPU, no images), engine 0.1.38 or newer, no AMD question."""
+
+    def test_pins(self):
+        fam = setup.FAMILIES["unsloth"]
+        names = [setup.model_file(fam, X, i) for i in range(1, setup.model_shards(fam, X) + 1)]
+        self.assertEqual(names, list(setup.UNSLOTH_IQ4_XS_SHARDS))
+        self.assertEqual(sum(b for b, _ in setup.UNSLOTH_IQ4_XS_SHARDS.values()), 93682584224)
+        for n, (size, sha) in setup.UNSLOTH_IQ4_XS_SHARDS.items():
+            self.assertRegex(sha, r"^[0-9a-f]{64}$")
+            self.assertEqual(fam["sha256"][n], (size, sha))
+        for n in setup.UNSLOTH_SHARDS:                                         # UD-Q4_K_XL's are still there
+            self.assertEqual(fam["sha256"][n], setup.UNSLOTH_SHARDS[n])
+        self.assertAlmostEqual(setup.MODELS[X]["download_gb"], 93682584224 / 1e9, places=1)
+        self.assertEqual(setup.MODELS[X]["families"], ("unsloth",))
+        self.assertEqual([m for m in setup.MODELS if "unsloth" in setup.MODELS[m].get("families", ())], [M, X])
+        self.assertIsNone(setup.gguf_unsupported(names[0]))                    # #444: a file setup runs now
+        self.assertEqual(setup.gguf_choice(names[0]), ("unsloth", X))
+        self.assertEqual(setup.budget_model({"args": ["--native", "/m/" + names[0]]}), X)
+        self.assertEqual(setup.budget_model({"args": ["--native", "/m/" + list(setup.UNSLOTH_SHARDS)[0]]}), M)
+        self.assertEqual(setup.budget_model({"args": []}), M)
+
+    def test_budget(self):
+        self.assertEqual(setup.resident_budget_gib(X, 63.7), 40)
+        self.assertEqual(setup.resident_budget_gib(X, 95.8), 55)              # at most all of them (59.5 GB)
+        self.assertAlmostEqual(setup.unsloth_split_need_gb(X), 93.7 + setup.UNSLOTH_RAM_LEFT_GB)
+
+    def test_install(self):
+        code, out, cfg = self.main(["--context", "8192"], version="0.1.38", m=X)
+        self.assertEqual(code, 0, out)
+        self.assertIn("EXPERIMENTAL", out)
+        base = f"https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/{REV}/UD-IQ4_XS/"
+        self.assertEqual(self.downloads, [base + n for n in setup.UNSLOTH_IQ4_XS_SHARDS])
+        self.assertEqual(self.verified, [(n, *v) for n, v in setup.UNSLOTH_IQ4_XS_SHARDS.items()])
+        packs = [r for r in self.runs if r[1].endswith("iq_pack.py")]
+        self.assertEqual(len(packs), 1, self.runs)
+        self.assertIn("--compat-bf16", packs[0])
+        self.assertNotIn("--experts-bin", packs[0])
+        self.assertTrue(packs[0][packs[0].index("--gguf") + 1].endswith("UD-IQ4_XS-00001-of-00003.gguf"))
+        args = cfg["args"]
+        self.assertEqual(args[args.index("--resident-budget-gib") + 1], "40")
+        self.assertTrue(args[args.index("--native") + 1].endswith("UD-IQ4_XS-00001-of-00003.gguf"))
+        for flag in ("--ple-gguf", "--mmap-experts", "--resident-experts", "--vision"):
+            self.assertNotIn(flag, args)
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-iq4_xs")
+        with tempfile.TemporaryDirectory() as t:                               # a start reads the choice back
+            p = Path(t) / "strata-unsloth-ud-iq4_xs.json"
+            p.write_text(json.dumps(cfg))
+            ch = setup.choices_from_config(p)
+            self.assertEqual((ch["family"], ch["model"]), ("unsloth", X))
+
+    def test_engine_0138(self):
+        code, out, cfg = self.main(["--context", "8192"], version="0.1.37", m=X)
+        self.assertEqual(code, 1)
+        self.assertIn("needs engine 0.1.38 or newer; this one is 0.1.37", out)
+        self.assertEqual(self.downloads, [])
+
+    def test_amd_is_not_asked(self):
+        r9700 = [{"index": 0, "name": "AMD Radeon AI PRO R9700", "vram_gb": 31.9, "arch": "gfx1201",
+                  "driver": "amdgpu"}]
+        with mock.patch.object(setup, "get_prebuilt_hip", lambda *a, **k: self.t / "engine"):
+            code, out, cfg = self.main(["--context", "8192", "--backend", "hip"], version="0.1.38", amd=r9700, m=X)
+        self.assertNotIn("has not been run on AMD cards yet", out)
+        self.assertIn("RAM budget: 40 GiB of UD-IQ4_XS's experts", out)
 
 
 class LayerSplit(unittest.TestCase):

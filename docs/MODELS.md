@@ -129,6 +129,15 @@ NVIDIA GPU (no images yet). Details and measurements: [UD-Q4_K_XL](UNSLOTH_Q4.md
 START-HERE.bat --setup --family unsloth --model UD-Q4_K_XL
 ```
 
+**Unsloth's UD-IQ4_XS** (experimental, 0.1.39, #621) is the smaller choice of the same family: a 94 GB download with
+59.5 GB of experts (IQ3_S and IQ4_NL), between IQ3_S and UD-Q4_K_XL. Setup runs it the same way (a RAM budget of your
+RAM minus 24 GB, the rest from the SSD), so on a 64 GB PC far fewer experts come from the SSD than with UD-Q4_K_XL, and
+on 96 GB all of them stay in RAM. Not measured on NVIDIA yet: [details](UNSLOTH_Q4.md#ud-iq4_xs-experimental-setup-from-0139-621).
+
+```
+START-HERE.bat --setup --family unsloth --model UD-IQ4_XS
+```
+
 ### OrcaRouter Uncensored IQ3_XXS
 
 For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](ORCA.md). It needs an
