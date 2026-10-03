@@ -98,7 +98,7 @@ inline void rows_ahead(const uint8_t* p) {
 // E-2 on the AVX-2 path (the AVX-512 kernels' STRATA_IQ_GATHER): the IQ3 grids by one AVX2 gather instead of eight
 // scalar loads assembled with set_epi32.  AVX2 gather is a different instruction with worse throughput on some cores
 // (opt-in, as on AVX-512); on the i7-12850HX it measures ~1.3x on the two 32-bit-grid formats, bit-exact.
-static const bool gather = std::getenv("STRATA_IQ256_GATHER") != nullptr;
+static const bool gather = [] { const char* v = std::getenv("STRATA_IQ256_GATHER"); return v != nullptr && std::atoi(v) != 0; }();
 
 // ---- per format: one 32-value half (values 64*j + 32*half .. +31) -> grid magnitudes, sign vector, scales
 template <int TY> struct Fmt32;
