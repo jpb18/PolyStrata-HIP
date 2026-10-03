@@ -71,8 +71,9 @@ fetches the MTP draft layer (~6 GB, +1 GB with images).
 
 Shard 1 is the part of the model that gets loaded when it starts: its experts go into your **RAM**, the rest onto
 your graphics card (the second shard, a 29 GB lookup table, stays on the SSD). So it fits when your **RAM is at least
-shard 1 + about 10 GB** for Windows and your other programs. With 64 GB of RAM every size fits (IQ3_S with little
-else open); with 48 GB, Q2_0 and IQ2_XS. A bigger graphics card makes it faster, but it doesn't lower the RAM needed
+the experts + about 10 GB** for Windows and your other programs - the experts are most of shard 1: 34 GB for Q2_0,
+35.5 for IQ2_XS, 43 for IQ3_XXS, 50 for IQ3_S, 23 for the Coder (the dense weights in shard 1 go to the graphics
+card). With 64 GB of RAM every size fits (IQ3_S with little else open); with 48 GB, Q2_0 and IQ2_XS. A bigger graphics card makes it faster, but it doesn't lower the RAM needed
 - except in the low-RAM mode below.
 
 ### A big graphics card and little RAM

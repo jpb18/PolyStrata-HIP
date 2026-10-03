@@ -40,7 +40,9 @@ word, so 60 tokens per second is faster than you can read.
 </td></tr>
 </table>
 
-A card with more VRAM is faster: an RTX 3090 (24 GB) should write roughly 100-140 tokens per second. Long chats,
+NVIDIA: Q2_0 with engine 0.1.36, the other rows with 0.1.26 (4K answers, 32K prompts; the full tables are in
+[DETAILS.md](docs/DETAILS.md#speed-measured)). A card with more VRAM is faster: an RTX 3090 (24 GB) should write
+roughly 100-140 tokens per second. Long chats,
 other cards: [speed of each model](docs/MODELS.md#how-fast-is-each-size), [community results](docs/COMMUNITY_BENCHMARKS.md).
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
