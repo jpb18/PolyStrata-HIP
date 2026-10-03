@@ -2479,11 +2479,37 @@ def is_wsl() -> bool:
     return sys.platform.startswith("linux") and "microsoft" in platform.uname().release.lower()
 
 
+def hip_config_cards(sel) -> list[dict]:
+    """#566: the AMD cards a HIP config runs on - its "gpu" (one index or a list) in HIP's numbering, as amd_gpus
+    lists them; no "gpu": the supported card with the most VRAM, as setup picks it.  Each card's name carries its
+    architecture (an RX 7900 XTX and an RX 7900 XT are both gfx1100; a card without a product name in sysfs is known
+    by its arch only).  A card that is not found is {} (the key then says "?")."""
+    amd = amd_gpus()
+    if sel is None:
+        usable = [g for g in amd if amd_problem(g) is None]
+        sel = max(usable, key=lambda x: (round(x["vram_gb"]), -x["index"]))["index"] if usable else None
+    byid = {g["index"]: g for g in amd}
+    cards = []
+    for i in (sel if isinstance(sel, list) else [sel]):
+        g = byid.get(i)
+        if g is None:
+            cards.append({})
+            continue
+        arch = g.get("arch") or ""
+        name = g.get("name") or "?"
+        cards.append({**g, "name": name if not arch or arch in name else f"{name} ({arch})"})
+    return cards
+
+
 def hardware_key(cfg: dict) -> str:
     """What a calibration is valid for: this GPU, CPU and RAM, and the model with its context and images setting
-    (the context's KV cache and the image encoder take VRAM from the expert cache)."""
+    (the context's KV cache and the image encoder take VRAM from the expert cache).  #566: a HIP config's cards are
+    AMD's (hip_config_cards) - nvidia-smi's list named them "?" (or another card with that number) before."""
     sel = cfg.get("gpu")
-    gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
+    if cfg.get("backend") == "hip":
+        gl = hip_config_cards(sel)
+    else:
+        gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
     g = {"name": " + ".join(x.get("name", "?") for x in gl), "vram_gb": sum(x.get("vram_gb", 0) for x in gl)}
     a = cfg.get("args", [])
     ctx = a[a.index("--max-context") + 1] if "--max-context" in a else "?"
@@ -2530,6 +2556,16 @@ def calibrate_config(cfg_path: Path) -> bool:
 def saved_calibration(cfg: dict) -> dict | None:
     """The settings an earlier calibration found for this PC and model, if any."""
     return (load_settings().get("calibration") or {}).get(hardware_key(cfg))
+
+
+def setup_calibration(cfg: dict, hip: bool) -> dict | None:
+    """The calibration a (re-)install applies to its new config: the one saved for this PC and model.  #566: on Linux
+    HIP too - hardware_key now names the AMD cards, so a `./setup.sh --calibrate` run is matched to its card and
+    model.  Windows HIP keeps the defaults for now (not tried there).  Setup still offers the tuning itself on NVIDIA
+    only: each control is verified on HIP first."""
+    if hip and WIN:
+        return None
+    return saved_calibration(cfg)
 
 
 def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
@@ -3661,7 +3697,7 @@ def main() -> int:
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
-    cal = None if hip else saved_calibration(cfg)     # tools/calibrate.py is NVIDIA-only for now
+    cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))
         import calibrate as CAL
