@@ -1687,6 +1687,13 @@ bool g_stage_grid = [] {
     const char* v = std::getenv("STRATA_IQ_STAGE_GRID");
     return v == nullptr || v[0] == '\0' || v[0] != '0';
 }();
+// The single-matrix mmvq (128-thread blocks, one per 4 rows) pays the 2-8 KB staging per block: on the RTX 5070 its
+// IQ2_XS / IQ2_S / IQ1_M calls were 10-20% slower staged at 3-8 columns (iq_multi_parity --bench), while the grouped
+// expert kernels gain.  So mmvq stages only with STRATA_IQ_STAGE_GRID_MMVQ=1 (bitwise the same either way).
+bool g_stage_grid_mmvq = g_stage_grid && [] {
+    const char* v = std::getenv("STRATA_IQ_STAGE_GRID_MMVQ");
+    return v != nullptr && v[0] == '1';
+}();
 
 template<int TY>
 void launch_mmvq(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int n_in, int n_out, int ncols,
@@ -1695,7 +1702,7 @@ void launch_mmvq(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int
     if constexpr (!kSplit<TY>) mmvq_kernel<TY><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
     else if (g_old_kernels) mmvq_kernel<TY><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
     else if constexpr (kStageIqGrid<TY>) {
-        if (!g_stage_grid) {
+        if (!g_stage_grid_mmvq) {
             if (ncols <= 1) mmvq_multi_kernel<TY, 1, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
             else if (ncols == 2) mmvq_multi_kernel<TY, 2, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
             else if (ncols <= 4) mmvq_multi_kernel<TY, 4, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
