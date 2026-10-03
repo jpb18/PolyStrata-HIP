@@ -55,7 +55,7 @@ public:
     /// --mtp-q4 (opt-in; before load): the draft layer's Q8_0 projections and its draft head run from 4-bit (Q4_0)
     /// copies made at load/bind - fewer bytes per draft step; drafts only, the verify window decides every token.
     /// (The prompt path's batched K/V pass keeps the Q8_0 originals.)
-    void set_q4(bool on) { q4_ = on; }
+    void set_q4(bool proj, bool head) { q4_ = proj; q4_head_ = head; }
     /// --mtp-draft-vocab FILE (opt-in; before bind): the draft head's token subset from FILE instead of
     /// rt/draft_vocab.bin (e.g. data/draft_vocab_en.bin, 40K tokens)
     void set_draft_vocab(const std::string& path) { dvocab_path_ = path; }
@@ -145,7 +145,7 @@ private:
     int device_ = -1;   ///< the device `load` ran on: the public calls switch to it (layer split)
     int max_drafts_ = 1 << 30;
     bool hnorm_stream_ = false;
-    bool q4_ = false;
+    bool q4_ = false, q4_head_ = false;
     uint8_t* dense4_ = nullptr;              ///< --mtp-q4: Q4_0 copies of the Q8_0 tensors
     std::vector<std::pair<std::string, uint64_t>> q4_off_;
     int dhead_type_ = -1;                    ///< the draft head subset's ggml type (the main head's, or Q4_0)

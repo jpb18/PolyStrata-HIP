@@ -420,7 +420,7 @@ struct Options {
     /// its own (llama.cpp's qwen4exp MTP graph) instead of one RMS over all four (the default, tools/mtp_probe.py).
     bool mtp_hnorm_stream = false;
     /// --mtp-q4 (opt-in): the draft layer's projections and draft head from 4-bit copies (fewer bytes per draft step)
-    bool mtp_q4 = false;
+    std::string mtp_q4;   ///< "" (off), all, proj (the projections only) or head (the draft head only)
     /// --mtp-draft-vocab FILE (opt-in): the draft head's token subset from FILE instead of <mtp>/draft_vocab.bin
     std::string mtp_draft_vocab;
     /// A control vector on the residual stream (strata/kernels/cvec.hpp), with llama.cpp's flags: the
@@ -526,7 +526,7 @@ void usage() {
                  "  --lookup-chain-min M  the shortest context match --lookup-chain extends on (default 3)\n"
                  "  --mtp-hnorm pooled|stream  the draft layer's hidden-input norm: one RMS over all four streams\n"
                  "                       (default) or one per stream (llama.cpp's MTP graph)\n"
-                 "  --mtp-q4             opt-in: the draft layer's projections and draft head as 4-bit copies\n"
+                 "  --mtp-q4 all|proj|head  opt-in: the draft layer's projections and/or draft head as 4-bit copies\n"
                  "  --mtp-draft-vocab FILE  opt-in: the draft head's token subset (default <mtp>/draft_vocab.bin)\n"
                  "  --control-vector-scaled FILE:SCALE[,...]  a control vector GGUF on the residual stream (llama.cpp's\n"
                  "                       format; --control-vector FILE = scale 1).  --serve: requests switch it (cvec=0|1)\n"
@@ -1223,7 +1223,13 @@ int main(int argc, char** argv) {
             }
             o.mtp_hnorm_stream = v == "stream";
         }
-        else if (a == "--mtp-q4") o.mtp_q4 = true;
+        else if (a == "--mtp-q4") {
+            o.mtp_q4 = next("--mtp-q4");
+            if (o.mtp_q4 != "all" && o.mtp_q4 != "proj" && o.mtp_q4 != "head") {
+                std::fprintf(stderr, "strata generate: --mtp-q4 takes all, proj or head\n");
+                return 2;
+            }
+        }
         else if (a == "--mtp-draft-vocab") o.mtp_draft_vocab = next("--mtp-draft-vocab");
         else if (a == "--control-vector") o.cvec_files.push_back({next("--control-vector"), 1.0f});
         else if (a == "--control-vector-scaled") {
@@ -2575,7 +2581,7 @@ int main(int argc, char** argv) {
         }
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
         mtp.set_hnorm_per_stream(o.mtp_hnorm_stream);   // --mtp-hnorm stream (opt-in), before any capture
-        mtp.set_q4(o.mtp_q4);                            // --mtp-q4 (opt-in), before load
+        mtp.set_q4(o.mtp_q4 == "all" || o.mtp_q4 == "proj", o.mtp_q4 == "all" || o.mtp_q4 == "head");   // before load
         if (!o.mtp_draft_vocab.empty()) mtp.set_draft_vocab(o.mtp_draft_vocab);
         // the draft layer is the canonical model's MTP head (512 experts) even when the target is pruned,
         // so it always sees the canonical geometry; `static` because MtpDrafter keeps a reference
