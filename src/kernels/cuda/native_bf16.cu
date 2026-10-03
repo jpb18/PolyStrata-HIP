@@ -2,6 +2,7 @@
 #include "strata/kernels/bf16_bits.hpp"
 
 #include <cuda_runtime.h>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -118,6 +119,83 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* __restrict__ x, int64_t 
             if (k < n_tok) y[(size_t) k * ldy + blockIdx.x] = acc[k];
 }
 
+// S25 (STRATA_MMVF_ROWS=1): RPB output rows per block. Each block read its row's weights once but all T activation
+// rows again (n_out blocks x T x n_in floats through L2 - the part that grew with T); here a block reads the
+// activations once for RPB rows. Per output, thread t still walks pairs t, t + BLOCK_SIZE, ... with the same two
+// ordered FMAs and the same warp and block reductions: bit-identical to bf16_f32_mmvf_multi_kernel.
+template <int BLOCK_SIZE, int NT, int RPB>
+__global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t ldx, const uint16_t* __restrict__ w,
+                                          float* __restrict__ y, int64_t ldy, int n_in, int n_out, int n_tok) {
+    const int t = threadIdx.x;
+    const int o0 = blockIdx.x * RPB;
+    __shared__ float partials[RPB][NT][32];
+    if constexpr (BLOCK_SIZE > 32) {
+        if (t < 32)
+#pragma unroll
+            for (int r = 0; r < RPB; ++r)
+#pragma unroll
+                for (int k = 0; k < NT; ++k) partials[r][k][t] = 0.0f;
+        __syncthreads();
+    }
+    float acc[RPB][NT];
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) acc[r][k] = 0.0f;
+    for (int pair = t; pair < n_in / 2; pair += BLOCK_SIZE) {
+        float2 in[NT];
+#pragma unroll
+        for (int k = 0; k < NT; ++k)
+            if (k < n_tok) in[k] = reinterpret_cast<const float2*>(x + (size_t) k * ldx)[pair];
+#pragma unroll
+        for (int r = 0; r < RPB; ++r) {
+            if (o0 + r >= n_out) break;
+            const uint32_t weight = reinterpret_cast<const uint32_t*>(w + (size_t) (o0 + r) * n_in)[pair];
+            const float w0 = f32_from_bf16((uint16_t) weight), w1 = f32_from_bf16((uint16_t) (weight >> 16));
+#pragma unroll
+            for (int k = 0; k < NT; ++k) {
+                if (k < n_tok) {
+                    acc[r][k] = __fmaf_rn(w0, in[k].x, acc[r][k]);
+                    acc[r][k] = __fmaf_rn(w1, in[k].y, acc[r][k]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < RPB; ++r)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) acc[r][k] = mmvf_warp_sum(acc[r][k]);
+    if constexpr (BLOCK_SIZE > 32) {
+        if ((t & 31) == 0)
+#pragma unroll
+            for (int r = 0; r < RPB; ++r)
+#pragma unroll
+                for (int k = 0; k < NT; ++k) partials[r][k][t / 32] = acc[r][k];
+        __syncthreads();
+        if (t < 32)
+#pragma unroll
+            for (int r = 0; r < RPB; ++r)
+#pragma unroll
+                for (int k = 0; k < NT; ++k) acc[r][k] = mmvf_warp_sum(partials[r][k][t]);
+    }
+    if (t == 0)
+#pragma unroll
+        for (int r = 0; r < RPB; ++r)
+            if (o0 + r < n_out)
+#pragma unroll
+                for (int k = 0; k < NT; ++k)
+                    if (k < n_tok) y[(size_t) k * ldy + o0 + r] = acc[r][k];
+}
+
+template <int B>
+void launch_rows(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy, int n_in, int n_out, int n_tok,
+                 cudaStream_t st) {
+    constexpr int RPB = 4;
+    const unsigned nb = (unsigned) ((n_out + RPB - 1) / RPB);
+    if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+    else bf16_f32_mmvf_rows_kernel<B, 8, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+}
+
 int mmvf_block_size(int64_t n_in) {
     int best = 32;
     int64_t best_iterations = (n_in + 63) / 64;
@@ -140,6 +218,24 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
         w == nullptr || y == nullptr || (reinterpret_cast<uintptr_t>(x) & 7u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: 1..8 rows, even n_in/ldx, aligned pointers");
     const cudaStream_t st = (cudaStream_t) stream;
+    static const bool rows = [] { const char* v = std::getenv("STRATA_MMVF_ROWS"); return v && v[0] == '1'; }();
+    if (rows && n_out >= 64) {
+        const int ni = (int) n_in, no = (int) n_out;
+        switch (mmvf_block_size(n_in)) {
+            case 32: launch_rows<32>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            case 64: launch_rows<64>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            case 96: launch_rows<96>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            case 128: launch_rows<128>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            case 160: launch_rows<160>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            case 192: launch_rows<192>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            case 224: launch_rows<224>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+            default: launch_rows<256>(x, ldx, w, y, ldy, ni, no, n_tok, st); break;
+        }
+        const cudaError_t result = cudaGetLastError();
+        if (result != cudaSuccess)
+            throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
+        return;
+    }
 #define STRATA_MMVF_M(N) case N: \
     if (n_tok <= 4) bf16_f32_mmvf_multi_kernel<N, 4><<<(unsigned) n_out, N, 0, st>>>(x, ldx, w, y, ldy, (int) n_in, n_tok); \
     else bf16_f32_mmvf_multi_kernel<N, 8><<<(unsigned) n_out, N, 0, st>>>(x, ldx, w, y, ldy, (int) n_in, n_tok); break

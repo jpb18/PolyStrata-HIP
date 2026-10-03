@@ -180,6 +180,89 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
     }
 }
 
+// S25 (STRATA_GDN_SPLIT=1): the same recurrence with each head's 128 state columns over 4 blocks of 32 columns
+// (128 threads: the same (column, row group) threads, each with the same 32 state rows), so 4x the blocks of
+// gdn_step_norm_multi_kernel - which ran one 512-thread block per head (32 blocks) and read the 2 MB state of a layer
+// at ~60 GB/s. Every column's arithmetic is the original's; the output norm, which needs all 128 columns of a head,
+// moves to gdn_out_norm_kernel: this kernel leaves the unnormalized output `oc` in y and the second kernel sums the
+// squares by the same warps (columns 32w..32w+31, the same butterfly) in the same order.
+constexpr int GS_COLS = 32;
+__global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __restrict__ state,
+                                                                      const float* __restrict__ hbuf, int C,
+                                                                      const float* __restrict__ gate,
+                                                                      const float* __restrict__ beta,
+                                                                      float* __restrict__ y, int h_k, int h_v, int T,
+                                                                      const int32_t* __restrict__ n_keep,
+                                                                      int t_out_begin) {
+    __shared__ float sk[S], sq[S];
+    __shared__ float red[RG][GS_COLS];
+    const int head = blockIdx.x;
+    const int c0 = blockIdx.y * GS_COLS;
+    const int lc = threadIdx.x;                 // local column
+    const int col = c0 + lc;
+    const int rg = threadIdx.y;
+    const int tid = rg * GS_COLS + lc;
+    const int qh = head % h_k;
+    const int qk = S * h_k;
+    const int value_dim = S * h_v;
+    const int n = n_keep ? *n_keep : T;
+    float s[RPG];
+    float* base = state + ((size_t) (rg * RPG) * h_v + head) * S + col;
+    const size_t row_stride = (size_t) h_v * S;
+#pragma unroll
+    for (int r = 0; r < RPG; ++r) s[r] = base[r * row_stride];
+    for (int t = 0; t < n; ++t) {
+        const float* ht = hbuf + (size_t) t * C;
+        __syncthreads();
+        if (tid < S) { sk[tid] = ht[qk + qh * S + tid]; sq[tid] = ht[qh * S + tid]; }
+        __syncthreads();
+        const float g = __expf(gate[(size_t) t * h_v + head]);
+        float kv = 0.0f;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], sk[rg * RPG + r], kv);
+        red[rg][lc] = kv;
+        __syncthreads();
+        const float kv_col = red[0][lc] + red[1][lc] + red[2][lc] + red[3][lc];
+        const float delta = (ht[2 * qk + head * S + col] - g * kv_col) * beta[(size_t) t * h_v + head];
+        float o = 0.0f;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) {
+            s[r] = fmaf(g, s[r], sk[rg * RPG + r] * delta);
+            o = fmaf(s[r], sq[rg * RPG + r], o);
+        }
+        __syncthreads();
+        red[rg][lc] = o;
+        __syncthreads();
+        if (rg == 0 && t >= t_out_begin)
+            y[(size_t) t * value_dim + head * S + col] =
+                (red[0][lc] + red[1][lc] + red[2][lc] + red[3][lc]) * rsqrtf((float) S);
+    }
+    if (n_keep != nullptr && n > 0) {
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) base[r * row_stride] = s[r];
+    }
+}
+
+// y = oc * rsqrt(mean(oc^2) + eps) * gamma * sigmoid(z) per head and token, with gdn_step_norm_multi_kernel's sums
+__global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
+                                                        float eps, float* __restrict__ y, int h_v, int T,
+                                                        const int32_t* __restrict__ n_keep, int t_out_begin) {
+    __shared__ float wsum[S / 32];
+    const int head = blockIdx.x, t = blockIdx.y + t_out_begin, col = threadIdx.x;
+    const int n = n_keep ? *n_keep : T;
+    if (t >= n) return;
+    const int value_dim = S * h_v;
+    const float oc = y[(size_t) t * value_dim + head * S + col];
+    float sq_part = oc * oc;
+    for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
+    if ((col & 31) == 0) wsum[col >> 5] = sq_part;
+    __syncthreads();
+    const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
+    const float scale = rsqrtf(ss / (float) S + eps);
+    const float zz = z[(size_t) t * value_dim + head * S + col];
+    y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+}
+
 __global__ void embedding_gather_dev_kernel(const uint8_t* __restrict__ codes, const float* __restrict__ scales,
                                             const float* __restrict__ offsets, const int32_t* __restrict__ tokens,
                                             int64_t n, int code_bits, int code_bias, int group_elems,
@@ -416,6 +499,16 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         n_tok > kVerifyMaxT) {
         std::fprintf(stderr, "gdn_step_norm_multi: invalid arguments\n");
         std::exit(1);
+    }
+    static const bool split = [] { const char* v = std::getenv("STRATA_GDN_SPLIT"); return v && v[0] == '1'; }();
+    if (split) {
+        gdn_step_split_kernel<<<dim3((unsigned) h_v, S / GS_COLS), dim3(GS_COLS, RG), 0, (cudaStream_t) stream>>>(
+            state, h, conv_channels, gate, beta, y, h_k, h_v, n_tok, n_keep, t_out_begin);
+        if (n_tok > t_out_begin)
+            gdn_out_norm_kernel<<<dim3((unsigned) h_v, (unsigned) (n_tok - t_out_begin)), S, 0, (cudaStream_t) stream>>>(
+                z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin);
+        check("gdn_step_norm_multi (split)");
+        return;
     }
     gdn_step_norm_multi_kernel<<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(
         state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin);
