@@ -32,6 +32,7 @@
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/gguf_expert_source.hpp"
+namespace strata::prefill { void set_nonresident_share(double share); }   // SYCL port: prefill.cpp
 #include "strata/kernels/resident_plan_mirror.hpp"
 #include "strata/core/pinned.hpp"
 #include "strata/core/remote_experts.hpp"
@@ -4508,6 +4509,10 @@ int main(int argc, char **argv) try {
                 if (srcp->pinned(l, e)) pinned += b;
             }
         strata::prefill::Prefill::set_pinned_share(total ? (double) pinned / (double) total : 1.0);
+        // SYCL port: the pairs outside the VRAM cache decide the prompt path's stream-all walk (prefill.cpp ring_slots)
+        int64_t nonres = 0;
+        for (const int32_t r : host_res) nonres += r < 0;
+        strata::prefill::set_nonresident_share(host_res.empty() ? 1.0 : (double) nonres / (double) host_res.size());
     }
     auto lend_slots = [&](int64_t c) -> int64_t {
         const uint64_t need = strata::prefill::Prefill::bytes_needed(g, ss, c);

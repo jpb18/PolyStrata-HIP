@@ -559,6 +559,28 @@ page-locked batches of 64, and a batch's copies run while the next one is read. 
 (0.33 -> 1.34 GB/s); a whole Coder start from the engine's launch to its first token 82 s -> 26 s, the IQ2_XS
 120 s -> 41 s (its 8.2 GB host mirror is ~9 s of the rest). Output identical. `STRATA_FILL_SERIAL=1` is the old fill.
 
+**The stream-all prompt walk is back (2026-10-03).** It copies every expert the VRAM cache does not hold, layer by
+layer ahead of the compute, instead of only the routed ones. It hung on the B70 until the stager and PLE fixes of
+2026-10-02 and runs since. It now runs by default when the VRAM holds more than 90% of the (layer, expert) pairs;
+past that it would copy several times the routed experts (the IQ2_XS keeps a quarter of them in the RAM mirror: a
+2,184-token prompt fell from ~560 to 254 tok/s with it). `STRATA_PREFILL_STREAM_ALL=1` / `=0` force it on or off.
+Coder, outputs identical either way:
+
+| prompt | routed-only | stream-all |
+|---|---|---|
+| 40K int8 | 1,106 tok/s | 1,160 |
+| 128K int8, KV streaming | 897 | 920 |
+| 128K k8v4 | 1,006 | 1,041 |
+| 256K int8, KV streaming | 760 | 780 |
+
+Measured alongside: the 2,184-token prompt reads 784-799 tok/s on both the 0.1.35+PR and the 0.1.38 build (three
+runs each), so the 825 seen once on 0.1.35 was session variance, not a regression. The prompt path at 40K (Coder,
+GPU timeline): expert dequant 15.7%, expert GEMMs 23.4%, host grouping 6.5%, gather 5.7%, combine 2.4%, prompt
+attention 19.2%, QSA select 6.8%, DeltaNet recurrence 5.8%, hyper-connection reads 4.6%. Upstream's sm_90 cluster
+kernels (greedy sampler, QSA top-k) would save next to nothing here: the sampler reads ~6 MB a round against a 13 ms
+token. Q4_0 tensor-core prompt attention (#452) is not worth porting: the port's XMX prompt attention is 2-3x slower
+than the plain kernel it uses for every KV format.
+
 **The 0.1.38 merge (2026-10-03).** Upstream 0.1.35 -> 0.1.38 (83 commits) merged the seven PRs the port had taken
 early, so their header forks in `sycl/include` are gone; the merge base for the 3-way merge was the port's own "main +
 PRs" migration. New in the port with it: the DeltaNet output norm without its dead FP32 store, two prompt-path

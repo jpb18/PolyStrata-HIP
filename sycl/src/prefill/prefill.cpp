@@ -108,6 +108,8 @@ inline int64_t stream_all_min() {
     return v;
 }
 double g_pinned_share = 1.0;
+// SYCL port: the share of (layer, expert) pairs the VRAM cache does not hold (set_nonresident_share, from generate.cpp)
+double g_nonres_share = 0.0;
 // The streamed ring: 384 slots when (nearly) every streamed expert is DMA'd from pinned RAM - measured on Q2_0,
 // 8192-token chunks: 96 slots 1153 tok/s, 384 1294 (the next layer's experts arrive during its attention half) -
 // and 96 when a large share goes through host copies (IQ3_S on 64 GB, a third unpinned: 96 slots 1216, 256 1070 -
@@ -154,11 +156,16 @@ inline int ring_slots(size_t T) {
     const int pinned_ring = fused_ring() ? 1024 : 384;
     const int r = v ? std::atoi(v) : g_ring_override > 0 ? g_ring_override : (g_pinned_share >= 0.9 ? pinned_ring : 96);
     if (v && r == STAGE) return STAGE; // Explicit opt-in to routed-only staging, including large chunks.
-    // SYCL port: routed-only staging by default. The stream-all walk (every non-resident expert of every layer, copied
-    // ahead across layers) hangs on the B70 in its first large chunk - the copy engine stops on a barrier (xe resets bcs
-    // on kill) - with any ring size and either issuer, while the per-layer walk streams correctly (8,000 tokens with
-    // 4,051 streamed experts, 2026-09-30). STRATA_PREFILL_STREAM_ALL=1 restores it for debugging.
-    static const bool stream_all_ok = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_ALL"); return e && e[0] == '1'; }();
+    // SYCL port: the stream-all walk (every non-resident expert of every layer, copied ahead across layers) hung on the
+    // B70 in its first large chunk until 2026-10-02 - the stager's and the PLE upload's host waits on queue events,
+    // which the Level Zero v2 adapter did not survive (Stager::issued_one, ple_done_seq). It runs since, and reads a
+    // 40K prompt 4.8% faster than routed-only staging (1,159 vs 1,106 tok/s, same output): the default again.
+    // STRATA_PREFILL_STREAM_ALL=0 keeps routed-only staging, =1 forces the walk.
+    // It copies EVERY non-resident expert of a layer, routed or not: with a big host tier (the IQ2_XS: a quarter of the
+    // experts in the pinned mirror) that is several times the routed ones, and a 2,184-token prompt fell from ~570 to
+    // 254 tok/s. So by default only while the VRAM holds more than 90% of the pairs (the Coder, and its lent slots).
+    static const int stream_all_env = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_ALL"); return e ? (e[0] == '1' ? 1 : 0) : -1; }();
+    const bool stream_all_ok = stream_all_env == 1 || (stream_all_env == -1 && g_nonres_share < 0.10);
     if (!stream_all_ok) return STAGE;
     const int big = r < 16 ? 16 : r > ring_cap() ? ring_cap() : r;
     return (int64_t) T >= stream_all_min() ? big : STAGE;
@@ -1408,6 +1415,7 @@ catch (sycl::exception const &exc) {
 }
 
 void Prefill::set_pinned_share(double share) { g_pinned_share = share; }
+void set_nonresident_share(double share) { g_nonres_share = share; }   // SYCL port (see ring_slots)
 void Prefill::set_ring_override(int slots) { g_ring_override = slots > 0 ? slots : 0; }
 double Prefill::pinned_share() { return g_pinned_share; }
 
