@@ -848,6 +848,35 @@ class LearnedProfile(unittest.TestCase):
         self.assertEqual(engine_args(cfg), ["--native", "x", "--expert-profile-save", "learned.bin"])
 
 
+class RepeatStop(unittest.TestCase):
+    """#606: one token repeated repeat_stop_tokens times in a row ends the reply as "length"; 0 turns it off."""
+
+    def run_reply(self, script, limit=None):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, script, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        if limit is not None:
+            svc.repeat_stop_tokens = limit
+        ids = tok.encode("hi")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            done = [x for kind, x in svc.run(ids, False, None, 3000, {}, threading.Event()) if kind == "done"][0]
+        return done, out.getvalue()
+
+    def test_a_long_run_is_ended(self):
+        done, log = self.run_reply("ok " + "!" * 1000 + " never")
+        self.assertEqual(done["finish"], "length")
+        self.assertEqual(done["completion_tokens"], 3 + 256)
+        self.assertIn("repeated one token ('!') 256 times", log)
+
+    def test_short_runs_and_off(self):
+        done, _ = self.run_reply("=" * 255 + " fine")
+        self.assertEqual(done["finish"], "stop")
+        done, log = self.run_reply("!" * 1000, limit=0)
+        self.assertEqual((done["finish"], done["completion_tokens"]), ("stop", 1001))
+        self.assertNotIn("repeated one token", log)
+        done, _ = self.run_reply("ab" * 400, limit=8)       # alternating tokens are not one run
+        self.assertEqual(done["finish"], "stop")
+
+
 class LayerSplit(unittest.TestCase):
     """#644: "layer_split" is the first layer of each later GPU; a list is accepted, counts per card are not."""
 
