@@ -2059,10 +2059,19 @@ int main(int argc, char** argv) {
     }
     // Layer split with explicit split points: every GPU holds only the dense weights of ITS layers (the PLE tensors
     // stay everywhere).  Without this each card keeps a full copy (~3.4 GB for the Coder) that its stage never
-    // reads - VRAM the expert cache wants.  STRATA_STAGE_TRIM=0 keeps the full copies.
+    // reads - VRAM the expert cache wants.  On by default in the AMD (HIP) builds, where it was measured (PR #639,
+    // 2x MI50); STRATA_STAGE_TRIM=0 keeps the full copies there.  The CUDA build keeps the full copies unless
+    // STRATA_STAGE_TRIM=1, until it has run on NVIDIA cards.
     const std::set<std::string> skip_base = skip;
-    const bool stage_trim = multi_gpu && !split_auto && !split_at.empty() &&
-                            !(std::getenv("STRATA_STAGE_TRIM") && std::string(std::getenv("STRATA_STAGE_TRIM")) == "0");
+    const bool stage_trim = multi_gpu && !split_auto && !split_at.empty() && [] {
+        const char* v = std::getenv("STRATA_STAGE_TRIM");
+        if (v != nullptr && v[0] != 0) return std::string(v) != "0";
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+        return true;
+#else
+        return false;
+#endif
+    }();
     // keep_routers: CUDA0 with --mmap-experts keeps every layer's router (ffn_gate_inp, ~2.5 MiB a layer) - the file
     // tier's routing-aware prefetch (RouterLookahead, below) copies all of them from CUDA0's arena, and would
     // otherwise turn itself off
