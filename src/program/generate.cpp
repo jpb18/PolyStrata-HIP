@@ -340,6 +340,10 @@ struct Options {
     /// and the KV state, minus this reserve for the graphs, the hit scratch and the head.
     int vram_reserve_mib = 700;
     bool vram_reserve_given = false;   ///< --vram-reserve-mib on the command line (#496: no smaller automatic reserve)
+    /// #533 (opt-in): the expert cache in physical segments (CUDA virtual memory management), so the serve loop's
+    /// `VRAM <reserve_mib>` command can give part of it back to other programs and take it again.  Off: one cudaMalloc.
+    bool vram_elastic = false;
+    int64_t vram_segment_mib = 512;
     /// Plan v0.3 P5: batched prompt processing in chunks of this many tokens (0 = the token path).
     int64_t prefill_chunk = 0;
     /// `--prefill auto`: the largest chunk (up to 8192) whose buffers the expert cache can lend.  Every expert a chunk
@@ -515,6 +519,9 @@ void usage() {
                  "  --conversation-cache-mib N  --serve: RAM budget for parked conversations (default 0 = off)\n"
                  "  --conversation-cache-slots N  --serve: at most N parked conversations (default 4)\n"
                  "  --conversation-cache-min-free-mib N  --serve: physical RAM floor when parking (default 2560)\n"
+                 "  --vram-elastic       --serve (#533, opt-in, NVIDIA): the expert cache in segments (--vram-segment-mib,\n"
+                 "                       default 512), so the command `VRAM <reserve_mib>` (the server's POST /v1/vram) can\n"
+                 "                       give VRAM back to other programs between requests and take it back later\n"
                  "  --prompt-cache-every N  --serve: also checkpoint every N fresh prompt tokens (default 16384, 0 = off)\n"
                  "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
                  "  --short-read N       --serve: read at most N fresh text tokens through the decode windows instead\n"
@@ -1211,6 +1218,8 @@ int main(int argc, char** argv) {
         }
         else if (a == "--no-split-rows") o.no_split_rows = true;
         else if (a == "--no-prefill-borrow") o.no_prefill_borrow = true;
+        else if (a == "--vram-elastic") o.vram_elastic = true;
+        else if (a == "--vram-segment-mib") o.vram_segment_mib = std::atoll(next("--vram-segment-mib"));
         else if (a == "--prefill-until") o.prefill_until = std::atoll(next("--prefill-until"));
         else if (a == "--dump-final-r") o.dump_final_r = next("--dump-final-r");
         else if (a == "--spec") o.spec = std::atoi(next("--spec"));
@@ -2951,6 +2960,24 @@ int main(int argc, char** argv) {
             sized_slots.push_back((int64_t) lay.blob_bytes(pr.first));
         }
         o.expert_cache = (int) sized_slots.size();
+    }
+    // #533: --vram-elastic: the cache in physical segments (the VRAM command resizes it between requests).  One GPU,
+    // no helper caches, serve mode: anything else keeps the one cudaMalloc, said once.
+    if (o.vram_elastic) {
+        const char* why = !o.serve ? "it works between requests of --serve"
+                        : multi_gpu ? "a layer split has a cache per GPU"
+                        : std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
+                                      [](int n) { return n > 0; }) ? "the helper caches on other GPUs"
+                        : o.vram_segment_mib < 64 ? "--vram-segment-mib is below 64" : nullptr;
+#if defined(STRATA_USE_HIP)
+        if (why == nullptr) why = "it is NVIDIA-only for now";
+#endif
+        if (why != nullptr) {
+            std::fprintf(stderr, "strata generate: --vram-elastic is off: %s\n", why);
+            o.vram_elastic = false;
+        } else {
+            xcache.set_segment_bytes(o.vram_segment_mib << 20);
+        }
     }
     if (o.expert_cache > 0) {
         // keep the first `keep_bytes` of the cache (the profile's hottest experts first); false when nothing is left
@@ -4986,7 +5013,7 @@ int main(int argc, char** argv) {
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
-                        "conversation_cache_min_free_mib=%lld engine=" STRATA_VERSION "\n",
+                        "conversation_cache_min_free_mib=%lld vram_elastic=%d engine=" STRATA_VERSION "\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),
@@ -4997,7 +5024,7 @@ int main(int argc, char** argv) {
                         (long long) ((o.mmap_experts ? src.resident_bytes() : strata::kernels::cpu::expert_layout().total) >> 20),
                         pool.workers(), o.pcie_frac,
                         o.spec_min_p, (long long) o.conversation_cache_mib, o.conversation_cache_slots,
-                        (long long) o.conversation_cache_min_free_mib);
+                        (long long) o.conversation_cache_min_free_mib, xcache.segmented() ? 1 : 0);
         }
         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
         // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
@@ -5044,7 +5071,132 @@ int main(int argc, char** argv) {
         bool mrope_identity = true;
         std::vector<float> img_rows;
         std::vector<const float*> row_ptr;
+        // ---- #533: VRAM <reserve_mib>, between requests, only with --vram-elastic.  It shrinks the expert cache
+        // until that much VRAM is free for other programs (a game, a CAD session), or grows it back towards its full
+        // size when more than that is free.  Never on its own: only this command (the server's POST /v1/vram) moves
+        // it.  A shrink gives back the cache's LAST segments: the experts in their slots become CPU misses, as any
+        // expert outside the cache is (no output changes beyond what a smaller cache decodes), the prompt path's
+        // loan moves down to the end of what is left (a smaller chunk when it no longer fits).  A grow maps them
+        // again and puts each slot's expert back (or, when the adaptive tier already brought that one back, the
+        // most-routed missing expert of the same layer); the adaptive tier carries on from there.
+        std::vector<std::pair<int32_t, int32_t>> vram_evicted;   // (residency index, slot) the shrinks took
+        const int64_t chunk_full = o.prefill_chunk;              // the loan's chunk with the whole cache
+        auto relend = [&]() {   // the prompt path's loan: the end of the slots left, its chunk as large as fits
+            if (pf_parts.empty() || pf_parts[0].first < 0) return;
+            PfPart& p = pf_parts[0];
+            const int64_t live = xcache.slots();
+            auto fits = [&](int64_t c) {
+                const int64_t k = part_slots(p, c);
+                return k > 0 && k + 128 <= live && !(o.prefill_auto && k * 100 > kAutoLendPct * live);
+            };
+            int64_t c = chunk_full;
+            while (c > 256 && !fits(c)) c = std::max<int64_t>(256, c / 2 / 256 * 256);
+            o.prefill_chunk = c;
+            p.first = (int32_t) std::max<int64_t>(0, live - part_slots(p, c));
+            p.first_now = -1;   // laid out again at the next loan
+        };
+        auto vram_command = [&](const std::string& cmd, std::string& e) -> bool {
+            // `VRAM` alone: the reserve the engine started with (--vram-reserve-mib)
+            char* end = nullptr;
+            const bool bare = cmd.find_first_not_of(' ', 4) == std::string::npos;
+            const long long reserve = bare ? (long long) o.vram_reserve_mib : std::strtoll(cmd.c_str() + 4, &end, 10);
+            if (!bare && (end == cmd.c_str() + 4 || reserve < 0)) { e = "expected: VRAM [reserve_mib]"; return false; }
+            if (!xcache.segmented()) {
+                e = "VRAM needs an engine started with --vram-elastic (one NVIDIA GPU, --serve)";
+                return false;
+            }
+            if (src.complement_ready()) {
+                e = "VRAM: not with the resident low-RAM mode (the cache holds experts RAM does not)";
+                return false;
+            }
+            if (peer.valid()) { e = "VRAM: not with --peer-device"; return false; }
+            for (const PfPart& p : pf_parts)
+                if (!p.lent.empty()) { e = "VRAM: a prompt's loan is still out"; return false; }
+            if (!ver.wait_commit(e)) return false;
+            apply_pending(true);                     // the adaptive tier's swaps in flight land first
+            if (cudaDeviceSynchronize() != cudaSuccess) {
+                e = std::string("VRAM: ") + cudaGetErrorString(cudaGetLastError());
+                return false;
+            }
+            const auto t0 = Clock::now();
+            size_t free_b = 0, total_b = 0;
+            cudaMemGetInfo(&free_b, &total_b);
+            const int64_t want_free = (int64_t) reserve << 20, mapped = xcache.mapped_bytes();
+            const int64_t before = xcache.slots();
+            // what stays at least: the prompt path's smallest loan (256 tokens) and the 128 slots it must leave
+            const int64_t floor_slots = std::min<int64_t>(xcache.full_slots(),
+                128 + (pf_parts.empty() || pf_parts[0].first < 0 ? 0 : part_slots(pf_parts[0], 256)));
+            std::string note;
+            if ((int64_t) free_b < want_free) {
+                const int64_t floor_b = xcache.bytes_of(floor_slots);
+                int64_t keep = mapped - (want_free - (int64_t) free_b);
+                if (keep < floor_b) {
+                    keep = floor_b;
+                    note = " (the cache keeps its smallest size: the prompt path's buffers)";
+                }
+                if (!xcache.shrink(keep, e)) return false;
+                const int64_t live = xcache.slots();
+                for (size_t i = 0; i < host_res.size(); ++i)
+                    if (host_res[i] >= live) {
+                        vram_evicted.emplace_back((int32_t) i, host_res[i]);
+                        host_res[i] = strata::core::kNotResident;
+                    }
+                res_upload();
+            } else if (mapped < xcache.full_bytes()) {
+                std::string gerr;
+                if (!xcache.grow(mapped + ((int64_t) free_b - want_free), gerr)) note = " (" + gerr + ")";
+                const int64_t live = xcache.slots();
+                std::string ferr;
+                std::vector<std::pair<int32_t, int32_t>> keep_out;
+                for (const auto& [i, slot] : vram_evicted) {
+                    if (slot >= live) { keep_out.emplace_back(i, slot); continue; }
+                    const int64_t layer = i / g.n_expert;
+                    int64_t pick = i;
+                    if (host_res[(size_t) i] >= 0) {   // back already (the adaptive tier): the layer's most-routed miss
+                        pick = -1;
+                        float best = -1.0f;
+                        for (int64_t ex = 0; ex < g.n_expert; ++ex) {
+                            const size_t j = (size_t) (layer * g.n_expert + ex);
+                            if (host_res[j] >= 0) continue;
+                            const float u = drive.d.usage.empty() ? 0.0f : drive.d.usage[j];
+                            if (u > best) { best = u; pick = (int64_t) j; }
+                        }
+                    }
+                    if (pick < 0) continue;
+                    const uint8_t* b = srcp->blob(layer, pick % g.n_expert);
+                    if (b == nullptr || !xcache.fill_slot_queued(slot, b, ferr,
+                            (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer))) {
+                        e = "VRAM: refilling the cache failed: " + ferr;
+                        return false;
+                    }
+                    host_res[(size_t) pick] = slot;
+                }
+                vram_evicted.swap(keep_out);
+                if (!xcache.sync_queued(ferr)) { e = "VRAM: " + ferr; return false; }
+                res_upload();
+            }
+            relend();
+            cudaMemGetInfo(&free_b, &total_b);
+            std::fprintf(stderr, "strata serve: VRAM %lld MiB kept free: the expert cache %lld -> %lld of %lld slots "
+                                 "(%.2f of %.2f GiB), %lld MiB free now, prompt chunk %lld, in %.0f ms%s\n",
+                         reserve, (long long) before, (long long) xcache.slots(), (long long) xcache.full_slots(),
+                         (double) xcache.mapped_bytes() / 1073741824.0, (double) xcache.full_bytes() / 1073741824.0,
+                         (long long) (free_b >> 20), (long long) o.prefill_chunk,
+                         std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), note.c_str());
+            std::printf("VRAM reserve_mib=%lld expert_slots=%lld expert_slots_full=%lld expert_cache_mib=%lld "
+                        "expert_cache_full_mib=%lld vram_free_mib=%lld prompt_chunk=%lld\n", reserve,
+                        (long long) xcache.slots(), (long long) xcache.full_slots(),
+                        (long long) (xcache.mapped_bytes() >> 20), (long long) (xcache.full_bytes() >> 20),
+                        (long long) (free_b >> 20), (long long) o.prefill_chunk);
+            return true;
+        };
         while (next_line(line)) {
+            if (line.rfind("VRAM", 0) == 0) {   // #533 (above): between requests, not a request
+                std::string verr;
+                if (!vram_command(line, verr)) std::printf("ERR %s\n", verr.c_str());
+                std::fflush(stdout);
+                continue;
+            }
             // #477: every --expert-profile-save-every minutes, before the next request (at QUIT: after the loop)
             if (!heat.empty() && line != "QUIT" && o.expert_profile_save_min > 0 &&
                 Clock::now() - profile_saved_at >= std::chrono::duration<double>(o.expert_profile_save_min * 60.0))
