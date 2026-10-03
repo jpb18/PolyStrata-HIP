@@ -452,7 +452,7 @@ LoadStats load_experts_direct(const std::string& path, uint8_t* dst, const std::
     std::mutex err_mu;
     std::string err;
     const int wide = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    std::vector<wchar_t> wpath((size_t) std::max(wide, 1), L'\0');
+    std::vector<wchar_t> wpath((size_t) (std::max)(wide, 1), L'\0');
     if (wide > 0) MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wide);
     auto worker = [&]() {
         HANDLE h = CreateFileW(wpath.data(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
@@ -520,7 +520,7 @@ bool experts_unbuffered(const std::vector<std::string>& files, uint64_t arena_by
     uint64_t seed = (uint64_t) GetTickCount64() * 6364136223846793005ull + 1442695040888963407ull;
     for (const std::string& f : files) {
         const int wide = MultiByteToWideChar(CP_UTF8, 0, f.c_str(), -1, nullptr, 0);
-        std::vector<wchar_t> w((size_t) std::max(wide, 1), L'\0');
+        std::vector<wchar_t> w((size_t) (std::max)(wide, 1), L'\0');
         if (wide > 0) MultiByteToWideChar(CP_UTF8, 0, f.c_str(), -1, w.data(), wide);
         HANDLE h = CreateFileW(w.data(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS,
                                nullptr);
