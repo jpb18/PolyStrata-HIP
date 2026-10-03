@@ -51,13 +51,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            images_of, openai_to_messages)
+                            images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
+from serve import runconfig  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
+# #458: the trailing effort turn ("effort_position": "end"); low is the template's own sentence, medium (which the
+# template says nothing for: no xhigh sentence is medium there) says it, since the xhigh one stays at the top
+EFFORT_TURN = "<|im_start|>system\n{}<|im_end|>\n"
+EFFORT_TEXT = {"low": "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the "
+                      "conclusion without unnecessary elaboration.",
+               "medium": "Reasoning effort is set to medium. Think as much as the task needs, without unnecessary "
+                         "elaboration."}
 VISION_START = "<|vision_start|>"
 # #606: a reply that repeats one token this many times in a row is ended there ("length"): a model in a loop, or a
 # broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
@@ -296,6 +304,76 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             print(f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
+class ConvCacheLog:
+    """#596: the engine's conversation cache as its log tells it (the engine writes "strata serve: conversation
+    cache: parked N tokens ...; parked=P bytes=B evictions=E" and "restored N tokens ...; parked=P bytes=B" to stderr,
+    which is the log): read on from where it was last read, from the start of the engine's current run."""
+    EVENT = re.compile(r"conversation cache: (parked|skipped|restored) (\d+) tokens.*?parked=(\d+) bytes=(\d+)"
+                       r"(?: evictions=(\d+))?")
+    DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+)")
+    READ_MAX = 1 << 20                                  # at most the last MiB of new lines per read
+
+    def __init__(self):
+        self.key, self.pos = None, 0
+        self.reset()
+
+    def reset(self):
+        self.state = {"parked": 0, "bytes": 0, "evictions": 0, "parks": 0, "restores": 0, "last_event": None,
+                      "last_tokens": None, "last_at": None}
+
+    def poll(self, path, start) -> dict:
+        """The state after the log's new lines; `start` is where the engine's current run began in it."""
+        if not path or start is None:
+            return dict(self.state)
+        if self.key != (path, start):                   # another start of the engine: its cache starts empty
+            self.key, self.pos = (path, start), start
+            self.reset()
+        try:
+            size = os.path.getsize(path)
+            if size < self.pos:                         # the log was emptied or replaced
+                self.pos = 0
+            if size - self.pos > self.READ_MAX:
+                self.pos = size - self.READ_MAX
+            with open(path, "rb") as f:
+                f.seek(self.pos)
+                data = f.read(size - self.pos)
+        except OSError:
+            return dict(self.state)
+        end = data.rfind(b"\n") + 1                     # whole lines only: the rest is read next time
+        self.pos += end
+        now = time.time()
+        for line in data[:end].decode("utf-8", "replace").splitlines():
+            if "conversation cache:" not in line:
+                continue
+            m = self.EVENT.search(line)
+            if m:
+                st = self.state
+                st["parked"], st["bytes"] = int(m.group(3)), int(m.group(4))
+                if m.group(5) is not None:
+                    st["evictions"] = int(m.group(5))
+                if m.group(1) != "skipped":
+                    st["parks" if m.group(1) == "parked" else "restores"] += 1
+                    st["last_event"], st["last_tokens"], st["last_at"] = m.group(1), int(m.group(2)), now
+                continue
+            m = self.DROPPED.search(line)
+            if m:
+                self.state["parked"] = int(m.group(1))
+        return dict(self.state)
+
+
+def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) -> dict:
+    """#596: the Monitor's Conversation cache card: the parked conversations (the engine's opt-in
+    --conversation-cache-mib: budget, slots, what its log says) and how much of the prompts the cache gave back."""
+    mib = info.get("conversation_cache_mib")
+    last = hist[-1] if hist else None
+    return {"enabled": isinstance(mib, int) and mib > 0, "budget_mib": mib if isinstance(mib, int) else None,
+            "slots": info.get("conversation_cache_slots"), **parked,
+            "requests": len(hist), "requests_reused": sum(1 for r in hist if (r.get("reused") or 0) > 0),
+            "reused_tokens": totals.get("reused", 0), "prompt_tokens": totals.get("prompt_tokens", 0),
+            "last_reused": last.get("reused") if last else None,
+            "last_prompt": last.get("prompt_tokens") if last else None}
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -332,6 +410,7 @@ class StrataEngine:
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
         log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
+        self.log_start = log_start                      # #596: the Monitor's conversation cache reads from here
         if log:
             threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
                              daemon=True).start()
@@ -784,6 +863,31 @@ def gpu_list(cfg: dict) -> list[int]:
     return [int(str(x).strip()) for x in items if str(x).strip() != ""]
 
 
+def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
+    """#458 (opt-in): the engine arguments for "effort_position": "end" - the id of "system" as --tail-role-token, so
+    the engine checkpoints in front of the trailing effort turn - or None when the config leaves it at the top (the
+    default) or the engine is too old for it (said once; the prompt stays the default one).  ValueError for a value
+    other than "start" / "end"."""
+    pos = cfg.get("effort_position", "start")
+    if pos not in ("start", "end"):
+        raise ValueError(f'"effort_position" must be "start" (the default) or "end", not {pos!r}')
+    if pos == "start":
+        return None
+    try:
+        with open(exe, "rb") as f:
+            known = b"--tail-role-token" in f.read()
+    except OSError:
+        known = False
+    role = tok.encode("system", parse_special=True)
+    if not known or len(role) != 1:
+        print("[strata] effort_position \"end\" needs engine 0.1.39 or newer (--tail-role-token): the reasoning "
+              "effort stays at the top of the prompt", flush=True)
+        return None
+    print("[strata] effort_position end: a request's non-default reasoning effort goes right before the answer, so "
+          "changing it keeps the cached conversation", flush=True)
+    return ["--tail-role-token", str(role[0])]
+
+
 def engine_silence_s(cfg: dict) -> float:
     """#481: the config's "engine_silence_s" - seconds an engine may print nothing during a request before the server
     ends it (default ENGINE_SILENCE_S; 0 = wait forever).  ValueError for anything but a number >= 0."""
@@ -933,11 +1037,14 @@ class ByteTokenizer:
     """Tiny stand-in tokenizer for tests without the pack: one id per UTF-8 byte, specials as ids >= 256."""
     SPECIALS = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|vision_start|>", "<|image_pad|>", "<|vision_end|>"]
 
-    def encode(self, text, parse_special=False):
+    ALWAYS = ()                                     # specials matched without parse_special (type 4, as <think>)
+
+    def encode(self, text, parse_special=False, plain=()):
         out, i = [], 0
         while i < len(text):
             for k, s in enumerate(self.SPECIALS):
-                if parse_special and text.startswith(s, i):
+                if (parse_special or s in self.ALWAYS) and text.startswith(s, i) and not any(
+                        a <= i < b for a, b in plain):
                     out.append(256 + k)
                     i += len(s)
                     break
@@ -995,6 +1102,12 @@ class Service:
         self.fifo = threading.Lock()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+        # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
+        # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
+        self.effort_end = False
+        self.conv_log = ConvCacheLog()                  # #596: the parked conversations, from the engine's log
+        self.config_path = None                         # #564: the run config the web page's Settings view edits
+        self.config_lock = threading.Lock()
         # #321: browser pages of these origins may call /v1/* (CORS; "*" = any page - only with an api_key that
         # matters); empty = no CORS headers at all, as before
         self.cors_origins: list[str] = []
@@ -1332,7 +1445,9 @@ class Service:
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
+        parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
+                "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
@@ -1375,11 +1490,38 @@ class Service:
                 "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
+    def render_prompt(self, messages, tools, kwargs) -> str:
+        """The template rendered.  #458: with `effort_end`, a request with a non-default effort (low, medium or no
+        thinking) is rendered as a default one up to the answer - the same prompt start, so the conversation cache
+        keeps it - and its effort follows in a short system turn right before the answer (thinking off: the template's
+        empty thinking block).  The engine (--tail-role-token) checkpoints in front of that turn."""
+        effort = kwargs.get("reasoning_effort")
+        off = kwargs.get("enable_thinking") is False
+        if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
+            return self.template.render(messages, tools=tools, **kwargs)
+        base = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
+        history = self.template.render(messages, tools=tools, add_generation_prompt=False, **base)
+        full = self.template.render(messages, tools=tools, add_generation_prompt=True, **kwargs)
+        mine = self.template.render(messages, tools=tools, add_generation_prompt=False, **kwargs)
+        if not full.startswith(mine):                  # a template this cannot take apart: rendered as asked
+            return full
+        tail = "" if off else EFFORT_TURN.format(EFFORT_TEXT.get(effort, EFFORT_TEXT["medium"]))
+        return history + tail + full[len(mine):]
+
+    def encode_prompt(self, messages, tools, kwargs) -> list[int]:
+        """The request's prompt: the template rendered and tokenized.  #537: a <think> / </think> written inside a
+        message's text is encoded as the text it is, not as the model's reasoning markers (the template's own are)."""
+        marked, marked_tools, changed = mark_think_literals(messages, tools)
+        prompt = self.render_prompt(marked, marked_tools, kwargs)
+        if not changed:
+            return self.tok.encode(prompt, parse_special=True)
+        prompt, plain = unmark_think_literals(prompt)
+        return self.tok.encode(prompt, parse_special=True, plain=plain)
+
     def prepare(self, messages, tools, kwargs, max_new=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context."""
-        prompt = self.template.render(messages, tools=tools, **kwargs)
-        ids = self.tok.encode(prompt, parse_special=True)
+        ids = self.encode_prompt(messages, tools, kwargs)
         self.embeddings.path = None
         images = images_of(messages)
         if images:
@@ -2216,6 +2358,10 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
                 return
+            if path == "/config":                            # #564: the Settings view's keys of the run config
+                if self._authorized():
+                    self._config_get()
+                return
             if path == "/mcp":
                 # the MCP servers, their state and tools (the web app's switch and Monitor card)
                 if self._authorized():
@@ -2284,6 +2430,9 @@ def make_handler(svc: Service):
                 return
             if path == "/settings":
                 self._settings()
+                return
+            if path == "/config":
+                self._config_post()
                 return
             # JSON from Strata's own page only, as /settings: else a plain form POST from any site unloads the model
             if path in ("/unload", "/load") and not self._own_page("the model can be loaded or unloaded"):
@@ -2411,6 +2560,44 @@ def make_handler(svc: Service):
                 return False
             return True
 
+        def _config_get(self):
+            if not svc.config_path:
+                self._json(404, {"error": {"message": "this server was started without a run config"}})
+                return
+            try:
+                cfg = runconfig.load(svc.config_path)
+            except (OSError, ValueError) as e:
+                self._json(500, {"error": {"type": "server_error", "message": f"the run config cannot be read: {e}"}})
+                return
+            self._json(200, runconfig.view(cfg, svc.config_path))
+
+        def _config_post(self):
+            """#564: change a few documented keys of the run config - JSON from Strata's own page only, as
+            /settings (the key is checked before); every other key of the file stays as it is."""
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not self._own_page("the run config can be changed"):
+                return
+            if not svc.config_path:
+                self._json(404, {"error": {"message": "this server was started without a run config"}})
+                return
+            try:
+                req = json.loads(body or b"{}")
+                with svc.config_lock:
+                    cfg = runconfig.load(svc.config_path)
+                    new, changed = runconfig.apply(cfg, req.get("set") if isinstance(req, dict) else None)
+                    if changed:
+                        bak = runconfig.save(svc.config_path, new)
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            except OSError as e:
+                self._json(500, {"error": {"type": "server_error", "message": f"the run config cannot be written: {e}"}})
+                return
+            if changed:
+                print(f"[strata] the Settings view changed {', '.join(changed)} in {Path(svc.config_path).name} "
+                      f"(the earlier file: {bak.name}); used from the next start", flush=True)
+            self._json(200, {**runconfig.view(new, svc.config_path), "changed": changed})
+
         def _settings(self):
             # They change what every client gets, so only the app's own page may set them
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -2478,7 +2665,7 @@ def make_handler(svc: Service):
             svc.load()
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
-            own = {t.get("name") for t in tools or []}
+            own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
                 if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
                     return
@@ -2530,8 +2717,7 @@ def make_handler(svc: Service):
             read for the same request, rendered and tokenized - the model does not run."""
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
-            prompt = svc.template.render(messages, tools=tools, **kw)
-            self._json(200, {"input_tokens": len(svc.tok.encode(prompt, parse_special=True))})
+            self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
             svc.load()
@@ -2985,7 +3171,12 @@ def main() -> int:
             silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
-        engine = StrataEngine(exe, engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env, lazy=lazy)
+        try:
+            effort_end = effort_end_args(cfg, exe, tok)  # #458
+        except ValueError as e:
+            raise SystemExit(f"[strata] config {e}")
+        engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
+                              env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
         note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
@@ -2993,6 +3184,7 @@ def main() -> int:
         if note:                                        # #560 #516: before --open starts a browser on that card
             print(note, flush=True)
     else:
+        effort_end = None
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
             "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}
     # the model's own chat template (exported with its tokenizer), else the original model's
@@ -3044,6 +3236,7 @@ def main() -> int:
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
     svc.repeat_stop_tokens = rs
+    svc.effort_end = bool(effort_end)                   # #458: "effort_position": "end" with an engine that has it
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         try:
             svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]
@@ -3056,6 +3249,8 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+    if a.config:
+        svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:
@@ -3094,8 +3289,8 @@ def main() -> int:
                   "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Strata " + str(a.port) + "\" "
                   "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
                   "       (and set this network to Private in Windows' network settings)", flush=True)
-    if a.open:
-        import webbrowser
+    if a.open and cfg.get("open_browser") is not False:   # #609: the config's "open_browser": false wins (an older
+        import webbrowser                                  # run-<model>.bat still passes --open)
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
     # #96: docker stop sends SIGTERM, which Python ignores by default, so the container's PID 1 would be killed after
     # the grace period with the engine still running. SIGTERM takes Ctrl+C's path below (QUIT to the engine).

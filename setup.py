@@ -2422,6 +2422,86 @@ def write_config(path: Path, cfg: dict):
     os.replace(tmp, path)
 
 
+# #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
+# "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
+SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
+                        "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
+SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_RESIDENT_PIN"})   # the "env" entries setup writes
+SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
+
+
+def carry_over(old: dict, cfg: dict) -> list[str]:
+    """#629: setup run again for an installed model keeps what the user added to its run config: every key setup does
+    not write (`SETUP_KEYS`), the "env" entries setup does not write, and in "vision" the keys setup does not write
+    plus an mmproj of their own (a Q8_0 one, #625) that still exists.  `cfg` (the new config) is updated in place;
+    the names of what was kept are returned.  Engine options added by hand to "args" are not merged (setup chooses
+    those): `args_dropped` names them."""
+    kept = []
+    for k, v in old.items():
+        if k not in SETUP_KEYS and k not in cfg:
+            cfg[k] = v
+            kept.append(k)
+    env = {k: v for k, v in (old.get("env") or {}).items() if k not in SETUP_ENV and k not in (cfg.get("env") or {})} \
+        if isinstance(old.get("env"), dict) else {}
+    if env:
+        cfg["env"] = {**(cfg.get("env") or {}), **env}
+        kept += [f"env {k}" for k in env]
+    ov, nv = old.get("vision"), cfg.get("vision")
+    if isinstance(ov, dict) and isinstance(nv, dict):
+        for k, v in ov.items():
+            if k not in SETUP_VISION and k not in nv:
+                nv[k] = v
+                kept.append(f"vision {k}")
+        mm = ov.get("mmproj")                          # a file of the user's own: not the one setup downloads
+        if isinstance(mm, str) and Path(mm).name != Path(str(nv.get("mmproj"))).name and Path(mm).is_file():
+            nv["mmproj"] = mm
+            kept.append("vision mmproj")
+    return kept
+
+
+def args_dropped(old: dict, cfg: dict) -> list[str]:
+    """#629: the engine options of the earlier run config that the new one has no more (by flag name): options added
+    by hand, which a setup run does not carry over - the start of the line that names them."""
+    def flags(c):
+        a = c.get("args") if isinstance(c.get("args"), list) else []
+        return [str(x) for x in a if str(x).startswith("--")]
+    new = set(flags(cfg))
+    return list(dict.fromkeys(f for f in flags(old) if f not in new))
+
+
+def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) -> None:
+    """#629: setup's run config, written over an earlier one for the same model without losing what the user added
+    to it: the keys setup does not write are carried over (carry_over), and the earlier file is kept as
+    strata-<model>.json.bak when it changes.  `source`: an earlier install's config to carry the keys over from when
+    this folder has none yet (a copy set up like the last one).  A line says what was kept, one what was not."""
+    old_path = cfg_path if cfg_path.is_file() else source
+    old = None
+    if old_path is not None and old_path.is_file():
+        try:
+            old = json.loads(old_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            pass
+        if not isinstance(old, dict):
+            old = None
+    kept = carry_over(old, cfg) if old is not None else []
+    bak = None
+    if cfg_path.is_file() and old != cfg:
+        bak = cfg_path.with_name(cfg_path.name + ".bak")
+        try:
+            shutil.copyfile(cfg_path, bak)
+        except OSError as e:
+            warn(f"could not keep a copy of the earlier {cfg_path.name} ({e.strerror or e})")
+            bak = None
+    write_config(cfg_path, cfg)
+    if kept:
+        ok(f"kept from your earlier {old_path.name}: " + ", ".join(kept))
+    if bak is not None:
+        dropped = args_dropped(old, cfg) if old is not None else []
+        say(f"  the earlier run config is kept as {bak.name}" + (
+            f"; engine options it had that this one has not (setup chooses those): {' '.join(dropped)}"
+            if dropped else ""))
+
+
 def readable_config(path: Path) -> bool:
     """#459: a config that parses as a JSON object; any other gets a one-line warning naming it."""
     text = None
@@ -2671,6 +2751,8 @@ def settings_summary(cfg: dict, port=None) -> str:
     srv = [f"{cfg.get('host', '127.0.0.1')}:{port or cfg.get('port', 8080)}"]
     if cfg.get("api_key"):
         srv.append("api key set")
+    if cfg.get("open_browser") is False:               # #609
+        srv.append("no browser")
     for k in ("gpu", "layer_split", "draft_vocab", "fit_max_tokens", "reasoning_budget_tokens", "anthropic_thinking"):
         if cfg.get(k) is not None:
             v = cfg[k]
@@ -2699,8 +2781,9 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     if keep and any(cfg.get(k) != v for k, v in keep.items()):   # #179: a --host/--api-key on a start was ignored
         cfg.update(keep)
         write_config(cfg_path, cfg)
-        ok("saved for this model: " + ", ".join("api key" if k == "api_key" else f"{k.replace('_', ' ')} {v}"
-                                                for k, v in keep.items()))
+        ok("saved for this model: " + ", ".join(
+            "api key" if k == "api_key" else ("the browser opens" if v else "no browser") if k == "open_browser"
+            else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
     cfg_path.touch()                                     # the most recently used model
     if "--mtp" in cfg["args"][:-1]:
         refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
@@ -2768,7 +2851,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         if g is not None:
             cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
-    if open_browser:
+    browser = open_browser and cfg.get("open_browser") is not False   # #609: "open_browser": false, --no-browser
+    if browser:
         cmd.append("--open")
     gb = 0.0
     if "--native" in cfg["args"]:
@@ -2788,7 +2872,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         say(f"  Starting {cfg.get('model_name', 'the model')}: it loads {size} into RAM and locks part of it for the "
             "GPU.")
     say("  While it does, YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES (longer the first time after a")
-    say("  restart). That is normal: please wait and don't close this window - the browser opens when it is ready.")
+    say("  restart). That is normal: please wait and don't close this window - " + (
+        "the browser opens when it is ready." if browser else "the server says when it is ready."))
     say("  Later, closing this window stops the model.")
     say("  " + "-" * 100)
     for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(cfg, port)}", 100,
@@ -2817,6 +2902,31 @@ def saved_draft_vocab(cfg_path: Path) -> str | None:
     except (OSError, ValueError, AttributeError):
         return None
     return v if v in DRAFT_VOCABS else None
+
+
+def vision_tokens(asked: int | None, vision: str, earlier: Path | None) -> int:
+    """#625: the most image tokens a picture becomes (the config's vision.max_tokens): --vision-tokens N, else what an
+    earlier config of this model chose for the same encoder device (a setup run again keeps it), else the device's
+    default (VISION).  More is allowed with a note on the time it takes: setup recommends, it does not cap."""
+    default = VISION[vision]["max_tokens"]
+    if asked is None and earlier is not None:
+        try:
+            v = json.loads(earlier.read_text(encoding="utf-8-sig")).get("vision")
+        except (OSError, ValueError, AttributeError):
+            v = None
+        mt = v.get("max_tokens") if isinstance(v, dict) and bool(v.get("gpu")) == (vision == "gpu") else None
+        if isinstance(mt, int) and mt > 0 and mt != default:
+            asked = mt
+    if asked is None:
+        return default
+    note = ""
+    if vision == "cpu" and asked > default:
+        note = (" - on the CPU a picture takes longer to encode the more tokens it gets (several seconds more at "
+                "1,024 than at 300)")
+    elif asked > VISION["gpu"]["max_tokens"]:
+        note = " - more than the encoder's default needs more VRAM and context per picture"
+    ok(f"images: up to {asked} image tokens per picture (--vision-tokens; default {default}){note}")
+    return asked
 
 
 DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "en": 133}   # the draft head's VRAM per subset (IQ3_S: the largest)
@@ -2933,9 +3043,10 @@ def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     return cfg
 
 
-def write_run_script(model, cfg_path, port):
+def write_run_script(model, cfg_path, port, open_browser=True):
+    """run-<model>.bat / .sh: the server with this config; `open_browser` False (#609: --no-browser) leaves --open out."""
     serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
-             "--port", str(port), "--open"]
+             "--port", str(port)] + (["--open"] if open_browser else [])
     if WIN:
         script = ROOT / f"run-{model.lower()}.bat"
         script.write_text("@echo off\r\ntitle Strata " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
@@ -3003,6 +3114,10 @@ def main() -> int:
                          "precise) or k8v4 (hybrid: INT8 K + 4-bit V, 816 B/cell)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (yes = the encoder on the GPU)")
+    ap.add_argument("--vision-tokens", type=int, metavar="N",
+                    help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
+                         "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
+                         "for this model")
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
@@ -3018,6 +3133,11 @@ def main() -> int:
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
     ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0)")
+    ap.add_argument("--no-browser", dest="browser", action="store_false", default=None,
+                    help="do not open the chat page in the browser when the model is ready (for a harness or an app "
+                         "that uses the API; remembered for this model, also in run-<model>.bat/.sh)")
+    ap.add_argument("--browser", dest="browser", action="store_true",
+                    help="open the chat page again when the model is ready (the default; undoes --no-browser)")
     ap.add_argument("--data-dir", help="where the model files go (~70-120 GB): default Strata-data next to this folder, "
                                        "remembered for every Strata folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
@@ -3060,6 +3180,8 @@ def main() -> int:
     a = ap.parse_args()
     if a.resident_budget_gib is not None and not a.resident_budget_gib > 0:
         ap.error("--resident-budget-gib takes a number of GiB above 0, e.g. --resident-budget-gib 32")
+    if a.vision_tokens is not None and a.vision_tokens < 1:
+        ap.error("--vision-tokens takes a number of image tokens, 1 or more, e.g. --vision-tokens 768")
     if a.vram_reserve_mib is not None and a.vram_reserve_mib < 0:
         ap.error("--vram-reserve-mib takes a number of MiB, 0 or more, e.g. --vram-reserve-mib 2048")
     if a.gpu is not None:                             # --gpu 0,2 means --gpus 0,2 (a user tried it: issue report)
@@ -3080,6 +3202,7 @@ def main() -> int:
     if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
         return update_install(have, a)
     explicit = a.setup or a.model or a.family or a.check or a.no_start
+    adopted = None                                     # #629: the earlier install this copy is set up like
     if not have and not explicit:                      # a new copy of Strata (an update unzipped elsewhere): set it
         prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already here
         if prev is not None:
@@ -3088,6 +3211,7 @@ def main() -> int:
                 say(f"  Found your earlier install in {prev.parent} ({prev.stem[len('strata-'):]}): setting up this "
                     "copy the same way - the model files are reused, nothing big is downloaded.")
                 a.family, a.model, a.context = ch["family"], ch["model"], a.context or ch["context"]
+                adopted = prev
                 a.kv = a.kv or ch["kv"]
                 a.vision = a.vision or ch["vision"]
                 a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
@@ -3122,14 +3246,14 @@ def main() -> int:
                  + ("keeps" if a.no_start else "starts with") + " the default settings")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib})
+                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         if not a.build:
             update_installed_engine(a.prebuilt)
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib})
+                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
@@ -3138,7 +3262,7 @@ def main() -> int:
         if pick <= len(have):
             return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib})
+                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
 
     # ---- 1. the PC
     step(1, "checking your PC")
@@ -3741,11 +3865,17 @@ def main() -> int:
         cfg["api_key"] = a.api_key
     if draft_vocab:
         cfg["draft_vocab"] = draft_vocab
+    if a.browser is not None:                          # #609: only when given (else an earlier choice is carried over)
+        cfg["open_browser"] = a.browser
     if vision != "none":
+        old_cfg = ROOT / f"strata-{tag.lower()}.json"
+        vt = vision_tokens(a.vision_tokens, vision, old_cfg if old_cfg.is_file() else adopted)
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
-                         "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
+                         "gpu": vision == "gpu", "max_tokens": vt}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
+    elif a.vision_tokens is not None:
+        warn("--vision-tokens: images are off for this model, so it is not used")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     cal = None if hip else saved_calibration(cfg)     # tools/calibrate.py is NVIDIA-only for now
     if cal is not None:
@@ -3753,8 +3883,8 @@ def main() -> int:
         import calibrate as CAL
         cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
         ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
-    write_config(cfg_path, cfg)
-    script = write_run_script(tag, cfg_path, port)
+    write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
+    script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
     if cal is None and not hip and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 5-10 minutes; the PC is busy "

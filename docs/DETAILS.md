@@ -490,6 +490,14 @@ print(r.choices[0].message.content)
   server ends it there with `finish_reason` `"length"` and says so in its window: a model in a loop, or a broken
   state that answers one token forever (#606 saw 36,689 tokens of `!`). `"repeat_stop_tokens": N` in
   `strata-<model>.json` sets the run length; `0` turns it off (for a request that really wants one token many times).
+- **Changing the effort without re-reading the prompt (opt-in, 0.1.39, #458).** The effort's instruction is the
+  first thing in the prompt, so a request that only changes the effort (an agent's "think harder" switch, `none` for
+  a quick tool step) reads the whole conversation again. `"effort_position": "end"` in `strata-<model>.json` renders
+  every request's prompt start as the default effort's and puts a `low` / `medium` effort in a short system turn
+  right before the answer (no thinking: the empty thinking block, as always); the engine (0.1.39+, which the server
+  checks) keeps its checkpoint in front of that turn, so the next request reuses the conversation whatever its
+  effort. The default (`"start"`) prompt is unchanged. The model sees a level that is not the default in another
+  place than it was trained with; how well it follows it there is not measured yet.
 - **Anthropic requests that don't ask for thinking (opt-in, 0.1.32, #278).** By default a `/v1/messages` request
   with no `"thinking"`, effort or budget thinks as the model's template does. `"anthropic_thinking": "on_request"` in
   `strata-<model>.json` renders such a request without thinking - Anthropic's own rule, and what Claude Code's short
@@ -544,6 +552,14 @@ print(r.choices[0].message.content)
 - **Model aliases** (0.1.32). `"aliases": ["qwen", "local-model"]` in `strata-<model>.json` lists the model under
   those names too in `/v1/models` (each with its own `id`, and in the model's `aliases`), like llama-server's
   `--alias`; a request naming one is answered under that name. Any other name is still served, as before.
+- **Model settings in the web page (0.1.39, #564).** The About tab's Model settings card shows and changes a few of
+  the keys above in `strata-<model>.json`: the `sampling` defaults (temperature, top_p, top_k, min_p),
+  `reasoning_budget_tokens`, `fit_max_tokens`, `anthropic_thinking`, `effort_position`, `aliases`, `idle_unload_s`,
+  `lazy_load`, `engine_silence_s`, `api_monitor`, `open_browser` and `--vram-reserve-mib`. An empty field removes the
+  key (its default). Every other key of the file stays as it is, the earlier file is kept as
+  `strata-<model>.json.bak`, and the model uses the change from its next start. Only Strata's own page can save
+  (JSON, the API key when one is set, as for the Chat settings); the network, key, MCP and program keys are not
+  editable there.
 - **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
   run setup with `START-HERE.bat --setup --host 0.0.0.0 --api-key some-long-secret` (or add `"host": "0.0.0.0"` and
   `"api_key": "..."` to `strata-<model>.json`). The server window then prints this PC's addresses
@@ -604,6 +620,11 @@ upstream layer-split checkpoints remain available with parking disabled. FP16,
 INT8, Q4_0 and identity-layout K8V4 snapshots are supported; the K8V4 draft ring
 remains INT8, as in upstream. Windows/HIP and multi-GPU runtime coverage must be
 reported separately from Linux/CUDA evidence.
+
+The web page's Monitor tab has a **Conversation cache** card (0.1.39, #596): the parked conversations against the
+slots and the RAM budget, how many were parked, restored and evicted, and the last switch (read from the engine's
+log), and for every setup how many prompt tokens the cache gave back - in the last request and since the start.
+`/metrics` has the same under `"conversation_cache"`.
 
 Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/V.
 They add host RAM, not another model or VRAM allocation. The byte budget also counts
@@ -764,6 +785,17 @@ helper (`strata-vision`, from llama.cpp's `mtmd` library) and adds it to your st
 
 A picture becomes up to 1,024 tokens of the context (a 640x480 photo: 300). The same picture sent again, as chat apps
 do on every turn, is encoded only once.
+
+**More image tokens (0.1.39, #625):** `--vision-tokens N` at setup (`START-HERE.bat --setup --vision cpu
+--vision-tokens 768`) sets the most tokens a picture becomes - `"max_tokens"` in the `"vision"` section of
+`strata-<model>.json`, which you can also edit by hand. More tokens keep more detail (small text, charts, screenshots)
+and take longer to encode, on the CPU most of all; a setup run again keeps the value.
+
+**A Q8_0 encoder (#625):** `"mmproj"` in the `"vision"` section can point to another mmproj file of this model, for
+example a Q8_0 one (llama.cpp's `convert_hf_to_gguf.py --mmproj --outtype q8_0` makes one): the encoder's library
+reads quantized weights, the file is half the size, and on the CPU it can encode faster than BF16. Setup downloads
+the BF16 file, and a setup run again keeps a file of your own that still exists. We have not measured its accuracy
+against BF16 yet; numbers are welcome in #625.
 
 **A spare GPU for the encoder (0.1.33, #408):** with a card the engine doesn't use, add `"cuda_device": 2` (numbered
 like `nvidia-smi`) to the `"vision"` section of `strata-<model>.json`: the encoder then runs on that card alone. Lower
