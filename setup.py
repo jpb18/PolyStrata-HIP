@@ -1196,7 +1196,7 @@ def cuda_lib_dirs():
 # ------------------------------------------------------------------------------------------------ AMD
 # The RX 7900 XT / XTX (gfx1100) and the RX 9070 series / Radeon AI PRO R9700 (gfx1201) on Linux, through the HIP
 # backend (docs/AMD_HIP.md); the RX 7800 XT / 7700 XT (gfx1101, #254) and the RX 9060 XT (gfx1200, #256) were run by
-# their owners; the RX 6800 / 6900 series (gfx1030, #311) runs but is unvalidated.  There is no ready-made AMD engine: ROCm comes from AMD's TheRock Python wheels into .venv (no sudo;
+# their owners; the RX 6800 / 6900 series (gfx1030, #311) and the RX 6700 XT (gfx1031, #524) run but are unvalidated.  There is no ready-made AMD engine: ROCm comes from AMD's TheRock Python wheels into .venv (no sudo;
 # a system ROCm 7 in /opt/rocm is used when it has hipcc and hipBLAS) and the engine is compiled here for the cards.
 # No images yet.
 ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   # TheRock's wheels per GPU family
@@ -1215,7 +1215,8 @@ AMD_NAMES = {"gfx1100": "AMD Radeon RX 7900 series (gfx1100)",   # when sysfs ha
              "gfx1030": "AMD Radeon RX 6800 / 6900 series (gfx1030)",
              "gfx1031": "AMD Radeon RX 6700 XT series (gfx1031)"}
 AMD_CARDS = ("the RX 7900 XT / XTX (gfx1100), RX 7800 XT / 7700 XT (gfx1101), RX 9060 XT (gfx1200) and "
-             "RX 9070 / 9070 XT / Radeon AI PRO R9700 (gfx1201), RX 6800 / 6900 series (gfx1030, unvalidated), and the RX 6700 XT (gfx1031, unvalidated) ")
+             "RX 9070 / 9070 XT / Radeon AI PRO R9700 (gfx1201), and the RX 6800 / 6900 series (gfx1030) and RX 6700 XT "
+             "(gfx1031, #524), both unvalidated")
 
 
 def rocm_index(arch):
