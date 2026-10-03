@@ -69,6 +69,7 @@ def main():
     ap.add_argument("--n", type=int, default=4, help="prompts (<= --batch)")
     ap.add_argument("--max-new", type=int, default=64)
     ap.add_argument("--skip-solo", action="store_true")
+    ap.add_argument("--keys", default="", help='sampling keys for every request, e.g. "temperature=0.7 top_k=20"')
     ap.add_argument("--extra", default="", help='more engine arguments in one string, e.g. "--adapt-every 1000000"')
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text())
@@ -83,7 +84,7 @@ def main():
     solo = []
     if not a.skip_solo:
         for i, ids in enumerate(prompts):
-            eng.send(f"GEN {a.max_new} " + ",".join(map(str, ids)))
+            eng.send(" ".join(x for x in ("GEN", str(a.max_new), a.keys, ",".join(map(str, ids))) if x))
             got, t0 = [], time.time()
             for line in out:
                 if line.startswith("T "):
@@ -99,7 +100,7 @@ def main():
     t_admit = time.time()
     first_bt = None
     for i, ids in enumerate(prompts):
-        eng.send(f"BGEN {i} {a.max_new} " + ",".join(map(str, ids)))
+        eng.send(" ".join(x for x in ("BGEN", str(i), str(a.max_new), a.keys, ",".join(map(str, ids))) if x))
         for line in out:
             if line.startswith("T "):
                 got[i].append(int(line.split()[1]))

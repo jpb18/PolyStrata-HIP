@@ -74,8 +74,39 @@ the HTTP server, 400 tokens per answer, temperature 0.7:
 | 4 | 51 tok/s | 205 tok/s |
 | 8 | 45 tok/s | 360 tok/s |
 
+With the patches below on engine 0.1.38 and parking on, through the service: 8 requests at temperature 0 -> 369
+tok/s, at 0.7 -> 358 tok/s.
+
 `--trim-stage-weights` alone raised the share of experts held in VRAM on that machine from 76-85 % to 84-100 %
 per card.
+
+## Together with conversation parking
+
+`--conversation-cache-mib N --conversation-cache-slots K` (DETAILS.md) works with the layer split too: a request
+whose conversation was parked is restored on every stage before its admission, so an agent and its sub-agents, or
+several chats that alternate, come back without reading their history again. Measured on the same 4-GPU split,
+two long conversations alternating through the HTTP server: the first turns took 3.9 s and 5.7 s to the first token
+(their prompts read), the follow-ups 0.53 s and 0.46 s.
+
+## Testing
+
+Three scripts drive a built engine or a running server; each exits non-zero on a failure.
+
+| Script | What it checks |
+| --- | --- |
+| `tools/batch_test.py` | the same prompts alone (`GEN`) and together in the batch slots (`BGEN`): every slot's greedy tokens equal its solo tokens; prints the aggregate rate. `--batch-groups` in `--extra` tests the pipeline, `--keys "temperature=0.7"` the sampled rows. |
+| `tools/parking_test.py` | a follow-up to a conversation decodes the same tokens whether its state stayed live or came back from the parking cache (with a layer split: every stage's image). |
+| `tools/early_close_test.py` | a client that stops reading a streamed answer early (alone, and with a second request running) does not leave its tokens to the next request (server). |
+
+For exact comparisons pass `--pcie-frac 0 --adapt-every 1000000` (and the scripts set `STRATA_IQ_MT_MIN=1`):
+
+```
+python3 tools/batch_test.py --exe engine/strata --config strata-<model>.json --batch 8 --n 8 \
+    --extra "--layer-split 12,24,36 --trim-stage-weights --batch-groups 4 --pcie-frac 0 --adapt-every 1000000"
+python3 tools/parking_test.py --exe engine/strata --config strata-<model>.json \
+    --extra "--layer-split 12,24,36 --conversation-cache-mib 8192 --conversation-cache-slots 4 --pcie-frac 0"
+STRATA_KEY=<key> python3 tools/early_close_test.py http://127.0.0.1:8080
+```
 
 ## Engine protocol (`--serve`)
 
