@@ -558,15 +558,20 @@ template<int TY> struct Split;
 // per-entry ones, which call Fmt<TY>::dot per column exactly as before #242 (the launchers test kSplit at compile
 // time, so the multi kernels are never instantiated for a type without a Split).
 template<int TY> inline constexpr bool kSplit = false;
+template<int TY> inline constexpr bool kStageIqGrid = (TY == 16 || TY == 17 || TY == 22 || TY == 29);
+
 template<> inline constexpr bool kSplit<16> = true;
 template<> struct Split<16> {   // IQ2_XXS
     struct W { int g[8]; int ls; float dw; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ s_grid = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ s_grid = nullptr) {
         const block_iq2_xxs* bq2 = (const block_iq2_xxs*) vbq + kbx;
         const int q2 = get_int_b2(bq2->qs, iqs);
         const uint8_t* aux8 = (const uint8_t*) &q2;
         const uint32_t aux32 = get_int_b2(bq2->qs, iqs + 1);
-        const uint2* grid_lut = s_grid ? (const uint2*) s_grid : (const uint2*) iq2xxs_grid;
+        const uint2* grid_lut;
+        if constexpr (STAGE_GRID) grid_lut = (const uint2*) s_grid;
+        else grid_lut = (const uint2*) iq2xxs_grid;
         W r;
 #pragma unroll
         for (int k0 = 0; k0 < 8; k0 += 2) {
@@ -606,11 +611,14 @@ struct SplitLs2 {
 };
 template<> inline constexpr bool kSplit<17> = true;
 template<> struct Split<17> : SplitLs2 {   // IQ2_XS
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ s_grid = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ s_grid = nullptr) {
         const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
         const int2 q2_packed = make_int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
         const uint16_t* q2 = (const uint16_t*) &q2_packed;
-        const uint2* grid_lut = s_grid ? (const uint2*) s_grid : (const uint2*) iq2xs_grid;
+        const uint2* grid_lut;
+        if constexpr (STAGE_GRID) grid_lut = (const uint2*) s_grid;
+        else grid_lut = (const uint2*) iq2xs_grid;
         W r;
         r.ls0 = bq2->scales[iqs / 2] & 0x0F;
         r.ls1 = bq2->scales[iqs / 2] >> 4;
@@ -629,14 +637,17 @@ template<> struct Split<17> : SplitLs2 {   // IQ2_XS
 };
 template<> inline constexpr bool kSplit<22> = true;
 template<> struct Split<22> : SplitLs2 {   // IQ2_S
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ s_grid = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ s_grid = nullptr) {
         const block_iq2_s* bq2 = (const block_iq2_s*) vbq + kbx;
         const int qs_packed = get_int_b2(bq2->qs, iqs / 2);
         const uint8_t* qs = (const uint8_t*) &qs_packed;
         const int qh = bq2->qh[iqs / 2];
         const int signs_packed_32 = get_int_b2(bq2->qs, QK_K / 32 + iqs / 2);
         const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
-        const uint64_t* grid_lut = s_grid ? (const uint64_t*) s_grid : iq2s_grid;
+        const uint64_t* grid_lut;
+        if constexpr (STAGE_GRID) grid_lut = (const uint64_t*) s_grid;
+        else grid_lut = iq2s_grid;
         W r;
         r.ls0 = bq2->scales[iqs / 2] & 0x0F;
         r.ls1 = bq2->scales[iqs / 2] >> 4;
@@ -655,16 +666,16 @@ template<> struct Split<22> : SplitLs2 {   // IQ2_S
 template<> inline constexpr bool kSplit<18> = true;
 template<> struct Split<18> {   // IQ3_XXS
     struct W { int g[8]; int ls; float dw; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ s_grid = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ = nullptr) {
         const block_iq3_xxs* bq3 = (const block_iq3_xxs*) vbq + kbx;
         const int2 q3_packed = make_int2(get_int_b2(bq3->qs, iqs), get_int_b2(bq3->qs, iqs + 1));
         const uint8_t* q3 = (const uint8_t*) &q3_packed;
         const uint32_t aux32 = get_int_b2(bq3->qs, QK_K / 16 + iqs / 2);
-        const uint32_t* grid_lut = s_grid ? (const uint32_t*) s_grid : iq3xxs_grid;
         W r;
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
-            const int2 grid_pos = make_int2(grid_lut[q3[l0 + 0]], grid_lut[q3[l0 + 1]]);
+            const int2 grid_pos = make_int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
             const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
             const int signs0 = __vcmpne4(signs & 0x08040201, 0);
             r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
@@ -687,19 +698,19 @@ template<> struct Split<18> {   // IQ3_XXS
 template<> inline constexpr bool kSplit<21> = true;
 template<> struct Split<21> {   // IQ3_S
     struct W { int g[8]; int ls; float dw; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ s_grid = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ = nullptr) {
         const block_iq3_s* bq3 = (const block_iq3_s*) vbq + kbx;
         const int2 qs_packed = make_int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
         const uint8_t* qs = (const uint8_t*) &qs_packed;
         const int qh = bq3->qh[iqs / 2];
         const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
         const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
-        const uint32_t* grid_lut = s_grid ? (const uint32_t*) s_grid : iq3s_grid;
         W r;
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
-            const int2 grid_pos = make_int2(grid_lut[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
-                                            grid_lut[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+            const int2 grid_pos = make_int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
+                                            iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
             const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
             const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
             r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
@@ -721,11 +732,14 @@ template<> struct Split<21> {   // IQ3_S
 template<> inline constexpr bool kSplit<29> = true;
 template<> struct Split<29> {   // IQ1_M
     struct W { int g[8]; float delta[4]; int sc0, sc1; float dw; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ s_grid = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ s_grid = nullptr) {
         const block_iq1_m* bq1 = (const block_iq1_m*) vbq + kbx;
         const int qs_packed = get_int_b4(bq1->qs, iqs);
         const uint8_t* qs = (const uint8_t*) &qs_packed;
-        const uint32_t* grid_lut = s_grid ? (const uint32_t*) s_grid : iq1s_grid_gpu;
+        const uint32_t* grid_lut;
+        if constexpr (STAGE_GRID) grid_lut = s_grid;
+        else grid_lut = iq1s_grid_gpu;
         W r;
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
@@ -765,7 +779,8 @@ template<> struct Split<29> {   // IQ1_M
 template<> inline constexpr bool kSplit<20> = true;
 template<> struct Split<20> {   // IQ4_NL
     struct W { int2 v[2]; float dw; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ = nullptr) {
         const block_iq4_nl* bq4 = (const block_iq4_nl*) vbq + kbx;
         W r;
 #pragma unroll
@@ -788,7 +803,8 @@ template<> struct Split<20> {   // IQ4_NL
 template<> inline constexpr bool kSplit<23> = true;
 template<> struct Split<23> {   // IQ4_XS
     struct W { int2 v[4]; int ls; float dw; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ = nullptr) {
         const block_iq4_xs* bq4 = (const block_iq4_xs*) vbq + kbx;
         W r;
 #pragma unroll
@@ -814,7 +830,8 @@ template<> struct Split<23> {   // IQ4_XS
 template<> inline constexpr bool kSplit<42> = true;
 template<> struct Split<42> {   // Q2_0
     struct W { int qx[4], qy[4]; float d2; };
-    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void* __restrict__ = nullptr) {
+    template<bool STAGE_GRID = false>
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const uint32_t* __restrict__ = nullptr) {
         const block_q2_0* bq2_0 = (const block_q2_0*) vbq + kbx;
         W r;
         r.d2 = bq2_0->d;
@@ -847,16 +864,16 @@ template<> struct Split<42> {   // Q2_0
 // One row against the n <= NC activations x + off[0..n) (n >= 1, warp-uniform; offsets in q8_1 blocks, 32-bit to
 // spare registers), the whole warp.  Per activation this is row_dot: the same calls k, lane-strided the same way,
 // summed in the same order, then the same warp_sum.  Only the weight side moves out of the per-activation loop.
-template<int TY, int NC, bool EXACT_N = false>
+template<int TY, int NC, bool EXACT_N = false, bool STAGE_GRID = false>
 __device__ __forceinline__ void row_dot_multi(const uint8_t* row, const block_q8_1* x, const int (&off)[NC], int n,
-                                              int nb, int lane, float (&s)[NC], const void* __restrict__ s_grid = nullptr) {
+                                              int nb, int lane, float (&s)[NC], const uint32_t* __restrict__ s_grid = nullptr) {
     using F = Fmt<TY>;
     using S = Split<TY>;
 #pragma unroll
     for (int c = 0; c < NC; ++c) s[c] = 0.0f;
     for (int k = lane; k < nb * F::ipb; k += 32) {
         const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
-        const typename S::W w = S::load(row, kbx, iqs, s_grid);
+        const typename S::W w = S::template load<STAGE_GRID>(row, kbx, iqs, s_grid);
 #pragma unroll
         for (int c = 0; c < NC; ++c)
             if (EXACT_N || c < n) s[c] += S::apply(w, x + off[c] + kbx * (F::qk / 32), iqs);
@@ -961,26 +978,20 @@ __device__ __forceinline__ void row_dot_20_sub16(const uint8_t* row, const block
     }
 }
 
-template<int TY>
-__device__ __forceinline__ const void* stage_iq_grid(uint32_t* s_buf, int tid, int nthreads) {
-    if constexpr (TY == 16) {
+template<int TY, bool STAGE_GRID = kStageIqGrid<TY>>
+__device__ __forceinline__ const uint32_t* stage_iq_grid(uint32_t* s_buf, int tid, int nthreads) {
+    if constexpr (!STAGE_GRID) {
+        return nullptr;
+    } else if constexpr (TY == 16) {
         uint2* dst = (uint2*) s_buf;
         const uint2* src = (const uint2*) iq2xxs_grid;
         for (int i = tid; i < 256; i += nthreads) dst[i] = src[i];
         __syncthreads();
-        return dst;
+        return s_buf;
     } else if constexpr (TY == 17) {
         uint2* dst = (uint2*) s_buf;
         const uint2* src = (const uint2*) iq2xs_grid;
         for (int i = tid; i < 512; i += nthreads) dst[i] = src[i];
-        __syncthreads();
-        return dst;
-    } else if constexpr (TY == 18) {
-        for (int i = tid; i < 256; i += nthreads) s_buf[i] = iq3xxs_grid[i];
-        __syncthreads();
-        return s_buf;
-    } else if constexpr (TY == 21) {
-        for (int i = tid; i < 512; i += nthreads) s_buf[i] = iq3s_grid[i];
         __syncthreads();
         return s_buf;
     } else if constexpr (TY == 22) {
@@ -988,31 +999,31 @@ __device__ __forceinline__ const void* stage_iq_grid(uint32_t* s_buf, int tid, i
         const uint2* src = (const uint2*) iq2s_grid;
         for (int i = tid; i < 1024; i += nthreads) dst[i] = src[i];
         __syncthreads();
-        return dst;
+        return s_buf;
     } else if constexpr (TY == 29) {
         uint2* dst = (uint2*) s_buf;
         const uint2* src = (const uint2*) iq1s_grid_gpu;
         for (int i = tid; i < 1024; i += nthreads) dst[i] = src[i];
         __syncthreads();
-        return dst;
+        return s_buf;
     } else {
         return nullptr;
     }
 }
 
-template<int TY>
+template<int TY, bool STAGE_GRID = kStageIqGrid<TY>>
 struct IqGridWords {
-    static constexpr int value = (TY == 22 || TY == 29) ? 2048 : (TY == 17) ? 1024 : (TY == 16 || TY == 21) ? 512 : (TY == 18) ? 256 : 1;
+    static constexpr int value = !STAGE_GRID ? 4 : (TY == 22 || TY == 29) ? 2048 : (TY == 17) ? 1024 : (TY == 16) ? 512 : 4;
 };
 
 // mmvq_kernel with the columns taken NC at a time.  After warp_sum every lane holds the same sum, so lane c stores
 // column c.
-template<int TY, int NC>
+template<int TY, int NC, bool STAGE_GRID = kStageIqGrid<TY>>
 __global__ void __launch_bounds__(128) mmvq_multi_kernel(const uint8_t* __restrict__ w, size_t row_bytes,
                                                          const block_q8_1* __restrict__ x, float* __restrict__ y,
                                                          int n_in, int n_out, int ncols) {
-    __shared__ uint32_t s_grid_buf[IqGridWords<TY>::value];
-    const void* s_grid = stage_iq_grid<TY>(s_grid_buf, threadIdx.y * 32 + threadIdx.x, 128);
+    __shared__ alignas(16) uint32_t s_grid_buf[IqGridWords<TY, STAGE_GRID>::value];
+    const uint32_t* s_grid = stage_iq_grid<TY, STAGE_GRID>(s_grid_buf, threadIdx.y * 32 + threadIdx.x, 128);
     const int row = blockIdx.x * 4 + threadIdx.y;
     if (row >= n_out) return;
     const int lane = threadIdx.x;
@@ -1024,7 +1035,7 @@ __global__ void __launch_bounds__(128) mmvq_multi_kernel(const uint8_t* __restri
 #pragma unroll
         for (int c = 0; c < NC; ++c) off[c] = (c0 + min(c, n - 1)) * xb;
         float s[NC];
-        row_dot_multi<TY, NC>(wr, x, off, n, nb, lane, s, s_grid);
+        row_dot_multi<TY, NC, false, STAGE_GRID>(wr, x, off, n, nb, lane, s, s_grid);
 #pragma unroll
         for (int c = 0; c < NC; ++c)
             if (c < n && lane == c) y[(size_t) (c0 + c) * n_out + row] = s[c];
@@ -1070,7 +1081,7 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
 // has halves of <= 4), so 4 takes such windows in one pass; 8 would take ~64-80 registers against ~48 (ptxas -v).
 constexpr int GRP_NC = 4;
 
-template<int TG>
+template<int TG, bool STAGE_GRID = kStageIqGrid<TG>>
 __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                               const int32_t* __restrict__ grp_start,
                                                               const int32_t* __restrict__ n_groups,
@@ -1079,8 +1090,8 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
                                                               float* __restrict__ gate, float* __restrict__ up) {
     const int ng = *n_groups;
     if (blockIdx.y >= ng) return;
-    __shared__ uint32_t s_grid_buf[IqGridWords<TG>::value];
-    const void* s_grid = stage_iq_grid<TG>(s_grid_buf, threadIdx.x, 256);
+    __shared__ alignas(16) uint32_t s_grid_buf[IqGridWords<TG, STAGE_GRID>::value];
+    const uint32_t* s_grid = stage_iq_grid<TG, STAGE_GRID>(s_grid_buf, threadIdx.x, 256);
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row = blockIdx.x * GU_ROWS + warp;             // 0 .. 2*n_ff
     if (row >= 2 * L.n_ff) return;
@@ -1097,19 +1108,19 @@ __global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned lon
             if (n == 1) {
                 const int off1[1] = { ent_tok[e] * xb };
                 float s1[1];
-                row_dot_multi<TG, 1, true>(wr, xq, off1, 1, nb, lane, s1, s_grid);
+                row_dot_multi<TG, 1, true, STAGE_GRID>(wr, xq, off1, 1, nb, lane, s1, s_grid);
                 if (lane == 0) dst[(size_t) e * L.n_ff + r] = s1[0];
             } else if (n == 2) {
                 const int off2[2] = { ent_tok[e] * xb, ent_tok[e + 1] * xb };
                 float s2[2];
-                row_dot_multi<TG, 2, true>(wr, xq, off2, 2, nb, lane, s2, s_grid);
+                row_dot_multi<TG, 2, true, STAGE_GRID>(wr, xq, off2, 2, nb, lane, s2, s_grid);
                 if (lane < 2) dst[(size_t) (e + lane) * L.n_ff + r] = s2[lane];
             } else {
                 int off[GRP_NC];
 #pragma unroll
                 for (int c = 0; c < GRP_NC; ++c) off[c] = ent_tok[e + min(c, n - 1)] * xb;
                 float s[GRP_NC];
-                row_dot_multi<TG, GRP_NC>(wr, xq, off, n, nb, lane, s, s_grid);
+                row_dot_multi<TG, GRP_NC, false, STAGE_GRID>(wr, xq, off, n, nb, lane, s, s_grid);
 #pragma unroll
                 for (int c = 0; c < GRP_NC; ++c)
                     if (c < n && lane == c) dst[(size_t) (e + c) * L.n_ff + r] = s[c];
@@ -1671,6 +1682,11 @@ bool env_on(const char* name) {
 }
 // STRATA_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
 bool g_old_kernels = env_on("STRATA_OLD_IQ_MMVQ");
+// STRATA_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
+bool g_stage_grid = [] {
+    const char* v = std::getenv("STRATA_IQ_STAGE_GRID");
+    return v == nullptr || v[0] == '\0' || v[0] != '0';
+}();
 
 template<int TY>
 void launch_mmvq(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int n_in, int n_out, int ncols,
@@ -1678,10 +1694,24 @@ void launch_mmvq(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int
     const dim3 grid((unsigned) ((n_out + 3) / 4)), block(32, 4);
     if constexpr (!kSplit<TY>) mmvq_kernel<TY><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
     else if (g_old_kernels) mmvq_kernel<TY><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
-    else if (ncols <= 1) mmvq_multi_kernel<TY, 1><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
-    else if (ncols == 2) mmvq_multi_kernel<TY, 2><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
-    else if (ncols <= 4) mmvq_multi_kernel<TY, 4><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
-    else mmvq_multi_kernel<TY, 8><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);   // 8 at a time past 8
+    else if constexpr (kStageIqGrid<TY>) {
+        if (!g_stage_grid) {
+            if (ncols <= 1) mmvq_multi_kernel<TY, 1, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+            else if (ncols == 2) mmvq_multi_kernel<TY, 2, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+            else if (ncols <= 4) mmvq_multi_kernel<TY, 4, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+            else mmvq_multi_kernel<TY, 8, false><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+            return;
+        }
+        if (ncols <= 1) mmvq_multi_kernel<TY, 1><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+        else if (ncols == 2) mmvq_multi_kernel<TY, 2><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+        else if (ncols <= 4) mmvq_multi_kernel<TY, 4><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+        else mmvq_multi_kernel<TY, 8><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+    } else {
+        if (ncols <= 1) mmvq_multi_kernel<TY, 1><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+        else if (ncols == 2) mmvq_multi_kernel<TY, 2><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+        else if (ncols <= 4) mmvq_multi_kernel<TY, 4><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);
+        else mmvq_multi_kernel<TY, 8><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols);   // 8 at a time past 8
+    }
 }
 
 template<int TG>
@@ -1690,7 +1720,13 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
                float* gate, float* up) {
     if constexpr (!kSplit<TG>) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     else if (g_old_kernels) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
-    else native_gu_multi_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    else if constexpr (kStageIqGrid<TG>) {
+        if (!g_stage_grid) {
+            native_gu_multi_kernel<TG, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            return;
+        }
+        native_gu_multi_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    } else native_gu_multi_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
 }
 
 template<int TD>

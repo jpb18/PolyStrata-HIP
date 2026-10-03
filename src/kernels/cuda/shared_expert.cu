@@ -161,32 +161,6 @@ void shared_expert_set_native_bf16(bool enabled) { native_bf16 = enabled; }
 bool shared_expert_native_bf16_enabled() { return native_bf16; }
 
 namespace {
-struct SharedQ81Block {
-    half2 ds;
-    int8_t qs[32];
-};
-
-__launch_bounds__(256, 1)
-__global__ void native_swiglu_quantize_q8_1_kernel(const float* __restrict__ gate,
-                                                   const float* __restrict__ up,
-                                                   SharedQ81Block* __restrict__ y, int n_in) {
-    const int i = int(blockIdx.x) * 256 + int(threadIdx.x);
-    if (i >= n_in) return;
-    const float gi = gate[i];
-    const float xi = __fdividef(gi, 1.0f + __expf(-gi)) * up[i];
-    float amax = fabsf(xi);
-    float sum = xi;
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset, 32));
-        sum += __shfl_xor_sync(0xffffffffu, sum, offset, 32);
-    }
-    const float d = amax / 127.0f;
-    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
-    y[i / 32].qs[i % 32] = q;
-    if ((i & 31) == 0) y[i / 32].ds = make_half2(d, sum);
-}
-
 __global__ void scale_rows_kernel(float* __restrict__ out, const float* __restrict__ g, int n) {
     const int t = blockIdx.y;
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -200,6 +174,14 @@ __global__ void sigmoid_scale_rows_kernel(float* __restrict__ out, const float* 
         const float gt = __fdividef(1.0f, 1.0f + __expf(-g[t]));
         out[(size_t) t * n + i] *= gt;
     }
+}
+
+bool fused_swiglu_q81_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_FUSED_SWIGLU_Q81");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    return on;
 }
 }  // namespace
 
@@ -217,8 +199,12 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
     native_mmvq(nw.gate_type, nw.gate_data, x_q8_1, gate, (int) n_embd, (int) n_ff, n_tok, stream);
     native_mmvq(nw.up_type, nw.up_data, x_q8_1, up, (int) n_embd, (int) n_ff, n_tok, stream);
     const int n = (int) (n_ff * n_tok);
-    native_swiglu_quantize_q8_1_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, cs>>>(
-        gate, up, (SharedQ81Block*) nw.q8_1, n);
+    if (fused_swiglu_q81_enabled()) {
+        native_swiglu_quantize_q8_1(gate, up, nw.q8_1, (int) n_ff, n_tok, stream);
+    } else {
+        native_swiglu_kernel<<<(unsigned) ((n + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate, up, gate, n);
+        native_quantize_q8_1(gate, nw.q8_1, (int) n_ff, n_tok, stream);
+    }
     native_mmvq(nw.down_type, nw.down_data, nw.q8_1, out, (int) n_ff, (int) n_embd, n_tok, stream);
     static const bool batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
     if (native_bf16 && batch && n_tok > 1) {   // one gemv for all rows (outputs identical), fused sigmoid+scale
@@ -320,9 +306,8 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
         native_mmvq(native->up_type, native->up_data, native->q8_1, up, (int) n_embd, (int) n_ff, 1, stream);
     else
         gemv(up_form, up_codes, up_scales, up_off, x_q8_0, x_q8k, up, n_embd, n_ff);
-    if (native_projection && native_down) {
-        native_swiglu_quantize_q8_1_kernel<<<(unsigned) ((n_ff + 255) / 256), 256, 0, (cudaStream_t) stream>>>(
-            gate, up, (SharedQ81Block*) native->q8_1, (int) n_ff);
+    if (native_projection && native_down && fused_swiglu_q81_enabled()) {
+        native_swiglu_quantize_q8_1(gate, up, native->q8_1, (int) n_ff, 1, stream);
         native_mmvq(native->down_type, native->down_data, native->q8_1, out, (int) n_ff, (int) n_embd, 1, stream);
     } else {
         if (native_projection)

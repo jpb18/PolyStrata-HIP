@@ -478,7 +478,11 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         std::fprintf(stderr, "gdn_step_norm_multi: invalid arguments\n");
         std::exit(1);
     }
-    if (n_keep != nullptr && t_out_begin >= n_tok) {
+    static const bool commit_split = [] {
+        const char* e = std::getenv("STRATA_GDN_COMMIT_SPLIT");
+        return !e || e[0] != '0';
+    }();
+    if (commit_split && n_keep != nullptr && t_out_begin >= n_tok) {
         gdn_step_commit_kernel<<<dim3((unsigned) h_v, 4u), dim3(32, RG), 0, (cudaStream_t) stream>>>(
             state, h, conv_channels, gate, beta, h_k, h_v, n_keep);
     } else {

@@ -627,7 +627,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
             }
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
-            const bool ple_batch_kv = dec_batch && n > 1 && ss.ple.w.key_bf16 != nullptr &&
+            static const bool ple_batch_env = [] {
+                const char* e = std::getenv("STRATA_PLE_BATCH");
+                return !e || e[0] != '0';
+            }();
+            const bool ple_batch_kv = ple_batch_env && dec_batch && n > 1 && ss.ple.w.key_bf16 != nullptr &&
                                       ss.ple.w.value_bf16 != nullptr && ple_native_bf16_enabled() &&
                                       ple_native_postops_enabled();
             if (ple_batch_kv) {
@@ -842,7 +846,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
         stamp(l, 16, grp);
         gr_read_group(1, true, inj_, inj2_);
-        const bool sh_fork = !prof_on_ && sh_cs_ != nullptr && ev_fork_ != nullptr && ev_join_ != nullptr;
+        static const bool sh_stream_env = [] {
+            const char* e = std::getenv("STRATA_SH_STREAM");
+            return !e || e[0] != '0';
+        }();
+        const bool sh_fork = sh_stream_env && !prof_on_ && sh_cs_ != nullptr && ev_fork_ != nullptr && ev_join_ != nullptr;
         cudaStream_t sh_stream = sh_fork ? sh_cs_ : cs;
         if (sh_fork) {
             cudaEventRecord(ev_fork_, cs);
@@ -920,7 +928,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     };
 
     // ---------------------------------------------------------------- post(l, group): experts, combine
-    const bool fuse_head_gr = (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
+    static const bool fuse_head_gr_env = [] {
+        const char* e = std::getenv("STRATA_FUSE_HEAD_GR");
+        return e && e[0] == '1';
+    }();
+    const bool fuse_head_gr = fuse_head_gr_env && (le_ == g.n_layers) && (head_ != nullptr && head_->loaded()) &&
                               !cvec().covers(g.n_layers - 1);
     auto post = [&](int64_t l, int grp) -> bool {
         const int tb = tb_[grp], te = te_[grp], n = te - tb;
