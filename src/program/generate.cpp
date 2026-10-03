@@ -3706,7 +3706,12 @@ int main(int argc, char** argv) {
         strata::core::doorbell_reset(db);
         double mix = 0, ffn = 0, post = 0;
         if (!strata::core::session_replay_stages(g, 0, 0, ss, gr, main_cs, mix, ffn, post, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            // #610: a native (IQ) pack captures no per-layer graphs; the serve path times its window's stages
+            std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(),
+                         native_pack ? " - a native (IQ) pack has no per-layer graphs to replay. Its decode window's GPU "
+                                       "stages are printed per request by the serve path instead: STRATA_VERIFY_PROFILE=1 "
+                                       "STRATA_DECODE_TIMING=1 with --serve (docs/DETAILS.md, \"Where a decode window's "
+                                       "time goes\")" : "");
             return 1;
         }
         const int reps = 20;

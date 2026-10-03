@@ -178,6 +178,15 @@ Its `hit_rate` is the VRAM share of the experts looked up while answering: exper
 (engine 0.1.39 or newer, #588) is their share of all routed experts, and the server log and the Monitor tab show it
 beside the hit rate.
 
+**Where a decode window's time goes (profiling, #610):** start the server with `STRATA_DECODE_TIMING=1` (and
+`STRATA_VERIFY_PROFILE=1` for the GPU's side) in the environment. After each request the engine log then has one
+`strata decode timing:` line - windows, tokens per window, and per window the verify time split into the wait for the
+GPU, the CPU expert pool (plan, activation quantization, jobs) and the stage, plus commit and draft - and one
+`strata decode GPU stages (ms/window):` line with the GPU time of each stage (GDN and QSA layers, the VRAM expert
+hits, the router, the head, ...). The GPU profile times every stage with events, so it slows the decode a little:
+use it to compare, not to measure speed. This works with every pack; `--gpu-stages` (a one-token replay of
+per-layer graphs) refuses a native (IQ) pack, which has no such graphs.
+
 Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
 and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
 
