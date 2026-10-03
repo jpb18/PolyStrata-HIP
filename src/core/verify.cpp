@@ -320,6 +320,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
         hist_snap_ = b.take<float>(T * HS);
+        ple_key_ = b.take<float>(T * (uint64_t) strata::kernels::NG_HC_DIM); ple_val_ = b.take<float>(T * N);
     };
     Bump count;
     carve(count);
@@ -472,13 +473,37 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         bool pending = l > 0 && !cvec().covers(l - 1);
         if (l == 1 && ple_on) {
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
+            // S25 (STRATA_PLE_BATCH=1): the key and value projections depend only on each row's n-gram embedding, so
+            // the group's rows run through the multi-row forms of the same kernels (the weights read once); every
+            // row's arithmetic is the single-row call's. The history-dependent rest stays row by row.
+            static const bool ple_batch = [] { const char* e = std::getenv("STRATA_PLE_BATCH"); return e && e[0] == '1'; }();
+            PleWeights pw = ss.ple.w;
+            const bool nkey = pw.key_native_data != nullptr && pw.key_bf16 == nullptr;
+            const bool batched = ple_batch && n > 1 && (pw.key_bf16 != nullptr || nkey) && ple_native_bf16();
+            if (batched) {
+                try {
+                    if (pw.key_bf16 != nullptr)
+                        bf16_gemv_fp32_mmvf_multi(ple_ + tb * N, N, pw.key_bf16, ple_key_ + (size_t) tb * NG_HC_DIM,
+                                                  NG_HC_DIM, N, NG_HC_DIM, n, cs);
+                    else {
+                        native_quantize_q8_1(ple_ + tb * N, xq_, (int) N, n, cs);
+                        native_mmvq(pw.key_native_type, pw.key_native_data, xq_, ple_key_ + (size_t) tb * NG_HC_DIM,
+                                    (int) N, NG_HC_DIM, n, cs);
+                    }
+                    bf16_gemv_fp32_mmvf_multi(ple_ + tb * N, N, pw.value_bf16, ple_val_ + tb * N, N, N, N, n, cs);
+                } catch (const std::exception& e) {
+                    err = std::string("verify PLE batch: ") + e.what();
+                    return false;
+                }
+            }
             for (int t = tb; t < te; ++t) {
+                if (batched) { pw.pre_key = ple_key_ + (size_t) t * NG_HC_DIM; pw.pre_value = ple_val_ + t * N; }
                 gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
                 PleOut po;
                 po.normalized = normalized;
                 po.result = Rt(t);
                 try {
-                    ple_block(ple_ + t * N, Rt(t), ss.ple.hist, ss.ple.w, po, ss.ple.scratch, cs);
+                    ple_block(ple_ + t * N, Rt(t), ss.ple.hist, pw, po, ss.ple.scratch, cs);
                     ple_history_advance(ss.ple.hist, normalized, cs);
                 } catch (const std::exception& e) {
                     err = std::string("verify PLE: ") + e.what();
