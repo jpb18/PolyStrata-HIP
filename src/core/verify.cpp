@@ -69,7 +69,29 @@ struct Bump {
     }
 };
 
+// #649 (HIP, opt-in A/Bs for the gfx1030 verify timeouts; CUDA never reads them)
+//   STRATA_VERIFY_COHERENT=1  the handshake words and rows in explicitly coherent (fine-grained) host memory
+//   STRATA_DOORBELL_STORE=1   the GPU stores each step's ring instead of read-modify-writing it over PCIe
+bool env_on(const char* name) {
+    const char* e = std::getenv(name);
+    return e != nullptr && e[0] != 0 && e[0] != '0';
+}
+#if defined(STRATA_USE_HIP)
+const bool g_coherent = env_on("STRATA_VERIFY_COHERENT");
+const bool g_doorbell_store = env_on("STRATA_DOORBELL_STORE");
+#endif
+const bool g_trace = env_on("STRATA_VERIFY_TRACE");
+
 bool mapped(size_t bytes, void** h, void** d) {
+#if defined(STRATA_USE_HIP)
+    if (g_coherent) {
+        if (hipHostMalloc(h, bytes, hipHostMallocMapped | hipHostMallocCoherent |
+                                        (peer_portable() ? hipHostMallocPortable : 0)) != hipSuccess)
+            return false;
+        std::memset(*h, 0, bytes);
+        return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
+    }
+#endif
     if (cudaHostAlloc(h, bytes, cudaHostAllocMapped | (peer_portable() ? cudaHostAllocPortable : 0)) != cudaSuccess) return false;   // multi-GPU: portable only with a peer - the peer card writes its rows into them
     std::memset(*h, 0, bytes);
     return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
@@ -122,6 +144,20 @@ void release_live_verifiers(std::FILE* f) {
         }
     if (f != nullptr) std::fflush(f);
 }
+// #649: the host side of STRATA_VERIFY_TRACE - a ring of the last kTraceN handshake events of every verifier
+struct TraceEv {
+    int64_t t_ns;
+    const void* who;
+    int64_t window, step, layer, aux;
+    uint32_t seq, flag, a, b;
+    const char* what;
+};
+constexpr uint64_t kTraceN = 4096;
+TraceEv g_trace_ring[kTraceN];
+std::atomic<uint64_t> g_trace_next{0};
+int64_t trace_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+}
 std::string released_note(bool drained) {
     return drained ? "; its GPU waits were released and the GPU finished (#267)"
                    : "; its GPU waits were released but the GPU did not finish within 5 s (#267)";
@@ -136,6 +172,7 @@ const int64_t g_test_stall = [] {
 
 bool Verifier::release_gpu_waits(int timeout_ms) {
     released_.store(true);
+    trace_ev("RELEASE", -1, -1, timeout_ms);
     // the words the spin kernels read (wait_flag_ge, wait_flag_ge_or) are mapped host memory, so a store here
     // reaches them with no API call; UINT32_MAX is past every ring.  (E-6's skip words are device memory, but
     // wait_flag_ge_or also returns on its flag.)  A host function raising flag B later only raises.
@@ -148,11 +185,74 @@ bool Verifier::release_gpu_waits(int timeout_ms) {
     for (cudaStream_t s : {cs_, copy_}) {
         if (s == nullptr) continue;
         while (cudaStreamQuery(s) == cudaErrorNotReady) {
-            if (ms_since(t0) > timeout_ms) return false;
+            if (ms_since(t0) > timeout_ms) {
+                trace_ev("RELEASE-NOT-DRAINED", -1, -1, (int64_t) ms_since(t0));
+                return false;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+    trace_ev("RELEASE-DRAINED", -1, -1, (int64_t) ms_since(t0));   // aux: ms the GPU took to finish once released
     return true;
+}
+
+void Verifier::trace_ev(const char* what, int64_t step, int64_t layer, int64_t aux) const {
+    if (!g_trace) return;
+    auto rd = [](const uint32_t* p) { return p ? *(const volatile uint32_t*) p : 0u; };
+    TraceEv& e = g_trace_ring[g_trace_next.fetch_add(1) % kTraceN];
+    e = {trace_now_ns(), this, windows, step, layer, aux, rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_), what};
+}
+
+void Verifier::trace_dump(std::FILE* f) const {
+    if (!g_trace || f == nullptr) return;
+    static const char* names[kProfPer] = {"pre", "hc-read0", "qkv gemv", "conv", "ab", "z", "rec", "kv-idx",
+                                          "k/v rope", "kv append", "q", "scores+topk", "kv-resolve", "attention",
+                                          "gate", "", "out-proj", "router+ring", "shared", "waitA", "VRAM hits", "waitB",
+                                          "PCIe grp", "waitCPU", "combine", "", "head", "", "", "", "", "", ""};
+    const uint64_t end = g_trace_next.load();
+    const uint64_t n = end < 160 ? end : 160;
+    std::fprintf(f, "strata verify trace (#649): the last %llu handshake events (host clock, us before the last; "
+                    "words: seq = GPU rang, flag = CPU served, A = plan, B = copies)\n", (unsigned long long) n);
+    const int64_t t_last = n ? g_trace_ring[(end - 1) % kTraceN].t_ns : 0;
+    for (uint64_t i = end - n; i < end; ++i) {
+        const TraceEv& e = g_trace_ring[i % kTraceN];
+        if (e.what == nullptr) continue;
+        std::fprintf(f, "  %10.1f %-20s v%p window %lld step %lld layer %lld aux %lld | seq %u flag %u A %u B %u\n",
+                     (double) (t_last - e.t_ns) / 1000.0, e.what, e.who, (long long) e.window, (long long) e.step,
+                     (long long) e.layer, (long long) e.aux, e.seq, e.flag, e.a, e.b);
+    }
+    if (trace_h_ == nullptr || g_ == nullptr) return;
+    // the breadcrumbs: every stamp point the GPU passed in this window (ns of the GPU clock after the window's first)
+    unsigned long long t0 = ~0ull;
+    for (size_t i = 0; i < trace_n_; ++i) {
+        const unsigned long long t = *(const volatile unsigned long long*) (trace_h_ + i);
+        if (t != 0 && t < t0) t0 = t;
+    }
+    if (t0 == ~0ull) {
+        std::fprintf(f, "strata verify trace: no GPU breadcrumb in this window (the GPU never started it)\n");
+        return;
+    }
+    int64_t last_l = -1;
+    for (int64_t l = 0; l <= g_->n_layers; ++l)
+        for (int i = 0; i < kProfPer; ++i)
+            for (int grp = 0; grp < 2; ++grp)
+                if (trace_h_[(size_t) ((l * kProfPer + i) * 2 + grp)] != 0) last_l = l;
+    std::fprintf(f, "strata verify trace: GPU breadcrumbs (us after the window's first), the GPU got as far as layer "
+                    "%lld:\n", (long long) last_l);
+    for (int64_t l = std::max<int64_t>(0, last_l - 2); l <= std::min<int64_t>(g_->n_layers, last_l + 1); ++l)
+        for (int grp = 0; grp < 2; ++grp) {
+            std::string line;
+            char b[64];
+            for (int i = 0; i < kProfPer; ++i) {
+                const unsigned long long t = trace_h_[(size_t) ((l * kProfPer + i) * 2 + grp)];
+                if (t == 0) continue;
+                std::snprintf(b, sizeof b, " %s(%d)=%.1f", names[i], i, (double) (t - t0) / 1000.0);
+                line += b;
+            }
+            if (!line.empty())
+                std::fprintf(f, "  layer %lld group %d:%s\n", (long long) l, grp, line.c_str());
+        }
+    std::fflush(f);
 }
 
 void Verifier::diag(std::FILE* f) const {
@@ -163,6 +263,7 @@ void Verifier::diag(std::FILE* f) const {
     std::fprintf(f, "  verify window%s: %d tokens at position %lld, host at layer step %u; the GPU rang %u; flags: "
                     "served %u, plan (A) %u, copies (B) %u\n", current ? "" : " (last window, not the current stage)",
                  last_t_, (long long) last_pos0_, cur_layer_ + 1, rd(h_seq_), rd(h_flag_), rd(h_flagA_), rd(h_flagB_));
+    trace_dump(f);   // #649: STRATA_VERIFY_TRACE=1 only
 }
 
 Verifier::~Verifier() {
@@ -331,6 +432,23 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return false;
     }
     cudaMemset(arena_, 0, count.used);
+    if (g_trace && trace_h_ == nullptr) {   // #649: the breadcrumbs, mapped so they read while the GPU hangs
+        trace_n_ = (size_t) (g.n_layers + 1) * kProfPer * 2;
+        if (!mapped(trace_n_ * 8, (void**) &trace_h_, (void**) &trace_m_)) {
+            (void) cudaGetLastError();
+            trace_h_ = trace_m_ = nullptr;
+            trace_n_ = 0;
+        }
+#if defined(STRATA_USE_HIP)
+        std::fprintf(stderr, "strata verify trace (#649): on; coherent words %s, doorbell %s, HIP_HOST_COHERENT=%s "
+                             "HSA_ENABLE_SDMA=%s GPU_MAX_HW_QUEUES=%s\n", g_coherent ? "explicit" : "default",
+                     g_doorbell_store ? "stored" : "incremented", std::getenv("HIP_HOST_COHERENT") ? std::getenv("HIP_HOST_COHERENT") : "-",
+                     std::getenv("HSA_ENABLE_SDMA") ? std::getenv("HSA_ENABLE_SDMA") : "-",
+                     std::getenv("GPU_MAX_HW_QUEUES") ? std::getenv("GPU_MAX_HW_QUEUES") : "-");
+#else
+        std::fprintf(stderr, "strata verify trace (#649): on\n");
+#endif
+    }
     prof_on_ = std::getenv("STRATA_VERIFY_PROFILE") != nullptr;
     if (prof_on_) {
         const size_t np = (size_t) g.n_layers * kProfPer + 4;
@@ -405,7 +523,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     auto Rt = [&](int t) { return R_ + (size_t) t * HC * N; };
     const int G = (split_ && T >= 2) ? 2 : 1;
     static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    auto stamp = [&](int64_t l, int i, int grp) { if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs); };
+    auto stamp = [&](int64_t l, int i, int grp) {
+        if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
+        if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
+    };
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
     groups_[T] = G;
 
@@ -691,6 +812,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
                           plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
                           (uint32_t) ((l - lb_) * G + grp + 1), cs);
+#if defined(STRATA_USE_HIP)
+        if (g_doorbell_store)   // #649 A/B: the step's ring stored, not incremented over PCIe
+            doorbell_publish_value(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
+                                   m_ids_ + tb * K, m_w_ + tb * K, m_seq_, (uint32_t) ((l - lb_) * G + grp + 1), cs);
+        else
+#endif
         doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
                          m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
         stamp(l, 17, grp);
@@ -1055,13 +1182,16 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     *(volatile uint32_t*) h_flag_ = 0;
     *(volatile uint32_t*) h_flagA_ = 0;
     *(volatile uint32_t*) h_flagB_ = 0;
+    if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only
     std::atomic_thread_fence(std::memory_order_seq_cst);
+    trace_ev("WINDOW", -1, -1, pos0 * 16 + T);
     last_t_ = T;
     last_pos0_ = pos0;
     for (int t = 0; t < T; ++t) last_tokens_[t] = tokens[t];
     ms_host += ms_since(t0);
     VDBG("staged; launching\n");
     const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
+    trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
     VDBG("launched\n");
@@ -1087,6 +1217,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                 last_flush = now;
                 const cudaError_t q = cudaStreamQuery(cs_);
                 if (q != cudaErrorNotReady && *seq < want) {
+                    trace_ev("NEVER-RANG", k, l, (int64_t) q);
+                    trace_dump(stderr);
                     err = "verify: layer " + std::to_string(l) + " never rang (" +
                           (q == cudaSuccess ? std::string("graph finished") : std::string(cudaGetErrorString(q))) + ")";
                     return false;
@@ -1094,11 +1226,20 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             }
             if (now - a > std::chrono::seconds(20)) {
                 // #267: the caller ends the engine; no spin kernel may outlive it
+                trace_ev("TIMEOUT", k, l, (int64_t) cudaStreamQuery(cs_));
+                if (g_trace) {
+                    diag(stderr);   // the words and the breadcrumbs before the release ...
+                    const bool drained = release_gpu_waits(5000);
+                    trace_dump(stderr);   // ... and after it: did the GPU move once its waits were raised?
+                    err = "verify: timed out at layer " + std::to_string(l) + released_note(drained);
+                    return false;
+                }
                 err = "verify: timed out at layer " + std::to_string(l) + released_note(release_gpu_waits(5000));
                 return false;
             }
         }
         const Clock::time_point b = Clock::now();
+        if (g_trace) trace_ev("RANG", k, l, (int64_t) std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
         VDBG("layer %lld rang\n", (long long) l);
         cur_layer_ = want - 1;
         set_plan_slot(grp);
@@ -1108,6 +1249,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
         VDBG("layer %lld served\n", (long long) l);
+        if (g_trace) trace_ev(*(volatile uint32_t*) h_flagA_ == want ? "SERVED" : "SERVED-NO-PLAN-YET", k, l,
+                              (int64_t) ms_since(b));   // aux: ms the CPU experts took
         progress_tick();
         std::atomic_thread_fence(std::memory_order_seq_cst);
         _mm_sfence();
@@ -1131,7 +1274,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     // spin kernel outlives the process - the case that left Windows GPUs "lost" until a power cycle.  The wait
     // itself stays a blocking sync: a cudaStreamQuery poll here cost IQ3_S ~3% decode (a core calling the driver
     // beside the expert workers).
+    trace_ev("SYNC", -1, -1, 0);
     const cudaError_t se = cudaStreamSynchronize(cs_);
+    trace_ev("SYNCED", -1, -1, (int64_t) se);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
