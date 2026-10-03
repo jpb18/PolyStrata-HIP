@@ -2628,11 +2628,37 @@ def rotational_disk(path) -> str | None:
     return None
 
 
+def hip_config_cards(sel) -> list[dict]:
+    """#566: the AMD cards a HIP config runs on - its "gpu" (one index or a list) in HIP's numbering, as amd_gpus
+    lists them; no "gpu": the supported card with the most VRAM, as setup picks it.  Each card's name carries its
+    architecture (an RX 7900 XTX and an RX 7900 XT are both gfx1100; a card without a product name in sysfs is known
+    by its arch only).  A card that is not found is {} (the key then says "?")."""
+    amd = amd_gpus()
+    if sel is None:
+        usable = [g for g in amd if amd_problem(g) is None]
+        sel = max(usable, key=lambda x: (round(x["vram_gb"]), -x["index"]))["index"] if usable else None
+    byid = {g["index"]: g for g in amd}
+    cards = []
+    for i in (sel if isinstance(sel, list) else [sel]):
+        g = byid.get(i)
+        if g is None:
+            cards.append({})
+            continue
+        arch = g.get("arch") or ""
+        name = g.get("name") or "?"
+        cards.append({**g, "name": name if not arch or arch in name else f"{name} ({arch})"})
+    return cards
+
+
 def hardware_key(cfg: dict) -> str:
     """What a calibration is valid for: this GPU, CPU and RAM, and the model with its context and images setting
-    (the context's KV cache and the image encoder take VRAM from the expert cache)."""
+    (the context's KV cache and the image encoder take VRAM from the expert cache).  #566: a HIP config's cards are
+    AMD's (hip_config_cards) - nvidia-smi's list named them "?" (or another card with that number) before."""
     sel = cfg.get("gpu")
-    gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
+    if cfg.get("backend") == "hip":
+        gl = hip_config_cards(sel)
+    else:
+        gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
     g = {"name": " + ".join(x.get("name", "?") for x in gl), "vram_gb": sum(x.get("vram_gb", 0) for x in gl)}
     a = cfg.get("args", [])
     ctx = a[a.index("--max-context") + 1] if "--max-context" in a else "?"
@@ -2679,6 +2705,16 @@ def calibrate_config(cfg_path: Path) -> bool:
 def saved_calibration(cfg: dict) -> dict | None:
     """The settings an earlier calibration found for this PC and model, if any."""
     return (load_settings().get("calibration") or {}).get(hardware_key(cfg))
+
+
+def setup_calibration(cfg: dict, hip: bool) -> dict | None:
+    """The calibration a (re-)install applies to its new config: the one saved for this PC and model.  #566: on Linux
+    HIP too - hardware_key now names the AMD cards, so a `./setup.sh --calibrate` run is matched to its card and
+    model.  Windows HIP keeps the defaults for now (not tried there).  Setup still offers the tuning itself on NVIDIA
+    only: each control is verified on HIP first."""
+    if hip and WIN:
+        return None
+    return saved_calibration(cfg)
 
 
 def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
@@ -2891,7 +2927,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
 OLD_DRAFT_VOCABS = {"369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced9597fb25"}   # to 0.1.26: 27 Han tokens
 
 
-DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin", "cyrillic": "draft_vocab_cyrillic.bin"}
+DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin", "cyrillic": "draft_vocab_cyrillic.bin",
+                "fr": "draft_vocab_fr.bin"}
 
 
 def saved_draft_vocab(cfg_path: Path) -> str | None:
@@ -2929,7 +2966,7 @@ def vision_tokens(asked: int | None, vision: str, earlier: Path | None) -> int:
     return asked
 
 
-DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "en": 133}   # the draft head's VRAM per subset (IQ3_S: the largest)
+DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "fr": 151, "en": 133}   # the draft head's VRAM per subset (IQ3_S: the largest)
 SMALL_DRAFT_VRAM_GB = 14   # #474: below this the default subset's head can be what does not fit
 
 
@@ -3004,7 +3041,7 @@ def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
     """The draft layer's token subset in the MTP folder: `cjk` (data/draft_vocab.bin, since 0.1.27, #137), `en`
     (data/draft_vocab_en.bin, the English/code subset before it: ~110 MiB less VRAM, English answers 1-2% faster) or
     `cyrillic` (data/draft_vocab_cyrillic.bin: English/code and the whole Cyrillic script, for Ukrainian, Russian,
-    Bulgarian, Serbian... answers).
+    Bulgarian, Serbian... answers) or `fr` (data/draft_vocab_fr.bin: English/code and the tokens of French text, #597).
     Copied when missing or when a shipped subset other than the chosen one is there; a subset made by hand is kept."""
     new, dst = ROOT / "data" / DRAFT_VOCABS.get(choice, "draft_vocab.bin"), rt / "draft_vocab.bin"
     if not new.exists() or not rt.is_dir():
@@ -3016,7 +3053,8 @@ def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
         if old not in shipped or old == hashlib.sha256(new.read_bytes()).hexdigest():
             return
         ok("draft layer: the token subset " + {"cjk": "with Chinese, Japanese and Korean",
-                                               "cyrillic": "with the Cyrillic script"}.get(choice,
+                                               "cyrillic": "with the Cyrillic script",
+                                               "fr": "for French"}.get(choice,
                                                                                           "for English and code (less VRAM)"))
     shutil.copyfile(new, dst)
 
@@ -3158,7 +3196,8 @@ def main() -> int:
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
-                         "and the Cyrillic script (Ukrainian, Russian... answers decode ~30%% faster)")
+                         "and the Cyrillic script (Ukrainian, Russian... answers decode ~30%% faster), fr = English, "
+                         "code and French (French answers: 18%% more drafts accepted)")
     ap.add_argument("--low-ram", choices=["auto", "on", "off", "resident", "mmap"], default="auto",
                     help="read the model's experts from one file in its folder instead of copying them all into RAM "
                          "(for a PC with a big GPU and little RAM); auto: when the experts would not fit the RAM. In "
@@ -3728,7 +3767,7 @@ def main() -> int:
              "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
         run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],
             env=env)
-    # a setup run again without --draft-vocab keeps the subset this model's config chose before (cyrillic, en)
+    # a setup run again without --draft-vocab keeps the subset this model's config chose before (cyrillic, fr, en)
     draft_vocab = a.draft_vocab or saved_draft_vocab(ROOT / f"strata-{tag.lower()}.json")
     refresh_draft_vocab(rt, draft_vocab or "cjk")
     ok(f"MTP draft layer: {rt}")
@@ -3877,7 +3916,7 @@ def main() -> int:
     elif a.vision_tokens is not None:
         warn("--vision-tokens: images are off for this model, so it is not used")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
-    cal = None if hip else saved_calibration(cfg)     # tools/calibrate.py is NVIDIA-only for now
+    cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))
         import calibrate as CAL
