@@ -449,6 +449,48 @@ def call_end(text: str) -> int:
             return text.find(CALL_END, pos)
 
 
+def tool_choice_of(tool_choice) -> tuple[str, str | None]:
+    """A client's `tool_choice` in either API's shape -> ("auto" | "none" | "required" | "named", name).  OpenAI:
+    "auto" / "none" / "required", {"type": "function", "function": {"name": N}} or the flat {"type": "function",
+    "name": N}; Anthropic: {"type": "auto" | "any" | "none"} and {"type": "tool", "name": N}.  A value it does not
+    know is ("unknown", None)."""
+    if tool_choice is None:
+        return "auto", None
+    if isinstance(tool_choice, str):
+        return (tool_choice, None) if tool_choice in ("auto", "none", "required") else ("unknown", None)
+    if isinstance(tool_choice, dict):
+        kind = tool_choice.get("type")
+        if kind in ("auto", "none"):
+            return kind, None
+        if kind in ("any", "required"):
+            return "required", None
+        if kind in ("function", "tool"):
+            fn = tool_choice.get("function")
+            name = (fn.get("name") if isinstance(fn, dict) else None) or tool_choice.get("name")
+            if isinstance(name, str) and name:
+                return "named", name
+    return "unknown", None
+
+
+def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
+    """`tool_choice` -> the text that opens the call the reply must make, or None (the model decides).
+    There is no grammar here: the server writes this opening itself, so the model can only go on with a call.
+    "required" / Anthropic "any": any of the tools; a named function: that one.  A value it cannot honour (an
+    unknown shape, a name that is not one of the tools, "required" with no tools) is logged and acts as "auto",
+    not a 400: a client's odd choice must not stop its request.  "none" is handled by the caller (no tools)."""
+    kind, name = tool_choice_of(tool_choice)
+    names = {t.get("name") for t in tools or [] if isinstance(t, dict)}
+    if kind in ("auto", "none"):
+        return None
+    if kind == "required" and names:
+        return CALL_START + "\n<function="
+    if kind == "named" and name in names:
+        return CALL_START + f"\n<function={name}>\n"
+    print(f"[strata] tool_choice {json.dumps(tool_choice)[:200]} is not supported here (or names no tool of the "
+          "request): the model decides, as with \"auto\"", flush=True)
+    return None
+
+
 def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     """`<function=NAME>\\n<parameter=P>\\nVALUE\\n</parameter>...</function>` -> ToolCall. Values are JSON-decoded
     when the tool's schema says the parameter is not a string (or, without a schema, when they parse as JSON

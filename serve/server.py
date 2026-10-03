@@ -53,7 +53,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
+                            forced_call, images_of, mark_think_literals, openai_to_messages, tool_choice_of,
+                            unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve.winjob import contain  # noqa: E402
@@ -2265,10 +2266,13 @@ class Service:
         prompt, plain = unmark_think_literals(prompt)
         return self.tok.encode(prompt, parse_special=True, plain=plain)
 
-    def prepare(self, messages, tools, kwargs, max_new=None):
+    def prepare(self, messages, tools, kwargs, max_new=None, force=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
-        the rest of the context."""
+        the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the
+        prompt; with thinking, Service.run writes it once the thinking is over."""
         ids = self.encode_prompt(messages, tools, kwargs)
+        if force and kwargs.get("enable_thinking", True) is False:
+            ids = ids + self.tok.encode(force, parse_special=True)
         self.embeddings.path = None
         images = images_of(messages)
         if images:
@@ -2367,8 +2371,9 @@ class Service:
                   f"{el:.0f} s", flush=True)
         return now
 
-    def run(self, ids, thinking, tools, max_new, sampling, cancel) -> Iterator[tuple[str, object]]:
-        """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..})."""
+    def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
+        """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
+        `force` (forced_call): the opening of the call the reply must make - see prepare()."""
         budget = self.reasoning_budget(sampling) if thinking else None   # #123: opt-in, off by default
         defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
@@ -2399,6 +2404,10 @@ class Service:
                     out.append(Event("content", held))
                 out.append(ev)
             return out
+        opening = []                                    # without thinking the prompt ends with the forced opening:
+        if force and not thinking:                      # the parser reads it as if the model had written it
+            opening, force = parser.feed(force), None
+        tail = ""                                       # the last characters written (the newlines before a call)
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
@@ -2439,10 +2448,13 @@ class Service:
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
+                    for ev in opening:
+                        yield "event", ev
                     while True:
                         gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
+                        opens = False                   # the thinking is over: write the forced call's opening
                         try:
                             for t in gen:
                                 if t is None:               # heartbeat while the engine is quiet
@@ -2465,7 +2477,9 @@ class Service:
                                 if self.repeat_stop_tokens and run_len >= self.repeat_stop_tokens:
                                     repeated = True     # #606: a degenerate output, not an answer: end it here
                                     break
-                                evs = cut(parser.feed(detok.push(t)))
+                                piece = detok.push(t)
+                                tail = (tail + piece)[-2:]
+                                evs = cut(parser.feed(piece))
                                 self._note(n, evs, st, rate)
                                 last_print = self._progress(last_print, st=st)
                                 for ev in evs:
@@ -2478,6 +2492,12 @@ class Service:
                                     # at a clean point: no tag held back, no character split across tokens
                                     if thought >= budget and not parser.buf and not detok.pending():
                                         wrap = True
+                                        break
+                                if force:
+                                    if any(ev.kind in ("tool_start", "tool_call") for ev in evs):
+                                        force = None    # the model is writing a call of its own
+                                    elif parser.state == "content" and not parser.buf and not detok.pending():
+                                        opens = True
                                         break
                         except EngineDied as e:
                             finish = "error"
@@ -2500,17 +2520,25 @@ class Service:
                                 self._say_died(e)
                                 if not leaving and not cancel.is_set():
                                     raise
-                        if not wrap or cancel.is_set():
+                        if not (wrap or opens) or cancel.is_set():
                             break
                         # #123: the thinking reached reasoning_budget_tokens.  Close it the way the model would (a
                         # short wrap-up and </think>) and let it answer: the next pass's prompt is this one plus what
                         # was generated plus the wrap-up, so the engine continues from the prefix it already holds.
-                        budget = None
-                        extra = self.tok.encode(REASONING_WRAP_UP, parse_special=True)
+                        # A forced call (tool_choice) is opened the same way: after the wrap-up, or where the
+                        # thinking ended, after the blank line the template puts before a call.
+                        if wrap:
+                            budget = None
+                            text = REASONING_WRAP_UP + (force or "")
+                        else:
+                            text = "\n" * (2 - (len(tail) - len(tail.rstrip("\n")))) + force
+                        force = None
+                        extra = self.tok.encode(text, parse_special=True)
                         if max_new - n - len(extra) < 1:
                             break                       # no room left to answer: "length", as without a budget
-                        print(f"[strata] thinking budget reached ({thought} tokens): wrapping up the thinking",
-                              flush=True)
+                        if wrap:
+                            print(f"[strata] thinking budget reached ({thought} tokens): wrapping up the thinking",
+                                  flush=True)
                         for t in extra:
                             n += 1
                             raw_ids.append(t)
@@ -2757,9 +2785,9 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
 
 
 # ------------------------------------------------------------------------------------------------ OpenAI
-def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None):
+def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None, force=None):
     """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
-    an empty delta and a `strata_mcp` field, which only the web app reads."""
+    an empty delta and a `strata_mcp` field, which only the web app reads.  `force`: see Service.run."""
     cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
     model = svc.model_for(req)
 
@@ -2771,7 +2799,7 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
     calls = 0
     streamed = {}                                  # tool call id -> index, for calls sent piece by piece
     finished = set()                               # ... and the ones whose final tool_call came (#211)
-    for kind, x in run if run is not None else svc.run(ids, thinking, tools, max_new, req, cancel):
+    for kind, x in run if run is not None else svc.run(ids, thinking, tools, max_new, req, cancel, force=force):
         if kind == "ping":
             yield None
         elif kind == "mcp":
@@ -2882,7 +2910,7 @@ def structured_chunks(chunks, validator):
 
 
 # ------------------------------------------------------------------------------------------------ Anthropic
-def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel):
+def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, force=None):
     mid = "msg_" + uuid.uuid4().hex[:24]
     yield "message_start", {"type": "message_start", "message": {
         "id": mid, "type": "message", "role": "assistant", "model": svc.model_for(req), "content": [],
@@ -2893,7 +2921,7 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
         return ("content_block_stop", {"type": "content_block_stop", "index": index})
 
     streamed, finished = set(), set()              # calls sent piece by piece; those whose final tool_call came (#211)
-    for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
+    for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force=force):
         if kind == "ping":
             yield None
             continue
@@ -3577,6 +3605,9 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "openai")
             messages, tools, kw = openai_to_messages(req)
             self._no_local_images(messages)
+            if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
+                tools = None
+            force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -3591,15 +3622,17 @@ def make_handler(svc: Service):
                 extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
                 use_mcp = bool(extra)
                 tools = (tools or []) + extra or None
+            if force and use_mcp:
+                raise ValueError("a forced tool_choice with MCP tools is not supported")
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
-            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
+            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force)
             if validator is not None:
                 chunks = structured_chunks(chunks, validator)
             chunks = self._capture(chunks, "openai")
@@ -3773,14 +3806,17 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             self._no_local_images(messages)
+            if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
+                tools = None
+            force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
-            events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
+            events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force)
             events = self._capture(events, "anthropic")
             if not req.get("stream"):
                 return self._json(200, anthropic_collect(events))
