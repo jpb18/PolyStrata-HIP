@@ -505,9 +505,22 @@ print(r.choices[0].message.content)
   clients then send it as their API key. Streamed answers carry `X-Accel-Buffering: no`, so nginx-style proxies pass
   each token on at once. The web app's settings and MCP tools only answer Strata's own page: when you open it through
   a proxy or tunnel whose address differs, add that address, e.g. `"trusted_origins": ["https://strata.example.com"]`.
+  A tunnel or proxy that passes its own name on as `Host` needs that name allowed too (see Host names below; a
+  `trusted_origins` entry already allows its name, and a quick tunnel's random name is covered by
+  `"allowed_hosts": [".trycloudflare.com"]`).
 - **From web apps in a browser (CORS).** Off by default. `"cors_origins": ["https://chat.example.com"]` lets pages of
   those origins call `/v1/*` from the browser (Open WebUI's direct connections, browser extensions); `["*"]` lets any
   page do it - only sensible with an API key. It never opens `/settings`, `/unload` or the MCP tools.
+- **Host names (DNS rebinding).** A web page of another site can point its own name at `127.0.0.1` and then reach
+  this server as if it were its own, so the server answers only requests whose `Host` is a name it knows:
+  `localhost` (and `*.localhost`), any IP address (`127.0.0.1`, `[::1]`, `192.168.x.x`, ...), the address it
+  listens on and, when it listens beyond this PC (`0.0.0.0` or a LAN address), this PC's name (`mypc`, `mypc.local`)
+  and `host.docker.internal`; any port. Others get **403** naming the setting, and the server window prints one line
+  for each. Reach it under another name (a reverse proxy that keeps the name, a tunnel, a DNS name on your network,
+  another container's name for it)? Add the name: `"allowed_hosts": ["strata.example.com"]` in
+  `strata-<model>.json` or `STRATA_ALLOWED_HOSTS=strata.example.com` (comma-separated); `".example.com"` allows that
+  name and every name below it, and `["*"]` turns the check off. The hosts of `trusted_origins` count as allowed.
+  Requests without a `Host` header (HTTP/1.0 clients) pass.
 
 **Conversation cache.** A request that continues a chat reads only the part after what the engine already holds: the
 live session, or one of the checkpoints it keeps in RAM (up to 6, ~118 MB each, taken at the start of each new
