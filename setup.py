@@ -3076,6 +3076,47 @@ def small_card_note(ctx: int, draft_vocab: str | None) -> list[str]:
     return lines
 
 
+PARALLEL_MAX = 8               # #465: the engine's batch window holds at most 8 requests
+PARALLEL_SHARE = 0.2           # #465: the slots' sessions may take this share of the VRAM the expert cache would hold
+
+
+def parallel_slot_gb(ctx: int, kv: str, streaming: bool) -> float:
+    """#465: the VRAM one batch slot's session takes: its KV cache (12 QSA layers; with KV streaming only the 32K
+    positions the attention reads stay in VRAM) and the DeltaNet state (~0.17 GB).  Measured: 0.56 GiB at 32K int8."""
+    kv_tok = 12 * (576 if kv == "q4_0" else 1056)
+    return (min(ctx, 32768) if streaming else ctx) * kv_tok / 1e9 + 0.17
+
+
+def parallel_recommend(vram_gb: float, ctx: int, kv: str, streaming: bool) -> int:
+    """#465: how many requests at once ("parallel") this card can take without the slots' sessions eating more than
+    PARALLEL_SHARE of its expert cache (~VRAM less 5 GB): 0 = none (one at a time).  Every slot's VRAM is expert cache
+    lost, and on a card whose experts mostly run on the CPU the batch reads ~as many experts as the requests one by one:
+    measured on a 12 GB RTX 5070 (Q2_0, 32K), 2 requests at once 66 tok/s together (one alone ~65), 4 at once 45."""
+    cache_gb = max(0.0, vram_gb - 5)
+    n = int(PARALLEL_SHARE * cache_gb / parallel_slot_gb(ctx, kv, streaming))
+    return min(4, n) if n >= 2 else 0
+
+
+def parallel_note(asked: int | None, vram_gb: float, ctx: int, kv: str, streaming: bool) -> list[str]:
+    """#465: what setup says about "parallel": the recommendation, or how the asked count compares with it (kept as
+    asked: recommend, never force)."""
+    rec = parallel_recommend(vram_gb, ctx, kv, streaming)
+    slot = parallel_slot_gb(ctx, kv, streaming)
+    if asked is None or asked <= 1:
+        if not rec:
+            return []
+        return [f"Several requests at once (opt-in): --parallel {rec} decodes up to {rec} together instead of one "
+                f"after the other (each takes ~{slot:.1f} GB of VRAM from the expert cache; docs/BATCHING.md)."]
+    lines = [f"parallel requests: {asked} at once (each takes ~{slot:.1f} GB of VRAM from the expert cache, "
+             f"{asked * slot:.1f} GB in all)"]
+    if asked > PARALLEL_MAX:
+        lines.append(f"the engine runs at most {PARALLEL_MAX} at once; it will use {PARALLEL_MAX}")
+    if asked > max(rec, 1):
+        lines.append(f"recommended for this card: {rec or 'one at a time'} - more slots leave fewer experts in VRAM, "
+                     "which can make every request slower; kept as you chose")
+    return lines
+
+
 DESKTOP_RESERVE_MIB = 3072     # #560 #516: what kept a KDE/Wayland desktop alive beside a full expert cache
 
 
@@ -3277,6 +3318,9 @@ def main() -> int:
     ap.add_argument("--vram-reserve-mib", type=int, metavar="N",
                     help="VRAM in MiB the engine leaves free for other programs (a game, another model; the engine's "
                          "default: 700); the expert cache takes that much less")
+    ap.add_argument("--parallel", type=int, metavar="N",
+                    help="up to N requests decode together (batch slots, opt-in; default: one at a time, the others "
+                         "wait). Each slot takes VRAM from the expert cache; setup says what it recommends")
     ap.add_argument("--kv-streaming", choices=["auto", "on", "off"], default="auto",
                     help="from a 64K context: keep the KV cache in RAM and only the attention's window in VRAM (more "
                          "experts fit on the GPU); auto: when the RAM has room for it")
@@ -3974,6 +4018,16 @@ def main() -> int:
         cfg["draft_vocab"] = draft_vocab
     if a.browser is not None:                          # #609: only when given (else an earlier choice is carried over)
         cfg["open_browser"] = a.browser
+    # #465: requests at once - written only when given (else an earlier "parallel" is carried over); a recommendation
+    streaming = "--kv-resident" in args
+    if a.parallel is not None:
+        if a.parallel >= 2:
+            cfg["parallel"] = a.parallel
+            for i, line in enumerate(parallel_note(a.parallel, gpu.get("vram_gb", 0.0), ctx, kv, streaming)):
+                (ok if i == 0 else warn)(line)
+        else:
+            cfg["parallel"] = 1
+            ok("parallel requests: one at a time (--parallel 1)")
     if vision != "none":
         old_cfg = ROOT / f"strata-{tag.lower()}.json"
         vt = vision_tokens(a.vision_tokens, vision, old_cfg if old_cfg.is_file() else adopted)
@@ -4013,6 +4067,9 @@ def main() -> int:
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
+    if a.parallel is None and not multi:               # #465: the opt-in, said once (nothing changes)
+        for line in parallel_note(None, gpu.get("vram_gb", 0.0), ctx, kv, "--kv-resident" in cfg["args"]):
+            say("  " + line)
     if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
         say("  Tuning:           FAILED (the reason is above): the default settings stay - "
             f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
