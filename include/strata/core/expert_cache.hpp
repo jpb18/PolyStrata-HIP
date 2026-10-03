@@ -16,14 +16,10 @@
 //   * `h_layer` held-out is **0.0456** - only 4.6% of (layer, token) pairs have all ten experts resident - so
 //     this cannot be a per-layer grouped kernel and the three-way split is not an optimisation.
 //
-// **WHAT THIS FILE IS AND IS NOT, TODAY.** It is the SLOT STORAGE and the RESIDENCY TABLE: it allocates the
-// VRAM, fills it from the host arena, and answers `(layer, expert) -> slot or -1`. It does **not** yet compute
-// anything - `moe_hit_grouped_s2` does not exist and the hit/miss split is not wired into the graph - so with
-// the cache on and nothing consuming it, **the engine is slower by the fill cost and faster by nothing.**
-// That is stated here rather than discovered from a benchmark, and it is why `--expert-cache` defaults to 0.
-//
-// The order of work is `Memory/R4-design-note.md` §7: slots and residency first, then the split, then the
-// kernel. This is that first step, and the step it unblocks is the one that can be measured.
+// **WHAT THIS FILE IS.** The SLOT STORAGE and the RESIDENCY TABLE: it allocates the VRAM, fills it from the host
+// arena, and answers `(layer, expert) -> slot or -1`. It computes nothing itself: the GPU computes the experts it
+// holds in the verify window's grouped kernels and the prompt path (the hit/miss split), and the CPU pool the rest.
+// (Written when nothing consumed the slots yet and `--expert-cache` defaulted to 0; setup's configs use `auto`.)
 #pragma once
 
 #include <cstddef>

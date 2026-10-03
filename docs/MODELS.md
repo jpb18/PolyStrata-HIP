@@ -71,8 +71,9 @@ fetches the MTP draft layer (~6 GB, +1 GB with images).
 
 Shard 1 is the part of the model that gets loaded when it starts: its experts go into your **RAM**, the rest onto
 your graphics card (the second shard, a 29 GB lookup table, stays on the SSD). So it fits when your **RAM is at least
-shard 1 + about 10 GB** for Windows and your other programs. With 64 GB of RAM every size fits (IQ3_S with little
-else open); with 48 GB, Q2_0 and IQ2_XS. A bigger graphics card makes it faster, but it doesn't lower the RAM needed
+the experts + about 10 GB** for Windows and your other programs - the experts are most of shard 1: 34 GB for Q2_0,
+35.5 for IQ2_XS, 43 for IQ3_XXS, 50 for IQ3_S, 23 for the Coder (the dense weights in shard 1 go to the graphics
+card). With 64 GB of RAM every size fits (IQ3_S with little else open); with 48 GB, Q2_0 and IQ2_XS. A bigger graphics card makes it faster, but it doesn't lower the RAM needed
 - except in the low-RAM mode below.
 
 ### A big graphics card and little RAM
@@ -126,6 +127,15 @@ NVIDIA GPU (no images yet). Details and measurements: [UD-Q4_K_XL](UNSLOTH_Q4.md
 
 ```
 START-HERE.bat --setup --family unsloth --model UD-Q4_K_XL
+```
+
+**Unsloth's UD-IQ4_XS** (experimental, 0.1.39, #621) is the smaller choice of the same family: a 94 GB download with
+59.5 GB of experts (IQ3_S and IQ4_NL), between IQ3_S and UD-Q4_K_XL. Setup runs it the same way (a RAM budget of your
+RAM minus 24 GB, the rest from the SSD), so on a 64 GB PC far fewer experts come from the SSD than with UD-Q4_K_XL, and
+on 96 GB all of them stay in RAM. Not measured on NVIDIA yet: [details](UNSLOTH_Q4.md#ud-iq4_xs-experimental-setup-from-0139-621).
+
+```
+START-HERE.bat --setup --family unsloth --model UD-IQ4_XS
 ```
 
 ### OrcaRouter Uncensored IQ3_XXS

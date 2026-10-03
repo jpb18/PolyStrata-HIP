@@ -59,6 +59,10 @@ from serve.structured import StructuredOutputError, prepare_format, validated_js
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_START = "<|vision_start|>"
+# #606: a reply that repeats one token this many times in a row is ended there ("length"): a model in a loop, or a
+# broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
+# sets it; 0 turns it off.
+REPEAT_STOP_TOKENS = 256
 # #123: what closes the thinking when it reaches reasoning_budget_tokens (the model's own end-of-thinking tag after it)
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
 LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
@@ -443,6 +447,8 @@ class StrataEngine:
             self.last.update(ram_blobs=int(f[11]), file_blobs=int(f[12]), file_mb=float(f[13]))
         if len(f) >= 15:                                  # #471 (engine 0.1.36+): the prompt tokens actually read
             self.last.update(prompt_read=int(f[14]))
+        if len(f) >= 16:                                  # #588 (engine 0.1.39+): routed experts read over PCIe
+            self.last.update(offloaded=int(f[15]))
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -789,12 +795,46 @@ def engine_silence_s(cfg: dict) -> float:
     return float(v)
 
 
+def layer_split_value(cfg: dict) -> str:
+    """#644: the config's "layer_split" as the engine's --layer-split value: "auto" (the default), or the FIRST LAYER of
+    each later GPU's share - one rising number per GPU after the first, e.g. "24,36,42" for 4 GPUs (layers 0-23 on the
+    first card, 24-35, 36-41, 42 to the end) - as a string or a JSON list ([24, 36, 42]).  ValueError with the format
+    and an example for anything else, such as per-card layer counts ("24,16,12,12")."""
+    v = cfg.get("layer_split")
+    if v is None or (isinstance(v, str) and v.strip().lower() in ("", "auto")):
+        return "auto"
+    n = len(gpu_list(cfg))
+    items = v if isinstance(v, (list, tuple)) else str(v).split(",") if isinstance(v, (str, int)) else None
+    vals = []
+    for x in items or []:
+        try:
+            if isinstance(x, bool) or isinstance(x, float):
+                raise ValueError
+            vals.append(int(str(x).strip()))
+        except ValueError:
+            vals = None
+            break
+    want = max(n - 1, 1)
+    example = ",".join(str(round(48 * (i + 1) / (want + 1))) for i in range(want))
+    hint = (f'"layer_split" is the first layer of each later GPU, one rising number per GPU after the first '
+            f'({want} for {n} GPUs), not a count of layers per card - e.g. "{example}" (or [{example.replace(",", ", ")}])'
+            f' for an even share of 48 layers, or "auto" (the default) to place them by each card\'s free VRAM')
+    if not vals:
+        raise ValueError(f"{hint}; got {v!r}")
+    if n > 1 and len(vals) != n - 1:
+        raise ValueError(f"{hint}; got {len(vals)} number(s) ({v!r}) for {n} GPUs")
+    if vals[0] < 2 or any(b <= a for a, b in zip(vals, vals[1:])):
+        raise ValueError(f"{hint}; got {v!r}, which does not rise from 2 or more")
+    return ",".join(str(x) for x in vals)
+
+
 def engine_args(cfg: dict) -> list[str]:
     """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
-    config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32")."""
+    config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32"; see
+    layer_split_value)."""
     args = list(cfg["args"])
     if len(gpu_list(cfg)) > 1 and "--layer-split" not in args:
-        args += ["--layer-split", str(cfg.get("layer_split") or "auto")]
+        args += ["--layer-split", layer_split_value(cfg)]
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if len(gpu_list(cfg)) > 1 and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
@@ -989,6 +1029,7 @@ class Service:
         self.min_free_vram_mib = 0
         self.before_load = None
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
+        self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
@@ -1436,6 +1477,7 @@ class Service:
             sampling = {**defaults, **req_values}
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
+        run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
@@ -1485,6 +1527,11 @@ class Service:
                                     break
                                 raw_ids.append(t)
                                 seg.append(t)
+                                run_len = run_len + 1 if t == run_tok else 1
+                                run_tok = t
+                                if self.repeat_stop_tokens and run_len >= self.repeat_stop_tokens:
+                                    repeated = True     # #606: a degenerate output, not an answer: end it here
+                                    break
                                 evs = parser.feed(detok.push(t))
                                 self._note(n, evs)
                                 last_print = self._progress(last_print)
@@ -1538,6 +1585,11 @@ class Service:
                         prompt = prompt + seg + extra
                     if cancel.is_set():
                         finish = "cancel"
+                    elif repeated:
+                        print(f"[strata] the reply repeated one token ({self.tok.decode([run_tok])!r}) "
+                              f"{run_len} times in a row: ended as \"length\" (repeat_stop_tokens in "
+                              "strata-<model>.json; 0 turns this off). If a new request with a short prompt does the "
+                              "same, restart the server and report it (#606)", flush=True)
                 except GeneratorExit:                   # the client disconnected mid-stream
                     finish = "disconnect"
                     raise
@@ -1554,6 +1606,11 @@ class Service:
                             cvec = (getattr(self.engine, "info", {}) or {}).get("cvec", 0)
                             loaded = str(cvec) not in ("0", "", "None")
                             hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
+                            # #588: the share the GPU read over PCIe (--pcie-frac) or another GPU computed - not in
+                            # the hit rate's lookups, which is the VRAM share of the rest (None: an older engine)
+                            routed = (last.get("lookups") or 0) + (last.get("offloaded") or 0)
+                            pcie_share = round(last["offloaded"] / routed, 3) \
+                                if last.get("offloaded") is not None and routed else None
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
                             self.history.append({
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
@@ -1566,7 +1623,7 @@ class Service:
                                 "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
                                 "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                                 if n and last.get("generated") and last.get("decode_ms") else None,
-                                "hit_rate": hit_rate, "ram_blobs": last.get("ram_blobs"),
+                                "hit_rate": hit_rate, "pcie_share": pcie_share, "ram_blobs": last.get("ram_blobs"),
                                 "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
                                 # #457: the speculative drafts from the DONE line (None: the engine did not say)
                                 "drafts_offered": last.get("drafts_offered"),
@@ -1590,6 +1647,8 @@ class Service:
                             ft = self.status.get("first_token")
                             rate = n / max(1e-6, now - ft) if ft else 0.0
                             hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
+                            if hit_msg and pcie_share:
+                                hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                                   f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
                             if finish == "length" and parser.state == "reasoning":   # #530
@@ -2914,7 +2973,11 @@ def main() -> int:
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         if len(gpu_list(cfg)) > 1:
-            print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({cfg.get('layer_split') or 'auto'})", flush=True)
+            try:
+                split = layer_split_value(cfg)          # #644: before the (minutes-long) start
+            except ValueError as e:
+                raise SystemExit(f"[strata] config {e}")
+            print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
         # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
         # it is told about (WinError 2), so it is made absolute here
         exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
@@ -2977,6 +3040,10 @@ def main() -> int:
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[strata] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
     svc.anthropic_think_unasked = mode == "model"
+    rs = cfg.get("repeat_stop_tokens", REPEAT_STOP_TOKENS)   # #606: opt-out with 0
+    if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
+        raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
+    svc.repeat_stop_tokens = rs
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         try:
             svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]

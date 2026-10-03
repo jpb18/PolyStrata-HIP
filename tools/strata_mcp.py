@@ -62,6 +62,9 @@ FALLBACK_MODELS = {
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), EXPERIMENTAL: the best quality, but most experts come from the "
                             "SSD on a 64 GB PC (7-8.5 tokens/s measured)", "download_gb": 111.3, "ram_gb": 48,
                    "arena_gb": 77.0, "families": ("unsloth",), "budget": True},
+    "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), EXPERIMENTAL: between IQ3_S and UD-Q4_K_XL; part of "
+                           "its experts come from the SSD on a 64 GB PC (not measured on NVIDIA yet)",
+                  "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True},
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -69,8 +72,9 @@ FALLBACK_FAMILIES = {
                                              "authors' numbers)", "tag": "swift-"},
     "coder": {"title": "Qwen3.8-Flash-Next Coder", "about": "half the experts (code, tools, images kept): needs ~32 GB "
                                                             "of RAM, faster; weaker outside coding", "tag": "coder-"},
-    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "4-bit, 111 GB download, most experts read from the "
-                                                                  "SSD: slow (7-8.5 tokens/s on a 64 GB PC)",
+    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "UD-Q4_K_XL (111 GB download) or UD-IQ4_XS (94 GB); "
+                                                                  "part of the experts read from the SSD: slower "
+                                                                  "(UD-Q4_K_XL: 7-8.5 tokens/s on a 64 GB PC)",
                 "tag": "unsloth-", "experimental": True, "vision": False},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]

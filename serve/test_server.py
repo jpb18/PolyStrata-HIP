@@ -21,12 +21,14 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, Service, StrataEngine,  # noqa: E402
-                          engine_args, prompt_tokens_seen, request_timings, serve, start_failure_hint)
+                          engine_args, layer_split_value, prompt_tokens_seen, request_timings, serve,
+                          start_failure_hint)
 from types import SimpleNamespace  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
-ANSWER = "x" * 2000                              # longer than the old 1024 fallback: one token per byte
+ANSWER = "xy" * 1000                             # longer than the old 1024 fallback: one token per byte (#606: not
+#                                                one token repeated, which the server ends at 256)
 
 
 class RecordingEngine(MockEngine):
@@ -805,6 +807,26 @@ class DraftCounts(unittest.TestCase):
         self.assertEqual((m["totals"]["drafts_offered"], m["totals"]["drafts_accepted"]), (17, 10))
 
 
+class PcieShare(unittest.TestCase):
+    """#588: the hit rate stays the VRAM share of the lookups; the routed experts the GPU read over PCIe (the DONE
+    line's 16th field, engine 0.1.39+) are given as their own share of all routed experts."""
+
+    def test_history(self):
+        tok = ByteTokenizer()
+        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
+            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20 25",     # 25 more over PCIe: 20% of 125 routed
+            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20 0",
+            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20"])       # an older engine
+        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            for _ in range(3):
+                list(svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event()))
+        rows = list(svc.history)
+        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.6, 0.6])
+        self.assertEqual([r["pcie_share"] for r in rows], [0.2, 0.0, None])
+        self.assertIn("expert cache 60.0% hit (+20.0% of the routed experts over PCIe)", out.getvalue())
+
+
 class LearnedProfile(unittest.TestCase):
     """#477: "expert_profile_save" in the config: the engine saves its learned profile there, and the next start
     begins from it when it is a profile of the same model; without the key the arguments are unchanged."""
@@ -845,6 +867,67 @@ class LearnedProfile(unittest.TestCase):
     def test_no_profile_in_the_args(self):
         cfg = {"args": ["--native", "x"], "expert_profile_save": "learned.bin"}
         self.assertEqual(engine_args(cfg), ["--native", "x", "--expert-profile-save", "learned.bin"])
+
+
+class RepeatStop(unittest.TestCase):
+    """#606: one token repeated repeat_stop_tokens times in a row ends the reply as "length"; 0 turns it off."""
+
+    def run_reply(self, script, limit=None):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, script, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        if limit is not None:
+            svc.repeat_stop_tokens = limit
+        ids = tok.encode("hi")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            done = [x for kind, x in svc.run(ids, False, None, 3000, {}, threading.Event()) if kind == "done"][0]
+        return done, out.getvalue()
+
+    def test_a_long_run_is_ended(self):
+        done, log = self.run_reply("ok " + "!" * 1000 + " never")
+        self.assertEqual(done["finish"], "length")
+        self.assertEqual(done["completion_tokens"], 3 + 256)
+        self.assertIn("repeated one token ('!') 256 times", log)
+
+    def test_short_runs_and_off(self):
+        done, _ = self.run_reply("=" * 255 + " fine")
+        self.assertEqual(done["finish"], "stop")
+        done, log = self.run_reply("!" * 1000, limit=0)
+        self.assertEqual((done["finish"], done["completion_tokens"]), ("stop", 1001))
+        self.assertNotIn("repeated one token", log)
+        done, _ = self.run_reply("ab" * 400, limit=8)       # alternating tokens are not one run
+        self.assertEqual(done["finish"], "stop")
+
+
+class LayerSplit(unittest.TestCase):
+    """#644: "layer_split" is the first layer of each later GPU; a list is accepted, counts per card are not."""
+
+    def cfg(self, split, gpus=(2, 0, 1, 3)):
+        c = {"args": ["--native", "x"], "gpu": list(gpus)}
+        if split is not ...:
+            c["layer_split"] = split
+        return c
+
+    def test_auto_and_absent(self):
+        for v in (..., None, "", "auto", "AUTO"):
+            self.assertEqual(engine_args(self.cfg(v))[-2:], ["--layer-split", "auto"])
+
+    def test_string_and_list(self):
+        self.assertEqual(engine_args(self.cfg("24,36,42"))[-2:], ["--layer-split", "24,36,42"])
+        self.assertEqual(engine_args(self.cfg(" 24, 36 ,42 "))[-2:], ["--layer-split", "24,36,42"])
+        self.assertEqual(engine_args(self.cfg([24, 36, 42]))[-2:], ["--layer-split", "24,36,42"])
+        self.assertEqual(engine_args(self.cfg(18, gpus=(0, 1)))[-2:], ["--layer-split", "18"])
+        self.assertEqual(engine_args(self.cfg([18], gpus=(0, 1)))[-2:], ["--layer-split", "18"])
+
+    def test_counts_per_card_are_refused_with_the_format(self):
+        for bad in ("24,16,12,12", [24, 16, 12, 12], "24,16,12", "24,36", "x", [24.5, 30, 40], "1,20,30", [True]):
+            with self.assertRaises(ValueError) as e:
+                layer_split_value(self.cfg(bad))
+            self.assertIn("first layer of each later GPU", str(e.exception))
+            self.assertIn('"12,24,36"', str(e.exception))   # the example for 4 GPUs
+
+    def test_one_gpu_ignores_it(self):
+        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0], "layer_split": "24,16"}),
+                         ["--native", "x"])
 
 
 class DraftHeadHint(unittest.TestCase):

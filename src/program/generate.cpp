@@ -70,6 +70,8 @@
 #else
 #include <unistd.h>
 #include <cerrno>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #endif
 
 #include <cuda_runtime.h>
@@ -111,6 +113,20 @@ bool under_wddm() {
     static const bool dxg = std::filesystem::exists("/dev/dxg");
     return dxg;
 #endif
+}
+
+// #620 #486: " (N MiB of M MiB VRAM free on this GPU)" for an allocation's failure message (clears the error first)
+std::string vram_free_note() {
+    (void) cudaGetLastError();
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return {};
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof buf, " (%llu MiB of %llu MiB VRAM free on this GPU)", (unsigned long long) (free_b >> 20),
+                  (unsigned long long) (total_b >> 20));
+    return buf;
 }
 
 // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
@@ -791,6 +807,55 @@ std::string stage_text() {
     return s;
 }
 
+#if !defined(_WIN32)
+// #605: whether `path` is on a rotational disk (1), not (0) or unknown (-1), from sysfs; `dev` is the disk's name
+int on_rotational_disk(const std::string& path, std::string& dev) {
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return -1;
+    char sys[64];
+    std::snprintf(sys, sizeof sys, "/sys/dev/block/%u:%u", (unsigned) major(st.st_dev), (unsigned) minor(st.st_dev));
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::canonical(sys, ec);
+    for (int up = 0; !ec && up < 2; ++up, p = p.parent_path()) {   // a partition has its disk's queue
+        std::ifstream q(p / "queue" / "rotational");
+        int r = -1;
+        if (q >> r) {
+            dev = p.filename().string();
+            return r;
+        }
+    }
+    return -1;
+}
+
+// #605: the engine's threads in uninterruptible sleep (state D - almost always waiting for the disk), and where
+// (wchan): 16 threads in blk_io_schedule is a disk that cannot keep up, not a deadlock in the engine
+void disk_wait_threads(std::FILE* f) {
+    std::map<std::string, int> where;
+    int waiting = 0, threads = 0;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        ++threads;
+        std::ifstream st(e.path() / "stat");
+        std::string line;
+        std::getline(st, line);
+        const size_t rp = line.rfind(')');
+        if (rp == std::string::npos || rp + 2 >= line.size() || line[rp + 2] != 'D') continue;
+        ++waiting;
+        std::ifstream w(e.path() / "wchan");
+        std::string wc;
+        std::getline(w, wc);
+        ++where[wc.empty() || wc == "0" ? "?" : wc];
+    }
+    if (threads == 0) return;
+    std::string list;
+    for (const auto& [name, n] : where) list += (list.empty() ? " (" : ", ") + name + " x" + std::to_string(n);
+    if (!list.empty()) list += ")";
+    std::fprintf(f, "  threads waiting on the disk (state D): %d of %d%s%s\n", waiting, threads, list.c_str(),
+                 waiting > 0 ? " - the engine is waiting for the drive: a rotational or failing disk with --ple-io "
+                               "direct (#605: --ple-io ram), or a drive too slow for the reads asked of it" : "");
+}
+#endif
+
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
     std::fprintf(f, "strata serve: stall report (engine %s): stage \"%s\" for %lld s; %llu layers served since the "
@@ -804,6 +869,9 @@ void stall_report(std::FILE* f, uint64_t layers_during) {
         }
         if (auto fn = strata::core::diag_pool_fn().load()) fn(f);
         if (auto fn = strata::core::diag_verify_fn().load()) fn(f);
+#if !defined(_WIN32)
+        disk_wait_threads(f);
+#endif
         const MemSample m = mem_sample();
         std::fprintf(f, "  memory: %llu MiB resident, %llu MiB %s, %llu MiB RAM available; %llu %s\n", m.rss_mib,
                      m.commit_mib,
@@ -1402,7 +1470,9 @@ int main(int argc, char** argv) {
         }
         if (!ok) {
             std::fprintf(stderr, "strata generate: --layer-split K[,K2..]|auto needs --serve, rising K from 2, and one "
-                                 "distinct GPU per K in --split-device (1..%d; or 0 with one K: the same GPU)\n", n_dev - 1);
+                                 "distinct GPU per K in --split-device (1..%d; or 0 with one K: the same GPU). K is the "
+                                 "FIRST LAYER of each later GPU, not a count of layers per card: \"24,36,42\" for 4 "
+                                 "GPUs, not \"24,12,6,6\" (got \"%s\")\n", n_dev - 1, o.layer_split.c_str());
             return 2;
         }
     }
@@ -2156,6 +2226,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
+#if !defined(_WIN32)
+        if (pio.mode == strata::kernels::PleIo::Direct) {
+            // #605: --ple-io direct's random reads (up to --ple-inflight at once) are for SSDs; a rotational disk
+            // can take longer than the stall watchdog's 60 s for one prompt chunk's rows.  Recommended, not forced.
+            std::string dev;
+            if (!under_wddm() && on_rotational_disk(o.ple_gguf, dev) == 1)   // (WSL's virtual disk says rotational)
+                std::fprintf(stderr, "strata generate: WARNING: the n-gram table (%s) is on a rotational disk (%s): "
+                                     "--ple-io direct reads it at random and can stall a prompt for minutes (#605). "
+                                     "--ple-io ram (it then needs RAM for the table) or the model on an SSD is "
+                                     "recommended\n", o.ple_gguf.c_str(), dev.c_str());
+        }
+#endif
         if (pio.lock)
             std::fprintf(stderr, "strata generate: PLE table %s (--ple-io ram) in %.1f s\n",
                          ple_table.locked() ? "locked in RAM" : "loaded (not locked)",
@@ -2637,8 +2719,9 @@ int main(int argc, char** argv) {
         const strata::core::WeightRef* wo_s = st.wt.find("output.weight");
         if (wo_s == nullptr ||
             (last && !o.native_head_gguf.empty() && !st.head.load(o.native_head_shards, g.n_embd, wo_s->ne1, err))) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d head: %s\n", st.dev,
-                         wo_s == nullptr ? "output.weight is missing" : err.c_str());
+            std::fprintf(stderr, "strata generate: layer split, CUDA%d head: %s%s\n", st.dev,
+                         wo_s == nullptr ? "output.weight is missing" : err.c_str(),
+                         wo_s == nullptr ? "" : vram_free_note().c_str());
             return 1;
         }
         size_t fb = 0, tb = 0;
@@ -2662,7 +2745,32 @@ int main(int argc, char** argv) {
         static const strata::core::ModelGeometry draft_geometry{};
         // with a layer split across GPUs the drafter reads the last stage's residual: it lives on that device
         const strata::core::OnDevice on_mtp(last_st ? last_st->dev : -1);
-        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
+        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
+    }
+    // THE HEAD BEFORE THE CACHE, AND BEFORE THE ARENA.  The expert cache takes what is free minus the reserve, so
+    // everything allocated after it comes out of the reserve.  The native head (~0.5 GB with IQ3_S) was loaded after
+    // it and ate most of the 700 MiB: 128K IQ3_S ended with 30 MiB free, the driver paged, and a request stalled for
+    // good at its first verify window.  Loaded first, the cache is sized around it.  #620: and before the expert
+    // arena registers tens of GiB of host pages, like the drafter above - WDDM then refused the head's cudaMalloc on
+    // a 16 GB card with the desktop on the iGPU ("native head upload: out of memory" with GiBs free).
+    const strata::core::WeightRef* wo = wt.find("output.weight");
+    if (wo == nullptr) { std::fprintf(stderr, "strata generate: output.weight is missing\n"); return 1; }
+    const int64_t n_vocab = wo->ne1;
+    strata::core::NativeHead native_head;
+    if (!o.native_head_gguf.empty() && !multi_gpu) {   // a layer split's head is on its last stage
+        if (!native_head.load(o.native_head_shards, g.n_embd, n_vocab, err)) {
+            std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "strata generate: experimental native Q5_K head, %llu bytes\n",
+                     (unsigned long long) native_head.weight_bytes());
+    }
+    std::vector<float> logits((size_t) n_vocab);
+    float* d_logits = nullptr;
+    if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
+        (void) cudaGetLastError();
+        std::fprintf(stderr, "strata generate: the logits buffer failed%s\n", vram_free_note().c_str());
+        return 1;
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
     // before the host arena maps its expert pages into their address spaces.
@@ -2785,6 +2893,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
+        if (!arena_src.ram_warning().empty())   // #633: said before the load's numbers, which it explains
+            std::fprintf(stderr, "strata generate: WARNING: %s\n", arena_src.ram_warning().c_str());
         std::fprintf(stderr, "strata generate: expert arena: %s\n", arena_src.note().c_str());
         std::fprintf(stderr, "strata generate: loaded %.2f GiB at %.2f GiB/s\n",
                      (double) strata::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
@@ -2819,28 +2929,7 @@ int main(int argc, char** argv) {
     // numbers if the slots do not fit, instead of handing back a cache smaller than it was asked for.
     mem_mark("the weights, the session and the drafter");
     strata::core::ExpertCache xcache;
-    // THE HEAD BEFORE THE CACHE.  The expert cache takes what is free minus the reserve, so everything allocated
-    // after it comes out of the reserve.  The native head (~0.5 GB with IQ3_S) was loaded after it and ate most of
-    // the 700 MiB: 128K IQ3_S ended with 30 MiB free, the driver paged, and a request stalled for good at its first
-    // verify window.  Loaded first, the cache is sized around it.
-    const strata::core::WeightRef* wo = wt.find("output.weight");
-    if (wo == nullptr) { std::fprintf(stderr, "strata generate: output.weight is missing\n"); return 1; }
-    const int64_t n_vocab = wo->ne1;
-    strata::core::NativeHead native_head;
-    if (!o.native_head_gguf.empty() && !multi_gpu) {   // a layer split's head is on its last stage
-        if (!native_head.load(o.native_head_shards, g.n_embd, n_vocab, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
-            return 1;
-        }
-        std::fprintf(stderr, "strata generate: experimental native Q5_K head, %llu bytes\n",
-                     (unsigned long long) native_head.weight_bytes());
-    }
-    std::vector<float> logits((size_t) n_vocab);
-    float* d_logits = nullptr;
-    if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: the logits buffer failed\n");
-        return 1;
-    }
+    // THE HEAD BEFORE THE CACHE: the native head and the logits are allocated above, before the expert arena (#620)
     const bool auto_cache = o.expert_cache < 0;
     bool reserve_adapted = false;   // #496: the auto sizing lowered the reserve so a small card's cache fits
     if (o.expert_cache < 0) {
@@ -3617,7 +3706,12 @@ int main(int argc, char** argv) {
         strata::core::doorbell_reset(db);
         double mix = 0, ffn = 0, post = 0;
         if (!strata::core::session_replay_stages(g, 0, 0, ss, gr, main_cs, mix, ffn, post, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            // #610: a native (IQ) pack captures no per-layer graphs; the serve path times its window's stages
+            std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(),
+                         native_pack ? " - a native (IQ) pack has no per-layer graphs to replay. Its decode window's GPU "
+                                       "stages are printed per request by the serve path instead: STRATA_VERIFY_PROFILE=1 "
+                                       "STRATA_DECODE_TIMING=1 with --serve (docs/DETAILS.md, \"Where a decode window's "
+                                       "time goes\")" : "");
             return 1;
         }
         const int reps = 20;
@@ -4082,6 +4176,19 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
             return 1;
         }
+        // #577: the unbuffered choice above was made before the RAM copy existed, from the budget asked for; now the
+        // copy is built, decide again from the RAM it really holds and the expert bytes outside it (on a 96 GB PC
+        // the file cache keeps those, and every refill after a prompt read the drive instead).  Windows only: the
+        // unbuffered reads exist there alone
+#if defined(_WIN32)
+        if (o.mmap_experts && o.resident_budget > 0) {
+            std::string why;
+            const bool was = src.unbuffered();
+            const bool ub = src.recheck_unbuffered(why);
+            std::fprintf(stderr, "strata generate: the file tier reads %s%s (%s)\n",
+                         ub ? "unbuffered" : "through the file cache", ub == was ? "" : " (changed)", why.c_str());
+        }
+#endif
     }
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
@@ -5698,6 +5805,7 @@ int main(int argc, char** argv) {
             const int64_t ram0 = src.ram_reads(), files0 = src.file_reads();
             const uint64_t file_bytes0 = src.file_read_bytes();
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+            const int64_t offload0 = drive.d.offload_entries;   // #588
             if (cancelled) finish = "cancel";
             while (!cancelled && produced_n < max_new) {
                 int T = S_mtp;
@@ -5945,6 +6053,7 @@ int main(int argc, char** argv) {
             }
             const int64_t req_hits = drive.d.cache_hits - decode_hits0;
             const int64_t req_look = (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused) - decode_look0;
+            const int64_t req_offload = drive.d.offload_entries - offload0;
             // #471: the prompt tokens this request read - all the fresh ones, or as far as the prompt pass got when a
             // cancel stopped it part-way (a cancelled request used to be logged and counted as having read them all)
             const int64_t fresh = n - resume;
@@ -5952,11 +6061,15 @@ int main(int argc, char** argv) {
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
             //      [RAM blobs] [file blobs] [file MB]   (CS-T tiers; appended, so an older server reads the rest)
             //      [prompt tokens read]   (#471: fewer than <prompt> - <reused> when a cancel stopped the read)
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld\n", (long long) produced_n,
+            //      [offloaded]   (#588: the decode's routed experts the GPU read over PCIe or another GPU computed;
+            //                    not in [lookups])
+            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld\n",
+                        (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
                         (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
-                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n);
+                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
+                        (long long) req_offload);
             std::fflush(stdout);
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             // "12288 of 98179" when cancelled mid-read (#471), the rate from what was read
@@ -5972,11 +6085,18 @@ int main(int argc, char** argv) {
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
             // the VRAM share of the experts the pool looked up while decoding; experts it sent over PCIe for the GPU
-            // to read (--pcie-frac) are in neither count
+            // to read (--pcie-frac) are in neither count - #588: so that share is said beside it (raising --pcie-frac
+            // raises the hit rate while the PCIe reads may make the decode slower)
             if (req_look > 0) {
-                std::fprintf(stderr, "strata serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)\n",
+                char off[160] = "";
+                if (req_offload > 0)
+                    std::snprintf(off, sizeof off, "; %lld more read by the GPU over PCIe or from another GPU (%.1f%% of "
+                                  "all %lld routed)", (long long) req_offload,
+                                  100.0 * (double) req_offload / (double) (req_look + req_offload),
+                                  (long long) (req_look + req_offload));
+                std::fprintf(stderr, "strata serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)%s\n",
                              100.0 * (double) req_hits / (double) req_look,
-                             (long long) req_hits, (long long) req_look);
+                             (long long) req_hits, (long long) req_look, off);
             }
             // the resident RAM mode, cumulative: experts read from experts.bin since the copy was made (what the plain
             // mmap mode reads through the OS file cache, from the SSD when the RAM could not keep it)
