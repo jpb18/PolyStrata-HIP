@@ -12,6 +12,9 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace strata::core {
 namespace {
@@ -26,6 +29,42 @@ bool hc_q8_name(const std::string& name) {
                                      ".hc_ffn_down.weight", ".hc_ffn_up.weight", ".hc_ffn_inject.weight"};
     for (const char* suffix : suffixes) if (name.ends_with(suffix)) return true;
     return false;
+}
+// S25: the GGUF keeps the inject rows as F32 - quantized here to Q8_0 (ggml's reference rounding) so the Q8_0 read
+// covers every hc projection
+uint16_t half_bits(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t e = (int32_t) ((x >> 23) & 0xff) - 127 + 15;
+    uint32_t m = x & 0x7fffffu;
+    if (e <= 0) {                                   // subnormal or zero
+        if (e < -10) return (uint16_t) sign;
+        m |= 0x800000u;
+        const uint32_t shift = (uint32_t) (14 - e);
+        uint32_t h = m >> shift;
+        const uint32_t rem = m & ((1u << shift) - 1), half = 1u << (shift - 1);
+        if (rem > half || (rem == half && (h & 1u))) ++h;
+        return (uint16_t) (sign | h);
+    }
+    if (e >= 31) return (uint16_t) (sign | 0x7c00u);
+    uint32_t h = ((uint32_t) e << 10) | (m >> 13);
+    const uint32_t rem = m & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) ++h;
+    return (uint16_t) (sign | h);
+}
+std::vector<uint8_t> q8_0_of(const float* x, uint64_t n) {
+    std::vector<uint8_t> out((size_t) (n / 32 * 34));
+    for (uint64_t b = 0; b < n / 32; ++b) {
+        float amax = 0.0f;
+        for (int j = 0; j < 32; ++j) amax = (std::max)(amax, std::fabs(x[b * 32 + j]));
+        const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+        uint8_t* o = out.data() + b * 34;
+        const uint16_t hb = half_bits(d);
+        std::memcpy(o, &hb, 2);
+        for (int j = 0; j < 32; ++j) o[2 + j] = (uint8_t) (int8_t) std::lround(x[b * 32 + j] * id);
+    }
+    return out;
 }
 bool eligible(const strata::TensorInfo& tensor, bool include_ple_key) {
     const auto& name = tensor.name;
@@ -186,7 +225,8 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
             }
             if (hc_q8_requested())
                 for (const auto& tensor : gguf.tensors()) {
-                    if (tensor.type != 8 || !hc_q8_name(tensor.name) || tensor.shape.size() != 2) continue;
+                    const bool f32_inject = tensor.type == 0 && tensor.name.ends_with("_inject.weight");
+                    if ((tensor.type != 8 && !f32_inject) || !hc_q8_name(tensor.name) || tensor.shape.size() != 2) continue;
                     auto found = table.table_.find(tensor.name);
                     if (found == table.table_.end() || found->second.hc_q8 != nullptr) continue;
                     auto& ref = found->second;
@@ -195,8 +235,11 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     }
                     const uint64_t bytes = (uint64_t) ref.ne0 / 32 * 34 * (uint64_t) ref.ne1;
                     void* p = nullptr;
+                    std::vector<uint8_t> q8;
+                    if (f32_inject) q8 = q8_0_of((const float*) gguf.tensor_data(tensor), (uint64_t) ref.ne0 * (uint64_t) ref.ne1);
                     if (cudaMalloc(&p, bytes) != cudaSuccess ||
-                        cudaMemcpy(p, gguf.tensor_data(tensor), bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+                        cudaMemcpy(p, f32_inject ? (const void*) q8.data() : gguf.tensor_data(tensor), bytes,
+                                   cudaMemcpyHostToDevice) != cudaSuccess) {
                         err = "native dense (STRATA_HC_Q8) upload " + tensor.name; return false;
                     }
                     ref.hc_q8 = p;
