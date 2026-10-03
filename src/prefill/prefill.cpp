@@ -1399,6 +1399,8 @@ int64_t Prefill::ring_max_slots() { return (int64_t) ring_budget_slots(); }
 
 int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chunk); }
 
+bool Prefill::ring_bytes_enabled() { return ring_bytes_on(); }
+
 namespace {
 
 const core::WeightRef* need(const core::LayerView& v, const char* suffix, std::string& err) {
