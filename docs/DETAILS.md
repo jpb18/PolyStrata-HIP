@@ -173,6 +173,10 @@ been warmed). The server log has the same per request (`expert tiers: GPU ... hi
 blobs ... MB read`), and `GET /metrics` lists `ram_blobs`, `file_blobs` and `file_mb` for each recent request (with
 engine 0.1.31 or newer). It also lists each request's speculative drafts, `drafts_offered` and `drafts_accepted`
 (`null` when the engine did not report them), and their sums since the server started in `totals` (#457).
+Its `hit_rate` is the VRAM share of the experts looked up while answering: experts the GPU reads over PCIe
+(`--pcie-frac`) are not in it, so a higher `--pcie-frac` raises it even when decoding gets slower. `pcie_share`
+(engine 0.1.39 or newer, #588) is their share of all routed experts, and the server log and the Monitor tab show it
+beside the hit rate.
 
 Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
 and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).

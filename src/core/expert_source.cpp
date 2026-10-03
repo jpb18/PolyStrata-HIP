@@ -2132,7 +2132,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             }
             if (kind[i] >= 0) {             // CUDA0, PCIe, or a remote/peer result staged into this row below
                 if (kind[i] == 0) ++d.cache_hits;
-                else if (kind[i] == 2 && d.peer != nullptr) ++d.peer_entries;
+                else ++d.offload_entries;                       // #588: PCIe or another GPU
+                if (kind[i] == 2 && d.peer != nullptr) ++d.peer_entries;
                 // multi-GPU: a direct peer launch is writing this row right now - zeroing it would race it
                 if (!(kind[i] == 2 && d.peer != nullptr && d.peer->launched_direct()))
                     std::memset(row, 0, (size_t) H * sizeof(float));
