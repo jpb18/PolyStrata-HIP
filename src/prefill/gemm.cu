@@ -377,11 +377,11 @@ bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
     return true;
 }
 
-// ---- sm_75: BF16 GEMMs through the FP16 tensor cores ---------------------------------------------------------------
-// Turing has no BF16 tensor cores: cublasGemmEx on CUDA_R_16BF inputs falls back to a SIMT fp32 kernel
-// (magma_sgemmEx) that ran at ~13 TFLOPS, a fifth of the 4K prompt.  BF16 -> FP16 is exact for every value inside
+// ---- sm_7x: BF16 GEMMs through the FP16 tensor cores ---------------------------------------------------------------
+// Turing and Volta have no BF16 tensor cores: cublasGemmEx on CUDA_R_16BF inputs falls back to a SIMT fp32 kernel
+// (magma_sgemmEx), a fifth of a 4K prompt on an RTX 2080 Ti.  BF16 -> FP16 is exact for every value inside
 // FP16's range (the 7-bit mantissa fits in 10 bits); weights and normalized activations sit there.  With
-// STRATA_BF16_TC (default on for sm_75), the weight is converted once per call and the activations in row slices,
+// STRATA_BF16_TC (default on for compute capability 7.x), the weight is converted once per call and the activations in row slices,
 // into the instance's own scratch, and the product runs as the FP16 GEMM (fp32 accumulate) on the tensor cores.
 namespace {
 __global__ void bf16_to_f16_kernel(const uint16_t* __restrict__ in, __half* __restrict__ out, int64_t n) {
@@ -396,11 +396,10 @@ int bf16_tc_mode() {
     static int mode = [] {
         const char* v = std::getenv("STRATA_BF16_TC");
         if (v != nullptr && v[0] != '\0') return std::atoi(v) != 0 ? 1 : 0;
-        int dev = 0, maj = 0, min = 0;
+        int dev = 0, maj = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev);
-        cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, dev);
-        return (maj == 7 && min == 5) ? 1 : 0;
+        return maj == 7 ? 1 : 0;   // Volta (sm_70, sm_72) and Turing (sm_75)
     }();
     return mode;
 }
