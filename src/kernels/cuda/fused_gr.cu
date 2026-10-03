@@ -145,6 +145,41 @@ struct GrMulti {
     int T;
 };
 
+
+// S26 STRATA_QFUSE=1: the q8_1 image of `mixed`, written by the up kernels below. A q8_1 block is 32 columns and an
+// up block owns UPM_COLS = 16, so the second of the two blocks that own a 32-column group (a per-group counter,
+// incremented after the block's writes are fenced, reset by that block for the next launch) reads the 32 values back
+// and quantizes them with native_quantize_q8_1_kernel's quantizer: one warp per token, the same XOR-tree max and sum,
+// d = amax / 127, roundf(x / d), ds = (d, sum) - the bytes the separate launch writes.
+struct GrQ81 { half2 ds; int8_t qs[32]; };
+static_assert(2 * 16 == 32, "two up blocks per q8_1 group");
+__device__ __forceinline__ void gr_q8_tail(const GrMulti& m, int d0) {
+    __shared__ int last;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        unsigned* c = m.a[0].q8_cnt + d0 / 32;
+        last = atomicAdd(c, 1u) == 1u;
+        if (last) atomicExch(c, 0u);
+    }
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (warp >= m.T) return;
+    const int c0 = (d0 / 32) * 32;
+    const float xi = *reinterpret_cast<const volatile float*>(m.a[warp].mixed + c0 + lane);
+    float amax = fabsf(xi), sum = xi;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+    const float d = amax / 127.0f;
+    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+    GrQ81* y = reinterpret_cast<GrQ81*>(m.a[warp].q8_mixed) + c0 / 32;
+    y->qs[lane] = q;
+    if (lane == 0) y->ds = make_half2(d, sum);
+}
 // Step 1 of `gr_down_kernel`, one block per token, same threads and reduction order: rs[t] and xn[t] to global.
 __global__ void __launch_bounds__(THREADS) gr_norm_multi_kernel(GrMulti m) {
     __shared__ float part[WARPS][HC];
@@ -306,6 +341,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
         for (int c = 0; c < HC; ++c) s += g[k][c][col];
         m.a[k].mixed[d0 + col] = s / (float) HC;
     }
+    if (m.a[0].q8_mixed != nullptr) gr_q8_tail(m, d0);   // S26 STRATA_QFUSE
 }
 
 
@@ -997,6 +1033,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_q8_kernel(GrMulti m, const floa
         for (int c = 0; c < HC; ++c) sum += g[k][c][col];
         m.a[k].mixed[d0 + col] = sum / (float) HC;
     }
+    if (m.a[0].q8_mixed != nullptr) gr_q8_tail(m, d0);   // S26 STRATA_QFUSE
 }
 
 template <int T> void launch_q8_t(const GrMulti& m, float* part, float* ssg, cudaStream_t st, unsigned long long* stamp_buf,
@@ -1023,7 +1060,7 @@ void launch_q8(const GrMulti& m, float* scratch, cudaStream_t st, unsigned long 
 
 }  // namespace
 
-void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
+bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
                          int stamp_i0) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
         std::fprintf(stderr, "fused_gr_read_multi: invalid arguments\n");
@@ -1041,6 +1078,11 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             std::exit(1);
         }
     }
+    // S26 STRATA_QFUSE: every token needs its q8_1 destination and token 0 the counters; otherwise none is written
+    bool q8 = a[0].q8_cnt != nullptr;
+    for (int t = 0; t < n_tok; ++t) q8 = q8 && a[t].q8_mixed != nullptr;
+    if (!q8)
+        for (int t = 0; t < n_tok; ++t) m.a[t].q8_mixed = nullptr;
     m.xn = xn_scratch;
     m.T = n_tok;
     cudaStream_t st = (cudaStream_t) stream;
@@ -1051,7 +1093,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             std::fprintf(stderr, "fused_gr_read_multi q8: %s\n", cudaGetErrorString(eq));
             std::exit(1);
         }
-        return;
+        return q8;
     }
     // STRATA_GR_V3=1: the two-kernel read above (another summation order - opt-in)
     static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
@@ -1095,7 +1137,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             std::fprintf(stderr, "fused_gr_read_multi v3: %s\n", cudaGetErrorString(e3));
             std::exit(1);
         }
-        return;
+        return false;   // the v3 read: no q8_1 (the caller quantizes)
     }
     // the default read (STRATA_GR_V3 unset): v1, or the bitwise-equal v2 / v3 this card's check accepted
     launch_multi(m, fused_gr_variant(), st, stamp_buf, stamp_i0);
@@ -1104,6 +1146,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         std::fprintf(stderr, "fused_gr_read_multi: %s\n", cudaGetErrorString(e));
         std::exit(1);
     }
+    return q8;
 }
 
 bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr) {

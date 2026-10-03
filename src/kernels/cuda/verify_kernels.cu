@@ -5,6 +5,7 @@
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/dp4a.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <cstdio>
@@ -112,6 +113,25 @@ __global__ void __launch_bounds__(256) gdn_ab_multi_kernel(const float* __restri
     }
 }
 
+// S26 (STRATA_QFUSE=1): the q8_1 image of a 32-column block, written by the warp that holds those columns with
+// native_quantize_q8_1_kernel's quantizer (the same XOR-tree max and sum, d = amax / 127, roundf(x / d), ds = (d, sum)).
+struct GdnQ81 { half2 ds; int8_t qs[32]; };
+__device__ __forceinline__ void gdn_q8_1_store(GdnQ81* __restrict__ xq, size_t idx, float xi) {
+    // no contraction: xi is a product here, and fma(a, b, shfl) would round the first sum unlike the separate
+    // quantizer, which reads xi from memory (S26 harness: ds.sum differed by 1 ulp without this)
+#pragma clang fp contract(off)
+    float amax = fabsf(xi), sum = xi;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+    const float d = amax / 127.0f;
+    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+    xq[idx / 32].qs[idx % 32] = q;
+    if (idx % 32 == 0) xq[idx / 32].ds = make_half2(d, sum);
+}
+
+template<bool Q>
 __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __restrict__ state,
                                                                      const float* __restrict__ hbuf, int C,
                                                                      const float* __restrict__ gate,
@@ -119,7 +139,8 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
                                                                      const float* __restrict__ z,
                                                                      const float* __restrict__ gamma, float eps,
                                                                      float* __restrict__ y, int h_k, int h_v, int T,
-                                                                     const int32_t* __restrict__ n_keep, int t_out_begin) {
+                                                                     const int32_t* __restrict__ n_keep, int t_out_begin,
+                                                                     GdnQ81* __restrict__ xq) {
     __shared__ float sk[S], sq[S];
     __shared__ float red[RG][S];
     __shared__ float wsum[S * RG / 32];
@@ -171,7 +192,13 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
             const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
             const float scale = rsqrtf(ss / (float) S + eps);
             const float zz = z[(size_t) t * value_dim + head * S + col];
-            y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+            if constexpr (Q) {
+                const float yv = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+                y[(size_t) t * value_dim + head * S + col] = yv;
+                gdn_q8_1_store(xq, (size_t) (t - t_out_begin) * value_dim + head * S + col, yv);
+            } else {
+                y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+            }
         }
     }
     if (n_keep != nullptr && n > 0) {
@@ -186,7 +213,11 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
 // at ~60 GB/s. Every column's arithmetic is the original's; the output norm, which needs all 128 columns of a head,
 // moves to gdn_out_norm_kernel: this kernel leaves the unnormalized output `oc` in y and the second kernel sums the
 // squares by the same warps (columns 32w..32w+31, the same butterfly) in the same order.
+// S26: OUT = false (the commit, whose outputs nobody reads) drops the output reduction and its two barriers; the
+// norm kernel below has the old kernel's code shape (S x RG threads, rg 0 holding oc), which makes it bitwise equal -
+// the 128-thread version differed from the old kernel by 1 ulp in ~7% of the outputs.
 constexpr int GS_COLS = 32;
+template<bool OUT>
 __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __restrict__ state,
                                                                       const float* __restrict__ hbuf, int C,
                                                                       const float* __restrict__ gate,
@@ -230,6 +261,7 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
             s[r] = fmaf(g, s[r], sk[rg * RPG + r] * delta);
             o = fmaf(s[r], sq[rg * RPG + r], o);
         }
+        if (!OUT) continue;
         __syncthreads();
         red[rg][lc] = o;
         __syncthreads();
@@ -243,24 +275,108 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
     }
 }
 
-// y = oc * rsqrt(mean(oc^2) + eps) * gamma * sigmoid(z) per head and token, with gdn_step_norm_multi_kernel's sums
-__global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
-                                                        float eps, float* __restrict__ y, int h_v, int T,
-                                                        const int32_t* __restrict__ n_keep, int t_out_begin) {
-    __shared__ float wsum[S / 32];
-    const int head = blockIdx.x, t = blockIdx.y + t_out_begin, col = threadIdx.x;
+
+// S26: the state-only replay (the commit) with its per-token inputs prefetched - gate, beta and the v column of every
+// row up front, the next row's k / q while the current one computes. The arithmetic and its order are
+// gdn_step_split_kernel<false>'s (gfx1151 harness: state bitwise equal; 44.5 -> 39.1 us at 1 row, 47.4 -> 40.5 at 2,
+// 53.8 -> 42.9 at 4, h_v 48). With outputs the prefetch lost (register pressure), so the window keeps the plain split.
+template<int MAXT>
+__global__ void __launch_bounds__(GS_COLS * RG) gdn_state_replay_kernel(float* __restrict__ state,
+                                                                        const float* __restrict__ hbuf, int C,
+                                                                        const float* __restrict__ gate,
+                                                                        const float* __restrict__ beta, int h_k,
+                                                                        int h_v, int T, const int32_t* __restrict__ n_keep) {
+    __shared__ float sk[S], sq[S];
+    __shared__ float red[RG][GS_COLS];
+    const int head = blockIdx.x;
+    const int c0 = blockIdx.y * GS_COLS;
+    const int lc = threadIdx.x;
+    const int col = c0 + lc;
+    const int rg = threadIdx.y;
+    const int tid = rg * GS_COLS + lc;
+    const int qh = head % h_k;
+    const int qk = S * h_k;
+    const int n = n_keep ? *n_keep : T;
+    float gv[MAXT], bv[MAXT], vv[MAXT];
+#pragma unroll
+    for (int t = 0; t < MAXT; ++t) {
+        if (t < n) {
+            gv[t] = gate[(size_t) t * h_v + head];
+            bv[t] = beta[(size_t) t * h_v + head];
+            vv[t] = hbuf[(size_t) t * C + 2 * qk + head * S + col];
+        }
+    }
+    float kn = 0.0f, qn = 0.0f;
+    if (n > 0) { kn = hbuf[qk + qh * S + tid]; qn = hbuf[qh * S + tid]; }
+    float s[RPG];
+    float* base = state + ((size_t) (rg * RPG) * h_v + head) * S + col;
+    const size_t row_stride = (size_t) h_v * S;
+#pragma unroll
+    for (int r = 0; r < RPG; ++r) s[r] = base[r * row_stride];
+#pragma unroll
+    for (int t = 0; t < MAXT; ++t) {
+        if (t >= n) break;
+        __syncthreads();
+        sk[tid] = kn; sq[tid] = qn;
+        __syncthreads();
+        if (t + 1 < n) {
+            const float* hn = hbuf + (size_t) (t + 1) * C;
+            kn = hn[qk + qh * S + tid]; qn = hn[qh * S + tid];
+        }
+        const float g = __expf(gv[t]);
+        float kv = 0.0f;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], sk[rg * RPG + r], kv);
+        red[rg][lc] = kv;
+        __syncthreads();
+        const float kv_col = red[0][lc] + red[1][lc] + red[2][lc] + red[3][lc];
+        const float delta = (vv[t] - g * kv_col) * bv[t];
+        float o = 0.0f;   // unused: kept because the measured code had it (without it: 51 us instead of 39 at 1 row)
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) {
+            s[r] = fmaf(g, s[r], sk[rg * RPG + r] * delta);
+            o = fmaf(s[r], sq[rg * RPG + r], o);
+        }
+        (void) o;
+    }
+    if (n_keep != nullptr && n > 0) {
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) base[r * row_stride] = s[r];
+    }
+}
+// y = oc * rsqrt(mean(oc^2) + eps) * gamma * sigmoid(z) per head and token: gdn_step_norm_multi_kernel's tail with its
+// code shape (S x RG threads; rg 0 holds oc, the other row groups contribute 0 to wsum), reading oc from y
+template<bool Q>
+__global__ void __launch_bounds__(S * RG) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
+                                                             float eps, float* __restrict__ y, int h_v, int T,
+                                                             const int32_t* __restrict__ n_keep, int t_out_begin,
+                                                             GdnQ81* __restrict__ xq) {
+    __shared__ float wsum[S * RG / 32];
+    const int head = blockIdx.x, t = blockIdx.y + t_out_begin, col = threadIdx.x, rg = threadIdx.y;
+    const int tid = rg * S + col;
     const int n = n_keep ? *n_keep : T;
     if (t >= n) return;
     const int value_dim = S * h_v;
-    const float oc = y[(size_t) t * value_dim + head * S + col];
-    float sq_part = oc * oc;
+    float oc = 0.0f, sq_part = 0.0f;
+    if (rg == 0) {
+        oc = y[(size_t) t * value_dim + head * S + col];
+        sq_part = oc * oc;
+    }
     for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
-    if ((col & 31) == 0) wsum[col >> 5] = sq_part;
+    if ((tid & 31) == 0) wsum[tid >> 5] = sq_part;
     __syncthreads();
-    const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
-    const float scale = rsqrtf(ss / (float) S + eps);
-    const float zz = z[(size_t) t * value_dim + head * S + col];
-    y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+    if (rg == 0) {
+        const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
+        const float scale = rsqrtf(ss / (float) S + eps);
+        const float zz = z[(size_t) t * value_dim + head * S + col];
+        if constexpr (Q) {
+            const float yv = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+            y[(size_t) t * value_dim + head * S + col] = yv;
+            gdn_q8_1_store(xq, (size_t) (t - t_out_begin) * value_dim + head * S + col, yv);
+        } else {
+            y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+        }
+    }
 }
 
 __global__ void embedding_gather_dev_kernel(const uint8_t* __restrict__ codes, const float* __restrict__ scales,
@@ -494,24 +610,37 @@ void gdn_ab_multi(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
 
 void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const float* gate, const float* beta,
                          const float* z, const float* gamma, float eps, float* y, int h_k, int h_v, int n_tok,
-                         const int32_t* n_keep, void* stream, int t_out_begin) {
+                         const int32_t* n_keep, void* stream, int t_out_begin, void* xq_out) {
+    GdnQ81* const xq = static_cast<GdnQ81*>(xq_out);   // S26: non-null = also the outputs' q8_1 (STRATA_QFUSE)
     if (!state || !h || !gate || !beta || !z || !gamma || !y || h_k <= 0 || h_v % h_k || n_tok < 1 ||
         n_tok > kVerifyMaxT) {
         std::fprintf(stderr, "gdn_step_norm_multi: invalid arguments\n");
         std::exit(1);
     }
     static const bool split = [] { const char* v = std::getenv("STRATA_GDN_SPLIT"); return v && v[0] == '1'; }();
-    if (split) {
-        gdn_step_split_kernel<<<dim3((unsigned) h_v, S / GS_COLS), dim3(GS_COLS, RG), 0, (cudaStream_t) stream>>>(
-            state, h, conv_channels, gate, beta, y, h_k, h_v, n_tok, n_keep, t_out_begin);
-        if (n_tok > t_out_begin)
-            gdn_out_norm_kernel<<<dim3((unsigned) h_v, (unsigned) (n_tok - t_out_begin)), S, 0, (cudaStream_t) stream>>>(
-                z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin);
+    // S26: the split runs where it is faster (gfx1151 harness, h_v 48: the commit 8-19% per call; a window of 2+ rows
+    // 3-13%; one row: no gain, the old kernel stays) - bitwise equal in every case
+    if (split && (t_out_begin >= n_tok || n_tok - t_out_begin >= 2)) {
+        const dim3 grid((unsigned) h_v, S / GS_COLS), block(GS_COLS, RG);
+        if (t_out_begin >= n_tok) {   // no outputs (the commit): the state only
+            gdn_state_replay_kernel<kVerifyMaxT><<<grid, block, 0, (cudaStream_t) stream>>>(
+                state, h, conv_channels, gate, beta, h_k, h_v, n_tok, n_keep);
+        } else {
+            gdn_step_split_kernel<true><<<grid, block, 0, (cudaStream_t) stream>>>(
+                state, h, conv_channels, gate, beta, y, h_k, h_v, n_tok, n_keep, t_out_begin);
+            const dim3 ng((unsigned) h_v, (unsigned) (n_tok - t_out_begin));
+            if (xq) gdn_out_norm_kernel<true><<<ng, dim3(S, RG), 0, (cudaStream_t) stream>>>(z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin, xq);
+            else gdn_out_norm_kernel<false><<<ng, dim3(S, RG), 0, (cudaStream_t) stream>>>(z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin, nullptr);
+        }
         check("gdn_step_norm_multi (split)");
         return;
     }
-    gdn_step_norm_multi_kernel<<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(
-        state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin);
+    if (xq && t_out_begin < n_tok)
+        gdn_step_norm_multi_kernel<true><<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, xq);
+    else
+        gdn_step_norm_multi_kernel<false><<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, nullptr);
     check("gdn_step_norm_multi");
 }
 

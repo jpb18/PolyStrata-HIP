@@ -57,6 +57,8 @@ using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
 const bool g_qdedup = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }();
+// S26 STRATA_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
+const bool g_qfuse = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }();
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -176,6 +178,7 @@ Verifier::~Verifier() {
     for (auto& e : exec_)
         if (e) cudaGraphExecDestroy(e);
     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
+    if (qcnt_) cudaFree(qcnt_);
     if (cs_) cudaStreamDestroy(cs_);
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
     if (commit_done_) cudaEventDestroy(commit_done_);
@@ -378,6 +381,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                              : "not every expert is resident - the host-planned window stays");
         }
     }
+    if (g_qfuse) {   // S26: the HC read's q8_1 group counters, zeroed once (each launch leaves them zero)
+        if (cudaMalloc((void**) &qcnt_, sizeof(unsigned) * (size_t) (g.n_embd / 32)) != cudaSuccess ||
+            cudaMemset(qcnt_, 0, sizeof(unsigned) * (size_t) (g.n_embd / 32)) != cudaSuccess) {
+            cudaGetLastError();
+            if (qcnt_) cudaFree(qcnt_);
+            qcnt_ = nullptr;
+        }
+    }
     if (device_plan_) {
         bool ok2 = cudaMalloc((void**) &skip_, 64) == cudaSuccess && cudaMemset(skip_, 0, 64) == cudaSuccess;
         if (ok2 && hits.slot_off != nullptr && hits.n_slots > 0) {
@@ -520,11 +531,16 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 a.q8_inject = (const uint8_t*) wi[half]->hc_q8;
                 a.eps = EPS; a.lo = lo_ + t * g.hc_lr; a.rs = rs_ + t * HC;
                 a.inject_out = inj_out + t * HC; a.mixed = mixed_ + t * N;
+                if (qcnt_ != nullptr) {   // S26 STRATA_QFUSE: the consumer's q8_1 image written by the read itself
+                    a.q8_cnt = qcnt_;
+                    if (half == 0) a.q8_mixed = xq_ + (size_t) (t - tb) * (N / 32) * 36;
+                    else if (strata::kernels::cpu::expert_layout().native) a.q8_mixed = nat_xq_ + (size_t) t * (N / 32) * 36;
+                }
             }
-            fused_gr_read_multi(fa, n, xn_ + (size_t) tb * HC * N, cs, (prof_on_ && grp == 0) ? prof_ : nullptr,
+            return fused_gr_read_multi(fa, n, xn_ + (size_t) tb * HC * N, cs, (prof_on_ && grp == 0) ? prof_ : nullptr,
                                 (int) (l * kProfPer + (half == 0 ? 27 : 30)));
         };
-        gr_read_group(0, pending, inj2_, inj_);
+        const bool q8_attn = gr_read_group(0, pending, inj2_, inj_);   // true: xq_ holds mixed's q8_1 (STRATA_QFUSE)
         stamp(l, 1, grp);
         float* xm = mixed_ + tb * N;
         try {
@@ -546,7 +562,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 float* hb = h_L_ + (size_t) gi * MT * C;
                 float* gate = gate_L_ + (size_t) gi * MT * HV;
                 float* beta = beta_L_ + (size_t) gi * MT * HV;
-                native_quantize_q8_1(xm, xq_, (int) N, n, cs);
+                if (!q8_attn) native_quantize_q8_1(xm, xq_, (int) N, n, cs);
                 native_mmvq(wqkv->native_type, wqkv->native_data, xq_, qkv + (size_t) tb * C, (int) N, (int) C, n, cs);
                 stamp(l, 2, grp);
                 gdn_conv_l2_multi(conv, qkv, (const float*) wc->data, hb, (int) C, (int) (2 * HK), EPS, n, cs, tb);
@@ -559,9 +575,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 stamp(l, 5, grp);
                 // the recurrence from the untouched state over tokens [0, te); outputs only for this group's
                 gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_, (int) HK,
-                                    (int) HV, te, nullptr, cs, tb);
+                                    (int) HV, te, nullptr, cs, tb, g_qfuse ? (void*) xq_ : nullptr);
                 stamp(l, 6, grp);
-                native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);
+                if (!g_qfuse) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);   // STRATA_QFUSE: done above
                 native_mmvq(wout->native_type, wout->native_data, xq_, bo_ + tb * N, (int) ZV, (int) N, n, cs);
             } else {
                 // ======================= QSA =======================
@@ -586,7 +602,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 // the per-token GEMVs / norms / RoPEs / copies of this layer as one launch over the
                 // window's rows each - row-wise identical arithmetic (STRATA_DEC_BATCH=0: token by token)
                 const bool qb = dec_batch && n > 1 && native_qsa_enabled() && native_rope_enabled() && !st.kv_q4;
-                native_quantize_q8_1(xm, xq_, (int) N, n, cs);
+                if (!q8_attn) native_quantize_q8_1(xm, xq_, (int) N, n, cs);
                 if (qb) bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wik->data, idx_raw + tb * ID, ID, N, ID, n, cs);
                 else for (int t = tb; t < te; ++t)
                     bf16_gemv_fp32_mmvf(mixed_ + t * N, (const uint16_t*) wik->data, idx_raw + t * ID, (int) N, (int) ID, cs);
@@ -689,7 +705,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             return false;
         }
         stamp(l, 16, grp);
-        gr_read_group(1, true, inj_, inj2_);
+        const bool q8_ffn = gr_read_group(1, true, inj_, inj2_);   // true: nat_xq_ holds the MoE input's q8_1
         // the window's rows routed in 2 launches (one router GEMV reading the weight once, one
         // top-10) instead of 2 per token; every row's arithmetic is the single-token call's (STRATA_DEC_BATCH=0: old)
         const WeightRef* w_router = v.get("ffn_gate_inp.weight");
@@ -730,7 +746,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             // read it (quantize_q8_1_rows and native_quantize_q8_1 write the same bytes), and the BF16 copy of xm
             // is skipped when the shared expert's native BF16 gate (which never reads it) is on.
             const bool qdedup = g_qdedup && strata::kernels::cpu::expert_layout().native;
-            if (qdedup) quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
+            if (qdedup && !q8_ffn) quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
             if (!(qdedup && shared_expert_native_bf16())) {
             if (dec_batch) f32_to_bf16_bulk(mixed_ + tb * N, sh_bf16_ + tb * N, (int64_t) n * N, cs);   // contiguous rows
             else for (int t = tb; t < te; ++t) f32_to_bf16_bulk(mixed_ + t * N, sh_bf16_ + t * N, N, cs);
@@ -746,7 +762,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
         if (strata::kernels::cpu::expert_layout().native) {
             if (!(g_qdedup && strata::kernels::cpu::expert_layout().native))
-                quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
+                if (!q8_ffn) quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
         } else
             quantize_q8_0_scaled(xm, hit_xq_ + (size_t) tb * (N / 32) * 34, hit_xs_ + (size_t) tb * (N / 32), (int64_t) n * N, cs);
         stamp(l, 18, grp);
@@ -1026,7 +1042,8 @@ bool Verifier::capture_commit(std::string& err) {
                 gdn_conv_commit(conv, qkv, (int) C, commit_, cs_);
                 gdn_step_norm_multi(state, h_L_ + (size_t) gdn_index * MT * C, (int) C, gate_L_ + (size_t) gdn_index * MT * HV,
                                     beta_L_ + (size_t) gdn_index * MT * HV, z_, (const float*) wnm->data, EPS, y_dummy_,
-                                    (int) g.ssm_k_heads, (int) HV, (int) MT, commit_, cs_);
+                                    (int) g.ssm_k_heads, (int) HV, (int) MT, commit_, cs_,
+                                    (int) MT);   // S26: t_out_begin = MT - the replay's outputs (y_dummy_) are never read
                 ++gdn_index;
             } else {
                 const QsaState& st = ss.qsa_states[qsa_index];
