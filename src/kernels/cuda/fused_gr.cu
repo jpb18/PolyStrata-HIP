@@ -827,7 +827,10 @@ __global__ void __launch_bounds__(THREADS) gr_down_q8_kernel(GrMulti m, float* _
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     const int rg = blockIdx.x, kc = blockIdx.y, c = kc / Q8_CPS;
     const bool inj = rg == Q8_RG;
-    const int nrows = inj ? ((m.a[0].q8_inject != nullptr && warp < HC) ? 1 : 0) : Q8_RPW;
+    // S25: the inject rows are F32 in the GGUF with BF16-exact values, so by default they are read as the pack's BF16
+    // (exact); a Q8_0 copy (STRATA_HC_Q8_INJECT=1) is the other option
+    const bool inj_bf16 = inj && m.a[0].q8_inject == nullptr;
+    const int nrows = inj ? (((m.a[0].q8_inject != nullptr || m.a[0].w_inject != nullptr) && warp < HC) ? 1 : 0) : Q8_RPW;
     const int row0 = inj ? warp : (rg * WARPS + warp) * Q8_RPW;
     const uint8_t* wb = inj ? m.a[0].q8_inject : m.a[0].q8_down;
     const int sub = lane & 7, bl = lane >> 3;       // lanes 8b..8b+7: one Q8_0 block, 4 values each
@@ -835,7 +838,7 @@ __global__ void __launch_bounds__(THREADS) gr_down_q8_kernel(GrMulti m, float* _
     float dq[Q8_RPW][Q8_SPB];
 #pragma unroll
     for (int r = 0; r < Q8_RPW; ++r) {
-        if (r >= nrows) break;
+        if (r >= nrows || inj_bf16) break;
         const uint8_t* row = wb + (size_t) (row0 + r) * (D / 32) * Q8B + (size_t) kc * (Q8_KC / 32) * Q8B;
 #pragma unroll
         for (int s = 0; s < Q8_SPB; ++s) {
@@ -883,8 +886,15 @@ __global__ void __launch_bounds__(THREADS) gr_down_q8_kernel(GrMulti m, float* _
         for (int k = 0; k < T; ++k) acc[k] = 0.0f;
 #pragma unroll
         for (int s = 0; s < Q8_SPB; ++s) {
-            const float4 w = q8_four(q[r][s], dq[r][s]);
             const int v = 32 * (4 * s + bl) + 4 * sub;
+            float4 w;
+            if (inj_bf16) {
+                const uint2 b = *reinterpret_cast<const uint2*>(m.a[0].w_inject + (size_t) row0 * D + (size_t) kc * Q8_KC + v);
+                w = make_float4(__uint_as_float(b.x << 16), __uint_as_float(b.x & 0xffff0000u),
+                                __uint_as_float(b.y << 16), __uint_as_float(b.y & 0xffff0000u));
+            } else {
+                w = q8_four(q[r][s], dq[r][s]);
+            }
 #pragma unroll
             for (int k = 0; k < T; ++k) {
                 const float4 x = *reinterpret_cast<const float4*>(&xs[k][v]);
@@ -1044,7 +1054,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     m.xn = xn_scratch;
     m.T = n_tok;
     cudaStream_t st = (cudaStream_t) stream;
-    if (a[0].q8_down != nullptr && a[0].q8_up != nullptr && (a[0].w_inject == nullptr || a[0].q8_inject != nullptr)) {
+    if (a[0].q8_down != nullptr && a[0].q8_up != nullptr) {   // inject: Q8_0 copy, or the BF16 rows
         launch_q8(m, xn_scratch, st, stamp_buf, stamp_i0);   // S23 experiment: STRATA_HC_Q8=1
         const cudaError_t eq = cudaGetLastError();
         if (eq != cudaSuccess) {

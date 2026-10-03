@@ -829,7 +829,23 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         const WeightRef *hn = wt.find("output_hc_norm.weight"), *hd = wt.find("output_hc_down.weight"),
                         *hu = wt.find("output_hc_up.weight");
         if (!hn || !hd || !hu) { err = "verify: an output_hc_* weight is missing"; return false; }
-        for (int t = 0; t < T; ++t) {
+        // S25 (STRATA_HC_Q8=1): the final mixer from the GGUF's Q8_0 projections too, through the same multi read
+        // (no pending write, no inject)
+        const bool mix_q8 = hd->hc_q8 != nullptr && hu->hc_q8 != nullptr && head_ != nullptr && head_->loaded();
+        if (mix_q8) {
+            FusedGrArgs fa[kFusedGrMaxT];
+            for (int t = 0; t < T; ++t) {
+                FusedGrArgs& a = fa[t];
+                a.R = Rt(t); a.R_out = Rt(t); a.apply = false;
+                a.w_norm = (const float*) hn->data; a.w_down = (const uint16_t*) hd->data;
+                a.w_up = (const uint16_t*) hu->data; a.w_inject = nullptr;
+                a.q8_down = (const uint8_t*) hd->hc_q8; a.q8_up = (const uint8_t*) hu->hc_q8;
+                a.eps = EPS; a.lo = lo_ + t * g.hc_lr; a.rs = rs_ + t * HC;
+                a.mixed = head_mixed_ + t * N;
+            }
+            fused_gr_read_multi(fa, T, xn_, cs);
+        }
+        for (int t = 0; t < T && !mix_q8; ++t) {
             BlockBuffers bb = ss.block;
             bb.R = Rt(t);
             bb.mixed = head_mixed_ + t * N;
