@@ -1,7 +1,9 @@
 // src/prefill/gemm_bf16_parity.cu - Gemm::bf16 against cuBLAS's own BF16 product (GPU, synthetic, no model).
 //
-// On sm_7x (Volta / Turing, no BF16 tensor cores) Gemm::bf16 converts the weight and the activations to FP16 and runs the FP16
-// tensor-core GEMM (STRATA_BF16_TC, default on there); everywhere else it is the cuBLAS BF16 call itself.  This
+// Below sm_80 (no BF16 tensor cores) Gemm::bf16 converts the weight and the activations to FP16 and runs the FP16
+// tensor-core GEMM (Volta by default, Turing with STRATA_BF16_TC=1) or widens them to fp32 (Pascal); everywhere else
+// it is the cuBLAS BF16 call itself.  (On Pascal the cuBLAS BF16 reference itself may be refused: the test then fails
+// at the reference, which says so.)  This
 // checks the result against cublasGemmEx on the same BF16 inputs, within fp32-accumulation rounding, over the prompt
 // path's shapes: the hyper-connection down / up projections, the router and indexer rows, the PLE value matrix, a T
 // large enough to slice the activations, beta = 1 accumulation (the bf16x2 low parts) and an output row stride wider
