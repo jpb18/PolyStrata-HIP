@@ -16,6 +16,7 @@
 #include "ggml-common.h"
 
 #include <cstdio>
+#include <utility>
 #include <cstdlib>
 
 namespace strata::kernels {
@@ -1396,6 +1397,13 @@ struct S26IQ3S {   // Split<21>::load with the grid from `grid` (LT) or iq3s_gri
 
 constexpr int S26_XMAX = 2560 / 32;   // q8_1 blocks of one activation row (n_embd 2560)
 
+// S26 BAL: step I of a warp's RPW x NI items (item p = 32 I + lane): rows QA / QB (lanes >= THR take QB)
+template<int I, int NI, int RPW> struct S26Bal {
+    static constexpr int P0 = 32 * I, QA = P0 / NI, QB0 = (P0 + 31) / NI, QB = QB0 < RPW ? QB0 : RPW - 1;
+    static constexpr int THR = (QA + 1) * NI - P0;
+    static_assert(NI >= 32, "a step spans at most two rows");
+};
+
 template<bool LT, bool LX, int RPW, bool SL = false, bool TS = false>
 __global__ void __launch_bounds__(256) s26_gu_l_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                        const int32_t* __restrict__ grp_start,
@@ -1491,7 +1499,7 @@ __global__ void __launch_bounds__(256) s26_gu_l_kernel(const unsigned long long*
 
 constexpr int S26_HMAX = 640 / 32;    // q8_1 blocks of one SwiGLU row (n_ff 640)
 
-template<bool LX, int RPW, bool SL = false, bool TS = false>
+template<bool LX, int RPW, bool SL = false, bool TS = false, int BAL = 0>
 __global__ void __launch_bounds__(256) s26_down_l_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                          const int32_t* __restrict__ grp_start,
                                                          const int32_t* __restrict__ n_groups,
@@ -1534,6 +1542,36 @@ __global__ void __launch_bounds__(256) s26_down_l_kernel(const unsigned long lon
         for (int q = 0; q < RPW; ++q)
 #pragma unroll
             for (int c = 0; c < GRP_NC; ++c) s[q][c] = 0.0f;
+        if constexpr (BAL > 0) {   // S26: 5 items per lane instead of 8 / 4, in BAL groups (loads first)
+            constexpr int NI = 2 * S26_HMAX, IT = RPW * NI / 32;
+            static_assert(RPW * NI % 32 == 0, "whole steps");
+            auto group = [&]<int G0, int... J>(std::integer_sequence<int, J...>) {
+                Split<20>::W w[sizeof...(J)];
+                int kk[sizeof...(J)];
+                bool hh[sizeof...(J)];
+                ([&] {
+                    using B = S26Bal<G0 + J, NI, RPW>;
+                    hh[J] = B::QB != B::QA && lane >= B::THR;
+                    kk[J] = B::P0 + lane - (hh[J] ? B::QB : B::QA) * NI;
+                    const uint8_t* rp = hh[J] ? wr[B::QB] : wr[B::QA];
+                    if constexpr (SL) w[J] = S26Split<20, false>::load(rp, kk[J] / 2, 2 * (kk[J] % 2));
+                    else w[J] = Split<20>::load(rp, kk[J] / 2, 2 * (kk[J] % 2));
+                }(), ...);
+                ([&] {
+                    using B = S26Bal<G0 + J, NI, RPW>;
+#pragma unroll
+                    for (int c = 0; c < GRP_NC; ++c)
+                        if (c < n) {
+                            const float v = Split<20>::apply(w[J], hbase + off[c] + kk[J] / 2, 2 * (kk[J] % 2));
+                            if (hh[J]) s[B::QB][c] += v; else s[B::QA][c] += v;
+                        }
+                }(), ...);
+            };
+            constexpr int G = (IT + BAL - 1) / BAL;
+            [&]<int... Q>(std::integer_sequence<int, Q...>) {
+                (group.template operator()<Q * G>(std::make_integer_sequence<int, (IT - Q * G < G ? IT - Q * G : G)>{}), ...);
+            }(std::make_integer_sequence<int, BAL>{});
+        } else
         for (int k = lane; k < nb * 2; k += 32) {
             const int kbx = k / 2, iqs = 2 * (k % 2);
             Split<20>::W w[RPW];
@@ -1593,7 +1631,7 @@ __global__ void s26_swiglu_q8_1_kernel(const float* __restrict__ gate, const flo
     y[ib].qs[iqs] = q;
     if (iqs == 0) y[ib].ds = make_half2(d, sum);
 }
-template<bool LT, bool LX, int RG, int RD, bool SL = false, bool FQ = false, bool TS = false>
+template<bool LT, bool LX, int RG, int RD, bool SL = false, bool FQ = false, bool TS = false, int BD = 0>
 void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr,
                   const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok,
                   const block_q8_1* X, float* gate, float* up, float* h, block_q8_1* hq, float* out, long long nh) {
@@ -1606,7 +1644,7 @@ void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t 
         quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
     }
     const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
-    s26_down_l_kernel<LX, RD, SL, TS><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+    s26_down_l_kernel<LX, RD, SL, TS, BD><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
@@ -1756,7 +1794,9 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     if (v2 && L.gu_type == 21 && L.d_type == 20 && L.n_embd == 2560 && L.n_ff == 640) {   // S26: see s26_gu_l_kernel
         // S26 STRATA_TSUM=1: the sums as one transposed butterfly per warp (s26_tsum.cuh; bitwise the same values)
         static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
-        if (ts) s26_launch_l<true, true, 4, 4, true, true, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
+        // (+ down rows' items spread evenly over the lanes, one load group: bitwise, harness 1.09-1.12x vs 1.03-1.06x;
+        // the same for gate / up was 0.6-0.8x)
+        if (ts) s26_launch_l<true, true, 4, 4, true, true, true, 1>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
                                                              hq, out, (long long) cap_entries * L.n_ff);
         else s26_launch_l<true, true, 4, 4, true, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
                                                         hq, out, (long long) cap_entries * L.n_ff);
