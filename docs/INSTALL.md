@@ -151,6 +151,9 @@ says so and starts the engine you had.
 - **Where that data folder is:** `%APPDATA%\Strata\settings.json` on Windows, `~/.config/strata/settings.json` on
   Linux ([details](DETAILS.md#before-you-start)).
 - **The program itself:** `.venv/`, `engine/` and `third_party/` in the Strata folder.
+- **Where github.com cannot be reached:** a build from source downloads llama.cpp's source (ggml, gguf-py) from
+  GitHub at the commit `LLAMA_CPP_COMMIT` in `setup.py` names. Put that commit's tree in `third_party/llama.cpp`
+  yourself (from a mirror or another PC) and setup uses it instead (#585).
 
 ## Setup's questions
 
