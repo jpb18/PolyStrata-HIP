@@ -114,6 +114,11 @@ if(STRATA_ENABLE_CUDA)
                       "CUDA 12.8 crashed on long prompts on these cards (issues #220, #224). Use CUDA 13.0 or newer.")
     endif()
   endforeach()
+  if(STRATA_EXPERIMENTAL_SM60)
+    # every target sees it: the Pascal / Volta code paths (the Volta prompt attention, PR #600) are compiled into this
+    # build only, so the ready-made engine (sm_75+) keeps exactly the code it had
+    add_compile_definitions(STRATA_EXPERIMENTAL_SM60=1)
+  endif()
   message(STATUS "Strata: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
   set(_strata_gpu_runtime_target CUDA::cudart)
   set(_strata_gpu_blas_target CUDA::cublas)

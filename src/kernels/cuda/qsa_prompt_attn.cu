@@ -737,7 +737,9 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
 }
 
 
-#if !defined(__HIPCC__)
+// PR #600: compiled only into the experimental build (-DSTRATA_EXPERIMENTAL_SM60=ON), the one build that runs on a
+// Volta card; the ready-made engine has none of it (no extra kernels to load, the same code as before).
+#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
 // ---- sm_70 (Volta): v1's structure on mma.m8n8k4 ------------------------------------------------------------------
 // Volta's tensor cores only have m8n8k4 (FP16 in, FP32 accumulate): per warp FOUR independent 8x8x4 products, one per
 // quad-pair (QP q = lanes 4q..4q+3 and 4q+16..4q+19; thread j = (lane & 3) + 4 * (lane >> 4) within it). Layout, measured on
@@ -1111,13 +1113,13 @@ bool launch70(const float* q, const QsaAttnPools& pools, const int32_t* ids, con
     }
     return true;
 }
-#else   // AMD: no m8n8k4 kernel; the dispatcher never selects it there
+#else   // AMD, or a build without STRATA_EXPERIMENTAL_SM60: no m8n8k4 kernel (the caller keeps the old one)
 template <int KV_MODE>
 bool launch70(const float*, const QsaAttnPools&, const int32_t*, const int32_t*, int64_t, const QsaShapes&, float*,
               int64_t, cudaStream_t) {
     return false;
 }
-#endif  // !__HIPCC__
+#endif  // !__HIPCC__ && STRATA_EXPERIMENTAL_SM60
 
 #if defined(__HIPCC__)
 // ---- S6: the int8-KV prompt attention on RDNA4 matrix cores (opt-in: STRATA_HIP_WMMA=1, gfx12 only). The design of
