@@ -1642,8 +1642,23 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         }
         host_setup_ms += ms_since(tsetup);
         bool normed = false;   // F-2: the previous half's write already normed R for this half (grs, xn16)
+        // #579 #613 (opt-in diagnosis, STRATA_PF_STEP_SYNC=1): the compute and copy streams are waited for after each
+        // step named below, a step that took over 250 ms is logged, and a stall's report names the step it is in.
+        // Slower (a sync per step); the bytes are the same.
+        static const bool step_sync = [] { const char* e = std::getenv("STRATA_PF_STEP_SYNC"); return e && e[0] == '1'; }();
+        auto pf_step = [&](const char* what, int64_t layer) {
+            if (!step_sync) return;
+            core::progress_at(what, layer, p0);
+            const auto ts = Clock::now();
+            const cudaError_t a = cudaStreamSynchronize(m.cs), b = cudaStreamSynchronize(m.copy);
+            const double ms = ms_since(ts);
+            if (ms > 250.0 || a != cudaSuccess || b != cudaSuccess)
+                std::fprintf(stderr, "strata pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
+                             (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
+        };
         for (int64_t l = LB; l < LE; ++l) {
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
+            if (l > LB) pf_step("reading the prompt (batched, step sync): the experts and the rest of layer", l - 1);
             core::progress_at("reading the prompt (batched): layer", l, p0);   // #251: a stall names layer and chunk
             const core::LayerView v(*m.wt, l);
             if (l == std::max<int64_t>(LB, 1) && !ple_land()) return false;   // the PLE rows, read from layer 1 on
@@ -1773,7 +1788,20 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                                             core::qsa_kv_format(st),
                                                             (p0 + s.page_size - 1) / s.page_size, s, m.cs);
                         pt.mark(kPfQsa, cs);
+                        pf_step("reading the prompt (batched, step sync): the K/V staged from RAM at layer", l);
                     }
+                    // #579 #613 (HIP, opt-in A/B, STRATA_KV_HOST_DMA=1): the append writes the staging pool and the
+                    // resident slots only, and one DMA copies the chunk's blocks from the staging pool to the host copy
+                    // - no kernel writes host memory over PCIe.  The bytes every reader sees are the same (the staged
+                    // first block is complete; past the chunk's last cell nothing is read until a later append writes
+                    // it).  CUDA: never.
+#if defined(STRATA_USE_HIP)
+                    static const bool kv_host_dma = [] { const char* e = std::getenv("STRATA_KV_HOST_DMA"); return e && e[0] == '1'; }();
+#else
+                    constexpr bool kv_host_dma = false;
+#endif
+                    const bool host_by_dma = staged && kv_host_dma;
+                    const strata::kernels::KvHostPools* host_w = host_by_dma ? nullptr : &st.host;
                     if (st.kv_hybrid) {   // K8V4: K INT8 unrotated, V rotated Q4_0 (only V and the output rotate)
                         strata::kernels::fwht256_inplace_cuda(m.Vc, T * 2, m.cs);
                         kv_append(m.Kc, m.Kc, T, p0, st.page_table, s.page_size, nullptr, nullptr,
@@ -1788,12 +1816,17 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         }
                         if (st.kv_q4)
                             strata::kernels::kv_append_q4(st.k_q4, st.v_q4, st.page_table, p0, T, m.Kc, m.Vc, s, m.cs,
-                                                          &st.host, staged ? &m.stage : nullptr);
+                                                          host_w, staged ? &m.stage : nullptr);
                         else
                             kv_append(m.Kc, m.Vc, T, p0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
                                       st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, m.cs,
-                                      &st.host, staged ? &m.stage : nullptr);
+                                      host_w, staged ? &m.stage : nullptr);
+                        if (host_by_dma)
+                            strata::kernels::kv_unstage_to_host(pools_of(m.stage, m.ident_table), st.host,
+                                                                core::qsa_kv_format(st), p0 / s.page_size,
+                                                                (p0 + T + s.page_size - 1) / s.page_size, s, m.cs);
                     }
+                    if (staged) pf_step("reading the prompt (batched, step sync): the K/V append at layer", l);
                     split_q(m.Qf, m.q, T, m.cs);
                     rms_rows(m.q, (const float*) wqn->data, T * 24, 256, 256, EPS, m.cs);
                     rope(m.q, T, 24, 256, 6144, p0, strata::kernels::rope_scaling(), m.cs);
@@ -2049,7 +2082,12 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         int32_t* src_h = grp_mapped ? m.grp_host + 2 * m.grp_tk : m.src_host.data();
                         if (grp_mapped) copy_i32(m.grp_dev, m.ids, T * K, m.cs);
                         else cudaMemcpyAsync(m.ids_host.data(), m.ids, (size_t) T * K * 4, cudaMemcpyDeviceToHost, m.cs);
+                        // #579: a stall here is the GPU (this layer's attention and router, or the previous layer's
+                        // work), not the host: the watchdog's report says so (only its text changes)
+                        core::progress_at("reading the prompt (batched): waiting for the GPU (attention, router) at layer",
+                                          l, p0);
                         cudaStreamSynchronize(m.cs);
+                        core::progress_at("reading the prompt (batched): layer", l, p0);
                         pt.fold();
                         if (pe.on) {   // the peer's marks so far are done: the primary waited for its last rows
                             int pd = 0; cudaGetDevice(&pd); cudaSetDevice(pe.dev); cudaStreamSynchronize(m.pp->s); pe.fold(); cudaSetDevice(pd);
