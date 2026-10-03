@@ -56,6 +56,7 @@ constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
+const bool g_qdedup = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }();
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -358,6 +359,25 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
         device_plan_ = v != nullptr && std::atoi(v) != 0;
     }
+    // STRATA_VERIFY_RESIDENT=1 (opt-in): when EVERY routed expert of every layer is resident in the VRAM/UMA tier
+    // (checked here, once; a full cache never evicts), the window graph is recorded without the host round trip:
+    // no doorbell, no flag waits, no plan copy from mapped memory, no PCIe/CPU share (fetch, rebase, its grouped
+    // launch, the mapped-row copy); the device plans each group (the host's exact loop, E-6) and the combine reads
+    // the hit rows as `0.0f + hit` (what the zeroed CPU rows + moe_hit_add gave). Same tokens, same arithmetic.
+    {
+        const char* v = std::getenv("STRATA_VERIFY_RESIDENT");
+        if (v != nullptr && std::atoi(v) != 0 && lb_ == 0 && le_ == g.n_layers && next_ == nullptr) {
+            std::vector<int32_t> res((size_t) (g.n_layers * g.n_expert));
+            bool all = cudaMemcpy(res.data(), hits.d_res, res.size() * sizeof(int32_t), cudaMemcpyDeviceToHost) ==
+                       cudaSuccess;
+            for (size_t i = 0; all && i < res.size(); ++i) all = res[i] >= 0;
+            if (all) device_plan_ = true;
+            resident_ = all;
+            std::fprintf(stderr, "strata verify: STRATA_VERIFY_RESIDENT=1: %s\n",
+                         all ? "every expert resident, the window runs without the host round trip"
+                             : "not every expert is resident - the host-planned window stays");
+        }
+    }
     if (device_plan_) {
         bool ok2 = cudaMalloc((void**) &skip_, 64) == cudaSuccess && cudaMemset(skip_, 0, 64) == cudaSuccess;
         if (ok2 && hits.slot_off != nullptr && hits.n_slots > 0) {
@@ -365,7 +385,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                   cudaMemcpy(slot_off_d_, hits.slot_off, (size_t) hits.n_slots * sizeof(unsigned long long),
                              cudaMemcpyHostToDevice) == cudaSuccess;
         }
-        if (!ok2) { cudaGetLastError(); device_plan_ = false; }
+        if (!ok2) { cudaGetLastError(); device_plan_ = false; resident_ = false; }
     }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
                  (double) count.used / 1048576.0);
@@ -688,8 +708,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
                           plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
                           (uint32_t) ((l - lb_) * G + grp + 1), cs);
-        doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
-                         m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
+        if (!resident_)   // STRATA_VERIFY_RESIDENT: no host step, so no doorbell
+            doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
+                             m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
         stamp(l, 17, grp);
         {
             const WeightRef *wgi = need(v, "ffn_gate_inp_shexp.weight", err), *wsg = need(v, "ffn_gate_shexp.weight", err),
@@ -703,19 +724,28 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             nsw.up_type = wsu->native_type; nsw.up_data = wsu->native_data;
             nsw.down_type = wsd->native_type; nsw.down_data = wsd->native_data;
             nsw.q8_1 = xq_;
+            // STRATA_VERIFY_QDEDUP=1: the experts' q8_1 image of xm is made first and the shared expert's gate/up
+            // read it (quantize_q8_1_rows and native_quantize_q8_1 write the same bytes), and the BF16 copy of xm
+            // is skipped when the shared expert's native BF16 gate (which never reads it) is on.
+            const bool qdedup = g_qdedup && strata::kernels::cpu::expert_layout().native;
+            if (qdedup) quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
+            if (!(qdedup && shared_expert_native_bf16())) {
             if (dec_batch) f32_to_bf16_bulk(mixed_ + tb * N, sh_bf16_ + tb * N, (int64_t) n * N, cs);   // contiguous rows
             else for (int t = tb; t < te; ++t) f32_to_bf16_bulk(mixed_ + t * N, sh_bf16_ + t * N, N, cs);
+            }
             try {
                 shared_expert_multi(n, xm, sh_bf16_ + tb * N, nsw, (const uint16_t*) wgi->data, sh_gate_ + (size_t) tb * g.n_ff,
-                                    sh_up_ + (size_t) tb * g.n_ff, sh_g_ + tb, shared_ + tb * N, N, g.n_ff, cs);
+                                    sh_up_ + (size_t) tb * g.n_ff, sh_g_ + tb, shared_ + tb * N, N, g.n_ff, cs,
+                                    qdedup ? (const void*) (nat_xq_ + (size_t) tb * (N / 32) * 36) : nullptr);
             } catch (const std::exception& e) {
                 err = std::string("verify shared expert: ") + e.what();
                 return false;
             }
         }
-        if (strata::kernels::cpu::expert_layout().native)
-            quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
-        else
+        if (strata::kernels::cpu::expert_layout().native) {
+            if (!(g_qdedup && strata::kernels::cpu::expert_layout().native))
+                quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, cs);
+        } else
             quantize_q8_0_scaled(xm, hit_xq_ + (size_t) tb * (N / 32) * 34, hit_xs_ + (size_t) tb * (N / 32), (int64_t) n * N, cs);
         stamp(l, 18, grp);
         return true;
@@ -727,7 +757,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
         const int64_t cap = (int64_t) n * K, capx = (int64_t) max_t_ * K;
         int32_t* pl = plan_ + (size_t) grp * (size_t) (plan_i32_ + 16);
-        if (device_plan_) {   // E-6: skipped when the device planned this group (all its experts resident)
+        if (resident_) {
+            // STRATA_VERIFY_RESIDENT: resident_plan (pre) wrote this group's plan into `pl`; nothing to wait for
+        } else if (device_plan_) {   // E-6: skipped when the device planned this group (all its experts resident)
             wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
             copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
         } else {
@@ -760,6 +792,18 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         };
         grouped(p_ptr, p_start, p_counts);
         stamp(l, 20, grp);
+        if (resident_ && native_moe_combine_enabled()) {
+            // every row is a hit: combine straight from hit_out as 0.0f + hit (= the zeroed row + moe_hit_add)
+            try {
+                native_moe_combine_multi_hits(hit_out, w_ + tb * K, shared_ + tb * N, bo_ + tb * N, N, K, n, cs);
+            } catch (const std::exception& e) { err = "verify combine: " + std::string(e.what()); return false; }
+        } else {
+        if (resident_) {
+            if (cudaMemsetAsync(parts_ + (size_t) tb * K * N, 0, sizeof(float) * (size_t) n * K * N, cs) != cudaSuccess) {
+                err = "verify: zeroing the parts failed";
+                return false;
+            }
+        } else {
         if (device_plan_) wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
         else wait_flag_ge(m_flagB_, ring, cs);                 // the PCIe share is in staging (DMA) or mapped
         if (sink_.pcie_mode == 2) {                            // stage it with a copy kernel, then point at staging
@@ -784,6 +828,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             else
                 copy_from_mapped(parts_ + (size_t) tb * K * N, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
         }
+        }   // !resident_
         moe_hit_add(parts_ + (size_t) tb * K * N, hit_out, p_dst, p_counts + 1, cap, N, cs);
         if (dec_batch && n > 1 && native_moe_combine_enabled()) {   // one launch for the window's rows
             try {
@@ -795,6 +840,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             mb.weights = w_ + t * K; mb.shared = shared_ + t * N;
             if (!moe_combine_parts(g, l, K, mb, parts_ + (size_t) t * K * N, bo_ + t * N, cs, err)) return false;
         }
+        }   // the resident combine from hit_out
         stamp(l, 24, grp);
         if (l == g.n_layers - 1) {
             for (int t = tb; t < te; ++t) gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
@@ -1063,7 +1109,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     volatile uint32_t* const flag = h_flag_;
     const int G = groups_[T] > 0 ? groups_[T] : 1;
     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
-    const int64_t steps = (le_ - lb_) * G;
+    const int64_t steps = resident_ ? 0 : (le_ - lb_) * G;   // STRATA_VERIFY_RESIDENT: the GPU never rings
     const bool test_stall = g_test_stall > 0 && windows + 1 == g_test_stall;   // #267 test hook (off: false)
     for (int64_t k = 0; k < steps; ++k) {
         const int64_t l = lb_ + k / G;

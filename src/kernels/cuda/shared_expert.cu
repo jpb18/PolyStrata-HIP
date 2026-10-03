@@ -27,6 +27,7 @@
 #include "strata/kernels/s_gemv.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -68,6 +69,27 @@ __global__ void native_swiglu_kernel(const float* gate, const float* up, float* 
     out[i] = __fdividef(gate[i], 1.0f + __expf(-gate[i])) * up[i];
 }
 
+
+// STRATA_VERIFY_QDEDUP: native_swiglu_kernel and native_quantize_q8_1_kernel in one launch. Each thread computes
+// the same swiglu expression (and still writes it to `out`), then the 32-lane block's q8_1 exactly as
+// native_quantize_q8_1_kernel does (XOR-tree max / sum, d = amax / 127, roundf(x / d), ds = (d, sum)).
+struct SwqQ81 { half2 ds; int8_t qs[32]; };
+__global__ void native_swiglu_q8_1_kernel(const float* gate, const float* up, float* out, SwqQ81* __restrict__ y,
+                                          int n) {
+    const int i = blockIdx.x * 256 + threadIdx.x;
+    if (i >= n) return;   // n is a multiple of 32: only whole warps return
+    const float xi = __fdividef(gate[i], 1.0f + __expf(-gate[i])) * up[i];
+    out[i] = xi;
+    float amax = fabsf(xi), sum = xi;
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset, 32));
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, offset, 32);
+    const float d = amax / 127.0f;
+    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+    y[i / 32].qs[i % 32] = q;
+    if (i % 32 == 0) y[i / 32].ds = make_half2(d, sum);
+}
 __global__ void to_f16_kernel(const float* __restrict__ in, uint16_t* __restrict__ out, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = f16_from_f32(in[i]);
@@ -157,6 +179,7 @@ __global__ void moe_combine_kernel(const float* __restrict__ parts, const float*
 }  // namespace
 
 void shared_expert_set_native_bf16(bool enabled) { native_bf16 = enabled; }
+bool shared_expert_native_bf16() { return native_bf16; }
 
 namespace {
 __global__ void scale_rows_kernel(float* __restrict__ out, const float* __restrict__ g, int n) {
@@ -168,16 +191,21 @@ __global__ void scale_rows_kernel(float* __restrict__ out, const float* __restri
 
 void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, const NativeSharedWeights& nw,
                          const uint16_t* gate_inp_bf16, float* gate, float* up, float* g, float* out, int64_t n_embd,
-                         int64_t n_ff, void* stream) {
+                         int64_t n_ff, void* stream, const void* x_q8_1_ready) {
     if (n_tok < 1 || n_tok > 8 || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream)
         throw std::invalid_argument("shared_expert_multi: needs 1..8 tokens, native weights, scratch and a stream");
     cudaStream_t cs = (cudaStream_t) stream;
-    native_quantize_q8_1(x, nw.q8_1, (int) n_embd, n_tok, stream);
-    native_mmvq(nw.gate_type, nw.gate_data, nw.q8_1, gate, (int) n_embd, (int) n_ff, n_tok, stream);
-    native_mmvq(nw.up_type, nw.up_data, nw.q8_1, up, (int) n_embd, (int) n_ff, n_tok, stream);
+    const void* xq = x_q8_1_ready ? x_q8_1_ready : nw.q8_1;
+    if (!x_q8_1_ready) native_quantize_q8_1(x, nw.q8_1, (int) n_embd, n_tok, stream);
+    native_mmvq(nw.gate_type, nw.gate_data, xq, gate, (int) n_embd, (int) n_ff, n_tok, stream);
+    native_mmvq(nw.up_type, nw.up_data, xq, up, (int) n_embd, (int) n_ff, n_tok, stream);
     const int n = (int) (n_ff * n_tok);
-    native_swiglu_kernel<<<(unsigned) ((n + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate, up, gate, n);
-    native_quantize_q8_1(gate, nw.q8_1, (int) n_ff, n_tok, stream);
+    if (x_q8_1_ready != nullptr && (n_ff % 32) == 0) {   // STRATA_VERIFY_QDEDUP: swiglu + its q8_1 in one launch
+        native_swiglu_q8_1_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, cs>>>(gate, up, gate, (SwqQ81*) nw.q8_1, n);
+    } else {
+        native_swiglu_kernel<<<(unsigned) ((n + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate, up, gate, n);
+        native_quantize_q8_1(gate, nw.q8_1, (int) n_ff, n_tok, stream);
+    }
     native_mmvq(nw.down_type, nw.down_data, nw.q8_1, out, (int) n_ff, (int) n_embd, n_tok, stream);
     static const bool batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
     if (native_bf16 && batch && n_tok > 1) {   // one gemv for all rows (outputs identical), one sigmoid launch
