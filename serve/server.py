@@ -425,17 +425,10 @@ class StrataEngine:
 
     def restart(self, tries: int = 3):
         """Start the engine again (the same command) after it died; the new process has its own line queue.
-        The old process is ended first (close(): QUIT, terminate, kill) - its GPU memory is freed only when it is
-        gone, and a new engine started next to it runs out of VRAM and exits before it is ready - and a failed start
-        is retried."""
-        try:
-            self.close()
-        except EngineStuck:
-            try:
-                self.proc.kill()
-                self.proc.wait(timeout=120)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
+        close() ends and waits for the old process first (EngineStuck when it cannot be ended).  A start that still
+        exits before READY - a dead engine's VRAM can take a while to come back, notably on ROCm - is retried
+        (PR #637)."""
+        self.close()
         info = dict(self.info)
         self.starting = True                     # prepare() answers 503 "starting" meanwhile (#344)
         try:
