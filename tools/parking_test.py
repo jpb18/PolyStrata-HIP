@@ -47,11 +47,14 @@ def run(a, cfg, tok, with_b):
     t0 = time.time()
     got, done = gen(eng, out, follow, a.max_new)
     dt = time.time() - t0
+    if with_b:   # B again: A is parked a second time, from retained K/V (every stage's) - only its new tail copied
+        gen(eng, out, pb, 8)
     eng.send("QUIT")
     eng.p.wait(timeout=180)
     log = open("/tmp/batch_test_engine.log").read()
     restored = re.findall(r"restored \d+ tokens[^\n]*", log)
-    return len(pa), len(follow), got, done, dt, restored
+    reparked = [int(x) for x in re.findall(r"parked \d+ tokens .*reused_kv_bytes=(\d+)", log)]
+    return len(pa), len(follow), got, done, dt, restored, reparked
 
 
 def main():
@@ -74,7 +77,9 @@ def main():
     first = next((k for k in range(min(len(ref[2]), len(park[2]))) if ref[2][k] != park[2][k]), None)
     print("follow-up tokens:", "IDENTICAL" if same else f"DIFFER at {first}", f"({len(ref[2])} / {len(park[2])})")
     print("   ", repr(tok.decode(park[2])[:200]))
-    return 0 if same and park[5] else 1
+    reused = park[6][-1] if park[6] else 0
+    print(f"second park of A: {reused} bytes of K/V reused (retained from its restore)")
+    return 0 if same and park[5] and reused > 0 else 1
 
 
 if __name__ == "__main__":
