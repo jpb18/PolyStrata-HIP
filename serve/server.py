@@ -2226,6 +2226,8 @@ def make_handler(svc: Service):
             if path == "/settings":
                 self._settings()
                 return
+            if path in ("/unload", "/load") and not self._control_body():
+                return
             # JSON from Strata's own page only, as /settings: else a plain form POST from any site unloads the model
             if path in ("/unload", "/load") and not self._own_page("the model can be loaded or unloaded"):
                 return
@@ -2334,6 +2336,28 @@ def make_handler(svc: Service):
             if version:
                 props["build_info"] = "Strata " + str(version)
             self._json(200, props)
+
+        def _control_body(self) -> bool:
+            """Consume the unused control body before replying/closing (Windows otherwise sends a TCP reset)."""
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._json(400, {"error": {"message": "invalid Content-Length"}})
+                return False
+            if not 0 <= length <= 65536:
+                self._json(413, {"error": {"message": "control request body is limited to 64 KiB"}})
+                return False
+            timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(2.0)
+                complete = len(self.rfile.read(length)) == length
+            except OSError:
+                complete = False
+            finally:
+                self.connection.settimeout(timeout)
+            if not complete:
+                self._json(400, {"error": {"message": "incomplete control request body"}})
+            return complete
 
         def _own_page(self, what) -> bool:
             """Only JSON (a form or a "simple" cross-site request can't send it without a CORS preflight, which this
