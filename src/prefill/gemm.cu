@@ -389,7 +389,7 @@ bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
 // product (STRATA_PREFILL_BF16X2's remainder, ~2^-9 of the original, deep in FP16's subnormal band) keeps cuBLAS.
 //   Default: on for compute capability 7.0 - 7.4 (Volta: only the experimental STRATA_EXPERIMENTAL_SM60 build runs
 //   there), OFF for 7.5 (RTX 20 in the ready-made engine: the sums round differently, so it is opt-in until it has
-//   been gated).  STRATA_BF16_TC=1 / =0 turns it on / off on any 7.x card.
+//   been gated).  STRATA_BF16_TC=1 / =0 turns it on / off on any 7.x card (=2, a test mode: on any card).
 // Pascal (6.x) has no tensor cores and cuBLAS has no BF16 GEMM for it (#395, measured NOT_SUPPORTED on a P40): both
 // operands are widened to fp32 by an exact shift and the product is cublasSgemm with the same fp32 accumulator.
 namespace {
@@ -437,14 +437,15 @@ int current_cc() {
 }
 // 0: cuBLAS's BF16 GEMM, 1: through FP16 (tensor cores), 2: through FP32 (Pascal)
 int bf16_path() {
-    const int cc = current_cc();
-    if (cc <= 0 || cc >= 80) return 0;
-    if (cc < 70) return 2;
     static const int forced = [] {
         const char* v = std::getenv("STRATA_BF16_TC");
-        return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1;
+        return v != nullptr && v[0] != '\0' ? std::atoi(v) : -1;
     }();
-    if (forced >= 0) return forced;
+    const int cc = current_cc();
+    if (forced == 2 && cc > 0) return 1;   // a test mode: the FP16 path on any card (gemm_bf16_parity on sm_80+)
+    if (cc <= 0 || cc >= 80) return 0;
+    if (cc < 70) return 2;
+    if (forced >= 0) return forced != 0 ? 1 : 0;
     return cc < 75 ? 1 : 0;
 }
 bool grow(uint16_t*& p, int64_t& have, int64_t want) {   // `have`, `want`: 2-byte elements
