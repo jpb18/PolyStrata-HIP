@@ -15,7 +15,7 @@
 #pragma once
 
 #include <cstdint>
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) && defined(STRATA_HIP_GFX906)   // PR #638: the gfx906 compat build only
 #include <hip/hip_runtime.h>
 #endif
 
