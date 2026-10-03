@@ -44,7 +44,8 @@ Requirements (details: [INSTALL.md](INSTALL.md#what-you-need)):
 
 - **GPU:** NVIDIA RTX 20, 30, 40 or 50 series, or AMD Radeon RX 7900 XT / XTX, RX 7800 XT / 7700 XT, RX 9060 XT,
   RX 9070 / 9070 XT, Radeon AI PRO R9700, RX 6800 / 6900 series; 12 GB of VRAM or more (an NVIDIA card with 8 GB runs,
-  slowly). GTX 10 series and older, and integrated GPUs, are not supported.
+  slowly). GTX 10 series and older, and integrated GPUs, are not supported; Pascal / Volta cards (P40, V100) and some
+  older AMD cards have experimental paths the user opts into ([OLDER_GPUS.md](OLDER_GPUS.md)).
 - **Driver:** NVIDIA 580 or newer. AMD on Linux: the kernel's amdgpu driver; on Windows: a current AMD Adrenalin
   driver. If the driver is missing or too old, tell the user to update it (NVIDIA App / nvidia.com/drivers, or AMD
   Software) and restart; do not install drivers yourself unless they ask.

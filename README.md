@@ -58,6 +58,8 @@ other cards: [speed of each model](docs/MODELS.md#how-fast-is-each-size), [commu
 | **System** | Windows 10 / 11 or Linux, and a current graphics driver from NVIDIA or AMD |
 
 Everything else is installed for you. Two or three cards can share the model ([multi-GPU](docs/MULTI_GPU.md)).
+Older cards (Tesla P40 / V100, GTX 10, Radeon VII / MI50, RX 6700 XT, RX 5500 XT) run through community-written,
+experimental paths: [Older GPUs](docs/OLDER_GPUS.md).
 The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 
 ## Install

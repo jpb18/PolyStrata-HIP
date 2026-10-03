@@ -348,8 +348,11 @@ run it; the report below is from a community machine: an RX 6900 XT 16 GB (gfx10
   [AMD_HIP_PERFORMANCE.md](AMD_HIP_PERFORMANCE.md) cost 8.6 and 13.6 tok/s here (30 with the defaults): keep the
   defaults on a 16 GB card.
 - **hipBLASLt:** ROCm's hipBLASLt ships no gfx1030 kernels, so there is no table and the plain hipBLAS path runs.
-- **Not validated:** gfx1031 / gfx1032 (the same `dp4a` path, no hardware report), setup's own build path and the
-  `gfx103X-all` wheels on gfx1030, images, answer-quality benchmarks.
+- **gfx1031** (RX 6700 XT, #524): setup knows it (the `gfx103X-all` wheels, unvalidated); its reporter runs it daily
+  on one card.
+- **Not validated:** gfx1032 (the same `dp4a` path, no hardware report), setup's own build path and the
+  `gfx103X-all` wheels on gfx1030, images, answer-quality benchmarks. RDNA1 (gfx1012, RX 5500 XT) builds by hand:
+  [OLDER_GPUS.md](OLDER_GPUS.md#amd-building-gfx906-and-gfx1012).
 
 ## gfx906 (Instinct MI50 / MI60, Radeon VII): wave64, built from source
 

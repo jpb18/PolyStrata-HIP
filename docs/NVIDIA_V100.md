@@ -14,8 +14,8 @@ cmake -S . -B build -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
 cmake --build build --target strata -j
 ```
 
-`STRATA_EXPERIMENTAL_SM60=1 ./setup.sh` does the same through setup (it compiles the engine on the PC instead of
-downloading it). For a PC with a V100 and a newer card, a build for both architectures (`-DCMAKE_CUDA_ARCHITECTURES="70;86"`) is the
+Setup does the same by itself for a model on a V100 (the experimental CUDA 12 engine, in `engine-cuda12/`: ready-made
+on Windows, compiled with a CUDA 12.x toolkit on Linux; [OLDER_GPUS.md](OLDER_GPUS.md)). For a PC with a V100 and a newer card, a build for both architectures (`-DCMAKE_CUDA_ARCHITECTURES="70;86"`) is the
 natural choice (a community report in issue #509 ran an RTX 3080 beside a V100 that way; it was not repeated here). On the
 measuring PC a Quadro RTX 4000 (sm_75) sits beside the V100s and was hidden with `CUDA_VISIBLE_DEVICES` because the sm_70-only
 build has no code for it.
@@ -29,7 +29,8 @@ select "old" kernels everywhere: which kernel runs is decided per architecture w
 | --- | --- |
 | MoE experts (ggml MMQ) | `dp4a` kernels (Volta has no int8 tensor cores) |
 | Dense projections (dequantized weights) | FP16 tensor-core GEMMs (cuBLAS / CUTLASS `s884`) |
-| BF16 projections (hyper-connection, router, indexer, ...) | cuBLAS BF16, which runs as an FP32 SIMT kernel on Volta (`magma_sgemmEx`); #540 moves it onto the FP16 tensor cores |
+| BF16 projections (hyper-connection, router, indexer, ...) | converted to FP16 and run on the FP16 tensor cores (#655, #540; `STRATA_BF16_TC=0`: cuBLAS BF16, an FP32 SIMT kernel on Volta) |
+| QSA attention for decode and verify windows (and prompts with `STRATA_PROMPT_ATTN_OLD=1`) | #540's kernel (fewer shuffles, bit-exact; `STRATA_ATTN_PRE75=0`: the one other cards run) |
 | QSA prompt attention, int8 / FP16 / K8V4 KV | `prompt_attn_v70_kernel` on `mma.m8n8k4` (`STRATA_PROMPT_ATTN_OLD=1`: the decode kernel, one query at a time) |
 | QSA prompt attention, Q4_0 KV | the decode kernel |
 | QSA block scores | the warp kernel (the tensor-core scorer needs sm_80) |
