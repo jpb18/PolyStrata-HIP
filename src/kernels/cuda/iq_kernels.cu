@@ -6,6 +6,7 @@
 // included unchanged.
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/dp4a.hpp"
+#include "s26_tsum.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -1395,7 +1396,7 @@ struct S26IQ3S {   // Split<21>::load with the grid from `grid` (LT) or iq3s_gri
 
 constexpr int S26_XMAX = 2560 / 32;   // q8_1 blocks of one activation row (n_embd 2560)
 
-template<bool LT, bool LX, int RPW, bool SL = false>
+template<bool LT, bool LX, int RPW, bool SL = false, bool TS = false>
 __global__ void __launch_bounds__(256) s26_gu_l_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                        const int32_t* __restrict__ grp_start,
                                                        const int32_t* __restrict__ n_groups,
@@ -1460,6 +1461,21 @@ __global__ void __launch_bounds__(256) s26_gu_l_kernel(const unsigned long long*
                 for (int c = 0; c < GRP_NC; ++c)
                     if (c < n) s[q][c] += Split<21>::apply(w[q], xbase + off[c] + kbx * 8, iqs);
         }
+        if constexpr (TS) {   // S26: all RPW x GRP_NC sums in one transposed butterfly (bitwise the same sums)
+            constexpr int P = s26ts::pow2_ceil(RPW * GRP_NC);
+            float v[P];
+#pragma unroll
+            for (int j = 0; j < P; ++j) v[j] = j < RPW * GRP_NC ? s[j / GRP_NC][j % GRP_NC] : 0.0f;
+            const float sum = s26ts::tsum<P>(v, lane);
+            const int j = s26ts::tsum_token<P>(lane);
+            if (lane == s26ts::tsum_lane<P>(j) && j < RPW * GRP_NC) {
+                const int c = j % GRP_NC;
+#pragma unroll
+                for (int q = 0; q < RPW; ++q)
+                    if (j / GRP_NC == q && c < n) (upq[q] ? up : gate)[(size_t) (e + c) * L.n_ff + rr[q]] = sum;
+            }
+            continue;
+        }
 #pragma unroll
         for (int q = 0; q < RPW; ++q)
 #pragma unroll
@@ -1475,7 +1491,7 @@ __global__ void __launch_bounds__(256) s26_gu_l_kernel(const unsigned long long*
 
 constexpr int S26_HMAX = 640 / 32;    // q8_1 blocks of one SwiGLU row (n_ff 640)
 
-template<bool LX, int RPW, bool SL = false>
+template<bool LX, int RPW, bool SL = false, bool TS = false>
 __global__ void __launch_bounds__(256) s26_down_l_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                          const int32_t* __restrict__ grp_start,
                                                          const int32_t* __restrict__ n_groups,
@@ -1529,6 +1545,18 @@ __global__ void __launch_bounds__(256) s26_down_l_kernel(const unsigned long lon
                 for (int c = 0; c < GRP_NC; ++c)
                     if (c < n) s[q][c] += Split<20>::apply(w[q], hbase + off[c] + kbx, iqs);
         }
+        if constexpr (TS) {   // S26: all RPW x GRP_NC sums in one transposed butterfly (bitwise the same sums)
+            constexpr int P = s26ts::pow2_ceil(RPW * GRP_NC);
+            float v[P];
+#pragma unroll
+            for (int j = 0; j < P; ++j) v[j] = j < RPW * GRP_NC ? s[j / GRP_NC][j % GRP_NC] : 0.0f;
+            const float sum = s26ts::tsum<P>(v, lane);
+            const int j = s26ts::tsum_token<P>(lane);
+            const int q = j / GRP_NC, c = j % GRP_NC;
+            if (lane == s26ts::tsum_lane<P>(j) && j < RPW * GRP_NC && c < n)
+                out[(size_t) ent_dst[e + c] * L.n_embd + r0 + 8 * q] = sum;
+            continue;
+        }
 #pragma unroll
         for (int q = 0; q < RPW; ++q)
 #pragma unroll
@@ -1565,12 +1593,12 @@ __global__ void s26_swiglu_q8_1_kernel(const float* __restrict__ gate, const flo
     y[ib].qs[iqs] = q;
     if (iqs == 0) y[ib].ds = make_half2(d, sum);
 }
-template<bool LT, bool LX, int RG, int RD, bool SL = false, bool FQ = false>
+template<bool LT, bool LX, int RG, int RD, bool SL = false, bool FQ = false, bool TS = false>
 void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr,
                   const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok,
                   const block_q8_1* X, float* gate, float* up, float* h, block_q8_1* hq, float* out, long long nh) {
     const dim3 ggu((unsigned) (2 * L.n_ff / (GU_ROWS * RG)), (unsigned) cap_groups);
-    s26_gu_l_kernel<LT, LX, RG, SL><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    s26_gu_l_kernel<LT, LX, RG, SL, TS><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     if (FQ) {
         s26_swiglu_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, hq, nh);
     } else {
@@ -1578,7 +1606,7 @@ void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t 
         quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
     }
     const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
-    s26_down_l_kernel<LX, RD, SL><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+    s26_down_l_kernel<LX, RD, SL, TS><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
@@ -1726,8 +1754,12 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const auto* X = (const block_q8_1*) x_q8_1;
     static const bool v2 = [] { const char* v = std::getenv("STRATA_EXPERT_V2"); return v && v[0] == '1'; }();
     if (v2 && L.gu_type == 21 && L.d_type == 20 && L.n_embd == 2560 && L.n_ff == 640) {   // S26: see s26_gu_l_kernel
-        s26_launch_l<true, true, 4, 4, true, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
-                                             hq, out, (long long) cap_entries * L.n_ff);
+        // S26 STRATA_TSUM=1: the sums as one transposed butterfly per warp (s26_tsum.cuh; bitwise the same values)
+        static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+        if (ts) s26_launch_l<true, true, 4, 4, true, true, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
+                                                             hq, out, (long long) cap_entries * L.n_ff);
+        else s26_launch_l<true, true, 4, 4, true, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
+                                                        hq, out, (long long) cap_entries * L.n_ff);
         check("native_expert_grouped (v2)");
         return;
     }

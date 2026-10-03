@@ -26,6 +26,7 @@
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/iq_kernels.hpp"
+#include "s26_tsum.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -1002,7 +1003,13 @@ struct SmallTraits {
 // equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
 
-template<typename F, int NCOLS, int NW, int ROWS>
+// S26 STRATA_TSUM=1 (TS): warp 0's NCOLS x ROWS sums as one transposed butterfly (s26_tsum.cuh), bitwise the same
+static bool s26_tsum_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    return on;
+}
+
+template<typename F, int NCOLS, int NW, int ROWS, bool TS = false>
 __launch_bounds__(NW * WARP, 1)
 __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w,
                                          const Q81Block* __restrict__ x,
@@ -1036,6 +1043,25 @@ __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w
     }
     __syncthreads();
     if (threadIdx.y > 0) return;
+    if constexpr (TS) {
+        constexpr int V = NCOLS * ROWS, P = s26ts::pow2_ceil(V);
+        float v[P];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j)
+#pragma unroll
+            for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+                for (int l = 0; l < NW - 1; ++l) tmp[j][i] += partial[l][j][i][threadIdx.x];
+                v[j * ROWS + i] = tmp[j][i];
+            }
+#pragma unroll
+        for (int k = V; k < P; ++k) v[k] = 0.0f;
+        const float sum = s26ts::tsum<P>(v, int(threadIdx.x));
+        const int k = s26ts::tsum_token<P>(int(threadIdx.x));
+        const int j = k / ROWS, i = k % ROWS;
+        if (int(threadIdx.x) == s26ts::tsum_lane<P>(k) && k < V && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = sum;
+        return;
+    }
 #pragma unroll
     for (int j = 0; j < NCOLS; ++j) {
 #pragma unroll
@@ -1061,9 +1087,11 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
     const dim3 threads(WARP, WARPS);
     if (n_in / F::DIV < F::BPI) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_mmvq_multi_kernel<F, NCOLS, WARPS, WARPS><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        if (s26_tsum_on()) native_mmvq_multi_kernel<F, NCOLS, WARPS, WARPS, true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        else native_mmvq_multi_kernel<F, NCOLS, WARPS, WARPS><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
     } else {
-        native_mmvq_multi_kernel<F, NCOLS, WARPS, 1><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        if (s26_tsum_on()) native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        else native_mmvq_multi_kernel<F, NCOLS, WARPS, 1><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
     }
 }
 
@@ -1166,7 +1194,7 @@ void small_f32(const void* weights, const float* x, void* scratch_q8_1,
 constexpr int Q8P_PERSIST_GRID = 640;
 constexpr int Q8P_PERSIST_MAX_IN = 4096;
 
-template<int NCOLS>
+template<int NCOLS, bool TS = false>
 __launch_bounds__(WARPS * WARP, 1)
 __global__ void native_q8_0_packed_kernel(const int8_t* __restrict__ qs, const half* __restrict__ dpl,
                                           const Q81Block* __restrict__ x, float* __restrict__ y,
@@ -1200,7 +1228,21 @@ __global__ void native_q8_0_packed_kernel(const int8_t* __restrict__ qs, const h
             for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
         }
         __syncthreads();
-        if (threadIdx.y == 0) {
+        if (TS && threadIdx.y == 0) {   // S26 STRATA_TSUM=1: one transposed butterfly, bitwise the same sums
+            constexpr int P = s26ts::pow2_ceil(NCOLS);
+            float v[P];
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+#pragma unroll
+                for (int l = 0; l < WARPS - 1; ++l) tmp[j] += partial[buf][l][j][threadIdx.x];
+                v[j] = tmp[j];
+            }
+#pragma unroll
+            for (int j = NCOLS; j < P; ++j) v[j] = 0.0f;
+            const float sum = s26ts::tsum<P>(v, int(threadIdx.x));
+            const int j = s26ts::tsum_token<P>(int(threadIdx.x));
+            if (int(threadIdx.x) == s26ts::tsum_lane<P>(j) && j < NCOLS) y[std::size_t(j) * n_out + row] = sum;
+        } else if (threadIdx.y == 0) {
 #pragma unroll
             for (int j = 0; j < NCOLS; ++j) {
 #pragma unroll
@@ -1222,7 +1264,11 @@ template<int NCOLS>
 void q8_packed_launch(const Q8Packed& w, const Q81Block* x, float* y, cudaStream_t s) {
     const bool persist = w.n_in <= Q8P_PERSIST_MAX_IN;
     const int grid = persist ? (std::min)(w.n_out, Q8P_PERSIST_GRID) : w.n_out;
-    native_q8_0_packed_kernel<NCOLS><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.qs, w.d, x, y, w.n_in, w.n_out,
+    if (s26_tsum_on())
+        native_q8_0_packed_kernel<NCOLS, true><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.qs, w.d, x, y, w.n_in, w.n_out,
+                                                                                          persist ? grid : w.n_out);
+    else
+        native_q8_0_packed_kernel<NCOLS><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.qs, w.d, x, y, w.n_in, w.n_out,
                                                                                     persist ? grid : w.n_out);
 }
 
@@ -1272,7 +1318,7 @@ int q6p_grid() {
     return grid;
 }
 
-template<int NCOLS>
+template<int NCOLS, bool TS = false>
 __launch_bounds__(WARPS * WARP, 1)
 __global__ void native_q6_k_packed_kernel(const int* __restrict__ ql, const int* __restrict__ qh,
                                           const int8_t* __restrict__ sc, const half* __restrict__ dpl,
@@ -1315,7 +1361,21 @@ __global__ void native_q6_k_packed_kernel(const int* __restrict__ ql, const int*
             for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
         }
         __syncthreads();
-        if (threadIdx.y == 0) {
+        if (TS && threadIdx.y == 0) {   // S26 STRATA_TSUM=1: one transposed butterfly, bitwise the same sums
+            constexpr int P = s26ts::pow2_ceil(NCOLS);
+            float v[P];
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+#pragma unroll
+                for (int l = 0; l < WARPS - 1; ++l) tmp[j] += partial[buf][l][j][threadIdx.x];
+                v[j] = tmp[j];
+            }
+#pragma unroll
+            for (int j = NCOLS; j < P; ++j) v[j] = 0.0f;
+            const float sum = s26ts::tsum<P>(v, int(threadIdx.x));
+            const int j = s26ts::tsum_token<P>(int(threadIdx.x));
+            if (int(threadIdx.x) == s26ts::tsum_lane<P>(j) && j < NCOLS) y[std::size_t(j) * n_out + row] = sum;
+        } else if (threadIdx.y == 0) {
 #pragma unroll
             for (int j = 0; j < NCOLS; ++j) {
 #pragma unroll
@@ -1339,7 +1399,11 @@ std::unordered_map<const void*, Q6Packed>& q6_packed_registry() {
 template<int NCOLS>
 void q6_packed_launch(const Q6Packed& w, const Q81Block* x, float* y, cudaStream_t s) {
     const int grid = (std::min)(w.n_out, q6p_grid());
-    native_q6_k_packed_kernel<NCOLS><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.ql, w.qh, w.sc, w.d, x, y, w.n_in,
+    if (s26_tsum_on())
+        native_q6_k_packed_kernel<NCOLS, true><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.ql, w.qh, w.sc, w.d, x, y, w.n_in,
+                                                                                          w.n_out, grid);
+    else
+        native_q6_k_packed_kernel<NCOLS><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.ql, w.qh, w.sc, w.d, x, y, w.n_in,
                                                                                     w.n_out, grid);
 }
 

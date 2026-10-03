@@ -1,4 +1,5 @@
 #include "strata/kernels/bf16_gemv.hpp"
+#include "s26_tsum.cuh"
 #include "strata/kernels/bf16_bits.hpp"
 
 #include <cuda_runtime.h>
@@ -123,7 +124,7 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* __restrict__ x, int64_t 
 // rows again (n_out blocks x T x n_in floats through L2 - the part that grew with T); here a block reads the
 // activations once for RPB rows. Per output, thread t still walks pairs t, t + BLOCK_SIZE, ... with the same two
 // ordered FMAs and the same warp and block reductions: bit-identical to bf16_f32_mmvf_multi_kernel.
-template <int BLOCK_SIZE, int NT, int RPB>
+template <int BLOCK_SIZE, int NT, int RPB, bool TS = false>
 __global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t ldx, const uint16_t* __restrict__ w,
                                           float* __restrict__ y, int64_t ldy, int n_in, int n_out, int n_tok) {
     const int t = threadIdx.x;
@@ -161,6 +162,26 @@ __global__ void bf16_f32_mmvf_rows_kernel(const float* __restrict__ x, int64_t l
             }
         }
     }
+    if constexpr (TS) {   // S26 STRATA_TSUM=1: the RPB x NT warp sums (both stages) as transposed butterflies, bitwise the same
+        constexpr int V = RPB * NT, P = s26ts::pow2_ceil(V);
+        const int lane = t & 31, j = s26ts::tsum_token<P>(lane);
+        const bool own = lane == s26ts::tsum_lane<P>(j) && j < V;
+        float v[P];
+#pragma unroll
+        for (int q = 0; q < P; ++q) v[q] = q < V ? acc[q / NT][q % NT] : 0.0f;
+        float sum = s26ts::tsum<P>(v, lane);
+        if constexpr (BLOCK_SIZE > 32) {
+            if (own) partials[j / NT][j % NT][t / 32] = sum;
+            __syncthreads();
+            if (t >= 32) return;
+#pragma unroll
+            for (int q = 0; q < P; ++q) v[q] = q < V ? partials[q / NT][q % NT][t] : 0.0f;
+            sum = s26ts::tsum<P>(v, lane);
+        }
+        const int r = j / NT, k = j % NT;
+        if (own && o0 + r < n_out && k < n_tok) y[(size_t) k * ldy + o0 + r] = sum;
+        return;
+    }
 #pragma unroll
     for (int r = 0; r < RPB; ++r)
 #pragma unroll
@@ -192,6 +213,12 @@ void launch_rows(const float* x, int64_t ldx, const uint16_t* w, float* y, int64
                  cudaStream_t st) {
     constexpr int RPB = 4;
     const unsigned nb = (unsigned) ((n_out + RPB - 1) / RPB);
+    static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+    if (ts) {
+        if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB, true><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+        else bf16_f32_mmvf_rows_kernel<B, 8, RPB, true><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
+        return;
+    }
     if (n_tok <= 4) bf16_f32_mmvf_rows_kernel<B, 4, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
     else bf16_f32_mmvf_rows_kernel<B, 8, RPB><<<nb, B, 0, st>>>(x, ldx, w, y, ldy, n_in, n_out, n_tok);
 }
