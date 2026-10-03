@@ -689,6 +689,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(quantize_act_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME quantize_act_parity COMMAND quantize_act_parity --selftest)
 
+  # the verify window's routing in one multi-column BF16 projection + one top-k, bitwise the per-token calls
+  add_executable(route_window_parity src/kernels/route_window_parity.cpp)
+  target_include_directories(route_window_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(route_window_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME route_window_parity COMMAND route_window_parity)
+
   add_executable(router_top10_parity src/kernels/router_top10_parity.cpp)
   target_include_directories(router_top10_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(router_top10_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
