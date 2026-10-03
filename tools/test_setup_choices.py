@@ -189,6 +189,23 @@ class ExperimentalSm60(unittest.TestCase):
                     mock.patch.object(setup, "out", lambda cmd: versions.get(cmd[0], "")):  # #414
                 self.assertEqual(setup.find_nvcc(), (str(new), (13, 0)))
                 self.assertEqual(setup.find_nvcc(below=(13, 0)), (str(old), (12, 9)))
+                # #601: STRATA_NVCC is the only one considered; CUDA_HOME is a candidate like CUDA_PATH
+                with mock.patch.dict(os.environ, {"STRATA_NVCC": str(old)}):
+                    self.assertEqual(setup.find_nvcc(), (str(old), (12, 9)))
+                with mock.patch.dict(os.environ, {"STRATA_NVCC": str(new)}):
+                    got, text = quiet(setup.find_nvcc, below=(13, 0))
+                    self.assertEqual(got, (None, None))
+                    self.assertIn("needs one older than 13.0", text)
+                with mock.patch.dict(os.environ, {"STRATA_NVCC": str(Path(d) / "missing")}):
+                    got, text = quiet(setup.find_nvcc)
+                    self.assertEqual(got, (str(new), (13, 0)))
+                    self.assertIn("no such file", text)
+            with mock.patch.object(setup, "WIN", False), mock.patch.object(setup.shutil, "which", lambda n: None), \
+                    mock.patch.dict(os.environ, {"CUDA_HOME": str(Path(d) / "12")}), \
+                    mock.patch.object(setup, "out", lambda cmd: versions.get(cmd[0], "")):
+                os.environ.pop("CUDA_PATH", None)
+                got = setup.find_nvcc(below=(13, 0))
+                self.assertEqual(got, (str(old), (12, 9)))
 
     def tools(self, archs, nvcc):
         seen = []

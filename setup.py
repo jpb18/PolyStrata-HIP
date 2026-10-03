@@ -700,10 +700,25 @@ def gpu_info(pick=None):
 
 
 def find_nvcc(below=None):
-    """The newest CUDA toolkit's nvcc and its (major, minor); with `below`, the newest older than that version."""
+    """The newest CUDA toolkit's nvcc and its (major, minor); with `below`, the newest older than that version.
+    #601: STRATA_NVCC=<path to nvcc> is the only one considered (a newer toolkit beside it that cannot build on this
+    PC - CUDA 12.9 with glibc 2.43 - is not taken instead)."""
+    pick = os.environ.get("STRATA_NVCC")
+    if pick:
+        if not Path(pick).exists():
+            warn(f"STRATA_NVCC={pick}: no such file; looking for a CUDA toolkit as usual")
+        else:
+            v = re.search(r"release (\d+)\.(\d+)", out([pick, "--version"]))
+            ver = (int(v.group(1)), int(v.group(2))) if v else None
+            if ver and below is not None and ver >= below:
+                warn(f"STRATA_NVCC={pick} is CUDA {ver[0]}.{ver[1]}; this build needs one older than "
+                     f"{below[0]}.{below[1]}")
+                return (None, None)
+            return (pick, ver) if ver else (None, None)
     cands = [shutil.which("nvcc")]
-    if os.environ.get("CUDA_PATH"):
-        cands.append(str(Path(os.environ["CUDA_PATH"]) / "bin" / ("nvcc.exe" if WIN else "nvcc")))
+    for var in ("CUDA_PATH", "CUDA_HOME"):           # CUDA_HOME: Linux's usual name (#601)
+        if os.environ.get(var):
+            cands.append(str(Path(os.environ[var]) / "bin" / ("nvcc.exe" if WIN else "nvcc")))
     if WIN:
         base = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
         if base.exists():
