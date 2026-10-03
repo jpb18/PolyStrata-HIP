@@ -5481,6 +5481,7 @@ int main(int argc, char** argv) {
             int64_t t2_rej[8] = {}, t2_hit[8] = {};   // STRATA_MTP_TOP2: rejections inside the MTP drafts by depth, runner-up hits
             std::vector<int32_t> cbuf((size_t) S, 0), ctail;
             strata::spec::PromptLookupSource lookup_src(sfx);
+            static const bool chain_fixed = std::getenv("STRATA_LOOKUP_CHAIN_FIXED") != nullptr;   // no policy gate
             int64_t draft_offered = 0, draft_accepted = 0;
             // what the session holds once this request is done: the prompt read so far, then every committed token
             std::vector<int32_t> consumed;
@@ -5528,13 +5529,19 @@ int main(int argc, char** argv) {
                     }
                 }
                 // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
-                int chain_n = 0;
+                int chain_n = 0, cm = 0;
                 if (o.lookup_chain > 0 && !first_window && !from_sfx && T < S) {
-                    int cm = 0, csrc = -1;
+                    int csrc = -1;
                     const int nt = chain_tail(sfx, drafts.data(), T - 1, ctail);
                     chain_n = strata::spec::propose_from_sources(lookup_src, ctail.data(), nt, T - 1,
                                                                  std::min(o.lookup_chain, S - T), o.lookup_chain_min,
                                                                  cbuf.data(), &cm, &csrc);
+                    // the policy keeps the chained tokens that pay at this machine's measured window costs
+                    if (chain_n > 0 && !chain_fixed) {
+                        double p_mtp = 1.0;
+                        for (int i = 0; i < T - 1; ++i) p_mtp *= dprob[(size_t) i];
+                        chain_n = policy.chain(T, p_mtp, chain_n, cm);
+                    }
                 }
                 const int T_mtp = T;
                 T += chain_n;
@@ -5621,9 +5628,12 @@ int main(int argc, char** argv) {
                     std::printf("ERR %s\n", err.c_str());
                     return 1;
                 }
-                if (timed_round && !eos && chain_n == 0)   // a chained window is neither an MTP nor a lookup window
+                if (timed_round && !eos && chain_n == 0)
                     policy.observe(from_sfx, T, a, sfx_match,
                                    std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
+                else if (timed_round && !eos)   // a chained window: its MTP part, its chain, its cost
+                    policy.observe_chain(T_mtp, chain_n, a, cm,
+                                         std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
                 if (eos) { finish = "stop"; break; }
                 if (stop_req.load()) { finish = "cancel"; break; }
                 x = outv[(size_t) a];
@@ -6384,13 +6394,18 @@ int main(int argc, char** argv) {
                 }
             }
             // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
-            int chain_n = 0;
+            int chain_n = 0, cm = 0;
             if (o.lookup_chain > 0 && use_mtp && !first_window && !from_sfx && T < o.spec) {
-                int cm = 0, csrc = -1;
+                int csrc = -1;
                 const int nt = chain_tail(sfx, drafts.data(), T - 1, ctail);
                 chain_n = strata::spec::propose_from_sources(lookup_src, ctail.data(), nt, T - 1,
                                                              std::min(o.lookup_chain, o.spec - T), o.lookup_chain_min,
                                                              cbuf.data(), &cm, &csrc);
+                if (chain_n > 0 && std::getenv("STRATA_LOOKUP_CHAIN_FIXED") == nullptr) {
+                    double p_mtp = 1.0;
+                    for (int i = 0; i < T - 1; ++i) p_mtp *= dprob[(size_t) i];
+                    chain_n = policy.chain(T, p_mtp, chain_n, cm);
+                }
             }
             const int T_mtp = T;
             T += chain_n;
@@ -6481,6 +6496,7 @@ int main(int argc, char** argv) {
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             total_ms += round_ms;
             if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
+            else if (timed_round) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
             if (rounds % 64 == 0)
                 std::fprintf(stderr, "strata generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);
