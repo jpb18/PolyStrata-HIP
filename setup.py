@@ -3203,6 +3203,32 @@ def resolve_rope(ctx: int, scaling, scale, trained: int = 262144):
 
 
 # ------------------------------------------------------------------------------------------------ main
+def sycl_setup(argv) -> int:
+    """--backend sycl: the Intel Arc engine (the SYCL port in sycl/, PR #423), experimental. There is no ready-made
+    Intel engine: it is compiled from source on the PC (docs/INTEL_ARC.md), then sycl/setup_intel.py runs this setup
+    with the Intel steps swapped in. Nothing of the CUDA / HIP paths is used or changed."""
+    say()
+    warn("Intel Arc (--backend sycl) is EXPERIMENTAL: a community port of the engine, not tested by the Strata "
+         "maintainers (no Intel card here). Expect rough edges; issues with your card and driver versions help.")
+    if WIN:
+        fail("the Intel Arc engine has no Windows setup yet (no ready-made Intel engine either)",
+             "run it on Linux, or in WSL2 Ubuntu with Intel's GPU driver: docs/INTEL_ARC.md")
+    say("  There is no ready-made Intel engine: it is built from source with Intel oneAPI (icpx + oneMKL),")
+    say("  docs/INTEL_ARC.md. Setup continues with sycl/setup_intel.py.")
+    rest, skip = [], False
+    for x in argv:                                     # setup_intel.py drives this setup through its AMD path
+        if skip:
+            skip = False
+        elif x == "--backend":
+            skip = True
+        elif not x.startswith("--backend="):
+            rest.append(x)
+    script = ROOT / "sycl" / "setup_intel.py"
+    if not script.exists():
+        fail(f"{script} is missing", "use a full Strata checkout (git clone) - docs/INTEL_ARC.md")
+    return subprocess.call([sys.executable, str(script), *rest])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=list(FAMILIES), help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5")
@@ -3280,11 +3306,14 @@ def main() -> int:
     ap.add_argument("--kv-streaming", choices=["auto", "on", "off"], default="auto",
                     help="from a 64K context: keep the KV cache in RAM and only the attention's window in VRAM (more "
                          "experts fit on the GPU); auto: when the RAM has room for it")
-    ap.add_argument("--backend", choices=["cuda", "hip"],
+    ap.add_argument("--backend", choices=["cuda", "hip", "sycl"],
                     help="cuda = NVIDIA (default), hip = AMD RX 7900 / 7800 / 7700 XT, RX 9060 XT / 9070 / AI PRO R9700 on "
-                         "Linux or Windows (chosen by itself when the PC has no NVIDIA card Strata can use)")
+                         "Linux or Windows (chosen by itself when the PC has no NVIDIA card Strata can use), "
+                         "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    if a.backend == "sycl":                            # Intel Arc: the SYCL port's own setup (sycl/setup_intel.py)
+        return sycl_setup(sys.argv[1:])
     if a.resident_budget_gib is not None and not a.resident_budget_gib > 0:
         ap.error("--resident-budget-gib takes a number of GiB above 0, e.g. --resident-budget-gib 32")
     if a.vision_tokens is not None and a.vision_tokens < 1:
