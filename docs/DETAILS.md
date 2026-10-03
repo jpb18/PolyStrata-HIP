@@ -596,6 +596,11 @@ INT8, Q4_0 and identity-layout K8V4 snapshots are supported; the K8V4 draft ring
 remains INT8, as in upstream. Windows/HIP and multi-GPU runtime coverage must be
 reported separately from Linux/CUDA evidence.
 
+The web page's Monitor tab has a **Conversation cache** card (0.1.39, #596): the parked conversations against the
+slots and the RAM budget, how many were parked, restored and evicted, and the last switch (read from the engine's
+log), and for every setup how many prompt tokens the cache gave back - in the last request and since the start.
+`/metrics` has the same under `"conversation_cache"`.
+
 Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/V.
 They add host RAM, not another model or VRAM allocation. The byte budget also counts
 an incoming snapshot during a switch. After a restore, unchanged K/V pages can be
