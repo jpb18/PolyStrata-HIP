@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +130,68 @@ class CarryOver(unittest.TestCase):
             self.assertEqual(json.loads(p.read_text(encoding="utf-8")),
                              {"exe": "new", "mcp_servers": {"a": {"command": "x"}}})
             self.assertFalse((Path(d) / "strata-x.json.bak").exists())   # nothing here was replaced
+
+
+class NoBrowser(unittest.TestCase):
+    """#609 (#631): --no-browser keeps the chat page from opening: "open_browser": false in the run config, no --open
+    on the start's server command or in run-<model>.bat/.sh.  Without the flag nothing changes."""
+
+    def setUp(self):
+        self.ram, self.found = PROFILES["64GB-1x32GB"]
+
+    def run_setup(self, *extra, configs=()):
+        return install(self.ram, self.found, ["--family", "qwen", "--model", "Q2_0", "--no-start", *extra],
+                       configs=configs)
+
+    def test_at_setup(self):
+        code, out, cfg, _ = self.run_setup("--no-browser")
+        self.assertEqual(code, 0, out)
+        self.assertIs(cfg["open_browser"], False)
+        code, out, cfg, _ = self.run_setup()
+        self.assertNotIn("open_browser", cfg)                             # not given: the config as before
+        # setup run again without the flag keeps the choice (#629); --browser undoes it
+        code, out, cfg, _ = self.run_setup(configs=[("strata-q2_0.json", {"open_browser": False})])
+        self.assertIs(cfg["open_browser"], False)
+        code, out, cfg, _ = self.run_setup("--browser", configs=[("strata-q2_0.json", {"open_browser": False})])
+        self.assertIs(cfg["open_browser"], True)
+
+    def test_run_script(self):
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(setup, "ROOT", Path(d)):
+            text = lambda p: p.read_text(encoding="utf-8")   # noqa: E731
+            self.assertIn('"--open"', text(setup.write_run_script("Q2_0", Path(d) / "strata-q2_0.json", 8080)))
+            script = setup.write_run_script("Q2_0", Path(d) / "strata-q2_0.json", 8080, False)
+            self.assertNotIn("--open", text(script))
+            self.assertIn('"--port" "8080"', text(script))
+
+    def start_cmd(self, cfg, keep=None):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "strata.exe"
+            exe.write_bytes(b"")
+            p = Path(d) / "strata-q2_0.json"
+            p.write_text(json.dumps({"exe": str(exe), "args": ["--kv", "int8"], "gpu": 0, "gpus_asked": True, **cfg}))
+            call = unittest.mock.Mock(return_value=0)
+            with unittest.mock.patch.object(setup, "gpus", lambda: self.found), \
+                    unittest.mock.patch.object(setup, "is_wsl", lambda: False), \
+                    unittest.mock.patch.object(setup, "ensure_engine_for", lambda cards, path, c, yes: c), \
+                    unittest.mock.patch.object(setup.subprocess, "call", call):
+                _, out = quiet(setup.start, p, None, None, True, True, None, keep)
+            return call.call_args[0][0], out, json.loads(p.read_text())
+
+    def test_on_a_start(self):
+        cmd, out, _ = self.start_cmd({})
+        self.assertIn("--open", cmd)                                      # the default, as before
+        self.assertIn("the browser opens when it is ready", out)
+        cmd, out, _ = self.start_cmd({"open_browser": False})
+        self.assertNotIn("--open", cmd)
+        self.assertNotIn("the browser opens", out)
+        self.assertIn("no browser", out)                                  # the Settings line says so
+        cmd, out, saved = self.start_cmd({}, {"open_browser": False})     # START-HERE --no-browser: kept from now on
+        self.assertNotIn("--open", cmd)
+        self.assertIs(saved["open_browser"], False)
+        self.assertIn("saved for this model: no browser", out)
+        cmd, out, saved = self.start_cmd({"open_browser": False}, {"open_browser": True})
+        self.assertIn("--open", cmd)
+        self.assertIs(saved["open_browser"], True)
 
 
 if __name__ == "__main__":
