@@ -2677,7 +2677,17 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
         return false;
     }
-    if (arena_mmap && from_gguf) {   // the first start: write experts.bin for the mapped starts after this one
+    // the first start: write experts.bin for the mapped starts after this one - only when the drive has room for it
+    // and 2 GiB more (a full drive fails other writes too); otherwise this start says so and runs pinned as before
+    std::error_code space_ec;
+    const uint64_t free_disk = arena_mmap && from_gguf ? (uint64_t) std::filesystem::space(
+        std::filesystem::path(path).parent_path(), space_ec).available : 0;
+    const bool room = !space_ec && free_disk >= want + (uint64_t) blob + (2ull << 30);
+    if (arena_mmap && from_gguf && !room)
+        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: NOT writing %s - %.1f GiB free on that drive, it needs "
+                             "%.1f GiB plus 2 GiB to spare; this start keeps the arena in RAM\n", path.c_str(),
+                     (double) free_disk / 1073741824.0, (double) (want + (uint64_t) blob) / 1073741824.0);
+    if (arena_mmap && from_gguf && room) {
         const std::string tmp = path + ".tmp";
         std::FILE* f = std::fopen(tmp.c_str(), "wb");
         bool ok = f != nullptr && std::fwrite(a->data(), 1, (size_t) want, f) == (size_t) want;
