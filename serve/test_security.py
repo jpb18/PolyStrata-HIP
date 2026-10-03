@@ -170,6 +170,24 @@ class OverHttp(unittest.TestCase):
         self.svc.allowed_hosts = ["*"]
         self.assertEqual(self.req("GET", "/status", host="evil.example.com")[0], 200)
 
+    def test_refusal_names_both_ways_out(self):
+        self.start()
+        message = self.req("GET", "/status", host="evil.example.com")[1]["error"]["message"]
+        self.assertIn("allowed_hosts", message)
+        self.assertIn("api_key", message)
+
+    def test_with_a_key_the_host_check_is_off(self):
+        # a rebinding page cannot authenticate; tunnels and proxies that pass their own name on keep working
+        self.start(api_key="s3cret")
+        tunnel = "random-words.trycloudflare.com"
+        self.assertEqual(self.req("GET", "/status", host=tunnel)[0], 401)
+        self.assertEqual(self.req("GET", "/status", headers={"Authorization": "Bearer s3cret"}, host=tunnel)[0], 200)
+        self.assertEqual(self.req("GET", "/health", host=tunnel)[0], 200)
+        code, _, log = self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                {"Content-Type": "application/json", "Authorization": "Bearer s3cret"}, host=tunnel)
+        self.assertEqual(code, 200)
+        self.assertNotIn("refused", log)
+
     def test_a_trusted_origin_s_host_is_allowed(self):
         self.start(trusted_origins=["https://strata.example.com"])
         self.assertEqual(self.req("GET", "/status", host="strata.example.com")[0], 200)

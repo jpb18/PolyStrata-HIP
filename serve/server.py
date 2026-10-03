@@ -1973,18 +1973,22 @@ def make_handler(svc: Service):
             pass
 
         def parse_request(self):
-            """Every request (any method) first passes the Host check: DNS rebinding protection (host_allowed)."""
+            """Without an API key, every request (any method) first passes the Host check: DNS rebinding protection
+            (host_allowed).  With a key a rebinding page cannot authenticate, so the check is skipped: tunnels and
+            proxies that pass their own name on keep working."""
             if not super().parse_request():
                 return False
             host = self.headers.get("Host")
-            if host_allowed(host, svc.host_names, "*" in svc.allowed_hosts):
+            if svc.api_key or host_allowed(host, svc.host_names, "*" in svc.allowed_hosts):
                 return True
             print(f"[strata] refused a request for Host {host!r} from {self.client_address[0]}: not a name this server "
-                  f"answers to (add it to \"allowed_hosts\" in the config or STRATA_ALLOWED_HOSTS)", flush=True)
+                  f"answers to (add it to \"allowed_hosts\" in the config or STRATA_ALLOWED_HOSTS, or set an API key)",
+                  flush=True)
             self._json(403, {"error": {"type": "forbidden", "message":
                              f"Host {host!r} is not allowed (DNS rebinding protection). Reaching Strata under this "
                              f"name on purpose? Add it to \"allowed_hosts\" in the config (strata-<model>.json) or to "
-                             f"the STRATA_ALLOWED_HOSTS environment variable"}})
+                             f"the STRATA_ALLOWED_HOSTS environment variable, or set an API key (\"api_key\"), which "
+                             f"turns this check off"}})
             return False
 
         def _foreign_page(self) -> bool:
