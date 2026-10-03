@@ -83,8 +83,8 @@ everything - the bit-exact check of the hand-off, not a speed mode.
 **Each card loads only its own layers' dense weights** (0.1.39, PR #639) with explicit split points (`--layer-split
 27`, not `auto`): every card used to keep a full copy (~3.4 GB for the Coder) though its stage reads only its own
 layers, and the VRAM it frees goes to that card's expert cache (2x MI50 16 GB, Coder: 8,819 -> 10,626 experts in
-VRAM, decode 39.2 -> 41.7 tok/s). On by default in the AMD (HIP) builds, `STRATA_STAGE_TRIM=0` keeps the full copies;
-on NVIDIA it is opt-in with `STRATA_STAGE_TRIM=1` until it has been run on NVIDIA cards (please report how it goes).
+VRAM, decode 39.2 -> 41.7 tok/s). Opt-in for now, on AMD and NVIDIA alike: `STRATA_STAGE_TRIM=1` (please report how
+it goes).
 A card holding more experts can change which experts run on the GPU, so the output can differ slightly from a run
 without it.
 
