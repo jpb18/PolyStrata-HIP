@@ -842,7 +842,8 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
     short = split_short(pair)             # #448: one card recommended (asked "n" by default), as for --resident
     for g in short:
         say(f"  {split_short_note(g)}.")
-    missing = [g for g in pair if not engine_runs_on(g)]
+    tk = config_toolkit(cfg)
+    missing = [g for g in pair if not (engine_runs_on(g) if tk == 13 else engine_runs_on(g, tk))]
     if missing:
         say("  The installed engine has no code for " + ", ".join(g["name"] for g in missing) + ": to use them "
             "together, run START-HERE.bat --setup --gpus " + ",".join(str(g["index"]) for g in pair))
@@ -3251,7 +3252,7 @@ def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     tk = config_toolkit(cfg)
     if tk == 13 and any(int(g["arch"]) < CUDA13_MIN_ARCH for g in cards):
         return use_cuda12(cards, cfg_path, cfg, yes)
-    missing = [g for g in cards if not engine_runs_on(g, tk)]
+    missing = [g for g in cards if not (engine_runs_on(g) if tk == 13 else engine_runs_on(g, tk))]
     if not missing:
         return cfg
     eng = engine_dir(tk)
