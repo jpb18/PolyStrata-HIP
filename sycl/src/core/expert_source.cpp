@@ -219,18 +219,25 @@ bool read_cgroup_memory_stat(const std::filesystem::path& path, uint64_t current
 }
 #endif
 
-bool available_memory_bytes(uint64_t& bytes) {
+}  // namespace
+
+namespace detail {
+
+bool host_available_memory(HostMemory& m, const std::string& meminfo, const std::string& self_cgroup,
+                           const std::string& cgroup_root) {
+    m = HostMemory{};
 #if defined(_WIN32)
+    (void) meminfo; (void) self_cgroup; (void) cgroup_root;
     MEMORYSTATUSEX status{};
     status.dwLength = sizeof(status);
     if (!GlobalMemoryStatusEx(&status)) return false;
-    bytes = (uint64_t) status.ullAvailPhys;
-    return bytes > 0;
+    m.available = (uint64_t) status.ullAvailPhys;
+    return m.available > 0;
 #elif defined(__linux__)
     // MemAvailable includes reclaimable page cache, unlike _SC_AVPHYS_PAGES.
-    std::ifstream info("/proc/meminfo");
+    std::ifstream info(meminfo);
     std::string line;
-    bytes = 0;
+    uint64_t bytes = 0;
     while (std::getline(info, line)) {
         std::istringstream fields(line);
         std::string key, unit;
@@ -239,17 +246,26 @@ bool available_memory_bytes(uint64_t& bytes) {
             value <= std::numeric_limits<uint64_t>::max() / 1024) bytes = value * 1024;
     }
     if (bytes == 0) return false;
-    // Account for the tightest cgroup-v2 ancestor limit when its normal mount is visible.
+    // Account for the tightest cgroup ancestor limit when its normal mount is visible.
     // This is a point-in-time guard, not a reservation against concurrent allocations.
-    std::ifstream groups("/proc/self/cgroup");
+    std::ifstream groups(self_cgroup);
     if (!groups) return false;
-    bool resolved_v2 = false;
+    const std::filesystem::path root(cgroup_root);
+    bool v2 = false;
+    std::string v1_path;   // the memory controller's group (cgroup v1), when there is no v2 line
     while (std::getline(groups, line)) {
-        if (line.rfind("0::/", 0) != 0) continue;
-        const std::filesystem::path root("/sys/fs/cgroup");
+        if (line.rfind("0::/", 0) != 0) {
+            // v1: "N:controller[,controller]:/path"
+            const size_t c1 = line.find(':'), c2 = c1 == std::string::npos ? c1 : line.find(':', c1 + 1);
+            if (c2 == std::string::npos) continue;
+            std::istringstream ctl(line.substr(c1 + 1, c2 - c1 - 1));
+            for (std::string c; std::getline(ctl, c, ',');)
+                if (c == "memory") v1_path = line.substr(c2 + 1);
+            continue;
+        }
         auto path = (root / line.substr(4)).lexically_normal();
         if (path.string().rfind(root.string(), 0) != 0 || !std::filesystem::is_directory(path)) return false;
-        resolved_v2 = true;
+        v2 = true;
         while (path.string().rfind(root.string(), 0) == 0) {
             std::ifstream limit_file(path / "memory.max"), current_file(path / "memory.current");
             std::string limit;
@@ -263,26 +279,57 @@ bool available_memory_bytes(uint64_t& bytes) {
                     size_t consumed = 0;
                     const uint64_t cap = std::stoull(limit, &consumed);
                     if (consumed != limit.size()) return false;
-                    detail::CgroupMemoryStat stat;
+                    CgroupMemoryStat stat;
                     if (!read_cgroup_memory_stat(path, current, stat)) return false;
                     uint64_t cgroup_available = 0;
-                    if (!detail::cgroup_available_bytes(cap, stat, cgroup_available)) return false;
+                    if (!cgroup_available_bytes(cap, stat, cgroup_available)) return false;
                     bytes = std::min(bytes, cgroup_available);
+                    m.cgroup_limit = std::min(m.cgroup_limit, cap);
                 } catch (...) { return false; }
             }
             if (path == root) break;
             path = path.parent_path();
         }
     }
-    return resolved_v2;
+    if (!v2 && !v1_path.empty()) {
+        // #633: cgroup v1 (older Docker hosts, RHEL 7/8): the memory controller's group and its ancestors.  An
+        // unlimited group says a number near 2^63 (rounded to its page size); a group whose files are not
+        // visible (no mount in this namespace) is skipped - MemAvailable alone, as with no cgroup at all.
+        const std::filesystem::path mroot = root / "memory";
+        auto path = (mroot / v1_path.substr(v1_path.rfind('/', 0) == 0 ? 1 : 0)).lexically_normal();
+        while (path.string().rfind(mroot.string(), 0) == 0) {
+            std::ifstream limit_file(path / "memory.limit_in_bytes"), usage_file(path / "memory.usage_in_bytes");
+            uint64_t cap = 0, usage = 0;
+            if (limit_file >> cap && usage_file >> usage && cap < (1ull << 62)) {
+                bytes = std::min(bytes, usage < cap ? cap - usage : 0);
+                m.cgroup_limit = std::min(m.cgroup_limit, cap);
+            }
+            if (path == mroot) break;
+            path = path.parent_path();
+        }
+    }
+    m.available = bytes;
+    return true;
 #else
+    (void) meminfo; (void) self_cgroup; (void) cgroup_root;
     const long pages = sysconf(_SC_AVPHYS_PAGES);
     const long page_bytes = sysconf(_SC_PAGESIZE);
     if (pages <= 0 || page_bytes <= 0 ||
         (uint64_t) pages > std::numeric_limits<uint64_t>::max() / (uint64_t) page_bytes) return false;
-    bytes = (uint64_t) pages * (uint64_t) page_bytes;
-    return bytes > 0;
+    m.available = (uint64_t) pages * (uint64_t) page_bytes;
+    return m.available > 0;
 #endif
+}
+
+}  // namespace detail
+
+namespace {
+
+bool available_memory_bytes(uint64_t& bytes) {
+    detail::HostMemory m;
+    if (!detail::host_available_memory(m)) return false;
+    bytes = m.available;
+    return bytes > 0;
 }
 
 }  // namespace
@@ -882,13 +929,14 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
     for (auto& t : th) t.join();
 }
 
-bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
+uint64_t FileExpertSource::expert_bytes() const {
+    uint64_t total = 0;
+    for (uint64_t b : layer_blob_bytes_) total += b * (uint64_t) n_expert_;
+    return total;
+}
+
+bool FileExpertSource::open_direct(std::string& why) {
 #if defined(_WIN32)
-    if (base_ == nullptr || paths_.empty() || !direct_.empty()) {
-        why = !direct_.empty() ? "already unbuffered" : "no expert files open";
-        return !direct_.empty();
-    }
-    if (!experts_unbuffered(paths_, ram_bytes, why, /*cache_counts=*/false)) return false;
     for (const std::string& path : paths_) {
         const int wide = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
         std::vector<wchar_t> w((size_t) (wide > 0 ? wide : 1), L'\0');
@@ -910,7 +958,58 @@ bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
     }
     return true;
 #else
+    (void) why;
+    return false;
+#endif
+}
+
+bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
+#if defined(_WIN32)
+    if (base_ == nullptr || paths_.empty() || !direct_.empty()) {
+        why = !direct_.empty() ? "already unbuffered" : "no expert files open";
+        return !direct_.empty();
+    }
+    // #577: the file tier reads the experts outside the RAM copy, not every byte of the shards (dense weights, the
+    // PLE table), and the copy holds at most every expert - the budget asked for can be more than that
+    const uint64_t experts = expert_bytes();
+    const uint64_t arena = std::min(ram_bytes, experts);
+    if (!experts_unbuffered(paths_, arena, why, /*cache_counts=*/false, experts - arena)) return false;
+    return open_direct(why);
+#else
     (void) ram_bytes;
+    why = "through the file cache (not Windows)";
+    return false;
+#endif
+}
+
+bool FileExpertSource::recheck_unbuffered(std::string& why) {
+#if defined(_WIN32)
+    if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
+        why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
+        return !direct_.empty();
+    }
+    if (base_ == nullptr || paths_.empty()) {
+        why = "no expert files open";
+        return false;
+    }
+    // #577: the RAM copy is built (and already out of the available RAM), so what the file cache would have to keep
+    // is exactly the experts outside it - the GPU cache's (refilled after a prompt borrowed their slots) and the
+    // ones neither holds
+    const uint64_t experts = expert_bytes();
+    const uint64_t read = experts > complement_bytes_ ? experts - complement_bytes_ : 0;
+    std::string w;
+    const bool ub = experts_unbuffered(paths_, 0, w, /*cache_counts=*/false, read);
+    char head[96];
+    std::snprintf(head, sizeof head, "re-checked with the RAM copy built (%.2f GiB): ",
+                  (double) complement_bytes_ / 1073741824.0);
+    why = head + w;
+    if (ub == !direct_.empty()) return ub;
+    if (ub) return open_direct(why);
+    // through the file cache after all: the mapped reads take over (staged() stays true for the GGUF in place)
+    for (void* d : direct_) CloseHandle((HANDLE) d);
+    direct_.clear();
+    return false;
+#else
     why = "through the file cache (not Windows)";
     return false;
 #endif
@@ -1241,9 +1340,9 @@ bool FileExpertSource::pin_cache_complement(
         err = std::string("FileExpertSource: GPU expert cache is not ready: ") +
               dpct::get_error_string_dummy(sync);
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         (void)0;
         return false;
@@ -1437,9 +1536,9 @@ bool FileExpertSource::pin_cache_complement(
                     note = std::string("no device alias (") +
                            dpct::get_error_string_dummy(aliased) + ")";
                     /*
-                    DPCT1010: SYCL uses exceptions to report errors and does
-                    not use the error codes. The cudaGetLastError function call
-                    was replaced with 0. You need to rewrite this code.
+                    DPCT1010: SYCL uses exceptions to report errors and
+                    does not use the error codes. The cudaGetLastError function
+                    call was replaced with 0. You need to rewrite this code.
                     */
                     (void)0;
                     (void)DPCT_CHECK_ERROR(
@@ -1458,8 +1557,8 @@ bool FileExpertSource::pin_cache_complement(
                 note = std::string("page-locking refused (") +
                        dpct::get_error_string_dummy(allocated) + ")";
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 (void)0;
@@ -1524,11 +1623,11 @@ bool FileExpertSource::pin_cache_complement(
                                 */
                                 (void)0;
                                 /*
-                                DPCT1027: The call to cudaHostUnregister was
-                                replaced with 0 because SYCL currently does not
-                                support registering of existing host memory for
-                                use by device. Use USM to allocate memory for
-                                use by host and device.
+                                DPCT1027: The call to cudaHostUnregister
+                                was replaced with 0 because SYCL currently does
+                                not support registering of existing host memory
+                                for use by device. Use USM to allocate memory
+                                for use by host and device.
                                 */
                                 (void)0;
                             }
@@ -1733,9 +1832,9 @@ bool FileExpertSource::reserve_exchanges(int64_t n, std::string &err) try {
         xstage_pinned_ = true;
     } else {
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         (void)0;
         p = std::malloc(total);
@@ -2152,7 +2251,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             }
             if (kind[i] >= 0) {             // CUDA0, PCIe, or a remote/peer result staged into this row below
                 if (kind[i] == 0) ++d.cache_hits;
-                else if (kind[i] == 2 && d.peer != nullptr) ++d.peer_entries;
+                else ++d.offload_entries;                       // #588: PCIe or another GPU
+                if (kind[i] == 2 && d.peer != nullptr) ++d.peer_entries;
                 // multi-GPU: a direct peer launch is writing this row right now - zeroing it would race it
                 if (!(kind[i] == 2 && d.peer != nullptr && d.peer->launched_direct()))
                     std::memset(row, 0, (size_t) H * sizeof(float));
@@ -2686,10 +2786,9 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
 
 ArenaExpertSource::~ArenaExpertSource() { close(); }
 
-bool ArenaExpertSource::open(const std::string &pack_dir, int64_t n_layers,
-                             int64_t n_expert, int threads, std::string &err,
-                             uint64_t max_pinned_bytes,
-                             const std::string &shared_arena_file) try {
+bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
+                             std::string& err, uint64_t max_pinned_bytes,
+                             const std::string& shared_arena_file) {
     close();
     const std::string path = pack_dir + "/experts.bin";
     // plan v0.3 P6: the layout (canonical, or a native pack's per-layer blobs) was loaded by the driver
@@ -2714,7 +2813,7 @@ bool ArenaExpertSource::open(const std::string &pack_dir, int64_t n_layers,
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { err = "ArenaExpertSource: cannot open " + path; return false; }
         const uint64_t got = (uint64_t) f.tellg();
-        if (got != want) {
+        if (got != want && got != want + (uint64_t) blob) {   // + one blob: STRATA_ARENA_MMAP's padded file
             char buf[400];
             std::snprintf(buf, sizeof buf,
                           "ArenaExpertSource: %s is %llu B but %lld layers x %lld experts (blobs up to %lld B) "
@@ -2723,6 +2822,76 @@ bool ArenaExpertSource::open(const std::string &pack_dir, int64_t n_layers,
                           (long long) blob, (unsigned long long) want);
             err = buf;
             return false;
+        }
+    }
+
+    // STRATA_ARENA_MMAP=1 (a small-RAM machine whose GPUs hold most experts): the arena is the pack's experts.bin
+    // mapped READ-ONLY - not locked, not pinned.  The page cache keeps what the CPU pool and the prompt path
+    // actually read (the experts no VRAM cache holds) and gives back the rest under memory pressure; a page
+    // dropped is re-read from the file, so a result never depends on what is resident.  The GPUs then get no
+    // mapped alias: run with --pcie-frac 0.  The first start writes experts.bin (arena layout, padded by one blob
+    // so a whole-slot copy may start at any expert), later ones map it.
+#if defined(_WIN32)
+    static const bool arena_mmap = false;   // POSIX mmap/madvise: Linux only for now
+#else
+    static const bool arena_mmap = [] { const char* v = std::getenv("STRATA_ARENA_MMAP"); return v && v[0] == '1'; }();
+    if (arena_mmap) {
+        const uint64_t file_bytes = want + (uint64_t) blob;
+        uint64_t have = 0;
+        {
+            std::ifstream f(path, std::ios::binary | std::ios::ate);
+            if (f) have = (uint64_t) f.tellg();
+        }
+        if (have == file_bytes) {
+            const int fd = ::open(path.c_str(), O_RDONLY);
+            void* v = fd >= 0 ? mmap(nullptr, (size_t) file_bytes, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+            if (fd >= 0) ::close(fd);
+            if (v == MAP_FAILED) { err = "ArenaExpertSource: mmap of " + path + " failed"; return false; }
+            map_ = v;
+            map_bytes_ = file_bytes;
+            base_ = (const uint8_t*) v;
+            pinned_bytes_ = 0;
+            dev_slice_.clear();
+            slice_bytes_ = 0;
+            blobs_ = n_layers * n_expert;
+            n_expert_ = n_expert;
+            reads_ = 0;
+            note_ = "mapped read-only from " + path + " (STRATA_ARENA_MMAP: not locked, not pinned)";
+            gib_per_s_ = 0.0;
+            load_seconds_ = load_read_s_ = load_copy_s_ = 0.0;
+            return true;
+        }
+    }
+#endif
+
+    // #633: THE RAM BEFORE THE ALLOCATION.  On Linux the arena is an anonymous mapping that succeeds whatever the host
+    // has; its pages are committed as the load writes them, so a container whose memory limit is below the arena was
+    // killed by the OOM killer part-way through the load, without a message.  A hard cgroup limit below it is
+    // certain to end that way: refused, with the numbers.  Less RAM available than the arena (another program, an
+    // engine still exiting) is only a warning - the OS may make room - per the recommend-not-force rule.
+    ram_warning_.clear();
+    // (a shared arena, --shared-expert-arena, may already be in RAM for another engine: not checked)
+    if (detail::HostMemory hm; shared_arena_file.empty() && detail::host_available_memory(hm)) {
+        const uint64_t need = want + (uint64_t) blob;
+        const double gib = 1073741824.0;
+        char buf[512];
+        if (hm.cgroup_limit < need) {
+            std::snprintf(buf, sizeof buf,
+                          "ArenaExpertSource: the expert arena needs %.2f GiB of RAM but this process's memory limit "
+                          "(cgroup memory.max / memory.limit_in_bytes) is %.2f GiB: it would be killed while loading. "
+                          "Raise the container's limit, or run with less RAM: --mmap-experts with "
+                          "--resident-budget-gib N keeps only the hottest experts in RAM",
+                          (double) need / gib, (double) hm.cgroup_limit / gib);
+            err = buf;
+            return false;
+        }
+        if (hm.available < need) {
+            std::snprintf(buf, sizeof buf,
+                          "the expert arena needs %.2f GiB of RAM but %.2f GiB is available (%.2f GiB short): the load "
+                          "may swap or be stopped by the OS. Close other programs (or wait for an engine that is "
+                          "still exiting), or run with less RAM: --mmap-experts with --resident-budget-gib N",
+                          (double) need / gib, (double) hm.available / gib, (double) (need - hm.available) / gib);
+            ram_warning_ = buf;
         }
     }
 
@@ -2784,6 +2953,30 @@ bool ArenaExpertSource::open(const std::string &pack_dir, int64_t n_layers,
         err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
         return false;
     }
+    // the first start: write experts.bin for the mapped starts after this one - only when the drive has room for it
+    // and 2 GiB more (a full drive fails other writes too); otherwise this start says so and runs pinned as before
+    std::error_code space_ec;
+    const uint64_t free_disk = arena_mmap && from_gguf ? (uint64_t) std::filesystem::space(
+        std::filesystem::path(path).parent_path(), space_ec).available : 0;
+    const bool room = !space_ec && free_disk >= want + (uint64_t) blob + (2ull << 30);
+    if (arena_mmap && from_gguf && !room)
+        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: NOT writing %s - %.1f GiB free on that drive, it needs "
+                             "%.1f GiB plus 2 GiB to spare; this start keeps the arena in RAM\n", path.c_str(),
+                     (double) free_disk / 1073741824.0, (double) (want + (uint64_t) blob) / 1073741824.0);
+    if (arena_mmap && from_gguf && room) {
+        const std::string tmp = path + ".tmp";
+        std::FILE* f = std::fopen(tmp.c_str(), "wb");
+        bool ok = f != nullptr && std::fwrite(a->data(), 1, (size_t) want, f) == (size_t) want;
+        if (ok) {
+            std::vector<uint8_t> pad((size_t) blob, 0);
+            ok = std::fwrite(pad.data(), 1, pad.size(), f) == pad.size();
+        }
+        if (f) ok = std::fclose(f) == 0 && ok;
+        if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
+        if (!ok) std::remove(tmp.c_str());
+        std::fprintf(stderr, "strata generate: STRATA_ARENA_MMAP: %s %s (the next start maps it)\n",
+                     ok ? "wrote" : "could NOT write", path.c_str());
+    }
     arena_ = a;
     base_ = a->data();
     pinned_bytes_ = a->registered_bytes;
@@ -2796,8 +2989,8 @@ bool ArenaExpertSource::open(const std::string &pack_dir, int64_t n_layers,
             void* d = nullptr;
             if (DPCT_CHECK_ERROR(d = (void *)(void *)(base_ + off)) != 0) {
                 /*
-                DPCT1010: SYCL uses exceptions to report errors and does not
-                use the error codes. The cudaGetLastError function call was
+                DPCT1010: SYCL uses exceptions to report errors and does
+                not use the error codes. The cudaGetLastError function call was
                 replaced with 0. You need to rewrite this code.
                 */
                 (void)0;
@@ -2817,13 +3010,13 @@ bool ArenaExpertSource::open(const std::string &pack_dir, int64_t n_layers,
     load_copy_s_ = st.copy_seconds;
     return true;
 }
-catch (sycl::exception const &exc) {
-  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
-            << ", line:" << __LINE__ << std::endl;
-  std::exit(1);
-}
 
 void ArenaExpertSource::close() {
+#if !defined(_WIN32)
+    if (map_ != nullptr) munmap(map_, (size_t) map_bytes_);
+#endif
+    map_ = nullptr;
+    map_bytes_ = 0;
     if (arena_ != nullptr) {
         delete (PinnedArena*) arena_;
         arena_ = nullptr;
@@ -2831,6 +3024,39 @@ void ArenaExpertSource::close() {
     base_ = nullptr;
     blobs_ = 0;
     n_expert_ = 0;
+}
+
+void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
+#if defined(_WIN32)
+    (void) layer; (void) expert;
+#else
+    if (map_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return;
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    const uint64_t off = lay.blob_offset(layer, expert) & ~(uint64_t) 4095;
+    const uint64_t end = lay.blob_offset(layer, expert) + lay.blob_bytes(layer);
+    madvise((uint8_t*) map_ + off, (size_t) (end - off), MADV_WILLNEED);
+#endif
+}
+
+// Only the pages wholly inside the blob: a page shared with a neighbour the CPU may still read stays.  MADV_DONTNEED
+// unmaps them from this process; they stay in the page cache as clean, unmapped pages - the first the kernel takes
+// back under pressure, and a minor fault away when the CPU needs the expert again (an adaptive swap evicts it).
+// Dropping them from the cache too (POSIX_FADV_DONTNEED) made every eviction a re-read from the disk: ~200 major
+// faults a second in decode, +8 ms a window.  The memory the arena used to hold was never the cache itself but
+// ROCclr's pin-in-place locks on it (see main) - locked pages are the ones the kernel cannot take back.
+uint64_t ArenaExpertSource::release(int64_t layer, int64_t expert) {
+#if defined(_WIN32)
+    (void) layer; (void) expert;
+    return 0;
+#else
+    if (map_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return 0;
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    const uint64_t off = (lay.blob_offset(layer, expert) + 4095) & ~(uint64_t) 4095;
+    const uint64_t end = (lay.blob_offset(layer, expert) + lay.blob_bytes(layer)) & ~(uint64_t) 4095;
+    if (end <= off) return 0;
+    if (madvise((uint8_t*) map_ + off, (size_t) (end - off), MADV_DONTNEED) != 0) return 0;
+    return end - off;
+#endif
 }
 
 bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {

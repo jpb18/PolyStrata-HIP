@@ -444,6 +444,29 @@ catch (sycl::exception const &exc) {
   std::exit(1);
 }
 
+void kv_unstage_to_host(const QsaAttnPools &stage, const KvHostPools &host,
+                        int fmt, int64_t b0, int64_t b1, const QsaShapes &s,
+                        void *stream) try {
+    if (b1 <= b0) return;
+    const Runs r = runs_of(stage, host, fmt, s);   // src: the host copy, dst: the staging pool (identity layout both)
+    for (int a = 0; a < r.n; ++a)
+        /*
+        DPCT1124: cudaMemcpyAsync is migrated to asynchronous memcpy API.
+        While the origin API might be synchronous, it depends on the type of
+        operand memory, so you may need to call wait() on event return by memcpy
+        API to ensure synchronization behavior.
+        */
+        if (DPCT_CHECK_ERROR(strata::q_of(stream)->memcpy(
+                (void *)(r.src[a] + b0 * r.len[a]), r.dst[a] + b0 * r.len[a],
+                (size_t)((b1 - b0) * r.len[a]))) != 0)
+            check("unstage");
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
 KvStreamCounters kv_stream_counters(const KvStreamMap &m) try {
     int32_t c[kKvCtlInts] = {};
     KvStreamCounters r;

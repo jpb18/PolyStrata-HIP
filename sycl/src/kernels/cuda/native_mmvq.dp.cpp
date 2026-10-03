@@ -30,6 +30,7 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/dp4a.hpp"
+#include "strata/kernels/q8_1_finite.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 
 #include <cstdint>
@@ -190,10 +191,10 @@ __dpct_inline__ void native_quantize_q8_1_kernel(const float *__restrict__ x,
     const float xi = x[i];
     const float amax = warp_max(sycl::fabs(xi));
     const float sum = warp_sum(xi);
-    const float d = amax / 127.0f;
-    const int8_t q = amax == 0.0f ? 0 : sycl::round(xi / d);
+    const float d = q8_1_finite(amax / 127.0f);   // #606: q8_1_finite.hpp - the same bits for every finite block
+    const int8_t q = q8_1_quant(xi, d, amax);
     y[i / Q8K].qs[i % Q8K] = q;
-    if (i % Q8K == 0) y[i / Q8K].ds = sycl::half2(d, sum);
+    if (i % Q8K == 0) y[i / Q8K].ds = q8_1_ds(d, sum);
 }
 
 // Exact pinned vec_dot_q5_K_q8_1_impl_vmmq expression and integer dot order.

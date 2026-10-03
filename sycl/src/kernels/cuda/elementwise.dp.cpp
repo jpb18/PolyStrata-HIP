@@ -600,6 +600,72 @@ __dpct_inline__ void doorbell_publish_kernel(const float *__restrict__ x,
     }
 }
 
+// #649 (HIP, STRATA_DOORBELL_STORE=1): the same publish, but the ring is STORED (the step's own number, known at
+// capture) instead of read-modify-written over PCIe - one store, no read of host memory from the GPU.
+__dpct_inline__ void doorbell_publish_value_kernel(
+    const float *__restrict__ x, const int32_t *__restrict__ ids,
+    const float *__restrict__ w, int n, int k, float *x_out, int32_t *ids_out,
+    float *w_out, uint32_t *seq, uint32_t value) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+#pragma unroll
+    for (int i = item_ct1.get_local_id(2); i < n;
+         i += item_ct1.get_local_range(2)) x_out[i] = x[i];
+    if ((int)item_ct1.get_local_id(2) < k) {
+        ids_out[item_ct1.get_local_id(2)] = ids[item_ct1.get_local_id(2)];
+        w_out[item_ct1.get_local_id(2)] = w[item_ct1.get_local_id(2)];
+    }
+    /*
+    DPCT1078: Consider replacing memory_order::acq_rel with
+    memory_order::seq_cst for correctness if strong memory order restrictions
+    are needed.
+    */
+    sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
+    item_ct1.barrier(sycl::access::fence_space::local_space);
+    if (item_ct1.get_local_id(2) == 0) {
+        /*
+        DPCT1078: Consider replacing memory_order::acq_rel with
+        memory_order::seq_cst for correctness if strong memory order
+        restrictions are needed.
+        */
+        sycl::atomic_fence(sycl::memory_order::acq_rel,
+                           sycl::memory_scope::system);
+        *(volatile uint32_t*) seq = value;
+        /*
+        DPCT1078: Consider replacing memory_order::acq_rel with
+        memory_order::seq_cst for correctness if strong memory order
+        restrictions are needed.
+        */
+        sycl::atomic_fence(sycl::memory_order::acq_rel,
+                           sycl::memory_scope::system);
+    }
+}
+
+void doorbell_publish_value(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k,
+                            float* x_out, int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value,
+                            void* stream) {
+    if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }
+    /*
+    DPCT1049: The work-group size passed to the SYCL kernel may exceed the
+    limit. To get the device limit, query info::device::max_work_group_size.
+    Adjust the work-group size if needed.
+    */
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->parallel_for<
+                dpct_kernel_name<class doorbell_publish_value_kernel_9bdb22>>(
+                sycl::nd_range<3>(sycl::range(1, 1, 1024),
+                                  sycl::range(1, 1, 1024)),
+                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                    doorbell_publish_value_kernel(x, ids, weights, (int)n,
+                                                  (int)k, x_out, ids_out,
+                                                  weights_out, d_seq, value);
+                });
+    }
+}
+
 void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }

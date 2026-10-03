@@ -11,6 +11,7 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/dp4a.hpp"
+#include "strata/kernels/q8_1_finite.hpp"
 
 #define GGML_COMMON_DECL_SYCL
 #define GGML_COMMON_IMPL_SYCL
@@ -1564,11 +1565,11 @@ __dpct_inline__ void q8_1_store(const float xi, block_q8_1 *__restrict__ y,
             0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(),
             sum, o);
     }
-    const float d = amax / 127.0f;
-    const int8_t q = amax == 0.0f ? 0 : sycl::round(xi / d);
+    const float d = q8_1_finite(amax / 127.0f);   // #606: q8_1_finite.hpp - the same bits for every finite block
+    const int8_t q = q8_1_quant(xi, d, amax);
     const long long ib = i / 32, iqs = i % 32;
     y[ib].qs[iqs] = q;
-    if (iqs == 0) y[ib].ds = sycl::half2(d, sum);
+    if (iqs == 0) y[ib].ds = q8_1_ds(d, sum);
 }
 
 __dpct_inline__ void quantize_q8_1_kernel(const float *__restrict__ x,

@@ -571,7 +571,7 @@ LoadStats load_experts_direct(const std::string& path, uint8_t* dst, const std::
 }
 
 bool experts_unbuffered(const std::vector<std::string>& files, uint64_t arena_bytes, std::string& why,
-                        bool cache_counts) {
+                        bool cache_counts, uint64_t read_bytes) {
     const char* env = std::getenv("STRATA_UNBUFFERED_LOAD");
     if (env != nullptr && env[0] != '\0') {
         why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
@@ -619,15 +619,21 @@ bool experts_unbuffered(const std::vector<std::string>& files, uint64_t arena_by
     GlobalMemoryStatusEx(&ms);
     const uint64_t avail = ms.ullAvailPhys;
     // what the cache could keep beside the arena (~4 GiB for everything else)
-    const uint64_t room = avail > arena_bytes + (4ull << 30) ? avail - arena_bytes - (4ull << 30) : 0;
-    const bool keepable = room >= total_bytes;
-    char msg[200];
-    std::snprintf(msg, sizeof msg, "%d of %d probe reads from the file cache; %.1f GiB available, %.1f GiB of files",
-                  fast, n, (double) avail / (1ull << 30), (double) total_bytes / (1ull << 30));
+    const uint64_t need = read_bytes == kAllFileBytes ? total_bytes : read_bytes;
+    const bool keepable = strata::platform::file_cache_keeps(avail, arena_bytes, need);
+    char msg[256];
+    if (read_bytes == kAllFileBytes)
+        std::snprintf(msg, sizeof msg, "%d of %d probe reads from the file cache; %.1f GiB available, %.1f GiB of files",
+                      fast, n, (double) avail / (1ull << 30), (double) total_bytes / (1ull << 30));
+    else
+        std::snprintf(msg, sizeof msg, "%.1f GiB available, %.1f GiB of it still to be taken by the RAM copy, %.1f GiB "
+                      "of experts read from the files: the file cache %s keep them",
+                      (double) avail / (1ull << 30), (double) arena_bytes / (1ull << 30), (double) need / (1ull << 30),
+                      keepable ? "can" : "cannot");
     why = msg;
     return (!cached || !cache_counts) && !keepable;
 #else
-    (void) files; (void) arena_bytes; (void) cache_counts;
+    (void) files; (void) arena_bytes; (void) cache_counts; (void) read_bytes;
     why = "buffered (not Windows)";
     return false;
 #endif

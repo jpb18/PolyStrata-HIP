@@ -1,9 +1,16 @@
-// src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
+#define DPCT_COMPAT_RT_VERSION 12080
+// src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the
+// header first.
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/core/expert_cache.hpp"
+
+#if !defined(STRATA_USE_HIP)
+   // #533: the virtual memory management types (the functions come through the
+   // runtime's entry points)
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -144,6 +151,303 @@ bool write_expert_profile(const std::string& path, int64_t n_layers, int64_t n_e
 
 ExpertCache::~ExpertCache() { close(); }
 
+// ---- #533: the segmented arena (--vram-elastic).  The driver API's virtual memory functions, looked up through the
+// runtime (no link against the driver library): one address range for the whole arena, backed by physical segments,
+// and the tail's segments unmapped / mapped again later.  Nothing here runs unless a segment size was set.
+#if 0   // SYCL port: no driver virtual memory management (--vram-elastic is CUDA-only, #533)
+namespace {
+struct Vmm {
+    int(CUDAAPI *device_get)(int *, int) = nullptr;
+    int(CUDAAPI *attribute)(int *, CUdevice_attribute, int) = nullptr;
+    int(CUDAAPI *granularity)(
+        size_t *, const dpct::experimental::mem_prop *,
+        sycl::ext::oneapi::experimental::granularity_mode) = nullptr;
+    int(CUDAAPI *reserve)(dpct::device_ptr *, size_t, size_t, dpct::device_ptr,
+                          unsigned long long) = nullptr;
+    int(CUDAAPI *address_free)(dpct::device_ptr, size_t) = nullptr;
+    int(CUDAAPI *create)(dpct::experimental::physical_mem_ptr *, size_t,
+                         const dpct::experimental::mem_prop *,
+                         unsigned long long) = nullptr;
+    int(CUDAAPI *release)(dpct::experimental::physical_mem_ptr) = nullptr;
+    int(CUDAAPI *map)(dpct::device_ptr, size_t, size_t,
+                      dpct::experimental::physical_mem_ptr,
+                      unsigned long long) = nullptr;
+    int(CUDAAPI *unmap)(dpct::device_ptr, size_t) = nullptr;
+    int(CUDAAPI *set_access)(dpct::device_ptr, size_t,
+                             const dpct::experimental::mem_access_desc *,
+                             size_t) = nullptr;
+    bool ok = false;
+};
+
+template <class F> bool entry(const char *name, F &f) try {
+    void* p = nullptr;
+    cudaDriverEntryPointQueryResult q{};
+#if DPCT_COMPAT_RT_VERSION >= 12050
+    /*
+    DPCT1007: Migration of cudaGetDriverEntryPointByVersion is not
+    supported.
+    */
+    const dpct::err0 e = cudaGetDriverEntryPointByVersion(
+        name, &p, 12000, cudaEnableDefault, &q);
+#else
+    const cudaError_t e = cudaGetDriverEntryPoint(name, &p, cudaEnableDefault, &q);
+#endif
+    if (e != 0 || q != cudaDriverEntryPointSuccess || p == nullptr) {
+        /*
+        DPCT1010: SYCL uses exceptions to report errors and does not use the
+        error codes. The cudaGetLastError function call was replaced with 0. You
+        need to rewrite this code.
+        */
+        (void)0;
+        return false;
+    }
+    f = reinterpret_cast<F>(p);
+    return true;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+const Vmm& vmm() {
+    static const Vmm v = [] {
+        Vmm x;
+        x.ok = entry("cuDeviceGet", x.device_get) && entry("cuDeviceGetAttribute", x.attribute) &&
+               entry("cuMemGetAllocationGranularity", x.granularity) && entry("cuMemAddressReserve", x.reserve) &&
+               entry("cuMemAddressFree", x.address_free) && entry("cuMemCreate", x.create) &&
+               entry("cuMemRelease", x.release) && entry("cuMemMap", x.map) && entry("cuMemUnmap", x.unmap) &&
+               entry("cuMemSetAccess", x.set_access);
+        return x;
+    }();
+    return v;
+}
+
+dpct::experimental::mem_prop device_prop(int dev) {
+    dpct::experimental::mem_prop prop{};
+    prop.type = 0;
+    prop.location.type = 1;
+    prop.location.id = dev;
+    return prop;
+}
+
+// one segment: a physical allocation mapped at `va`, readable and writable by this device
+bool map_segment(const Vmm &v, int dev, dpct::device_ptr va, size_t bytes,
+                 unsigned long long &handle) {
+    const dpct::experimental::mem_prop prop = device_prop(dev);
+    dpct::experimental::physical_mem_ptr h = 0;
+    if (v.create(&h, bytes, &prop, 0) != 0) return false;
+    if (v.map(va, bytes, 0, h, 0) != 0) {
+        v.release(h);
+        return false;
+    }
+    dpct::experimental::mem_access_desc access{};
+    access.location.type = 1;
+    access.location.id = dev;
+    access.flags =
+        sycl::ext::oneapi::experimental::address_access_mode::read_write;
+    if (v.set_access(va, bytes, &access, 1) != 0) {
+        v.unmap(va, bytes);
+        v.release(h);
+        return false;
+    }
+    handle = (unsigned long long) h;
+    return true;
+}
+}  // namespace
+#endif
+
+bool ExpertCache::open_segmented(uint64_t want, std::string &err) try {
+#if 1   // SYCL port: --vram-elastic is CUDA-only (#533)
+    (void) want;
+    err = "ExpertCache: --vram-elastic (a segmented expert cache) is CUDA-only for now";
+    return false;
+#else
+    const Vmm& v = vmm();
+    int dev = 0, supported = 0;
+    int cu = 0;
+    if (!v.ok || DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) != 0 ||
+        v.device_get(&cu, dev) != 0 ||
+        v.attribute(&supported,
+                    CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
+                    cu) != 0 ||
+        !supported) {
+        err = "ExpertCache: --vram-elastic needs the driver's virtual memory management, which this GPU or driver "
+              "does not offer";
+        return false;
+    }
+    const dpct::experimental::mem_prop prop = device_prop(dev);
+    size_t gran = 0;
+    if (v.granularity(
+            &gran, &prop,
+            sycl::ext::oneapi::experimental::granularity_mode::recommended) !=
+            0 ||
+        gran == 0) {
+        err = "ExpertCache: cannot read the driver's allocation granularity";
+        return false;
+    }
+    const uint64_t g = (uint64_t) gran;
+    const uint64_t total = (want + g - 1) / g * g;
+    seg_ = (int64_t) (((uint64_t) seg_req_ + g - 1) / g * g);
+    dpct::device_ptr va = 0;
+    if (v.reserve(&va, (size_t)total, 0, 0, 0) != 0) {
+        err = "ExpertCache: cannot reserve the address range of the segmented expert cache";
+        return false;
+    }
+    base_ = reinterpret_cast<uint8_t*>(va);
+    reserved_ = total;
+    for (uint64_t at = 0; at < total; at += (uint64_t) seg_) {
+        segs_.push_back(0);
+        seg_size_.push_back((int64_t) std::min<uint64_t>((uint64_t) seg_, total - at));
+    }
+    for (size_t i = 0; i < segs_.size(); ++i) {
+        if (!map_segment(v, dev,
+                         va + (dpct::device_ptr)((uint64_t)i * (uint64_t)seg_),
+                         (size_t)seg_size_[i], segs_[i])) {
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "ExpertCache: cudaMalloc failed: segment %zu of %zu (%.2f GiB) of the "
+                          "segmented cache could not be allocated", i + 1, segs_.size(),
+                          (double) seg_size_[i] / 1073741824.0);
+            err = buf;   // "cudaMalloc failed": the auto cache's smaller-retry path reads it as an allocation failure
+            release_segmented();
+            return false;
+        }
+        mapped_segs_ = (int64_t) i + 1;
+    }
+    return true;
+#endif
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+void ExpertCache::release_segmented() {
+#if 0   // SYCL port: no segmented arena (#533)
+    const Vmm& v = vmm();
+    if (base_ != nullptr) dpct::get_current_device().queues_wait_and_throw();
+    const dpct::device_ptr va = reinterpret_cast<dpct::device_ptr>(base_);
+    for (size_t i = 0; i < segs_.size(); ++i)
+        if (segs_[i] != 0) {
+            v.unmap(va + (dpct::device_ptr)((uint64_t)i * (uint64_t)seg_),
+                    (size_t)seg_size_[i]);
+            v.release((dpct::experimental::physical_mem_ptr)segs_[i]);
+        }
+    if (base_ != nullptr && reserved_ > 0) v.address_free(va, (size_t) reserved_);
+#endif
+    segs_.clear();
+    seg_size_.clear();
+    mapped_segs_ = 0;
+    reserved_ = 0;
+    base_ = nullptr;
+}
+
+int64_t ExpertCache::mapped_bytes() const {
+    if (segs_.empty()) return base_ != nullptr ? full_bytes() : 0;
+    int64_t b = 0;
+    for (int64_t i = 0; i < mapped_segs_; ++i) b += seg_size_[(size_t) i];
+    return b;
+}
+
+int64_t ExpertCache::slots_within(int64_t bytes) const {
+    if (bytes >= full_bytes()) return slots_;
+    if (bytes <= 0) return 0;
+    if (off_.empty()) return blob_ > 0 ? bytes / blob_ : 0;
+    // off_[i + 1] is slot i's end: count the slots whose end is at most `bytes`
+    return (int64_t) (std::upper_bound(off_.begin() + 1, off_.end(), (uint64_t) bytes) - (off_.begin() + 1));
+}
+
+bool ExpertCache::shrink(int64_t keep_bytes, std::string &err) try {
+    if (segs_.empty()) {
+        err = "the expert cache is not segmented (the engine needs --vram-elastic)";
+        return false;
+    }
+#if 1   // SYCL port: --vram-elastic is CUDA-only (#533)
+    (void) keep_bytes;
+    return false;
+#else
+    const Vmm& v = vmm();
+    int64_t keep = 0, at = 0;   // the segments [0, keep) hold the first keep_bytes
+    while (keep < (int64_t) segs_.size() && at < keep_bytes) at += seg_size_[(size_t) keep++];
+    if (keep >= mapped_segs_) return true;
+    if (DPCT_CHECK_ERROR(dpct::get_current_device().queues_wait_and_throw()) !=
+        0) {
+        /*
+        DPCT1009: SYCL reports errors using exceptions and does not use
+        error codes. Please replace the "get_error_string_dummy(...)" with a
+        real error-handling function.
+        */
+        /*
+        DPCT1010: SYCL uses exceptions to report errors and does not use the
+        error codes. The cudaGetLastError function call was replaced with 0. You
+        need to rewrite this code.
+        */
+        err = std::string("the device failed before the cache shrank: ") +
+              dpct::get_error_string_dummy(0);
+        return false;
+    }
+    const dpct::device_ptr va = reinterpret_cast<dpct::device_ptr>(base_);
+    for (int64_t i = mapped_segs_ - 1; i >= keep; --i) {
+        const dpct::device_ptr p =
+            va + (dpct::device_ptr)((uint64_t)i * (uint64_t)seg_);
+        if (v.unmap(p, (size_t)seg_size_[(size_t)i]) != 0 ||
+            v.release((dpct::experimental::physical_mem_ptr)segs_[(size_t)i]) !=
+                0) {
+            err = "the driver refused to release an expert-cache segment";
+            live_slots_ = slots_within(mapped_bytes());
+            return false;
+        }
+        segs_[(size_t) i] = 0;
+        mapped_segs_ = i;
+    }
+    live_slots_ = slots_within(mapped_bytes());
+    return true;
+#endif
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
+bool ExpertCache::grow(int64_t want_bytes, std::string& err) {
+    if (segs_.empty()) {
+        err = "the expert cache is not segmented (the engine needs --vram-elastic)";
+        return false;
+    }
+#if 1   // SYCL port: --vram-elastic is CUDA-only (#533)
+    (void) want_bytes;
+    return false;
+#else
+    const Vmm& v = vmm();
+    int dev = 0;
+    dev = dpct::get_current_device_id();
+    const dpct::device_ptr va = reinterpret_cast<dpct::device_ptr>(base_);
+    int64_t at = mapped_bytes();
+    while (mapped_segs_ < (int64_t) segs_.size() && at + seg_size_[(size_t) mapped_segs_] <= want_bytes) {
+        const size_t i = (size_t) mapped_segs_;
+        if (!map_segment(v, dev,
+                         va + (dpct::device_ptr)((uint64_t)i * (uint64_t)seg_),
+                         (size_t)seg_size_[i], segs_[i])) {
+            /*
+            DPCT1010: SYCL uses exceptions to report errors and does not use
+            the error codes. The cudaGetLastError function call was replaced
+            with 0. You need to rewrite this code.
+            */
+            (void)0;
+            err = "the driver has no VRAM for another expert-cache segment";
+            live_slots_ = slots_within(mapped_bytes());
+            return false;
+        }
+        at += seg_size_[i];
+        ++mapped_segs_;
+    }
+    live_slots_ = slots_within(mapped_bytes());
+    return true;
+#endif
+}
+
 #if defined(STRATA_USE_HIP)
 bool ExpertCache::ensure_blocking_staging(std::size_t bytes, std::string& err) {
     if (bytes <= blocking_staging_bytes_) return true;
@@ -201,8 +505,11 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
         }
     }
 
-    if (DPCT_CHECK_ERROR(base_ = (uint8_t *)sycl::malloc_device(
-                             (size_t)want, dpct::get_in_order_queue())) != 0) {
+    if (seg_req_ > 0) {   // #533: --vram-elastic: physical segments behind one address range (zeroed below)
+        if (!open_segmented(want, err)) return false;
+    } else if (DPCT_CHECK_ERROR(
+                   base_ = (uint8_t *)sycl::malloc_device(
+                       (size_t)want, dpct::get_in_order_queue())) != 0) {
         base_ = nullptr;
         char buf[256];
         std::snprintf(
@@ -233,6 +540,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
 
     residency_.assign((size_t) (n_layers * n_expert), kNotResident);
     slots_ = n_slots;
+    live_slots_ = n_slots;
     n_layers_ = n_layers;
     n_expert_ = n_expert;
     blob_ = blob_bytes;
@@ -274,6 +582,7 @@ bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l
     // one allocation of the summed size, through the uniform path's checks: n "slots" of 1 byte
     if (!open((int64_t) off.back(), n_layers, n_expert, 1, err)) return false;
     slots_ = (int64_t) slot_bytes.size();
+    live_slots_ = slots_;
     blob_ = mx;
     off_ = std::move(off);
 #if defined(STRATA_USE_HIP)
@@ -300,12 +609,15 @@ void ExpertCache::close() {
     blocking_staging_bytes_ = 0;
 #endif
     off_.clear();
-    if (base_ != nullptr) {
+    if (!segs_.empty()) {
+        release_segmented();
+    } else if (base_ != nullptr) {
         sycl::free(base_, dpct::get_in_order_queue());
         base_ = nullptr;
     }
     residency_.clear();
     slots_ = 0;
+    live_slots_ = 0;
     n_layers_ = 0;
     n_expert_ = 0;
     blob_ = 0;
