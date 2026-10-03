@@ -145,6 +145,13 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   with `--resident-experts` started with `--gpus` switches to `--mmap-experts` with a note, and the engine runs that
   pair as `--mmap-experts` with a warning instead of refusing it.
 
+**A mapped arena for small RAM (Linux, opt-in, 0.1.39, PR #640):** `STRATA_ARENA_MMAP=1` maps a native pack's expert
+arena read-only from the pack's `experts.bin` instead of reading it into locked RAM, for a PC whose GPUs hold most
+experts but whose RAM is small (2x 16 GB GPUs with 32 GB of RAM: ~1 GB -> 25 GB available while serving). The first
+start writes `experts.bin` (when the drive has room for it), later starts map it; the pages of the experts a GPU holds
+are handed back to the OS. Run it with `--pcie-frac 0` (the GPUs get no mapped alias). Without the variable nothing
+changes.
+
 **Low-RAM mode without `experts.bin` (engine 0.1.31):** for the native packs (IQ2_XS, IQ3_XXS, IQ3_S, the Coder, Swift,
 Q2_0 packed by `tools/iq_pack.py`; not the canonical Q2_0 pack setup makes for AVX-512 CPUs) the mapped mode no longer
 needs the pack's `experts.bin`: when the pack has none, the engine
@@ -208,7 +215,9 @@ card gains depends on its PCIe link (the experts stream over it), so they are st
 More VRAM matters more than a faster GPU: every extra GB holds ~700 more experts, and every expert on the GPU is one the
 CPU does not have to compute. A 3090's 24 GB takes most of the CPU work away. (Since 0.1.14 the expert profile ranks
 all 24,576 experts; before, the cache stopped at 8,000, about 10-14 GB. `tools/make_profile.py` builds a profile from
-your own prompts: run the engine once with `--dump-routing trace.bin`, see the tool's help.)
+your own prompts: run the engine once with `--dump-routing trace.bin`, see the tool's help. The shipped profile already
+ranks every pair, so a trace only changes the order with `--reorder` (0.1.39, #587): your trace's pairs first, then the
+base's, then the rest.)
 
 ## Which model?
 
