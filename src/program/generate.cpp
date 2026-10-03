@@ -1365,9 +1365,10 @@ int main(int argc, char** argv) {
                      o.prompt_cache == 0 ? "--prompt-cache 0" : "--conversation-cache-slots 0");
     // parking with --layer-split saves every stage (SavedConversation::stage_images)
     // Layer split (multi-GPU): the later stages run layers [K_i, K_i+1) on their own GPUs (--split-device, default
-    // the next visible ones); "auto" places the K from each GPU's free VRAM once the weights are in (below).  Across
-    // GPUs, not yet: KV streaming, images, control vectors, the helper caches (--expert-cache-remote), and lending
-    // cache slots to the prompt path (each stage's prompt path has its own buffers).
+    // the next visible ones); "auto" places the K from each GPU's free VRAM once the weights are in (below).  KV
+    // streaming and images (the server's GPU encoder) run across a split, also with parking and --batch.  Across
+    // GPUs, not yet: control vectors, the helper caches (--expert-cache-remote), and lending cache slots to the
+    // prompt path (each stage's prompt path has its own buffers).
     // --pcie-frac given: that one share is every stage's (the stages' own link probes are skipped), so a split over
     // a fast and a slow link cannot set the two apart from the command line (#485)
     const bool pcie_given = o.pcie_frac >= 0.0;
