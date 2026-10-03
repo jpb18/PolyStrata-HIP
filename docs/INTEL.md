@@ -28,7 +28,7 @@ PCIe 3.0 x8 slot (the card trains at Gen3 x8 there; it can do Gen5 x16).
 
 Decode speed with speculative decoding depends on the text: code drafts well, prose less so (see "Speed depends
 on the text"). The SYCL numbers are greedy runs of the engine (as in "How to run it by hand" below, 256 new
-tokens) on engine 0.1.31-sycl (2026-10-01; 0.1.32-0.1.35-sycl reproduce them exactly);
+tokens) on engine 0.1.31-sycl (2026-10-01; 0.1.32-0.1.38-sycl reproduce them exactly);
 "Decode round 2" below lists what each change bought.
 
 ## Setup
@@ -558,6 +558,19 @@ admitted in profile order first (the same placement), the reads go in file order
 page-locked batches of 64, and a batch's copies run while the next one is read. Cold page cache: 76.2 s -> 18.8 s
 (0.33 -> 1.34 GB/s); a whole Coder start from the engine's launch to its first token 82 s -> 26 s, the IQ2_XS
 120 s -> 41 s (its 8.2 GB host mirror is ~9 s of the rest). Output identical. `STRATA_FILL_SERIAL=1` is the old fill.
+
+**The 0.1.38 merge (2026-10-03).** Upstream 0.1.35 -> 0.1.38 (83 commits) merged the seven PRs the port had taken
+early, so their header forks in `sycl/include` are gone; the merge base for the 3-way merge was the port's own "main +
+PRs" migration. New in the port with it: the DeltaNet output norm without its dead FP32 store, two prompt-path
+fixes (the fused layout's buffers, the streamed walk's resident lookup), `STRATA_GR_DOWN_MAX4=1` (opt-in; neutral on
+the B70: 2,184-token prompt 793 vs 788 tok/s, decode 76.2 vs 76.3). Stubbed in the port: `--peer-device` (a second
+GPU as an expert-cache tier: upstream's code is CUDA calls; `open` refuses with a message) and the fused int8 prompt
+kernels (#136, part of the MMQ library the port does not build). Off on SYCL: the sm_90 thread-block-cluster greedy
+sampler and QSA top-k (no SYCL counterpart; the callers take the plain kernels). `STRATA_GDN_KEYHEAD=1` stays opt-in
+(still 8% slower here: 727 vs 788 tok/s). `qsa_prompt_attn_parity` now also tests upstream's Q4_0 tensor-core mode
+(#452), which the port does not have: those cases report "refused" (the int8 and fp16 XMX cases pass); a `--kv
+q4_0` prompt takes the older kernel, as before. Outputs identical (Coder, IQ2_XS, 40K); 128K int8 KV streaming
+892 / 66.8 tok/s.
 
 **0.1.35 and seven open upstream PRs (2026-10-02).** Upstream main 0.1.33 -> 0.1.35 merged as before, then seven open
 PRs ported into `sycl/` ahead of upstream (one dpct run of main + all of them, 3-way merged into only the files they

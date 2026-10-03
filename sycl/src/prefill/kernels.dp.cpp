@@ -774,7 +774,7 @@ __dpct_inline__ void gdn_rec_cols_pipe_kernel(float *__restrict__ state,
 // one of a token orders every read of rkv before the next token's writes, the next token's first one every read of ro
 // before the writes after it.  64 blocks instead of 192.  Per value head and column the same arithmetic in the same
 // order: the same bits (src/prefill/gdn_rec_parity.cu checks them and times the variants: 1.41x on a 4080 Super).
-// sm_80+ with 32 to 47 or 64 and more SMs (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
+// sm_80+ cards that hold its 64 blocks at once (gdn_keyhead_ok); STRATA_GDN_KEYHEAD=0: gdn_rec_cols_pipe_kernel.
 #if 1   // SYCL port: plain copies (no cp.async)
 #define STRATA_GDN_CP_ASYNC 0   // Turing builds: plain copies (never launched there, see gdn_keyhead_ok)
 #else

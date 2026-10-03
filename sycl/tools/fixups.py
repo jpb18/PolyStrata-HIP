@@ -111,6 +111,20 @@ def gdn_plain_copies(s):
     return s.replace("*reinterpret_cast<float4*>(smem) = *reinterpret_cast<const float4*>(gmem);",
                      "*reinterpret_cast<sycl::float4*>(smem) = *reinterpret_cast<const sycl::float4*>(gmem);")
 edit("src/prefill/kernels.dp.cpp", gdn_plain_copies)
+# 0.1.38: upstream's sm_90 thread-block-cluster greedy sampler (cudaLaunchKernelEx with a cluster dimension) has no
+# SYCL counterpart: the HIP branch's "not available" answer, so the caller takes the plain greedy kernel
+edit("src/kernels/cuda/sampler.dp.cpp", lambda s: s.replace(
+    "                           int *out, void *stream) try {\n#if defined(__HIPCC__)\n",
+    "                           int *out, void *stream) try {\n#if 1   // SYCL port: no thread-block clusters (sm_90): the caller takes the plain greedy kernel\n"))
+edit("src/kernels/cuda/qsa_select.dp.cpp", lambda s: s.replace(
+    "                            void *stream) try {\n#if defined(__HIPCC__)\n",
+    "                            void *stream) try {\n#if 1   // SYCL port: no thread-block clusters (sm_90): the caller takes the plain top-k\n"))
+# 0.1.38: dpct could not deduce fused_gr's templated kernel names (the staged read and the MAX_T down kernels)
+def gr_kernel_names(s):
+    pat = re.compile(r",\s*dpct_placeholder /\*Fix the type mannually\*/>>\((.{0,900}?)\b(gr_down_staged_kernel|gr_down_multi_kernel<(\d+)>)\(", re.S)
+    return pat.sub(lambda m: (">>(" if m.group(2) == "gr_down_staged_kernel" else f", dpct_kernel_scalar<{m.group(3)}>>>(")
+                   + m.group(1) + m.group(2) + "(", s)
+edit("src/kernels/cuda/fused_gr.dp.cpp", gr_kernel_names)
 edit("src/kernels/cuda/elementwise.dp.cpp", doorbell)
 edit("src/kernels/cuda/verify_kernels.dp.cpp", doorbell)
 

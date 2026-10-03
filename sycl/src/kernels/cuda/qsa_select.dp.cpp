@@ -925,6 +925,362 @@ auto &qs = *sycl::ext::oneapi::group_local_memory_for_overwrite<
         }
     }
 }
+
+#if !defined(__HIPCC__)
+// ---- the decode top-k on a thread-block cluster (sm_90+; S19).  One CTA per query (block_topk_reg_kernel, or
+// block_topk_kernel above 33,792 blocks: a --max-context over ~135K) makes four radix passes and two scans over up to
+// 65,538 blocks on ONE SM while the rest of the GPU idles - a decode window has 1-5 queries.  Here a cluster of CL_N
+// CTAs shares a query: CTA r holds the keys of blocks [r * per, (r + 1) * per) in shared memory, builds the digit
+// histogram of its keys, and PUSHES it into slot r of every CTA's `hin` (distributed shared memory); after one cluster
+// barrier each CTA sums the CL_N slots itself, so all of them take the same digit.  The emit pass needs each CTA's
+// cells above / at the threshold: pushed the same way, then each CTA offsets its own by the ranks before it.
+// RTX 5070, per call at capacity = context (decode_cluster_parity --bench): 21.9 -> 15.6 us at 32K, 58 -> 18 at 128K,
+// 200 -> 22 at 262K (the one-CTA kernels' digit search was serial, too: one thread over 256 bins per pass).
+//
+// IDENTICAL IDS, by construction rather than by luck: the threshold thr (the width-th largest key, cells counted with
+// their weights) and `above` (cells with a larger key) are pure functions of the multiset of (key, weight) - integer
+// histograms, summed in any order - and the digit rule is block_topk_kernel's, written as a scan (the largest digit d
+// whose cells at or above it reach `need`; 0 when none). The cells emitted are then fixed: every cell of a block with
+// key > thr, and the first eq_budget = width - above cells at thr in ascending order (a block at thr may be cut),
+// written in ascending cell order. Position of a thread's first cell = (cells above thr before it) + min(cells at thr
+// before it, eq_budget): the telescoped sum of the reference's per-thread clamp. NaN keys are 0 (order_key) as there.
+//
+// Barriers: barrier.cluster arrive / wait (each CTA's threads all take part; it also orders the CTA's own shared
+// memory, so it doubles as __syncthreads). Phase 0 is a relaxed arrive at entry, waited before the first remote store
+// (a CTA's shared memory exists once it runs). Pushes go out before the arrive that releases them, and nothing reads
+// another CTA's memory after the last wait - so a CTA may exit without a closing barrier (a wait counts the threads
+// that have not exited). `hin` alternates by pass parity: CTA x reads slot buffer p&1 in pass p before arriving at
+// pass p+1's barrier, and nobody writes buffer p&1 again (pass p+2) before waiting on that barrier.
+constexpr int CL_N = 8;        // CTAs per query (the portable cluster size)
+constexpr int CL_T = 1024;     // threads per CTA
+constexpr int CL_MAXQ = 16;    // larger calls (prefill sub-batches) fill the GPU with one CTA per query already
+#if defined(DPCT_COMPATIBILITY_TEMP) && DPCT_COMPATIBILITY_TEMP >= 900
+#define STRATA_SEL_CLUSTER 1
+#else
+#define STRATA_SEL_CLUSTER 0   // an older target's code is a trap; qsa_block_topk_cluster never launches it there
+#endif
+
+#if STRATA_SEL_CLUSTER
+__dpct_inline__ void cl_arrive_relaxed() {
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory");
+}
+/*
+DPCT1053: Migration of device assembly code is not supported.
+*/
+__dpct_inline__ void cl_arrive() {
+    asm volatile("barrier.cluster.arrive.release.aligned;\n" :: : "memory");
+}
+/*
+DPCT1053: Migration of device assembly code is not supported.
+*/
+__dpct_inline__ void cl_wait() {
+    asm volatile("barrier.cluster.wait.acquire.aligned;\n" :: : "memory");
+}
+__dpct_inline__ unsigned cl_rank() {
+    unsigned r;
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r));
+    return r;
+}
+template <typename T>
+__dpct_inline__ T *cl_map(T *p,
+                          unsigned rank) { // p in CTA `rank`'s shared memory
+    uint64_t o;
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("mapa.u64 %0, %1, %2;\n"
+                 : "=l"(o)
+                 : "l"((uint64_t)p), "r"(rank));
+    return reinterpret_cast<T*>(o);
+}
+// exclusive block scan of a 64-bit value over CL_T threads; `total` = the CTA's sum
+__dpct_inline__ unsigned long long cl_excl_scan64(unsigned long long v,
+                                                  unsigned long long *s_warp,
+                                                  unsigned long long &total) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int lane = item_ct1.get_local_id(2) & 31,
+              warp = item_ct1.get_local_id(2) >> 5;
+    unsigned long long x = v;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        /*
+        DPCT1108: '__shfl_up_sync' was migrated with the experimental feature
+        masked sub_group function which may not be supported by all compilers or
+        runtimes. You may need to adjust the code.
+        */
+        const unsigned long long y = dpct::experimental::shift_sub_group_right(
+            0xffffffffu, sycl::ext::oneapi::this_work_item::get_sub_group(), x,
+            o);
+        if (lane >= o) x += y;
+    }
+    if (lane == 31) s_warp[warp] = x;
+    /*
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
+    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
+    performance if there is no access to global memory.
+    */
+    item_ct1.barrier();
+    if (warp == 0) {
+        const unsigned long long w = s_warp[lane];
+        unsigned long long z = w;
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            /*
+            DPCT1108: '__shfl_up_sync' was migrated with the experimental
+            feature masked sub_group function which may not be supported by all
+            compilers or runtimes. You may need to adjust the code.
+            */
+            const unsigned long long y =
+                dpct::experimental::shift_sub_group_right(
+                    0xffffffffu,
+                    sycl::ext::oneapi::this_work_item::get_sub_group(), z, o);
+            if (lane >= o) z += y;
+        }
+        s_warp[lane] = z - w;
+        if (lane == 31) s_warp[32] = z;
+    }
+    /*
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
+    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
+    performance if there is no access to global memory.
+    */
+    item_ct1.barrier();
+    total = s_warp[32];
+    return s_warp[warp] + x - v;
+}
+#endif
+
+// grid (CL_N, nq), cluster (CL_N, 1, 1), CL_T threads, dynamic shared memory: ceil(max_blocks / CL_N) keys
+/*
+DPCT1110: The total declared local variable size in device function
+block_topk_cluster_kernel exceeds 128 bytes and may cause high register
+pressure. Consult with your hardware vendor to find the total register size
+available and adjust the code, or use smaller sub-group size to avoid high
+register pressure.
+*/
+void block_topk_cluster_kernel(const float *__restrict__ scores,
+                               const int32_t *__restrict__ steps,
+                               int64_t max_blocks, int64_t cap,
+                               int32_t *__restrict__ ids, uint8_t *dpct_local) {
+#if STRATA_SEL_CLUSTER
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    auto keys = (uint32_t *)dpct_local; // this CTA's blocks' keys
+    auto &hin =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<int[2][CL_N][256]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<
+                3>()); // the cluster's histograms, slot = the pushing rank
+    auto &hloc =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<int[2][256]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<
+                3>()); // this CTA's histogram
+    auto &cnt = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        unsigned long long[CL_N]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<
+            3>()); // per rank: its cells above thr (low 32 bits) and at it
+                   // (high)
+    auto &s_warp = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        unsigned long long[33]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &s_prefix =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<uint32_t>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &s_above = *sycl::ext::oneapi::group_local_memory_for_overwrite<int>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    const unsigned rank = cl_rank();
+    const int t = item_ct1.get_local_id(2), lane = t & 31, warp = t >> 5;
+    cl_arrive_relaxed();                                // phase 0: this CTA runs
+    const int64_t qi = item_ct1.get_group(1);
+    const int32_t* st = steps + qi * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    int32_t* out = ids + qi * cap;
+    if (n_kv <= width) {                                // the identity, split over the cluster; no remote access
+#pragma unroll
+        for (int64_t j = (int64_t)rank * CL_T + t; j < n_kv;
+             j += (int64_t)CL_N * CL_T) out[j] = (int32_t)j;
+        return;
+    }
+    // the tail block n_bid weighs its cells (0..3); with none it is not a candidate (the reference skips w == 0)
+    const int wtail = (int) (n_kv - n_bid * R);
+    const int64_t nbe = n_bid + (wtail > 0 ? 1 : 0);
+    const int64_t per = (nbe + CL_N - 1) / CL_N;       // <= ceil(max_blocks / CL_N), the keys the host sized
+    const int64_t lo = (int64_t) rank * per < nbe ? (int64_t) rank * per : nbe;
+    const int64_t hi = lo + per < nbe ? lo + per : nbe;
+    const int n = (int) (hi - lo);
+    const int tail_i = (wtail > 0 && n_bid >= lo && n_bid < hi) ? (int) (n_bid - lo) : -1;
+    const float* sc = scores + qi * max_blocks + lo;
+#pragma unroll
+    for (int i = t; i < n; i += CL_T) keys[i] = order_key(sc[i]);
+#pragma unroll
+    for (int i = t; i < 2 * 256; i += CL_T)(&hloc[0][0])[i] = 0;
+    /*
+    DPCT1065: Consider replacing sycl::nd_item::barrier() with
+    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
+    performance if there is no access to global memory.
+    */
+    item_ct1.barrier();
+    uint32_t prefix = 0;
+    int above = 0;                                      // cells strictly above the digits fixed so far
+    for (int pass = 0; pass < 4; ++pass) {
+        const int shift = 24 - 8 * pass;
+        const uint32_t hmask = pass == 0 ? 0u : (0xffffffffu << (shift + 8));
+        int* hl = hloc[pass & 1];
+        // warp-aggregated: the scores share their top bits, so plain atomics would queue on a few bins
+        for (int i0 = 0; i0 < n; i0 += CL_T) {
+            const int i = i0 + t;
+            int bin = -1;
+            if (i < n) {
+                const uint32_t k = keys[i];
+                if ((k & hmask) == prefix) bin = (int) ((k >> shift) & 255);
+            }
+            const unsigned same = dpct::match_any_over_sub_group(
+                sycl::ext::oneapi::this_work_item::get_sub_group(), 0xffffffffu,
+                bin);
+            if (bin >= 0 && lane == dpct::ffs<int>(same) - 1)
+                dpct::atomic_fetch_add<
+                    sycl::access::address_space::generic_space>(
+                    &hl[bin], sycl::popcount(same) * R);
+            if (bin >= 0 && i == tail_i) dpct::atomic_fetch_add<
+                sycl::access::address_space::generic_space>(&hl[bin],
+                                                            wtail - R);
+        }
+        /*
+        DPCT1118: SYCL group functions and algorithms must be encountered in
+        converged control flow. You may need to adjust the code.
+        */
+        /*
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
+        sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
+        better performance if there is no access to global memory.
+        */
+        item_ct1.barrier();
+        if (pass == 0) cl_wait();                       // phase 0 done: every CTA's shared memory is there
+        for (int i = t; i < CL_N * 64; i += CL_T) {     // the histogram into slot `rank` of every CTA, as int4
+            const int dst = i >> 6, c = i & 63;
+            *cl_map(reinterpret_cast<sycl::int4 *>(&hin[pass & 1][rank][0]) + c,
+                    (unsigned)dst) =
+                reinterpret_cast<const sycl::int4 *>(hl)[c];
+        }
+#pragma unroll
+        for (int i = t; i < 256; i += CL_T) hloc[(pass + 1) & 1][i] = 0;
+        cl_arrive();
+        cl_wait();
+        if (warp == 0) {
+            // lane L owns digits 255 - 8L down to 248 - 8L; the digit holding the need-th cell from the top
+            const int need = (int) width - above;
+            int tot[8], part = 0;
+#pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                const int d = 255 - 8 * lane - k;
+                int v = 0;
+#pragma unroll
+                for (int r = 0; r < CL_N; ++r) v += hin[pass & 1][r][d];
+                tot[k] = v;
+                part += v;
+            }
+            int incl = part;
+#pragma unroll
+            for (int o = 1; o < 32; o <<= 1) {
+                /*
+                DPCT1108: '__shfl_up_sync' was migrated with the experimental
+                feature masked sub_group function which may not be supported by
+                all compilers or runtimes. You may need to adjust the code.
+                */
+                const int y = dpct::experimental::shift_sub_group_right(
+                    0xffffffffu,
+                    sycl::ext::oneapi::this_work_item::get_sub_group(), incl,
+                    o);
+                if (lane >= o) incl += y;
+            }
+            const int excl = incl - part;
+            const unsigned hit = sycl::reduce_over_group(
+                sycl::ext::oneapi::this_work_item::get_sub_group(),
+                (0xffffffffu &
+                 (0x1 << sycl::ext::oneapi::this_work_item::get_sub_group()
+                             .get_local_linear_id())) &&
+                        excl < need && incl >= need
+                    ? (0x1 << sycl::ext::oneapi::this_work_item::get_sub_group()
+                                  .get_local_linear_id())
+                    : 0,
+                sycl::ext::oneapi::plus<>());
+            // no hit cannot happen (the cells total n_kv > width); the reference would then take digit 0
+            const int who = hit ? dpct::ffs<int>(hit) - 1 : 31;
+            if (lane == who) {
+                int acc = excl, k = 0;
+#pragma unroll
+                for (; k < 7; ++k) {
+                    if (acc + tot[k] >= need) break;
+                    acc += tot[k];
+                }
+                s_prefix = prefix | ((uint32_t) (255 - 8 * lane - k) << shift);
+                s_above = above + acc;
+            }
+        }
+        /*
+        DPCT1118: SYCL group functions and algorithms must be encountered in
+        converged control flow. You may need to adjust the code.
+        */
+        /*
+        DPCT1065: Consider replacing sycl::nd_item::barrier() with
+        sycl::nd_item::barrier(sycl::access::fence_space::local_space) for
+        better performance if there is no access to global memory.
+        */
+        item_ct1.barrier();
+        prefix = s_prefix;
+        above = s_above;
+    }
+    const uint32_t thr = prefix;
+    const int64_t eq_budget = width - above;           // cells at thr that fit, lowest index first
+    // each thread a contiguous run of the CTA's keys; an odd run length keeps the shared reads conflict-free
+    int seg = (n + CL_T - 1) / CL_T;
+    if ((seg & 1) == 0 && seg > 0) ++seg;
+    const int s0 = t * seg < n ? t * seg : n, s1 = s0 + seg < n ? s0 + seg : n;
+    uint32_t gt = 0, eq = 0;
+    for (int i = s0; i < s1; ++i) {
+        const uint32_t k = keys[i], w = i == tail_i ? (uint32_t) wtail : (uint32_t) R;
+        if (k > thr) gt += w;
+        else if (k == thr) eq += w;
+    }
+    unsigned long long cta;
+    const unsigned long long before =
+        cl_excl_scan64((unsigned long long) gt | ((unsigned long long) eq << 32), s_warp, cta);
+    if (t < CL_N) *cl_map(&cnt[rank], (unsigned) t) = cta;
+    cl_arrive();
+    cl_wait();
+    int64_t gt_off = 0, eq_off = 0;
+#pragma unroll
+    for (unsigned r = 0; r < rank; ++r) {
+        gt_off += (int64_t) (cnt[r] & 0xffffffffu);
+        eq_off += (int64_t) (cnt[r] >> 32);
+    }
+    const int64_t eq_before = eq_off + (int64_t) (before >> 32);
+    int64_t wpos = gt_off + (int64_t) (before & 0xffffffffu) + (eq_before < eq_budget ? eq_before : eq_budget);
+    int64_t eq_left = eq_budget - eq_before;
+    if (eq_left < 0) eq_left = 0;
+    for (int i = s0; i < s1; ++i) {
+        const uint32_t k = keys[i];
+        const int w = i == tail_i ? wtail : R;
+        const int64_t b = lo + i;
+        if (k > thr) {
+#pragma unroll
+            for (int c = 0; c < w; ++c) out[wpos++] = (int32_t)(b * R + c);
+        } else if (k == thr) {
+#pragma unroll
+            for (int c = 0; c < w && eq_left > 0; ++c, --eq_left)
+                out[wpos++] = (int32_t)(b * R + c);
+        }
+    }
+#else
+    (void) scores; (void) steps; (void) max_blocks; (void) cap; (void) ids;
+    /* unreachable on SYCL: the launcher refuses this device */
+#endif
+}
+#endif  // !__HIPCC__
 }  // namespace
 
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
@@ -1173,21 +1529,171 @@ void qsa_block_topk_ref(const float* scores, const int32_t* steps, int64_t nq, i
     */
 }
 
+#if !defined(__HIPCC__)
+// Only Turing has a retained model measurement for this CUDA dispatch. Other CUDA devices keep the capacity rule
+// (the RTX 5070 regression below). Cache the properties per calling thread; layer-split device switches are checked.
+static bool topk_active_turing_device() try {
+    int dev = 0;
+    if (DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) !=
+        0) return false;
+    static thread_local int cached_device = -1;
+    static thread_local bool turing = false;
+    if (dev != cached_device) {
+        dpct::device_info prop{};
+        if (DPCT_CHECK_ERROR(dpct::get_device(dev).get_device_info(prop)) !=
+            0) return false;
+        /*
+        DPCT1005: The SYCL device version is different from CUDA Compute
+        Compatibility. You may need to rewrite this code.
+        */
+        turing = prop.get_major_version() == 7 && prop.get_minor_version() == 5;
+        cached_device = dev;
+    }
+    return turing;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+#endif
+
+bool qsa_block_topk_cluster(const float *scores, const int32_t *steps,
+                            int64_t nq, int64_t max_blocks, int64_t cap,
+                            const QsaShapes &s, int32_t *ids,
+                            void *stream) try {
+#if 1   // SYCL port: no thread-block clusters (sm_90): the caller takes the plain top-k
+    (void) scores; (void) steps; (void) nq; (void) max_blocks; (void) cap; (void) s; (void) ids; (void) stream;
+    return false;
+#else
+    if (nq <= 0) return true;
+    if (s.idx_block != R || cap < qsa_selection_width(kTopkMaxCells, s) || nq > 65535 || max_blocks <= 0) return false;
+    const size_t smem = (size_t) ((max_blocks + CL_N - 1) / CL_N) * sizeof(uint32_t);
+    // Per device (a layer split runs on several): 1 the cluster kernel runs here, 2 it does not. It needs sm_90+ (the
+    // card's, or STRATA_EMULATE_CC's) AND code built for it: a build with only older code JIT-compiles their PTX, whose
+    // copy of this kernel is a trap - the function's PTX version says which. `opt`: the dynamic shared memory opted in.
+    static int ok[64] = {};
+    static size_t opt[64] = {};
+    int dev = 0;
+    /*
+    DPCT1026: The call to cudaGetLastError was removed because this
+    functionality is redundant in SYCL.
+    */
+    if (DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) != 0 || dev < 0 ||
+        dev >= 64) {
+        ; return false;
+    }
+    if (ok[dev] == 0) {
+        int major = 0;
+        dpct::kernel_function_info fa{};
+        const bool code =
+            DPCT_CHECK_ERROR(
+                major = dpct::get_device(dev).get_major_version()) == 0 &&
+            strata::cc_major_of(major) >= 9 &&
+            DPCT_CHECK_ERROR(dpct::get_kernel_function_info(
+                &fa, (const void *)block_topk_cluster_kernel)) == 0 &&
+            fa.ptxVersion >= 90 && fa.binaryVersion >= 90;
+        /*
+        DPCT1026: The call to cudaGetLastError was removed because this
+        functionality is redundant in SYCL.
+        */
+        ok[dev] = code ? 1 : 2;
+    }
+    if (ok[dev] != 1) return false;
+    if (smem > opt[dev]) {   // a larger capacity: opt in, and check that a cluster of CL_N such CTAs can be resident
+        int clusters = 0;
+        cudaLaunchConfig_t q{};
+        cudaLaunchAttribute qa[1];
+        qa[0].id = cudaLaunchAttributeClusterDimension;
+        qa[0].val.clusterDim.x = CL_N;
+        qa[0].val.clusterDim.y = 1;
+        qa[0].val.clusterDim.z = 1;
+        q.gridDim = dpct::dim3(CL_N, 1, 1);
+        q.blockDim = dpct::dim3(CL_T, 1, 1);
+        q.dynamicSmemBytes = smem;
+        q.attrs = qa;
+        q.numAttrs = 1;
+        /*
+        DPCT1027: The call to cudaFuncSetAttribute was replaced with 0
+        because SYCL currently does not support corresponding setting.
+        */
+        if (0 != 0 ||
+            /*
+            DPCT1007: Migration of cudaOccupancyMaxActiveClusters is not
+            supported.
+            */
+            cudaOccupancyMaxActiveClusters(&clusters, block_topk_cluster_kernel,
+                                           &q) != 0 ||
+            clusters < 1) {
+            /*
+            DPCT1026: The call to cudaGetLastError was removed because this
+            functionality is redundant in SYCL.
+            */
+            return false; // this capacity takes the one-CTA kernels; a smaller
+                          // one may still fit
+        }
+        opt[dev] = smem;
+    }
+    cudaLaunchConfig_t cfg{};
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = CL_N;
+    at[0].val.clusterDim.y = 1;
+    at[0].val.clusterDim.z = 1;
+    cfg.gridDim = dpct::dim3(CL_N, (unsigned)nq, 1);
+    cfg.blockDim = dpct::dim3(CL_T, 1, 1);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = strata::q_of(stream);
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    const dpct::err0 e = cudaLaunchKernelEx(
+        &cfg, block_topk_cluster_kernel, scores, steps, max_blocks, cap, ids);
+    /*
+    DPCT1009: SYCL reports errors using exceptions and does not use error
+    codes. Please replace the "get_error_string_dummy(...)" with a real
+    error-handling function.
+    */
+
+    return true;
+#endif
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
+
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                     const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks) {
     // keys in registers when every query's blocks fit (contexts up to ~135K cells); the same ids. STRATA_TOPK_OLD=1:
     // the kernel that reads them from memory on every pass
     static const bool old = std::getenv("STRATA_TOPK_OLD") != nullptr;
     if (nq <= 0) return;
+#if !defined(__HIPCC__)
+    // sm_90+: a cluster of CL_N CTAs per query for the calls of a few queries (decode windows); the same ids.
+    // STRATA_QSA_CLUSTER=0: the one-CTA kernels below
+    static const bool cluster = [] {
+        const char* v = std::getenv("STRATA_QSA_CLUSTER");
+        return !v || std::atoi(v) != 0;
+    }();
+    if (cluster && !old && nq <= CL_MAXQ && qsa_block_topk_cluster(scores, steps, nq, max_blocks, cap, s, ids, stream))
+        return;
+#endif
     // the blocks a query can have: the call's active count when the caller knows it (the prompt path), else the capacity.
     // Decode (no count) keeps the capacity rule and the original register width: nothing changes there.
 #if defined(__HIPCC__)
     const bool counted = active_blocks > 0;
 #else
-    // CUDA keeps 0.1.32's capacity rule: #337's dispatch was measured on RDNA4 only, and on the RTX 5070 the 64K
-    // prompts read 1-3% slower with it
-    const bool counted = false;
-    (void) active_blocks;
+    // Turing: --max-context 262144 makes the stride 65538, even while a 131K prompt's active blocks fit in
+    // TK_T * TK_PER registers. Use the prefill bound on sm_75, keeping max_blocks as the score-row stride.
+    // Other CUDA devices keep 0.1.32's capacity rule: #337 was measured on RDNA4, and RTX 5070 64K prompts were
+    // 1-3% slower. Decode/captured graphs omit the bound and never query the device here.
+    static const bool capacity_guard = std::getenv("STRATA_TOPK_CAPACITY_GUARD") != nullptr;
+    // STRATA_TOPK_ACTIVE_ANY=1 (tests): the Turing dispatch on any CUDA card, so qsa_topk_active_parity checks it
+    // on whatever card runs the tests (the kernels are the same on every architecture)
+    static const bool any_card = [] { const char* v = std::getenv("STRATA_TOPK_ACTIVE_ANY"); return v && v[0] == '1'; }();
+    const bool counted = !capacity_guard && active_blocks > 0 && active_blocks <= max_blocks &&
+                         (any_card || topk_active_turing_device());
 #endif
     const int64_t reach = counted && active_blocks < max_blocks ? active_blocks : max_blocks;
     const int64_t fit = (int64_t) TK_T * (counted ? TK_PER_MAX : TK_PER);

@@ -10,7 +10,8 @@
 // produces a valid token, so only a comparison at the distribution level can tell them apart; the parity test
 // does that against an independently computed distribution.
 //
-// `sampler_greedy_kernel` is the plain argmax, one block per token over the vocabulary.  The sampled chain has
+// `sampler_greedy_kernel` is the plain argmax, one block per token over the vocabulary (on sm_90+ without penalties,
+// `sampler_greedy_cluster_kernel`: the same token from a cluster of 8 CTAs per row).  The sampled chain has
 // three implementations that pick the same token, bit for bit:
 //   - the SPLIT top_k (default): `sampler_split_part_kernel` cuts each row into 4,096-logit blocks over the whole
 //     GPU, each keeps its own top_k, and `sampler_split_merge_kernel` merges those lists and runs the tail;
@@ -24,6 +25,7 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/sampler.hpp"
 #include "strata/core/coupled_draft.hpp"
+#include "strata/core/emulate.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -221,6 +223,175 @@ sampler_greedy_kernel(const float *__restrict__ logits, int n_vocab,
         if (lane == 0) out[t] = (wi < n_vocab) ? wi : 0;
     }
 }
+
+#if !defined(__HIPCC__)
+/// **THE SAME ARGMAX ON A THREAD-BLOCK CLUSTER (sm_90+, S19), FOR THE CALLS WITHOUT PENALTIES.**  One block per
+/// token reads its 1 MB row (248,320 logits) on one SM with one load in flight per thread: latency-bound, 40 us per
+/// call on an RTX 5070, for every verify window and every draft step.  Here a cluster of `kAmCtas` CTAs shares the
+/// row, each thread keeps four loads in flight, and the CTAs' results meet in CTA 0's shared memory (distributed
+/// shared memory): 6 us (decode_cluster_parity --bench).
+///
+/// The answer is a function of the row alone, so it is the one-block kernel's bit for bit: the LOWEST index whose value
+/// is the largest non-NaN value above -inf (each thread walks its elements in ascending order with a strict `>`, and
+/// every merge takes the larger value or, on equality, the smaller index - an order-free rule), and 0 when there is
+/// none (all -inf / NaN), as there.  NaN never wins a `>`.
+///
+/// Barriers: a relaxed cluster arrive at entry, waited before the remote store (CTA 0 must be running); each CTA's
+/// result goes to slot `rank` of CTA 0, released by the next arrive; CTAs 1.. then exit (a cluster wait counts the
+/// threads that have not exited) and CTA 0 waits, reads its own slots, and writes the token.
+constexpr int kAmCtas = 8;      // CTAs per token (the portable cluster size)
+constexpr int kAmThreads = 1024;
+#if defined(DPCT_COMPATIBILITY_TEMP) && DPCT_COMPATIBILITY_TEMP >= 900
+#define STRATA_AM_CLUSTER 1
+#else
+#define STRATA_AM_CLUSTER 0     // older targets: a trap, never launched (sample_greedy_cluster checks)
+#endif
+#if STRATA_AM_CLUSTER
+__dpct_inline__ void am_take(float s, int v, float &bv, int &best) {
+    if (s > bv) { bv = s; best = v; }
+}
+__dpct_inline__ void am_merge(float ov, int oi, float &bv, int &best) {
+    if (ov > bv || (ov == bv && oi < best)) { bv = ov; best = oi; }
+}
+#endif
+// grid (kAmCtas, n_tokens), cluster (kAmCtas, 1, 1), kAmThreads threads
+void sampler_greedy_cluster_kernel(const float* __restrict__ logits,
+                                                                            int n_vocab, int* __restrict__ out) {
+#if STRATA_AM_CLUSTER
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+auto &sv = *sycl::ext::oneapi::group_local_memory_for_overwrite<float[32]>(
+    sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &si = *sycl::ext::oneapi::group_local_memory_for_overwrite<int[32]>(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    auto &cv =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[kAmCtas]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<
+                3>()); // on CTA 0: each CTA's result
+    auto &ci =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<int[kAmCtas]>(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+    unsigned rank;
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(rank));
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory");
+    const float *l = logits + (size_t)item_ct1.get_group(1) * n_vocab;
+    float bv = sycl::bit_cast<float, int>(
+        0xff800000); // -inf; `n_vocab` is "no candidate", as in
+                     // sampler_greedy_kernel
+    int best = n_vocab;
+    constexpr int S = kAmCtas * kAmThreads;
+    int v = (int)rank * kAmThreads + (int)item_ct1.get_local_id(2);
+    for (; v + 3 * S < n_vocab; v += 4 * S) {   // four independent loads, then taken in ascending order
+        const float x0 = l[v], x1 = l[v + S], x2 = l[v + 2 * S], x3 = l[v + 3 * S];
+        am_take(x0, v, bv, best);
+        am_take(x1, v + S, bv, best);
+        am_take(x2, v + 2 * S, bv, best);
+        am_take(x3, v + 3 * S, bv, best);
+    }
+#pragma unroll
+    for (; v < n_vocab; v += S) am_take(l[v], v, bv, best);
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        /*
+        DPCT1108: '__shfl_down_sync' was migrated with the experimental
+        feature masked sub_group function which may not be supported by all
+        compilers or runtimes. You may need to adjust the code.
+        */
+        am_merge(
+            dpct::experimental::shift_sub_group_left(
+                0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(),
+                bv, off),
+            dpct::experimental::shift_sub_group_left(
+                0xFFFFFFFFu, sycl::ext::oneapi::this_work_item::get_sub_group(),
+                best, off),
+            bv, best);
+    const int warp = (int)(item_ct1.get_local_id(2) >> 5),
+              lane = (int)(item_ct1.get_local_id(2) & 31);
+    if (lane == 0) { sv[warp] = bv; si[warp] = best; }
+    item_ct1.barrier(sycl::access::fence_space::local_space);
+    if (warp == 0) {
+        bv = sv[lane];
+        best = si[lane];
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            /*
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
+            feature masked sub_group function which may not be supported by all
+            compilers or runtimes. You may need to adjust the code.
+            */
+            am_merge(dpct::experimental::shift_sub_group_left(
+                         0xFFFFFFFFu,
+                         sycl::ext::oneapi::this_work_item::get_sub_group(), bv,
+                         off),
+                     dpct::experimental::shift_sub_group_left(
+                         0xFFFFFFFFu,
+                         sycl::ext::oneapi::this_work_item::get_sub_group(),
+                         best, off),
+                     bv, best);
+    }
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::
+                     : "memory"); // CTA 0 runs
+    if (item_ct1.get_local_id(2) == 0) {
+        uint64_t a;
+        /*
+        DPCT1053: Migration of device assembly code is not supported.
+        */
+        asm volatile("mapa.u64 %0, %1, %2;\n"
+                     : "=l"(a)
+                     : "l"((uint64_t)&cv[rank]), "r"(0u));
+        *reinterpret_cast<float*>(a) = bv;
+        /*
+        DPCT1053: Migration of device assembly code is not supported.
+        */
+        asm volatile("mapa.u64 %0, %1, %2;\n"
+                     : "=l"(a)
+                     : "l"((uint64_t)&ci[rank]), "r"(0u));
+        *reinterpret_cast<int*>(a) = best;
+    }
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
+    if (rank != 0) return;
+    /*
+    DPCT1053: Migration of device assembly code is not supported.
+    */
+    asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+    if (warp == 0) {
+        bv = lane < kAmCtas ? cv[lane] : sycl::bit_cast<float, int>(0xff800000);
+        best = lane < kAmCtas ? ci[lane] : n_vocab;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            /*
+            DPCT1108: '__shfl_down_sync' was migrated with the experimental
+            feature masked sub_group function which may not be supported by all
+            compilers or runtimes. You may need to adjust the code.
+            */
+            am_merge(dpct::experimental::shift_sub_group_left(
+                         0xFFFFFFFFu,
+                         sycl::ext::oneapi::this_work_item::get_sub_group(), bv,
+                         off),
+                     dpct::experimental::shift_sub_group_left(
+                         0xFFFFFFFFu,
+                         sycl::ext::oneapi::this_work_item::get_sub_group(),
+                         best, off),
+                     bv, best);
+        if (lane == 0) out[item_ct1.get_group(1)] = (best < n_vocab) ? best : 0;
+    }
+#else
+    (void) logits; (void) n_vocab; (void) out;
+    __trap();
+#endif
+}
+#endif  // !__HIPCC__
 
 /// **THE SAMPLED PATH, ONE BLOCK PER TOKEN.**  The kernel below replaced a version that ran the whole chain
 /// in ONE THREAD per token (`<<<ceil(T/64), 64>>>`, so a 4-token window fielded four threads): `top_k` alone
@@ -1129,9 +1300,9 @@ bool stream_capturing(void *stream) try {
     if (DPCT_CHECK_ERROR(
             (st = strata::q_of(stream)->ext_oneapi_get_state())) != 0) {
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         (void)0;
         return true;
@@ -1166,9 +1337,9 @@ sycl::int2 *split_scratch(void *stream, size_t entries) {
     int device = 0;
     if (DPCT_CHECK_ERROR(device = dpct::get_current_device_id()) != 0) {
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         (void)0;
         return nullptr;
@@ -1190,17 +1361,17 @@ sycl::int2 *split_scratch(void *stream, size_t entries) {
     if (DPCT_CHECK_ERROR(ptr = sycl::malloc_device<sycl::int2>(
                              want, dpct::get_in_order_queue())) != 0) {
         /*
-        DPCT1010: SYCL uses exceptions to report errors and does not use the
-        error codes. The cudaGetLastError function call was replaced with 0. You
-        need to rewrite this code.
+        DPCT1010: SYCL uses exceptions to report errors and does not use
+        the error codes. The cudaGetLastError function call was replaced with 0.
+        You need to rewrite this code.
         */
         (void)0;
         want = entries;
         if (DPCT_CHECK_ERROR(ptr = sycl::malloc_device<sycl::int2>(
                                  want, dpct::get_in_order_queue())) != 0) {
             /*
-            DPCT1010: SYCL uses exceptions to report errors and does not use
-            the error codes. The cudaGetLastError function call was replaced
+            DPCT1010: SYCL uses exceptions to report errors and does not
+            use the error codes. The cudaGetLastError function call was replaced
             with 0. You need to rewrite this code.
             */
             (void)0;
@@ -1215,6 +1386,76 @@ sycl::int2 *split_scratch(void *stream, size_t entries) {
 }
 
 }  // namespace
+
+bool sample_greedy_cluster(const float *logits, int n_tokens, int n_vocab,
+                           int *out, void *stream) try {
+#if 1   // SYCL port: no thread-block clusters (sm_90): the caller takes the plain greedy kernel
+    (void) logits; (void) n_tokens; (void) n_vocab; (void) out; (void) stream;
+    return false;
+#else
+    if (n_tokens <= 0 || n_vocab <= 0) return true;
+    if (n_tokens > 65535) return false;
+    // Per device (a layer split runs on several): 1 the cluster kernel runs here, 2 it does not - sm_90+ (the card's,
+    // or STRATA_EMULATE_CC's), code built for it (an older build's PTX holds a trap: the PTX version says which), and
+    // room for one cluster of kAmCtas CTAs.
+    static int ok[64] = {};
+    int dev = 0;
+    /*
+    DPCT1026: The call to cudaGetLastError was removed because this
+    functionality is redundant in SYCL.
+    */
+    if (DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) != 0 || dev < 0 ||
+        dev >= 64) {
+        ; return false;
+    }
+    cudaLaunchConfig_t cfg{};
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = kAmCtas;
+    at[0].val.clusterDim.y = 1;
+    at[0].val.clusterDim.z = 1;
+    cfg.gridDim = dpct::dim3(kAmCtas, 1, 1);
+    cfg.blockDim = dpct::dim3(kAmThreads, 1, 1);
+    cfg.dynamicSmemBytes = 0;
+    cfg.stream = strata::q_of(stream);
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    if (ok[dev] == 0) {
+        int major = 0, clusters = 0;
+        dpct::kernel_function_info fa{};
+        const bool runs =
+            DPCT_CHECK_ERROR(
+                major = dpct::get_device(dev).get_major_version()) == 0 &&
+            strata::cc_major_of(major) >= 9 &&
+            DPCT_CHECK_ERROR(dpct::get_kernel_function_info(
+                &fa, (const void *)sampler_greedy_cluster_kernel)) == 0 &&
+            fa.ptxVersion >= 90 && fa.binaryVersion >= 90 &&
+            /*
+            DPCT1007: Migration of cudaOccupancyMaxActiveClusters is not
+            supported.
+            */
+            cudaOccupancyMaxActiveClusters(
+                &clusters, sampler_greedy_cluster_kernel, &cfg) == 0 &&
+            clusters >= 1;
+        /*
+        DPCT1026: The call to cudaGetLastError was removed because this
+        functionality is redundant in SYCL.
+        */
+        ok[dev] = runs ? 1 : 2;
+    }
+    if (ok[dev] != 1) return false;
+    cfg.gridDim = dpct::dim3(kAmCtas, (unsigned)n_tokens, 1);
+    const dpct::err0 e = cudaLaunchKernelEx(&cfg, sampler_greedy_cluster_kernel,
+                                            logits, n_vocab, out);
+
+    return true;
+#endif
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
 
 void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* history, int history_len,
                    const SamplerParams& p, int* out, void* stream) {
@@ -1235,13 +1476,21 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
                   sizeof(unsigned) // the penalty bitmap
             : 0;
     if (p.greedy || p.temperature <= 0.0f) {
+        // Without penalties (shmem == 0: no window) on sm_90+, a cluster of CTAs per token - the same token; see
+        // `sampler_greedy_cluster_kernel`.  STRATA_ARGMAX_MULTI=0: always the one-block kernel.
+        static const bool multi = [] {
+            const char* v = std::getenv("STRATA_ARGMAX_MULTI");
+            return !v || std::atoi(v) != 0;
+        }();
         // One block per token, 1,024 threads over the vocabulary.  See `sampler_greedy_kernel`.
         const int gthreads = 1024;
-        /*
-        DPCT1049: The work-group size passed to the SYCL kernel may exceed
-        the limit. To get the device limit, query
-        info::device::max_work_group_size. Adjust the work-group size if needed.
-        */
+        if (!(multi && shmem == 0 && sample_greedy_cluster(logits, n_tokens, n_vocab, out, stream)))
+            /*
+            DPCT1049: The work-group size passed to the SYCL kernel may
+            exceed the limit. To get the device limit, query
+            info::device::max_work_group_size. Adjust the work-group size if
+            needed.
+            */
         {
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};

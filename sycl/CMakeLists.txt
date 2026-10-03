@@ -10,7 +10,7 @@
 #
 # Device code is JIT-compiled from SPIR-V unless STRATA_SYCL_AOT names a device (bmg-g31 for the Arc Pro B70).
 cmake_minimum_required(VERSION 3.24)
-project(strata_sycl VERSION 0.1.35 LANGUAGES C CXX)   # the upstream engine version this port tracks
+project(strata_sycl VERSION 0.1.38 LANGUAGES C CXX)   # the upstream engine version this port tracks
 set(STRATA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -156,14 +156,16 @@ target_link_libraries(strata_kernels PUBLIC strata_core)
 strata_resolve(_engine src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
                        src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp
                        src/core/mtp.cpp src/core/conversation_snapshot.cpp src/core/conversation_state.cpp
-                       src/core/conversation_memory.cpp)   # 0.1.31: the conversation snapshots (#216)
+                       src/core/conversation_memory.cpp   # 0.1.31: the conversation snapshots (#216)
+                       src/core/peer_experts.cpp)         # 0.1.36+: --peer-device (a stub in the port: no second GPU tier yet)
 add_library(strata_engine STATIC ${_engine} ${CMAKE_CURRENT_SOURCE_DIR}/src/core/gguf_expert_source.cpp)
 target_include_directories(strata_engine PRIVATE ${STRATA_ROOT}/src/core)   # conversation_checked.hpp (#include "...")
 target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu)
 
 # cuBLAS -> oneMKL through dpct::blas (needs the MKL SYCL BLAS domain)
 strata_resolve(_prefill src/prefill/gemm.cu src/prefill/kernels.cu src/prefill/prefill.cpp)
-add_library(strata_prefill STATIC ${_prefill})
+add_library(strata_prefill STATIC ${_prefill}
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/moe_fused_stub.cpp)   # upstream's fused int8 kernels: not built here
 target_compile_options(strata_prefill PUBLIC -qmkl=sequential)
 target_link_options(strata_prefill PUBLIC -qmkl=sequential)
 target_link_libraries(strata_prefill PUBLIC strata_engine)

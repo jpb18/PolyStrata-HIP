@@ -465,6 +465,47 @@ __dpct_inline__ void copy_rows_from_mapped_kernel(
             d[i] = const_cast<const sycl::float4 *>(sr)[i];
     }
 }
+namespace {
+__dpct_inline__ void scatter_rows_kernel(const sycl::float4 *__restrict__ src,
+                                         sycl::float4 *dst,
+                                         const int32_t *__restrict__ rows,
+                                         int64_t w4) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    const int64_t r = item_ct1.get_group(2);
+    const sycl::float4 *s = src + r * w4;
+    sycl::float4 *d = dst + (int64_t)rows[r] * w4;
+#pragma unroll
+    for (int64_t i = item_ct1.get_local_id(2); i < w4;
+         i += item_ct1.get_local_range(2)) d[i] = s[i];
+}
+}  // namespace
+void scatter_rows_f32(const float* src, float* dst, const int32_t* rows, int64_t n, int64_t width, void* stream) {
+    if (n <= 0) return;
+    if ((width & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
+        std::fprintf(stderr, "scatter_rows_f32: width must be a multiple of 4 and both pointers 16-byte aligned\n");
+        std::exit(1);
+    }
+    {
+        auto exp_props = sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::use_root_sync};
+
+        strata::q_of(stream)
+            ->submit([&](sycl::handler &cgh) {
+                auto width_ct3 = width / 4;
+
+                cgh.parallel_for<
+                    dpct_kernel_name<class scatter_rows_kernel_7d83a1>>(
+                    sycl::nd_range<3>(sycl::range(1, 1, (unsigned)n) *
+                                          sycl::range(1, 1, 128),
+                                      sycl::range(1, 1, 128)),
+                    exp_props, [=](sycl::nd_item<3> item_ct1) {
+                        scatter_rows_kernel((const sycl::float4 *)src,
+                                            (sycl::float4 *)dst, rows,
+                                            width_ct3);
+                    });
+            });
+    }
+}
 void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t width, const int32_t* hit_rows,
                            const int32_t* count, void* stream) {
     if (rows <= 0) return;
