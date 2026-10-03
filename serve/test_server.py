@@ -499,6 +499,36 @@ class ClientShapes(unittest.TestCase):
                 self.assertEqual(status, 400, b)
                 self.assertIn("messages must be a list of objects", b["error"]["message"])
 
+    def test_malformed_tools_are_a_400(self):
+        # #592: a "tools" value that is not a list of named tool objects is a 400 naming the field, on both APIs,
+        # not a dropped connection (an AttributeError/TypeError in the request thread)
+        msgs = [{"role": "user", "content": "hi"}]
+        bad = ("auto", ["get_weather"], [{"description": "no name"}], {"name": "x"},
+               [{"type": "function", "function": "get_weather"}], [{"type": "function", "function": {"name": ""}}])
+        for path in ("/v1/chat/completions", "/v1/messages"):
+            for tools in bad:
+                with self.subTest(path=path, tools=tools):
+                    status, b = self.post(path, {"model": "x", "max_tokens": 8, "messages": msgs, "tools": tools})
+                    self.assertEqual(status, 400, b)
+                    self.assertIn("tools", b["error"]["message"])
+        status, b = self.post("/v1/chat/completions", {"model": "x", "max_tokens": 8, "messages": msgs})
+        self.assertEqual(status, 200, b)                            # the server goes on
+
+    def test_well_formed_tools_still_work(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        fn = {"name": "get_weather", "description": "the weather", "parameters": {"type": "object", "properties": {}}}
+        for path, tools in (("/v1/chat/completions", [{"type": "function", "function": fn}]),
+                            ("/v1/chat/completions", [fn]),                 # the bare shape some clients send
+                            ("/v1/chat/completions", json.dumps([{"type": "function", "function": fn}])),
+                            ("/v1/chat/completions", []), ("/v1/chat/completions", None),
+                            ("/v1/messages", [{"name": "get_weather", "input_schema": {"type": "object"}}]),
+                            ("/v1/messages", [])):
+            with self.subTest(path=path, tools=tools):
+                status, b = self.post(path, {"model": "x", "max_tokens": 8, "messages": msgs, "tools": tools})
+                self.assertEqual(status, 200, b)
+                if tools:
+                    self.assertIn("get_weather", self.prompt_text())
+
     def test_vision_temp_image_removed_when_the_pipe_fails(self):
         # #352: the temporary image goes even when the encoder's pipe raises
         from serve.server import Vision
