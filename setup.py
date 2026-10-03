@@ -297,6 +297,70 @@ def page_file_gb():
     return max(0.0, (m.ullTotalPageFile - m.ullTotalPhys) / 2**30)
 
 
+def cpu_cores():
+    """#642: (performance cores, efficiency cores) of a hybrid CPU (Intel 12th gen+, AMD Zen 5 + Zen 5c), counted
+    as the engine's pool counts them (detect_cpu_topology: physical cores, by Windows' EfficiencyClass or Linux's
+    cpu_capacity); None on a CPU whose cores are all alike, or when the OS does not say."""
+    classes = []                                       # one entry per physical core: its efficiency/capacity class
+    try:
+        if WIN:
+            k32 = ctypes.windll.kernel32
+            n = ctypes.c_ulong(0)
+            k32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(n))   # RelationProcessorCore: the size
+            if not n.value:
+                return None
+            buf = ctypes.create_string_buffer(n.value)
+            if not k32.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(n)):
+                return None
+            raw, at = buf.raw[:n.value], 0
+            while at + 10 <= len(raw):   # SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: Relationship, Size, then
+                rel, size = struct.unpack_from("<II", raw, at)               # PROCESSOR_RELATIONSHIP (Flags,
+                if size <= 0:                                                # EfficiencyClass, ...)
+                    break
+                if rel == 0:
+                    classes.append(raw[at + 9])
+                at += size
+        else:
+            seen = {}
+            for cpu in sorted(Path("/sys/devices/system/cpu").glob("cpu[0-9]*"), key=lambda p: int(p.name[3:])):
+                cap = cpu / "cpu_capacity"
+                pkg, core = cpu / "topology" / "physical_package_id", cpu / "topology" / "core_id"
+                if not cap.exists():
+                    return None
+                key = (pkg.read_text().strip(), core.read_text().strip()) if pkg.exists() and core.exists() else cpu.name
+                seen.setdefault(key, int(cap.read_text().strip()))
+            classes = list(seen.values())
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not classes or max(classes) == min(classes):
+        return None
+    p = sum(1 for c in classes if c == max(classes))
+    return p, len(classes) - p
+
+
+def hybrid_pool_workers(cores) -> int | None:
+    """#642 (Hardin22's measurement): on a hybrid CPU the expert pool runs best on the P-cores but the host loop's one
+    plus HALF of the E-cores - an E-core runs the expert kernels ~2.2x slower and each layer waits for its slowest
+    part (i9-14900KF, 8P + 16E: 15 workers decoded 165 / 116 tok/s against 106 / 84 with all 23).  None: not hybrid
+    (the engine's own default, one worker per physical core but the host's, stays)."""
+    if not cores:
+        return None
+    p, e = cores
+    return max(1, p - 1 + e // 2)
+
+
+def recommend_pool_workers(args: list) -> list:
+    """`args` with setup's recommended `--pool-workers` for a hybrid CPU, unless they set one already (a calibration's
+    measured count, or the user's own).  A recommendation: the config line can be edited or removed."""
+    n = hybrid_pool_workers(cpu_cores())
+    if n is None or "--pool-workers" in args:
+        return args
+    p, e = cpu_cores()
+    ok(f"hybrid CPU ({p} performance + {e} efficiency cores): {n} CPU expert workers - the performance cores and half "
+       "of the efficiency cores (--pool-workers in the config; START-HERE --calibrate measures it on this PC)")
+    return [*args, "--pool-workers", str(n)]
+
+
 def cpu_info():
     """(name, avx2, avx512): avx512 means everything Strata's fast AVX-512 kernels use (F, BW, VL, VNNI, VBMI),
     the same test the engine makes (cpu_avx512_ok), not just AVX-512F."""
@@ -3664,6 +3728,8 @@ def main() -> int:
         import calibrate as CAL
         cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
         ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
+    else:                                              # #642: measured counts (a calibration) win over the rule
+        cfg["args"] = recommend_pool_workers(cfg["args"])
     write_config(cfg_path, cfg)
     script = write_run_script(tag, cfg_path, port)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
