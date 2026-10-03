@@ -142,6 +142,10 @@ public:
     /// One batch window over slots [0, S): tokens[s] at positions pos[s]; out[s] = the greedy pick after it.
     bool run_slots(int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool, void* user, int32_t* out,
                    std::string& err);
+    /// The same over the S slots `rows` (row t is slot rows[t], any distinct slots in any order): the slots not
+    /// listed are not touched, so an idle slot keeps its state (a finished conversation it may continue later).
+    bool run_slot_rows(const int* rows, int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool, void* user,
+                       int32_t* out, std::string& err);
     /// Keep every row of the last batch window: each slot's state advances by its one token.
     bool commit_slots(std::string& err);
 
@@ -210,26 +214,32 @@ private:
     // batch windows (see init_slots)
     std::vector<SessionState*> slots_;
     bool batch_rec_ = false;               ///< record_window is capturing a batch window
-    int row_base_ = 0;                     ///< ... over slots [row_base_, row_base_ + T)
+    int row_base_ = 0;                     ///< ... its hand-off rows start here (a pipeline group's own rows)
+    int brow_[8] = {};                     ///< ... and row t is slot brow_[t]
     bool last_batch_ = false;              ///< the last run was a batch window (set_plan_slot: one group)
-    std::map<int, cudaGraphExec_t> exec_bm_, commit_bm_;   ///< key base * 16 + S
-    int last_base_ = 0;
+    std::map<uint64_t, cudaGraphExec_t> exec_bm_, commit_bm_;   ///< key: batch_key(rows, S, hand-off base)
+    int last_rows_[8] = {};                ///< the slots of the last batch window's rows
+    static uint64_t batch_key(const int* rows, int S, int hbase) {
+        uint64_t k = (uint64_t) hbase << 40 | (uint64_t) S << 32;
+        for (int t = 0; t < S; ++t) k |= (uint64_t) (rows[t] & 15) << (4 * t);
+        return k;
+    }
     // batch_launch / batch_poll
     bool b_running_ = false;
     int64_t b_k_ = 0, b_steps_ = 0;
     std::chrono::steady_clock::time_point b_last_;
     int32_t b_out_[8] = {};
     std::vector<strata::kernels::SamplerParams> slot_sp_;
-    bool sample_rows(int base, int S, std::string& err);   ///< the sampled slots' rows of the last batch window
+    bool sample_rows(int S, std::string& err);   ///< the sampled slots' rows of the last batch window
     int32_t* h_commitb_ = nullptr; int32_t* m_commitb_ = nullptr;   // per slot [1, 0, pos, -1 ..], stride 2 + max_t
     int32_t* commitb_ = nullptr;
     float* tail_snap_b_ = nullptr;         ///< per (slot, QSA layer) indexer tail snapshot
     void* arena_b_ = nullptr;
     int64_t last_pos_b_[8] = {};
-    bool capture_batch(int base, int S, std::string& err);
+    bool capture_batch(const int* rows, int S, int hbase, std::string& err);
     void collect_profile();   ///< STRATA_VERIFY_PROFILE: add the last window's stamps to prof_sum_
-    bool capture_commit_batch(int base, int S, std::string& err);
-    bool stage_batch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err);
+    bool capture_commit_batch(const int* rows, int S, int hbase, std::string& err);
+    bool stage_batch(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos, std::string& err);
     strata::kernels::SamplerParams sampling_ = [] {
         strata::kernels::SamplerParams s;
         s.greedy = true;
