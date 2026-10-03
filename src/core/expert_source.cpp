@@ -872,13 +872,14 @@ void FileExpertSource::fill_many(const std::vector<Fill>& todo) {
     for (auto& t : th) t.join();
 }
 
-bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
+uint64_t FileExpertSource::expert_bytes() const {
+    uint64_t total = 0;
+    for (uint64_t b : layer_blob_bytes_) total += b * (uint64_t) n_expert_;
+    return total;
+}
+
+bool FileExpertSource::open_direct(std::string& why) {
 #if defined(_WIN32)
-    if (base_ == nullptr || paths_.empty() || !direct_.empty()) {
-        why = !direct_.empty() ? "already unbuffered" : "no expert files open";
-        return !direct_.empty();
-    }
-    if (!experts_unbuffered(paths_, ram_bytes, why, /*cache_counts=*/false)) return false;
     for (const std::string& path : paths_) {
         const int wide = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
         std::vector<wchar_t> w((size_t) (wide > 0 ? wide : 1), L'\0');
@@ -900,7 +901,58 @@ bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
     }
     return true;
 #else
+    (void) why;
+    return false;
+#endif
+}
+
+bool FileExpertSource::set_unbuffered(uint64_t ram_bytes, std::string& why) {
+#if defined(_WIN32)
+    if (base_ == nullptr || paths_.empty() || !direct_.empty()) {
+        why = !direct_.empty() ? "already unbuffered" : "no expert files open";
+        return !direct_.empty();
+    }
+    // #577: the file tier reads the experts outside the RAM copy, not every byte of the shards (dense weights, the
+    // PLE table), and the copy holds at most every expert - the budget asked for can be more than that
+    const uint64_t experts = expert_bytes();
+    const uint64_t arena = std::min(ram_bytes, experts);
+    if (!experts_unbuffered(paths_, arena, why, /*cache_counts=*/false, experts - arena)) return false;
+    return open_direct(why);
+#else
     (void) ram_bytes;
+    why = "through the file cache (not Windows)";
+    return false;
+#endif
+}
+
+bool FileExpertSource::recheck_unbuffered(std::string& why) {
+#if defined(_WIN32)
+    if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0') {
+        why = std::string("STRATA_UNBUFFERED_LOAD=") + env;
+        return !direct_.empty();
+    }
+    if (base_ == nullptr || paths_.empty()) {
+        why = "no expert files open";
+        return false;
+    }
+    // #577: the RAM copy is built (and already out of the available RAM), so what the file cache would have to keep
+    // is exactly the experts outside it - the GPU cache's (refilled after a prompt borrowed their slots) and the
+    // ones neither holds
+    const uint64_t experts = expert_bytes();
+    const uint64_t read = experts > complement_bytes_ ? experts - complement_bytes_ : 0;
+    std::string w;
+    const bool ub = experts_unbuffered(paths_, 0, w, /*cache_counts=*/false, read);
+    char head[96];
+    std::snprintf(head, sizeof head, "re-checked with the RAM copy built (%.2f GiB): ",
+                  (double) complement_bytes_ / 1073741824.0);
+    why = head + w;
+    if (ub == !direct_.empty()) return ub;
+    if (ub) return open_direct(why);
+    // through the file cache after all: the mapped reads take over (staged() stays true for the GGUF in place)
+    for (void* d : direct_) CloseHandle((HANDLE) d);
+    direct_.clear();
+    return false;
+#else
     why = "through the file cache (not Windows)";
     return false;
 #endif

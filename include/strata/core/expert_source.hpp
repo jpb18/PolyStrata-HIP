@@ -480,8 +480,14 @@ public:
     /// beside `ram_bytes` (the RAM budget), cached now or not (their mapped pages would land in the working set); see
     /// experts_unbuffered.  The mapped reads' page faults are one small request each, and the pages they bring in
     /// take the RAM the budget was sized for.  `why` says what decided.
+    /// #577: `ram_bytes` counts up to every expert, and only the experts outside it are what the cache must keep.
     bool set_unbuffered(uint64_t ram_bytes, std::string& why);
+    /// #577: the same decision once the RAM copy is built (pin_cache_complement), from the RAM it really holds and the
+    /// expert bytes outside it; switches either way (startup only, nothing reading).  Returns whether unbuffered.
+    bool recheck_unbuffered(std::string& why);
     bool unbuffered() const { return !direct_.empty(); }
+    /// Every expert's bytes (n_layers x n_expert blobs).
+    uint64_t expert_bytes() const;
     /// #286, unbuffered: assembles the blobs of these pairs ahead of the `blob` calls that will ask for them (the
     /// GPU cache's fill from the profile) - one batch of reads instead of one blob at a time.  At most 64 pairs.
     void prefetch_pairs(const std::pair<int32_t, int32_t>* pairs, int64_t n);
@@ -524,6 +530,7 @@ private:
     /// #286: the blobs from the drive, unbuffered: every role's 4 KiB-aligned window is read at once (overlapped)
     /// into this thread's aligned buffer, then copied into place.  False when a read fails.
     bool read_direct(const Fill* fills, size_t n) const;
+    bool open_direct(std::string& why);
     std::vector<std::string> paths_;          ///< the mapped files, as maps_
     std::vector<void*> direct_;               ///< #286: per file, an unbuffered overlapped handle (Windows)
     std::vector<int> role_file_;              ///< 3 x n_layers: index into maps_ / direct_

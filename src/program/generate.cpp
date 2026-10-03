@@ -4082,6 +4082,16 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
             return 1;
         }
+        // #577: the unbuffered choice above was made before the RAM copy existed, from the budget asked for; now the
+        // copy is built, decide again from the RAM it really holds and the expert bytes outside it (on a 96 GB PC
+        // the file cache keeps those, and every refill after a prompt read the drive instead)
+        if (o.mmap_experts && o.resident_budget > 0) {
+            std::string why;
+            const bool was = src.unbuffered();
+            const bool ub = src.recheck_unbuffered(why);
+            std::fprintf(stderr, "strata generate: the file tier reads %s%s (%s)\n",
+                         ub ? "unbuffered" : "through the file cache", ub == was ? "" : " (changed)", why.c_str());
+        }
     }
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
