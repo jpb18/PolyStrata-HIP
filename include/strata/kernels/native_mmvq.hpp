@@ -100,6 +100,14 @@ void native_q8_0_pack_host(const void* gguf_blocks, void* out, int n_in, int n_o
 void native_q8_0_packed_register(const void* gguf_weights, const void* packed, int n_in, int n_out);
 void native_q8_0_packed_unregister(const void* gguf_weights);
 
+/// STRATA_Q6_PACKED=1 (opt-in): a packed copy of a Q6_K matrix (the output heads) - the same bytes as ql / qh /
+/// scales / d planes - that native_q6_k_mmvq calls on `weights` read instead (bitwise equal outputs). The copy is
+/// owned here: native_q6_k_pack builds it from the device matrix (false: not eligible or failed; nothing changes),
+/// native_q6_k_unpack frees it. STRATA_Q6P_SELFTEST=1 checks it bitwise and times it at load.
+bool native_q6_k_packed_enabled();
+bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what);
+void native_q6_k_unpack(const void* weights);
+
 void native_q8_0_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream);
 

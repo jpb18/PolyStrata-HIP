@@ -38,6 +38,8 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <cstdio>
+#include <vector>
 
 namespace strata::kernels {
 namespace {
@@ -1250,6 +1252,122 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
     return true;
 }
 
+
+// ============================ STRATA_Q6_PACKED=1: the packed Q6_K head layout (opt-in) ============================
+//
+// The output heads (the main head, 248320 rows, and the MTP draft head's row subset) are Q6_K matrices of 2560-wide
+// rows: 10 blocks of 210 bytes each, so every int load is 2-byte aligned and a row is 2100 bytes. The packed copy
+// holds the SAME bytes as four planes - ql (128 B per block), qh (64 B), scales (16 B), d (2 B) - so a thread's
+// two words are aligned dword loads (non-temporal). Thread ownership (block tid / 32 + 4 i, word tid % 32), the
+// q6_q8_dot_impl expression, the per-thread order and the reduction are those of native_q6_k_mmvq_kernel<false> /
+// native_mmvq_multi_kernel<Q6KTraits, NC, 4, 1>: every output is bitwise equal. Persistent workgroups.
+int g_q6p_grid_override = 0;   // the self-test's grid sweep (STRATA_Q6P_SELFTEST=2)
+int q6p_grid() {
+    if (g_q6p_grid_override > 0) return g_q6p_grid_override;
+    static const int grid = [] {
+        const char* v = std::getenv("STRATA_Q6P_GRID");
+        const int g = v ? std::atoi(v) : 0;
+        return g > 0 ? g : 640;
+    }();
+    return grid;
+}
+
+template<int NCOLS>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_q6_k_packed_kernel(const int* __restrict__ ql, const int* __restrict__ qh,
+                                          const int8_t* __restrict__ sc, const half* __restrict__ dpl,
+                                          const Q81Block* __restrict__ x, float* __restrict__ y,
+                                          int n_in, int n_out, int row_step) {
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int nb = n_in / 256;
+    const int x_stride = n_in / Q8K;
+    const int iqs = tid % 32;
+    const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+    const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
+    const int vh_shift = 2 * ((iqs % 16) / 8);
+    const int qh_word = 8 * (iqs / 16) + iqs % 8;
+    __shared__ float partial[2][WARPS - 1][NCOLS][WARP];
+    int buf = 0;
+    for (int row = int(blockIdx.x); row < n_out; row += row_step, buf ^= 1) {
+        float tmp[NCOLS] = {};
+        for (int kbx = tid / 32; kbx < nb; kbx += WARPS * WARP / 32) {
+            const std::size_t block = std::size_t(row) * nb + kbx;
+            const int vl = STRATA_Q8P_LOAD(ql + block * 32 + iqs);
+            const int vh = STRATA_Q8P_LOAD(qh + block * 16 + qh_word) >> vh_shift;
+            const int8_t* scales = sc + block * 16 + scale_offset;
+            const float d = dpl[block];
+            const int kby = kbx * 8;
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+                const Q81Block* xb = x + std::size_t(j) * x_stride + kby;
+                int u[2];
+                float d8[2];
+#pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    u[i] = reinterpret_cast<const int*>(xb[bq8_offset + 2 * i].qs)[iqs % 8];
+                    d8[i] = __low2float(xb[bq8_offset + 2 * i].ds);
+                }
+                tmp[j] += q6_q8_dot_impl(vl, vh, u, scales, d, d8);
+            }
+        }
+        if (threadIdx.y > 0) {
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) partial[buf][threadIdx.y - 1][j][threadIdx.x] = tmp[j];
+        }
+        __syncthreads();
+        if (threadIdx.y == 0) {
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+#pragma unroll
+                for (int l = 0; l < WARPS - 1; ++l) tmp[j] += partial[buf][l][j][threadIdx.x];
+                tmp[j] = warp_sum(tmp[j]);
+                if (threadIdx.x == 0) y[std::size_t(j) * n_out + row] = tmp[j];
+            }
+        }
+    }
+}
+
+bool g_q6_bypass = false;   // the load-time self-test times the GGUF-layout kernels with the copy registered
+
+// the packed planes of one Q6_K matrix (owned: allocated by native_q6_k_pack, freed by native_q6_k_unpack)
+struct Q6Packed { void* base; const int* ql; const int* qh; const int8_t* sc; const half* d; int n_in, n_out; };
+std::unordered_map<const void*, Q6Packed>& q6_packed_registry() {
+    static std::unordered_map<const void*, Q6Packed> registry;
+    return registry;
+}
+
+template<int NCOLS>
+void q6_packed_launch(const Q6Packed& w, const Q81Block* x, float* y, cudaStream_t s) {
+    const int grid = (std::min)(w.n_out, q6p_grid());
+    native_q6_k_packed_kernel<NCOLS><<<unsigned(grid), dim3(WARP, WARPS), 0, s>>>(w.ql, w.qh, w.sc, w.d, x, y, w.n_in,
+                                                                                    w.n_out, grid);
+}
+
+bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
+    auto& registry = q6_packed_registry();
+    if (registry.empty() || g_q6_bypass || (ncols > 1 && !g_multi_exact)) return false;
+    const auto found = registry.find(weights);
+    if (found == registry.end() || found->second.n_in != n_in || found->second.n_out != n_out) return false;
+    validate_shape(n_in, ncols, 256);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        case 1: q6_packed_launch<1>(found->second, x, y, s); break;
+        case 2: q6_packed_launch<2>(found->second, x, y, s); break;
+        case 3: q6_packed_launch<3>(found->second, x, y, s); break;
+        case 4: q6_packed_launch<4>(found->second, x, y, s); break;
+        case 5: q6_packed_launch<5>(found->second, x, y, s); break;
+        case 6: q6_packed_launch<6>(found->second, x, y, s); break;
+        case 7: q6_packed_launch<7>(found->second, x, y, s); break;
+        case 8: q6_packed_launch<8>(found->second, x, y, s); break;
+        default: throw std::invalid_argument("native MMVQ requires 1 <= ncols <= 8");
+    }
+    launch_check();
+    return true;
+}
 } // namespace
 
 bool native_q8_0_packed_enabled() {
@@ -1286,6 +1404,133 @@ void native_q8_0_packed_register(const void* gguf_weights, const void* packed, i
 }
 
 void native_q8_0_packed_unregister(const void* gguf_weights) { q8_packed_registry().erase(gguf_weights); }
+
+bool native_q6_k_packed_enabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("STRATA_Q6_PACKED");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    return enabled;
+}
+
+bool native_q6_k_pack(const void* weights, int n_in, int n_out, const char* what) {
+    if (!weights || n_in <= 0 || n_in % 256 || n_in / 256 < WARPS * WARP / 32 || n_out < 2048) return false;
+    if (q6_packed_registry().count(weights)) return true;
+    const std::size_t nb = std::size_t(n_in / 256) * std::size_t(n_out);
+    const std::size_t bytes = nb * sizeof(Q6KBlock);
+    std::vector<Q6KBlock> host(nb);
+    if (cudaMemcpy(host.data(), weights, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) { cudaGetLastError(); return false; }
+    // planes: ql | qh | scales | d, each 256-byte aligned
+    const std::size_t o_qh = (nb * 128 + 255) & ~std::size_t(255);
+    const std::size_t o_sc = (o_qh + nb * 64 + 255) & ~std::size_t(255);
+    const std::size_t o_d = (o_sc + nb * 16 + 255) & ~std::size_t(255);
+    const std::size_t total = o_d + nb * 2;
+    std::vector<uint8_t> packed(total, 0);
+    for (std::size_t b = 0; b < nb; ++b) {
+        std::memcpy(packed.data() + b * 128, host[b].ql, 128);
+        std::memcpy(packed.data() + o_qh + b * 64, host[b].qh, 64);
+        std::memcpy(packed.data() + o_sc + b * 16, host[b].scales, 16);
+        std::memcpy(packed.data() + o_d + b * 2, &host[b].d, 2);
+    }
+    void* dev = nullptr;
+    if (cudaMalloc(&dev, total) != cudaSuccess) { cudaGetLastError(); return false; }
+    if (cudaMemcpy(dev, packed.data(), total, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(dev); cudaGetLastError(); return false;
+    }
+    auto* base = static_cast<uint8_t*>(dev);
+    q6_packed_registry()[weights] = Q6Packed{dev, reinterpret_cast<const int*>(base),
+                                             reinterpret_cast<const int*>(base + o_qh),
+                                             reinterpret_cast<const int8_t*>(base + o_sc),
+                                             reinterpret_cast<const half*>(base + o_d), n_in, n_out};
+    std::fprintf(stderr, "strata: STRATA_Q6_PACKED=1 packed the %s (%d x %d, +%.1f MiB)\n", what, n_out, n_in,
+                 total / 1048576.0);
+    // STRATA_Q6P_SELFTEST=1: bitwise check against the GGUF-layout kernels (1..4 columns) and paired timings
+    if (const char* v = std::getenv("STRATA_Q6P_SELFTEST"); v && (v[0] == '1' || v[0] == '2')) {
+        cudaStream_t s = nullptr;
+        cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+        const int nq = n_in / Q8K;
+        std::vector<Q81Block> hx(std::size_t(4) * nq);
+        uint32_t r = 12345u;
+        for (auto& blk : hx) {
+            for (auto& q : blk.qs) { r = r * 1664525u + 1013904223u; q = int8_t(int((r >> 24) & 255u) - 128); }
+            r = r * 1664525u + 1013904223u;
+            blk.ds = __floats2half2_rn(0.001f + float(r >> 8) * 1e-9f, 0.0f);
+        }
+        void *dx = nullptr, *ya = nullptr, *yb = nullptr;
+        cudaMalloc(&dx, hx.size() * sizeof(Q81Block));
+        cudaMalloc(&ya, std::size_t(4) * n_out * 4);
+        cudaMalloc(&yb, std::size_t(4) * n_out * 4);
+        cudaMemcpy(dx, hx.data(), hx.size() * sizeof(Q81Block), cudaMemcpyHostToDevice);
+        std::vector<float> a(std::size_t(4) * n_out), c(std::size_t(4) * n_out);
+        bool same = true;
+        for (int nc = 1; nc <= 4; ++nc) {
+            g_q6_bypass = true;
+            native_q6_k_mmvq(weights, dx, (float*) ya, n_in, n_out, nc, s);
+            g_q6_bypass = false;
+            native_q6_k_mmvq(weights, dx, (float*) yb, n_in, n_out, nc, s);
+            cudaStreamSynchronize(s);
+            cudaMemcpy(a.data(), ya, std::size_t(nc) * n_out * 4, cudaMemcpyDeviceToHost);
+            cudaMemcpy(c.data(), yb, std::size_t(nc) * n_out * 4, cudaMemcpyDeviceToHost);
+            same = same && std::memcmp(a.data(), c.data(), std::size_t(nc) * n_out * 4) == 0;
+        }
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0); cudaEventCreate(&e1);
+        for (int nc : {1, 2, 4}) {
+            std::vector<float> tb, tc;
+            for (int k = 0; k < 11; ++k) {
+                for (int pass = 0; pass < 2; ++pass) {
+                    const bool cand = (pass == 0) == (k % 2 == 1);
+                    g_q6_bypass = !cand;
+                    cudaEventRecord(e0, s);
+                    for (int it = 0; it < 5; ++it) native_q6_k_mmvq(weights, dx, (float*) (cand ? yb : ya), n_in, n_out, nc, s);
+                    cudaEventRecord(e1, s);
+                    cudaEventSynchronize(e1);
+                    float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
+                    (cand ? tc : tb).push_back(ms * 1000.0f / 5);
+                }
+            }
+            g_q6_bypass = false;
+            std::sort(tb.begin(), tb.end()); std::sort(tc.begin(), tc.end());
+            std::fprintf(stderr, "strata: Q6_K packed self-test %s ncols %d: GGUF %.1f us (%.1f-%.1f), packed %.1f us "
+                         "(%.1f-%.1f), 11 paired samples\n", what, nc, tb[5], tb[0], tb[10], tc[5], tc[0], tc[10]);
+        }
+        std::fprintf(stderr, "strata: Q6_K packed self-test %s: outputs %s (1-4 columns)\n", what,
+                     same ? "BITWISE EQUAL" : "DIFFER");
+        if (v[0] == '2') {   // grid sweep of the packed kernel
+            for (int grid : {160, 320, 640, 1280, 2560, 5120, 20480}) {
+                g_q6p_grid_override = grid;
+                for (int nc : {1, 2, 4}) {
+                    std::vector<float> tc;
+                    for (int k = 0; k < 7; ++k) {
+                        cudaEventRecord(e0, s);
+                        for (int it = 0; it < 5; ++it) native_q6_k_mmvq(weights, dx, (float*) yb, n_in, n_out, nc, s);
+                        cudaEventRecord(e1, s);
+                        cudaEventSynchronize(e1);
+                        float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
+                        tc.push_back(ms * 1000.0f / 5);
+                    }
+                    std::sort(tc.begin(), tc.end());
+                    std::fprintf(stderr, "strata: Q6_K packed grid sweep %s grid %d ncols %d: %.1f us (%.1f-%.1f)\n",
+                                 what, grid, nc, tc[3], tc[0], tc[6]);
+                }
+            }
+            g_q6p_grid_override = 0;
+        }
+        cudaEventDestroy(e0); cudaEventDestroy(e1);
+        cudaFree(dx); cudaFree(ya); cudaFree(yb);
+        cudaStreamDestroy(s);
+        if (!same) { native_q6_k_unpack(weights); return false; }
+    }
+    return true;
+}
+
+void native_q6_k_unpack(const void* weights) {
+    auto& registry = q6_packed_registry();
+    const auto found = registry.find(weights);
+    if (found == registry.end()) return;
+    cudaFree(found->second.base);
+    registry.erase(found);
+}
 
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 bool native_mmvq_multi_exact() { return g_multi_exact; }
@@ -1507,6 +1752,7 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
+    if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q6_PACKED=1 heads
     validate_shape(n_in, ncols, 256);
     if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
     validate_pointer(weights);
