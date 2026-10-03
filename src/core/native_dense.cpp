@@ -24,6 +24,7 @@ bool hc_q8_requested() {
     return on;
 }
 bool hc_q8_name(const std::string& name) {
+    if (name == "output_hc_down.weight" || name == "output_hc_up.weight") return true;   // S25: the final mixer too
     if (name.rfind("blk.", 0) != 0) return false;
     static const char* suffixes[] = {".hc_attn_down.weight", ".hc_attn_up.weight", ".hc_attn_inject.weight",
                                      ".hc_ffn_down.weight", ".hc_ffn_up.weight", ".hc_ffn_inject.weight"};
@@ -246,7 +247,10 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
             }
             if (hc_q8_requested())
                 for (const auto& tensor : gguf.tensors()) {
-                    const bool f32_inject = tensor.type == 0 && tensor.name.ends_with("_inject.weight");
+                    // S25: the F32 inject rows hold BF16-exact values: the read takes the pack's BF16 rows unless
+                    // STRATA_HC_Q8_INJECT=1 asks for a Q8_0 copy
+                    static const bool q8_inject = [] { const char* v = std::getenv("STRATA_HC_Q8_INJECT"); return v && v[0] == '1'; }();
+                    const bool f32_inject = q8_inject && tensor.type == 0 && tensor.name.ends_with("_inject.weight");
                     if ((tensor.type != 8 && !f32_inject) || !hc_q8_name(tensor.name) || tensor.shape.size() != 2) continue;
                     auto found = table.table_.find(tensor.name);
                     if (found == table.table_.end() || found->second.hc_q8 != nullptr) continue;
