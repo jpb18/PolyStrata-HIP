@@ -125,7 +125,8 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). You can 
   **About** with the settings and addresses.
 - **Your apps and coding agents:** add an "OpenAI-compatible" provider with base URL **`http://127.0.0.1:8080/v1`**,
   any API key and any model name. Apps that use Anthropic's API: `http://127.0.0.1:8080/v1/messages` (Claude Code:
-  `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`).
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`). Codex CLI and other Responses API apps: `/v1/responses`
+  ([setup](docs/DETAILS.md#the-responses-api-and-codex-cli)).
 - **Thinking:** choose **off, low, medium or high** in the chat menu or your app's "reasoning effort". Off is
   fastest; high is best for hard questions.
 - **Pictures:** say yes to "Images?" in setup, then click **Picture** in the chat, or attach them in your app
