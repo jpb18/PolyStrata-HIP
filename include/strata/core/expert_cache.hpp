@@ -89,12 +89,43 @@ public:
     void close();
 
     bool valid() const { return base_ != nullptr; }
-    int64_t slots() const { return slots_; }
+    /// The slots usable now: all of them, unless `shrink` gave the tail's VRAM back (#533) - then the ones wholly
+    /// inside the VRAM still backed, always a prefix.  The prompt path's loan (the last slots) and every report
+    /// follow this; `full_slots()` is what `open` allocated.
+    int64_t slots() const { return live_slots_; }
+    int64_t full_slots() const { return slots_; }
     /// Slots actually claimed.  Not the same as `slots()` - the cache does not evict, so a run that routes
     /// fewer distinct experts than there are slots leaves the rest empty.
     int64_t resident() const { return per_layer_ ? admitted_ : next_free_; }
-    int64_t bytes() const { return off_.empty() ? slots_ * blob_ : (int64_t) off_.back(); }
+    /// The bytes of `slots()` (all of the arena unless shrunk); `full_bytes()`: of every slot.
+    int64_t bytes() const { return slot_end(live_slots_); }
+    int64_t full_bytes() const { return slot_end(slots_); }
     double gib() const { return (double) bytes() / 1073741824.0; }
+
+    /// **#533: HOT VRAM RESIZE, OPT-IN (--vram-elastic).**  With a segment size set before `open`/`open_sized`, the
+    /// arena is one reserved address range backed by physical segments of that size (CUDA virtual memory
+    /// management) instead of one cudaMalloc, so `shrink` can give the tail's VRAM back to the driver - for another
+    /// program - and `grow` can take it again, while every slot keeps its address (the captured graphs, the verify
+    /// plan's pointers and the prompt path's loan all hold addresses into it).  0 (the default): one cudaMalloc, as
+    /// always.  CUDA only: a HIP build refuses it at open.  The slots past `slots()` after a shrink must hold no
+    /// resident expert and no loan: the CALLER evicts them first (they become CPU misses).
+    void set_segment_bytes(int64_t seg_bytes) { seg_req_ = seg_bytes > 0 ? seg_bytes : 0; }
+    bool segmented() const { return !segs_.empty(); }
+    int64_t segment_bytes() const { return seg_; }
+    /// Bytes of the arena backed by VRAM now (a whole number of segments; the arena when not segmented).
+    int64_t mapped_bytes() const;
+    /// Unmaps every segment past the first `keep_bytes` (rounded UP to a segment boundary): `slots()` becomes the
+    /// slots wholly inside what stays.  Waits for the device first.  False with `err` when not segmented or a driver
+    /// call failed.
+    bool shrink(int64_t keep_bytes, std::string& err);
+    /// Maps segments again up to `want_bytes` (rounded DOWN to a segment, at most the arena; the last, shorter
+    /// segment only when `want_bytes` covers the arena).  Stops at the first segment the driver cannot back (false,
+    /// `err`: what was mapped by then stays).  The new slots are empty until the caller fills them.
+    bool grow(int64_t want_bytes, std::string& err);
+    /// The number of leading slots that fit wholly inside the first `bytes` bytes.
+    int64_t slots_within(int64_t bytes) const;
+    /// The bytes the first `n` slots span.
+    int64_t bytes_of(int64_t n) const { return slot_end(n < 0 ? 0 : n > slots_ ? slots_ : n); }
 
     /// `(layer, expert)` -> slot index, or `kNotResident`.  Bounds-checked: a bad layer or expert returns
     /// `kNotResident` rather than reading whatever is adjacent in the table.
@@ -160,7 +191,17 @@ private:
     uint8_t* blocking_staging_ = nullptr;
     std::size_t blocking_staging_bytes_ = 0;
 #endif
+    int64_t slot_end(int64_t n) const { return off_.empty() ? n * blob_ : (int64_t) off_[(size_t) n]; }
+    bool open_segmented(uint64_t want, std::string& err);
+    void release_segmented();
     uint8_t* base_ = nullptr;
+    int64_t live_slots_ = 0;            ///< #533: slots() - all of them unless shrunk
+    int64_t seg_req_ = 0;               ///< #533: the segment size asked for (0: one cudaMalloc)
+    int64_t seg_ = 0;                   ///< #533: the segment size used (a multiple of the driver's granularity)
+    uint64_t reserved_ = 0;             ///< #533: the reserved address range's size
+    std::vector<unsigned long long> segs_;   ///< #533: each segment's physical handle (0: unmapped)
+    std::vector<int64_t> seg_size_;     ///< #533: each segment's size (the last one may be shorter)
+    int64_t mapped_segs_ = 0;           ///< #533: segments [0, mapped_segs_) are backed
     std::vector<int32_t> residency_;   ///< [n_layers * n_expert] -> slot or kNotResident
     int64_t slots_ = 0;
     int64_t n_layers_ = 0;

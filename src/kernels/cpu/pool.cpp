@@ -95,6 +95,12 @@ CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity) {
         }
 
         if (affinity == PoolAffinity::All || !topo.is_hybrid) {
+            // #642 (from Hardin22's fork): on a hybrid CPU the P-cores first (the host takes the first of them), so a
+            // pool smaller than the core count (setup's --pool-workers for a hybrid CPU) runs on the P-cores and the
+            // first E-cores rather than on whatever the OS numbered first.  All cores alike: the order is unchanged.
+            if (topo.is_hybrid)
+                std::stable_sort(descs.begin(), descs.end(),
+                                 [](const CoreDesc& x, const CoreDesc& y) { return x.efficiency > y.efficiency; });
             for (const auto& c : descs) topo.worker_cores.push_back(c.lps[0]);
             if (skip_first && !topo.worker_cores.empty()) {
                 topo.host_core = topo.worker_cores.front();
@@ -219,6 +225,9 @@ CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity) {
     }
 
     if (affinity == PoolAffinity::All || !topo.is_hybrid) {
+        if (topo.is_hybrid)   // #642: the P-cores first (see the Windows branch)
+            std::stable_sort(all_cpus.begin(), all_cpus.end(),
+                             [](const CoreLinux& x, const CoreLinux& y) { return x.cap > y.cap; });
         for (const auto& cl : all_cpus) {
             if (!cl.is_sibling) topo.worker_cores.push_back(cl.cpu);
         }

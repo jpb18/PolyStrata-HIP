@@ -114,6 +114,10 @@ void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t w
 /// device-to-host memcpy nodes (copy-engine operations in the middle of the layer chain) and the ring kernel.
 void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream);
+/// #649 (HIP, STRATA_DOORBELL_STORE=1): the ring stored as `value` instead of incremented over PCIe.
+void doorbell_publish_value(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k,
+                            float* x_out, int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value,
+                            void* stream);
 
 /// Plan v0.3 P3: copy `n` int32 from mapped pinned host memory into device memory with a kernel (the QSA
 /// per-token step and positions), instead of a host-to-device memcpy node in the middle of a layer.

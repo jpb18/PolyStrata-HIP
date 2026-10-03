@@ -554,6 +554,37 @@ class StrataEngine:
         if len(f) >= 16:                                  # #588 (engine 0.1.39+): routed experts read over PCIe
             self.last.update(offloaded=int(f[15]))
 
+    def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
+        """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
+        expert cache until that much VRAM is free, or grows it back when more is free; None: back to the reserve it
+        started with.  -> the engine's figures (expert_slots, expert_cache_mib, vram_free_mib, ...); raises ValueError
+        with the engine's reason (e.g. it was not started with --vram-elastic), EngineDied when it ended."""
+        if not self.alive():
+            raise EngineDied("the engine is not running")
+        self.proc.stdin.write("VRAM" + ("" if reserve_mib is None else f" {int(reserve_mib)}") + "\n")
+        self.proc.stdin.flush()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                line = self.lines.get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                raise EngineDied("the engine did not answer the VRAM command") from None
+            if line is None:
+                raise EngineDied("the engine ended")
+            line = line.strip()
+            if line.startswith("ERR"):
+                raise ValueError(line[4:].strip() or "the engine refused the VRAM command")
+            if line.startswith("VRAM "):
+                out = {}
+                for kv in line.split()[1:]:
+                    k, _, v = kv.partition("=")
+                    out[k] = int(v) if v.lstrip("-").isdigit() else v
+                self.info.update({k: out[k] for k in ("expert_slots", "vram_free_mib") if k in out})
+                self.info["vram"] = out
+                return out
+            if time.time() > deadline:
+                raise EngineDied("the engine did not answer the VRAM command")
+
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
         keys = ""
@@ -967,6 +998,13 @@ def engine_args(cfg: dict) -> list[str]:
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if len(gpu_list(cfg)) > 1 and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
+    # #533 (opt-in): "vram_elastic": true - the expert cache in segments, so POST /v1/vram can give VRAM back to other
+    # programs and take it back; "vram_segment_mib" sets the segment size (the engine's default: 512)
+    if cfg.get("vram_elastic") is True and "--vram-elastic" not in args:
+        args.append("--vram-elastic")
+        seg = cfg.get("vram_segment_mib")
+        if isinstance(seg, int) and not isinstance(seg, bool) and seg > 0 and "--vram-segment-mib" not in args:
+            args += ["--vram-segment-mib", str(seg)]
     return learned_profile_args(cfg, args)
 
 
@@ -1166,6 +1204,7 @@ class Service:
         self.idle_unload_s = 0
         self.min_free_vram_mib = 0
         self.before_load = None
+        self.vram_reserve = None                         # #533: the last POST /v1/vram reserve (None: the start's)
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
@@ -1267,6 +1306,35 @@ class Service:
                   "(a minute or two) ...", flush=True)
         self.engine.restart()
         print("[strata] the engine is running again", flush=True)
+        if self.vram_reserve is not None and hasattr(self.engine, "vram"):   # #533: the reserve asked for last
+            try:
+                self.engine.vram(self.vram_reserve)
+            except (ValueError, EngineDied) as e:
+                print(f"[strata] the VRAM reserve ({self.vram_reserve} MiB) was not applied: {e}", flush=True)
+
+    vram_wait_s = 300.0                                  # #533: how long POST /v1/vram waits for a running request
+
+    def vram(self, reserve_mib: int | None) -> dict:
+        """#533, POST /v1/vram: keep `reserve_mib` of VRAM free for other programs (None: the reserve the engine
+        started with), applied between requests - a request that is running finishes first (up to wait_s).  Only an
+        engine started with --vram-elastic (the config's "vram_elastic": true) can do it; it never resizes on its own.
+        An unloaded engine applies it when it loads.  -> {"status": ..., and the engine's figures}."""
+        if not hasattr(self.engine, "vram"):
+            raise ValueError("this engine cannot resize its VRAM use")
+        if not self.fifo.acquire(timeout=self.vram_wait_s):
+            raise ModelBusy("a request is still running; try again when it has finished")
+        try:
+            if not self.loaded():
+                self.vram_reserve = reserve_mib
+                return {"status": "not loaded", "reserve_mib": reserve_mib,
+                        "note": "applied when the model loads"}
+            out = self.engine.vram(reserve_mib)
+            self.vram_reserve = reserve_mib
+            print(f"[strata] VRAM: {out.get('vram_free_mib')} MiB free, expert cache {out.get('expert_cache_mib')} of "
+                  f"{out.get('expert_cache_full_mib')} MiB ({out.get('expert_slots')} experts)", flush=True)
+            return {"status": "ok", **out}
+        finally:
+            self.fifo.release()
 
     def _say_died(self, e: Exception) -> None:
         """The server window's line for an engine that died (or was ended, #481) in the middle of a request."""
@@ -1507,6 +1575,8 @@ class Service:
             "activity": {"requests": totals["requests"] + int(busy), "in_flight": int(busy) + int(s.get("queued") or 0),
                          "last_request_at": int(last_at) if last_at else None},
             "last_timings": last_t,
+            "vram": dict((getattr(self.engine, "info", {}) or {}).get("vram") or {},
+                         elastic=bool((getattr(self.engine, "info", {}) or {}).get("vram_elastic"))),
             "machine": {
                 "at": int(time.time()),
                 "gpu": {"name": static.get("gpu_name"), "used_mib": scaled(hw.get("gpu_mem_used"), 2 ** 20),
@@ -2520,6 +2590,17 @@ def make_handler(svc: Service):
                             svc.fifo.release()
                         result = "loaded"
                     self._json(200, {"status": result, **svc.v1_status()})
+                    return
+                if path == "/v1/vram":                       # #533: give VRAM back to other programs, or take it
+                    if not self._own_page("the VRAM reserve can be changed"):
+                        return
+                    r = req.get("reserve_mib")
+                    if r is not None and (isinstance(r, bool) or not isinstance(r, int) or r < 0):
+                        raise ValueError("reserve_mib: a whole number of MiB (0 or more), or null for the start's")
+                    try:
+                        self._json(200, svc.vram(r))
+                    except EngineDied as e:
+                        self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
                     self.record = svc.begin_request(path, req)

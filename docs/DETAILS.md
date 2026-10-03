@@ -441,6 +441,18 @@ the OS file cache, so loading again takes seconds while that RAM is not needed e
 16 GB with Q2_0 in the low-RAM mode: unloading takes ~0.3 s, and a request to an unloaded model answered after
 4.6 s (text) or 14.7 s (a picture, image encoder on the CPU).
 
+**Giving part of the VRAM back while it keeps serving (#533, opt-in, one NVIDIA GPU).** With `"vram_elastic": true`
+in the config (the engine flag `--vram-elastic`), the expert cache is allocated in 512 MiB segments
+(`"vram_segment_mib"`), and `POST /v1/vram` with `{"reserve_mib": 8000}` shrinks it between requests until that much
+VRAM is free for another program; `{"reserve_mib": null}` grows it back towards its full size, keeping the reserve
+the engine started with (`--vram-reserve-mib`), and `{"reserve_mib": 0}` takes all of it back. A request that is
+running finishes first. The experts of the segments given back are computed on the CPU, like any expert outside the
+cache, so answers keep coming, slower; growing back puts the same experts in the same slots. Nothing resizes on its
+own. Not with a layer split, the helper caches, `--peer-device` or the resident low-RAM mode. Measured on an RTX 5070
+12 GB with Q2_0 (4.8 GiB cache): `{"reserve_mib": 6000}` took 78 ms and freed 4.3 GiB (the cache keeps 0.5 GiB for
+the prompt path), decode 44 -> 33 tok/s; growing back took 92 ms and the answers were token for token the ones before
+the shrink. Without the flag nothing changes (the same answers as without it).
+
 **Keep what the expert cache learned across restarts (opt-in, engine 0.1.36, #477):** a start fills the GPU's expert
 cache from the shipped profile, and the adaptive tier (`--adapt-every`) then moves in the experts your requests use.
 With `"expert_profile_save": "expert-profile-learned.bin"` in `strata-<model>.json` the engine saves that as a

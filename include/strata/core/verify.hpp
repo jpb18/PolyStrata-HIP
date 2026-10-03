@@ -60,6 +60,9 @@ public:
 
     /// The watchdog's view of the window in flight (issue #31): the layer, the GPU's sequence, the flags.
     void diag(std::FILE* f) const;
+    /// #649 (STRATA_VERIFY_TRACE=1, opt-in): the last windows' host-side handshake events and the GPU's breadcrumbs
+    /// (in mapped memory, so they read while the GPU hangs).  Nothing when the trace is off.
+    void trace_dump(std::FILE* f) const;
 
     /// #267: raise every flag the window's spin kernels wait on past any ring (UINT32_MAX), so a window the GPU
     /// cannot finish drains instead of staying resident, then wait up to `timeout_ms` for its streams.  For the
@@ -184,6 +187,12 @@ private:
     bool ple_stage() const { return lb_ <= 1 && 1 < le_; }   ///< holds layer 1, where the PLE block runs
     bool capture_commit(std::string& err);
     bool record_window(int T, cudaStream_t cs, std::string& err);
+    // #649: STRATA_VERIFY_TRACE=1 - a host event ring (trace_ev) and GPU breadcrumbs: the profiler's stamp points,
+    // per layer and token group, written to mapped memory (null when the trace is off)
+    void trace_ev(const char* what, int64_t step, int64_t layer, int64_t aux) const;
+    unsigned long long* trace_h_ = nullptr;
+    unsigned long long* trace_m_ = nullptr;
+    size_t trace_n_ = 0;
     static constexpr int kProfPer = 33;              // stamps per layer (32 left the hc-read second
                                       // half's up-stamp at slot 32 = the next layer's slot 0: D8)
     bool prof_on_ = false;
