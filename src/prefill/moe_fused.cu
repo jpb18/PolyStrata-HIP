@@ -577,6 +577,20 @@ struct DevInfo {
 std::mutex g_mu;
 DevInfo g_dev[32];
 
+#if defined(__HIPCC__)
+// Resident blocks per multiprocessor for the gfx11 WMMA prompt-expert kernels' persistent grids.  HIP counts a gfx11
+// WGP (two CUs, which these kernels use as one in the default WGP mode) as one multiprocessor, and the occupancy query
+// answers 1 block for these kernels where 2 run side by side - so the grid was half the GPU's room.  gfx1151 (20
+// WGPs), 8192 tokens x top 10, IQ3_S / IQ4_NL, one layer: 1 block per WGP 60.7 ms, 2 44.7, 3 49.9, 4 45.2 (the same
+// work items and arithmetic: the results do not change).  STRATA_PF_OCC=N sets the blocks per WGP (an experiment knob).
+static int wgp_blocks(int occ) {
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_PF_OCC");
+        return v != nullptr ? std::atoi(v) : 0;
+    }();
+    return env > 0 ? env : 2 * std::max(occ, 1);
+}
+#endif
 const DevInfo& dev_info() {
     int dev = 0;
     cudaGetDevice(&dev);
@@ -692,8 +706,8 @@ void experts(const Batch& b, int n_expert, int64_t n, const void* scratch, const
     // the most tiles the batch can have: every row in it, plus a partial tile per expert
     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
 #if defined(__HIPCC__)
-    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / W_ROWS), (int64_t) d.sms * d.occ_gu);
-    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / W_ROWS), (int64_t) d.sms * d.occ_d);
+    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / W_ROWS), (int64_t) d.sms * wgp_blocks(d.occ_gu));
+    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / W_ROWS), (int64_t) d.sms * wgp_blocks(d.occ_d));
     expert_w11_kernel<true><<<g_gu, W_THREADS, 0, s>>>(b, tb, (const uint8_t*) xa, src, (uint8_t*) ha, nullptr);
     expert_w11_kernel<false><<<g_d, W_THREADS, 0, s>>>(b, tb, (const uint8_t*) ha, src, nullptr, dm);
 #else

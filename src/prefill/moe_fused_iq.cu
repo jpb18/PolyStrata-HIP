@@ -761,6 +761,20 @@ template <int T, bool GU, int WW> bool setup_ww(int& occ) {
 template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
 #endif
 
+#if defined(__HIPCC__)
+// Resident blocks per multiprocessor for the gfx11 WMMA prompt-expert kernels' persistent grids.  HIP counts a gfx11
+// WGP (two CUs, which these kernels use as one in the default WGP mode) as one multiprocessor, and the occupancy query
+// answers 1 block for these kernels where 2 run side by side - so the grid was half the GPU's room.  gfx1151 (20
+// WGPs), 8192 tokens x top 10, IQ3_S / IQ4_NL, one layer: 1 block per WGP 60.7 ms, 2 44.7, 3 49.9, 4 45.2 (the same
+// work items and arithmetic: the results do not change).  STRATA_PF_OCC=N sets the blocks per WGP (an experiment knob).
+static int wgp_blocks(int occ) {
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_PF_OCC");
+        return v != nullptr ? std::atoi(v) : 0;
+    }();
+    return env > 0 ? env : 2 * std::max(occ, 1);
+}
+#endif
 const DevInfo& dev_info() {
     int dev = 0;
     cudaGetDevice(&dev);
@@ -861,8 +875,8 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
 #if defined(__HIPCC__)
     {
         const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
-        const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / NW_ROWS), (int64_t) d.sms * d.occ);
-        const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / NW_ROWS), (int64_t) d.sms * d.occ);
+        const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / NW_ROWS), (int64_t) d.sms * wgp_blocks(d.occ));
+        const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / NW_ROWS), (int64_t) d.sms * wgp_blocks(d.occ));
         const uint8_t* xa8 = (const uint8_t*) xa;
         uint8_t* ha8 = (uint8_t*) ha;
 #define STRATA_NW_GU(T) native_w11_kernel<T, true><<<g_gu, NW_THREADS, 0, s>>>(b, g, tb, xa8, src, ha8, nullptr)
