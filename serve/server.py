@@ -398,6 +398,25 @@ class StrataEngine:
     """
     silence_s = ENGINE_SILENCE_S         # #481: main() sets the config's engine_silence_s (survives restart())
     silent_note = None                   # #481: why the server ended a silent engine (death_note says it)
+    batch = 0                            # --batch: the engine's batch slots (0: one request at a time)
+
+    # `last`: the figures of the engine's last DONE line.  With batch slots several requests run at once, each on its
+    # own thread, so each one reads its own request's figures (Service.run records them); one at a time, the one dict.
+    @property
+    def last(self):
+        if self.batch:
+            tl = self.__dict__.setdefault("_tl", threading.local())
+            if not hasattr(tl, "last"):
+                tl.last = {}
+            return tl.last
+        return self.__dict__.get("_last", {})
+
+    @last.setter
+    def last(self, value):
+        self.__dict__["_last"] = value
+        if self.batch:
+            tl = self.__dict__.setdefault("_tl", threading.local())
+            tl.last = value
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False):
@@ -466,8 +485,13 @@ class StrataEngine:
         self.ended = False                              # READY: alive from here (restart() set it True, #344)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
-        # --batch: concurrent requests in the engine's batch slots (see generate_batched)
-        self.batch = int(args[args.index("--batch") + 1]) if "--batch" in args else 0
+        # --batch: concurrent requests in the engine's batch slots (see generate_batched).  The engine says how many
+        # it runs (INFO batch_slots=N: it may have fewer than asked, or none, when they do not fit)
+        asked = next((int(args[args.index(k) + 1]) for k in ("--batch", "--slots") if k in args), 0)
+        self.batch = int(self.info.get("batch_slots") or 0)
+        if asked and self.batch != asked:
+            print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
+                  "(its log says why)", flush=True)
         groups = int(args[args.index("--batch-groups") + 1]) if "--batch-groups" in args else 1
         groups = groups if self.batch and groups > 0 and self.batch % groups == 0 else 1
         gs = self.batch // groups if self.batch else 0
@@ -475,8 +499,16 @@ class StrataEngine:
         self.slot_order = [g * gs + t for t in range(gs) for g in range(groups)]
         self.slot_q = [queue.Queue() for _ in range(self.batch)]
         self.slot_busy = [False] * self.batch
+        # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
+        # the slot that has its start (the engine checks it again); when the slot was last used
+        self.slot_held: list[list[int]] = [[] for _ in range(self.batch)]
+        self.slot_used = [0.0] * self.batch
+        self.slot_live: list[dict | None] = [None] * self.batch   # /metrics: the request in each slot
         self.slot_cv = threading.Condition()
         self.waiting = 0                                # requests waiting for the control lines (ctl)
+        self.wait_lens: list[list[int]] = []            # ... their prompt lengths (a long read gives way to short ones)
+        self.ctl_epoch = 0                              # how often the control lines were taken
+        self._yielded = None                            # (slot, tokens read): the last request on them gave way
         self.ctl = threading.Lock()                     # one admission or solo request on the control lines at a time
         self.wlock = threading.Lock()                   # stdin writes from several request threads
         self.pump = threading.Thread(target=self._pump, daemon=True)
@@ -719,6 +751,10 @@ class StrataEngine:
                 f = line.split()
                 self._ctl_result = ("badm", len(f) >= 3 and f[2] == "1")
                 return
+            elif line.startswith("YIELDED "):            # the read gave way (BYIELD): <slot> <tokens read>
+                f = line.split()
+                if len(f) >= 3 and f[1].lstrip("-").isdigit() and f[2].isdigit():
+                    self._yielded = (int(f[1]), int(f[2]))
             elif line.startswith("ERR"):
                 raise ValueError(line[4:].strip())
             if line.startswith("DONE") and self._ctl_mode == "solo":
@@ -742,61 +778,107 @@ class StrataEngine:
                 return line
         return None
 
-    def _release_slot_when_done(self, slot: int):
-        """A slot whose consumer left: BSTOP it and free it once the engine says BDONE (in the background)."""
+    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None):
+        """A slot whose consumer left (a stop token, a stop string, a disconnect): BSTOP it and free it once the engine
+        says BDONE (in the background).  `stream`: the prompt and every token of it so far - with the tokens still to
+        come before BDONE, all but the last are what the slot holds then (the next turn of its conversation)."""
         try:
             self._send(f"BSTOP {slot}")
         except EngineDied:
             pass
         def wait():
             end = time.monotonic() + 600.0
+            tail = list(stream or [])
             while time.monotonic() < end:
                 try:
                     line = self.slot_q[slot].get(timeout=5.0)
                 except queue.Empty:
                     continue
-                if line is None or line.startswith("BDONE "):
+                if line is None:
+                    tail = []
                     break
+                if line.startswith("BT "):
+                    try:
+                        tail.append(int(line.split()[2]))
+                    except (IndexError, ValueError):
+                        tail = []
+                if line.startswith("BDONE "):
+                    break
+            self.slot_held[slot] = tail[:-1] if stream and tail else []
             with self.slot_cv:
                 self.slot_busy[slot] = False
                 self.slot_cv.notify_all()
         threading.Thread(target=wait, daemon=True).start()
+
+    YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
+
+    def _take_control(self, cancel, plen: int, after_epoch: int | None = None):
+        """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
+        `after_epoch`: a request whose read gave way lets the requests waiting then go first."""
+        entry = [plen]
+        with self.slot_cv:
+            self.waiting += 1
+            self.wait_lens.append(entry)
+        beat = time.monotonic()
+        try:
+            while True:
+                with self.slot_cv:
+                    turn = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
+                if turn and self.ctl.acquire(timeout=0.5):
+                    break
+                if not turn:
+                    with self.slot_cv:
+                        self.slot_cv.wait(timeout=0.5)
+                if cancel.is_set():
+                    return False
+                if time.monotonic() - beat >= 10.0:     # a heartbeat every 10 s, as the engine's own wait
+                    beat = time.monotonic()
+                    yield None
+        finally:
+            with self.slot_cv:
+                self.waiting -= 1
+                self.wait_lens.remove(entry)
+        with self.slot_cv:
+            self.ctl_epoch += 1
+            self.slot_cv.notify_all()
+        return True
+
+    def _shorter_waiting(self, plen: int) -> bool:
+        """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
+        with self.slot_cv:
+            return any(e[0] * 2 <= plen for e in self.wait_lens)
 
     def generate_batched(self, ids, max_new, sampling, cancel, embeddings=None):
         """--batch.  Alone (no slot busy, nobody waiting): the solo path (GEN, with drafts: the fastest stream)
         - and when another request arrives meanwhile, this one is STOPped and continues in a batch slot (BGEN with
         its prompt + what it generated: the engine reuses that prefix).  Otherwise: BGEN into a free slot, then the
         slot's own BT lines until BDONE.  Several requests run at once; the control lines (prompt reading, admission)
-        are taken one request at a time.  A consumer that stops early leaves the engine in step: the solo request is
-        STOPped and read to its DONE, an admission to its BADM, a slot is BSTOPped and freed at its BDONE."""
+        are taken one request at a time - and a long prompt read gives way at a chunk boundary to a waiting request
+        with a much shorter prompt (#656: `BYIELD <slot>`; the part read waits in a slot and the read goes on after).
+        A consumer that stops early leaves the engine in step: the solo request is STOPped and read to its DONE, an
+        admission to its BADM, a slot is BSTOPped and freed at its BDONE."""
         self.progress = None
         keys = self.sampling_keys(sampling or {})
         out: list[int] = []
         pending: list[int] = []
-        with self.slot_cv:
-            self.waiting += 1
-        try:
-            while not self.ctl.acquire(timeout=10.0):
-                if cancel.is_set():
-                    return
-                yield None
-        finally:
-            with self.slot_cv:
-                self.waiting -= 1
+        prompt, left = list(ids), int(max_new)
+        ok = yield from self._take_control(cancel, len(prompt))
+        if not ok:
+            return
         holding = True
         btrace("ctl acquired")
-        slot = None
+        slot, gen0, reserved = None, None, None
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
         stop_sent = False
+        yields = 0
         try:
             with self.slot_cv:
                 alone = not any(self.slot_busy) and self.waiting == 0
-            prompt, left = list(ids), int(max_new)
             if alone and left > 1:
                 head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                 self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                 phase = "solo"
-                self._ctl_mode, self._ctl_result = "solo", None
+                self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
                 def others():
                     with self.slot_cv:
                         return self.waiting > 0
@@ -806,46 +888,95 @@ class StrataEngine:
                         out.append(t)
                         yield t
                     if x is None:                       # a heartbeat (False: a token, flushed above)
+                        if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
+                                self._shorter_waiting(len(prompt))):
+                            with self.slot_cv:          # the slot the part read will wait in
+                                reserved = self.pick_slot(prompt)
+                                if reserved is not None:
+                                    self.slot_busy[reserved] = True
+                            if reserved is not None:
+                                self._send(f"BYIELD {reserved}")
                         yield None
                 phase = "none"                          # its DONE is read
                 while pending:
                     t = pending.pop(0)
                     out.append(t)
                     yield t
-                finish = (self.last or {}).get("finish") if isinstance(self.last, dict) else None
-                left = int(max_new) - len(out)
-                if cancel.is_set() or left <= 0 or finish in ("stop", "length") or (out and out[-1] in EOS_IDS):
-                    return
-                prompt = list(ids) + out                # promoted: it continues in a batch slot from here
-            # a free slot (they free themselves at BDONE, which needs no control lines)
-            with self.slot_cv:
-                while True:
-                    slot = next((b for b in self.slot_order if not self.slot_busy[b]), None)
-                    if slot is not None:
-                        self.slot_busy[slot] = True
-                        break
-                    self.slot_cv.wait(timeout=10.0)
-                    if cancel.is_set():
+                if self._yielded is not None and reserved is not None and self._yielded[0] == reserved:
+                    slot, reserved = reserved, None     # gave way: the read goes on in that slot (below)
+                elif reserved is not None:              # it did not give way: the slot is free again
+                    with self.slot_cv:
+                        self.slot_busy[reserved] = False
+                        self.slot_cv.notify_all()
+                    reserved = None
+                if slot is None:
+                    finish = (self.last or {}).get("finish") if isinstance(self.last, dict) else None
+                    left = int(max_new) - len(out)
+                    if cancel.is_set() or left <= 0 or finish in ("stop", "length") or (out and out[-1] in EOS_IDS):
                         return
-            while not self.slot_q[slot].empty():
-                self.slot_q[slot].get_nowait()
-            head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
-            self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
-            phase = "admit"
-            self._ctl_mode, self._ctl_result = "batch", None
-            for x in self._control(cancel, pending.append):
+                    prompt = list(ids) + out            # promoted: it continues in a batch slot from here
+            while True:
+                if slot is None:
+                    # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
+                    # the start of this prompt (its conversation's last turn), else the one used longest ago
+                    with self.slot_cv:
+                        while True:
+                            slot = self.pick_slot(prompt)
+                            if slot is not None:
+                                self.slot_busy[slot] = True
+                                break
+                            self.slot_cv.wait(timeout=10.0)
+                            if cancel.is_set():
+                                return
+                if self._yielded is not None:           # it gave way: the others waiting then go first
+                    self.slot_held[slot] = list(prompt[:self._yielded[1]])
+                    self._yielded = None
+                    yields += 1
+                    self.ctl.release()
+                    holding = False
+                    with self.slot_cv:
+                        epoch = self.ctl_epoch
+                    ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                    if not ok:
+                        return
+                    holding = True
+                while not self.slot_q[slot].empty():
+                    self.slot_q[slot].get_nowait()
+                head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
+                live = {"slot": slot, "state": "reading", "prompt_tokens": len(prompt), "generated": 0,
+                        "started": time.time(), "first_token": None}
+                self.slot_live[slot] = live
+                self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                self.slot_held[slot] = []               # the admission overwrites what the slot held
+                phase = "admit"
+                self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
+                asked = False
+                for x in self._control(cancel, pending.append):
+                    while pending:
+                        t = pending.pop(0)
+                        out.append(t)
+                        yield t
+                    if x is None:
+                        if (not asked and not embeddings and yields < self.YIELDS_MAX and
+                                self._shorter_waiting(len(prompt))):
+                            self._send(f"BYIELD {slot}")
+                            asked = True
+                        yield None
+                cont = bool(self._ctl_result and self._ctl_result[1])
+                phase = "slot" if cont else "none"
                 while pending:
-                    yield pending.pop(0)
-                if x is None:
-                    yield None
-            cont = bool(self._ctl_result and self._ctl_result[1])
-            phase = "slot" if cont else "none"
-            while pending:
-                yield pending.pop(0)
+                    t = pending.pop(0)
+                    out.append(t)
+                    yield t
+                if not cont and self._yielded is not None and self._yielded[0] == slot and not cancel.is_set():
+                    continue                            # gave way: again once the shorter request is in
+                break
             self.ctl.release()
             holding = False
             if not cont:
                 return
+            live.update(state="decoding", first_token=time.time(), generated=len(out))
+            gen0 = len(out) - 1                         # the admission's own token: the slot feeds it first
             while True:
                 try:
                     line = self.slot_q[slot].get(timeout=10.0)
@@ -859,17 +990,23 @@ class StrataEngine:
                     phase = "none"
                     raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
                 if line.startswith("BT "):
+                    t = int(line.split()[2])
+                    out.append(t)
+                    live["generated"] = len(out)
                     if cancel.is_set():
                         if not stop_sent:
                             self._send(f"BSTOP {slot}")
                             stop_sent = True
                         continue
-                    yield int(line.split()[2])
+                    yield t
                 elif line.startswith("BDONE "):
                     phase = "none"
                     f = line.split()
                     if len(f) >= 5 and isinstance(self.last, dict):
-                        self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4])}
+                        self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
+                                     "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
+                    # what the slot's sessions hold now: the prompt and every token fed (all but the last one)
+                    self.slot_held[slot] = list(prompt) + out[gen0:-1] if len(out) > gen0 else []
                     return
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
@@ -886,13 +1023,50 @@ class StrataEngine:
                 pass
             if holding:
                 self.ctl.release()
+            if reserved is not None:
+                with self.slot_cv:
+                    self.slot_busy[reserved] = False
+                    self.slot_cv.notify_all()
             if slot is not None:
+                self.slot_live[slot] = None
+                self.slot_used[slot] = time.time()
                 if phase == "slot":
-                    self._release_slot_when_done(slot)    # freed at its BDONE
+                    self.slot_held[slot] = []
+                    stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
+                    self._release_slot_when_done(slot, stream)    # freed at its BDONE
                 else:
                     with self.slot_cv:
                         self.slot_busy[slot] = False
                         self.slot_cv.notify_all()
+
+    def pick_slot(self, prompt: list[int]) -> int | None:
+        """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
+        prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
+        conversations other slots hold stay for their next turns.  None: every slot is busy."""
+        free = [b for b in self.slot_order if not self.slot_busy[b]]
+        if not free:
+            return None
+        def held_prefix(b):
+            h = self.slot_held[b]
+            return len(h) if h and len(h) < len(prompt) and prompt[:len(h)] == h else 0
+        best = max(free, key=held_prefix)
+        if held_prefix(best) > 0:
+            return best
+        return min(free, key=lambda b: (bool(self.slot_held[b]), self.slot_used[b]))
+
+    def slots_view(self) -> list[dict]:
+        """/metrics: each batch slot - idle (with the tokens it holds for a next turn), reading or decoding."""
+        now, view = time.time(), []
+        for b in range(self.batch):
+            r = self.slot_live[b]
+            if r is None:
+                view.append({"slot": b, "state": "idle", "held_tokens": len(self.slot_held[b])})
+                continue
+            ft = r.get("first_token")
+            view.append({"slot": b, "state": r["state"], "prompt_tokens": r["prompt_tokens"],
+                         "generated": r["generated"], "elapsed_s": round(now - r["started"], 1),
+                         "tok_s": round(r["generated"] / max(1e-6, now - ft), 1) if ft else None})
+        return view
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
@@ -1263,7 +1437,32 @@ def engine_args(cfg: dict) -> list[str]:
         seg = cfg.get("vram_segment_mib")
         if isinstance(seg, int) and not isinstance(seg, bool) and seg > 0 and "--vram-segment-mib" not in args:
             args += ["--vram-segment-mib", str(seg)]
+    args += parallel_args(cfg, args)
     return learned_profile_args(cfg, args)
+
+
+PARALLEL_MAX = 8      # the engine's batch window holds at most 8 rows (kVerifyMaxT)
+
+
+def parallel_args(cfg: dict, args: list[str]) -> list[str]:
+    """#465 (opt-in): "parallel": N in the config - up to N requests decode together in the engine's batch slots
+    (--batch N); more wait their turn.  1 or absent: one request at a time, as before.  A value the engine cannot use
+    is said and passed on: the engine warns and adjusts (recommend, never force)."""
+    if "--batch" in args or "--slots" in args:
+        return []
+    n = cfg.get("parallel")
+    if n is None or n is False:
+        return []
+    if isinstance(n, bool) or not isinstance(n, int):
+        print(f'[strata] "parallel" must be a whole number of requests (2..{PARALLEL_MAX}), not {n!r}: ignored',
+              flush=True)
+        return []
+    if n <= 1:
+        return []
+    if n > PARALLEL_MAX:
+        print(f'[strata] "parallel": {n} - the engine runs at most {PARALLEL_MAX} requests together; it will use '
+              f"{PARALLEL_MAX}", flush=True)
+    return ["--batch", str(n)]
 
 
 def profile_shape(path: str) -> tuple[int, int] | None:
@@ -1441,6 +1640,9 @@ class Service:
         self.host_names: set[str] = set(LOOPBACK_NAMES)
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
         self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
+        # "parallel" (the engine's batch slots): every running request's own status and rate window; self.status
+        # then says busy while any runs and shows the newest one
+        self.live_reqs: dict[int, tuple[dict, collections.deque]] = {}
         # #332: the API request monitor (/api-monitor) keeps the last 100 requests' prompts and answers in memory,
         # so it is off unless the config's "api_monitor" (or --api-monitor) turns it on
         self.api_monitor = False
@@ -1581,6 +1783,12 @@ class Service:
             raise ValueError("this engine cannot resize its VRAM use")
         if not self.fifo.acquire(timeout=self.vram_wait_s):
             raise ModelBusy("a request is still running; try again when it has finished")
+        # parallel requests do not hold the fifo: the engine's control lines (a prompt being admitted) are taken too,
+        # and the engine refuses a resize while a slot decodes
+        ctl = getattr(self.engine, "ctl", None) if getattr(self.engine, "batch", 0) else None
+        if ctl is not None and not ctl.acquire(timeout=self.vram_wait_s):
+            self.fifo.release()
+            raise ModelBusy("a request is still running; try again when it has finished")
         try:
             if not self.loaded():
                 self.vram_reserve = reserve_mib
@@ -1592,6 +1800,8 @@ class Service:
                   f"{out.get('expert_cache_full_mib')} MiB ({out.get('expert_slots')} experts)", flush=True)
             return {"status": "ok", **out}
         finally:
+            if ctl is not None:
+                ctl.release()
             self.fifo.release()
 
     def _say_died(self, e: Exception) -> None:
@@ -1707,10 +1917,19 @@ class Service:
                                        amd=getattr(self, "backend", None) == "hip")
 
     def _tok_s(self):
-        """tok/s over the last RATE_WINDOW_S seconds.  Returns 0.0 while nothing is generating."""
+        """tok/s over the last RATE_WINDOW_S seconds.  Returns 0.0 while nothing is generating.  With parallel requests:
+        the sum of theirs."""
+        with self.status_lock:
+            many = [(dict(st), list(rt)) for st, rt in self.live_reqs.values()]
+        if many:
+            return sum(self._rate_of(st, rt) for st, rt in many)
         with self.status_lock:
             s = dict(self.status)
             rate = list(self.rate)
+        return self._rate_of(s, rate)
+
+    @staticmethod
+    def _rate_of(s, rate):
         if not s.get("busy") or not s.get("first_token"):
             return 0.0
         now = time.time()
@@ -1723,10 +1942,9 @@ class Service:
     def _tok_s_mean(self):
         """The whole-request mean since the first token (the old formula), kept so the two can be compared."""
         with self.status_lock:
-            s = dict(self.status)
-        if not s.get("busy") or not s.get("first_token"):
-            return 0.0
-        return s["generated"] / max(1e-6, time.time() - s["first_token"])
+            many = [dict(st) for st, _ in self.live_reqs.values()] or [dict(self.status)]
+        return sum(s["generated"] / max(1e-6, time.time() - s["first_token"]) for s in many
+                   if s.get("busy") and s.get("first_token"))
 
     def _prefill_tok_s_mean(self):
         """Engine-reported mean over newly read tokens, excluding the cached prefix."""
@@ -1770,6 +1988,8 @@ class Service:
         the hardware (with a minute of history per series)."""
         with self.status_lock:
             s = dict(self.status)
+            if self.live_reqs:                          # parallel requests: the newest one's status
+                s = {**s, **dict(list(self.live_reqs.values())[-1][0]), "queued": s.get("queued", 0)}
             hist = list(self.history)
             totals = dict(self.totals)
         now = time.time()
@@ -1793,6 +2013,17 @@ class Service:
                 "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
+        par = int(getattr(self.engine, "batch", 0) or 0)
+        if par:                                         # #465: the requests running together, slot by slot
+            with self.status_lock:
+                running = len(self.live_reqs)
+            waiting = int(getattr(self.engine, "waiting", 0) or 0)
+            slots = self.engine.slots_view() if hasattr(self.engine, "slots_view") else []
+            busy_slots = sum(1 for x in slots if x["state"] != "idle")
+            live.update(parallel=par, running=running, slots=slots,
+                        waiting_for_slot=max(0, running - busy_slots) if running > busy_slots else waiting)
+            if running and state == "idle":
+                live["state"] = "generating"
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
@@ -1827,7 +2058,9 @@ class Service:
             "started": int(self.started_at), "uptime_s": int(time.time() - self.started_at),
             "cache_max_tokens": ctx,
             "context": {"native": ctx, "max_positions": ctx},
-            "concurrency": {"serving": 1, "requested": 1},       # one request at a time; more wait their turn
+            # one request at a time (more wait their turn), or "parallel": N batch slots (#465)
+            "concurrency": {"serving": max(1, int(getattr(self.engine, "batch", 0) or 0)),
+                            "requested": max(1, int(getattr(self.engine, "batch", 0) or 0))},
             "dialects": ["/v1/chat/completions", "/v1/messages", "/v1/responses"],
             "vision": {"enabled": images, "available": images, "error": None},
             "activity": {"requests": totals["requests"] + int(busy), "in_flight": int(busy) + int(s.get("queued") or 0),
@@ -1934,13 +2167,13 @@ class Service:
             max_new = max(1, room)          # --fit-max-tokens: a shorter completion beats a 400
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
-    def _note(self, n, evs):
+    def _note(self, n, evs, st=None, rate=None):
         with self.status_lock:
-            s = self.status
+            s = self.status if st is None else st
             s["generated"] = n
             if s.get("first_token") is None:
                 s["first_token"] = time.time()
-            self.rate.append((time.time(), n))          # the live rate's window over the last RATE_WINDOW_S
+            (self.rate if rate is None else rate).append((time.time(), n))   # the live rate's window (RATE_WINDOW_S)
             for ev in evs:
                 if ev.kind == "reasoning":
                     s["phase"] = "thinking"
@@ -1952,13 +2185,13 @@ class Service:
                     s["phase"] = "tool call complete"
                 s["tail"] = ((s.get("tail") or "") + (ev.text or ""))[-600:]
 
-    def _progress(self, last_print, every=1.0):
+    def _progress(self, last_print, every=1.0, st=None):
         """A progress line in the server window every `every` seconds while a request runs."""
         now = time.time()
         if now - last_print < every:
             return last_print
         with self.status_lock:
-            s = dict(self.status)
+            s = dict(self.status if st is None else st)
         el = now - s.get("started", now)
         if s.get("first_token") is None:
             pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
@@ -1989,6 +2222,11 @@ class Service:
         engine_last0 = getattr(self.engine, "last", None)
         trace = getattr(self.request_trace, "record", None)
         waiting = time.perf_counter()
+        # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
+        # window (self.status says busy while any runs); one at a time they are self.status / self.rate, as before
+        par = bool(getattr(self.engine, "batch", 0))
+        st = {} if par else self.status
+        rate = collections.deque(maxlen=32) if par else self.rate
         with self.status_lock:
             self.status["queued"] += 1
         try:
@@ -2001,13 +2239,18 @@ class Service:
                             trace["state"] = "generating"
                         self.status["queued"] -= 1
                     # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
-                    self.ensure_loaded()
+                    # (parallel requests do not hold the fifo: one of them starts it, the others wait for that)
+                    with (self.fifo if par else contextlib.nullcontext()):
+                        self.ensure_loaded()
                     with self.status_lock:
-                        self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
-                                           generated=0, started=time.time(), first_token=None, tool=None, tail="",
-                                           max_tokens=max_new)
+                        st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
+                                  generated=0, started=time.time(), first_token=None, tool=None, tail="",
+                                  max_tokens=max_new)
+                        if par:
+                            self.live_reqs[id(st)] = (st, rate)
+                            self.status.update(st)
                         self.last_request_at = time.time()
-                        self.rate.clear()               # the previous request's samples must not leak into this one
+                        rate.clear()                    # the previous request's samples must not leak into this one
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
@@ -2018,7 +2261,7 @@ class Service:
                         try:
                             for t in gen:
                                 if t is None:               # heartbeat while the engine is quiet
-                                    last_print = self._progress(last_print)
+                                    last_print = self._progress(last_print, st=st)
                                     yield "ping", None
                                     continue
                                 n += 1
@@ -2038,8 +2281,8 @@ class Service:
                                     repeated = True     # #606: a degenerate output, not an answer: end it here
                                     break
                                 evs = parser.feed(detok.push(t))
-                                self._note(n, evs)
-                                last_print = self._progress(last_print)
+                                self._note(n, evs, st, rate)
+                                last_print = self._progress(last_print, st=st)
                                 for ev in evs:
                                     yield "event", ev
                                 if budget and parser.state == "reasoning":
@@ -2085,7 +2328,7 @@ class Service:
                             raw_ids.append(t)
                             thinking_n += parser.state == "reasoning"
                             evs = parser.feed(detok.push(t))
-                            self._note(n, evs)
+                            self._note(n, evs, st, rate)
                             for ev in evs:
                                 yield "event", ev
                         prompt = prompt + seg + extra
@@ -2103,12 +2346,12 @@ class Service:
                     # #266: settle this request's status, history and totals while still holding the fifo: once
                     # it is released the next request sets its own status, which this must not record or clear
                     with self.status_lock:
-                        if self.status.get("busy"):
+                        if st.get("busy"):
                             # only this request's DONE counts: same object means no DONE arrived (death, error,
                             # disconnect)
                             last = dict(getattr(self.engine, "last", {}) or {}) \
                                 if getattr(self.engine, "last", None) is not engine_last0 else {}
-                            started = self.status.get("started", time.time())
+                            started = st.get("started", time.time())
                             cvec = (getattr(self.engine, "info", {}) or {}).get("cvec", 0)
                             loaded = str(cvec) not in ("0", "", "None")
                             hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
@@ -2149,8 +2392,8 @@ class Service:
                                 self.last_timings = dict(timings, at=int(time.time())) if timings else None
                             self.last_request_at = time.time()
                             now = time.time()
-                            el = now - self.status.get("started", now)
-                            ft = self.status.get("first_token")
+                            el = now - st.get("started", now)
+                            ft = st.get("first_token")
                             rate = n / max(1e-6, now - ft) if ft else 0.0
                             hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
                             if hit_msg and pcie_share:
@@ -2163,9 +2406,17 @@ class Service:
                                       "strata-<model>.json for every request) leaves room to answer", flush=True)
                             if os.environ.get("STRATA_DEBUG") and raw_ids:
                                 print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
-                        self.status["busy"] = False
-                        self.status.pop("tail", None)            # #212: the answer's end is not kept once it is done
-                        self.status.pop("tool", None)
+                        st["busy"] = False
+                        st.pop("tail", None)                     # #212: the answer's end is not kept once it is done
+                        st.pop("tool", None)
+                        if par:
+                            self.live_reqs.pop(id(st), None)
+                            if self.live_reqs:              # the newest request still running
+                                self.status.update(list(self.live_reqs.values())[-1][0])
+                            else:
+                                self.status.update(busy=False)
+                                self.status.pop("tail", None)
+                                self.status.pop("tool", None)
         finally:
             if emb:
                 Path(emb).unlink(missing_ok=True)
