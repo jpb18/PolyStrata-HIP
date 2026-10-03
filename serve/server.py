@@ -2017,11 +2017,11 @@ class Service:
         if par:                                         # #465: the requests running together, slot by slot
             with self.status_lock:
                 running = len(self.live_reqs)
-            waiting = int(getattr(self.engine, "waiting", 0) or 0)
             slots = self.engine.slots_view() if hasattr(self.engine, "slots_view") else []
-            busy_slots = sum(1 for x in slots if x["state"] != "idle")
-            live.update(parallel=par, running=running, slots=slots,
-                        waiting_for_slot=max(0, running - busy_slots) if running > busy_slots else waiting)
+            # the requests in flight that are not in a slot: the one alone on the solo path, or waiting their turn
+            in_slots = sum(1 for x in slots if x["state"] != "idle")
+            live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
+                        waiting=int(getattr(self.engine, "waiting", 0) or 0))
             if running and state == "idle":
                 live["state"] = "generating"
         engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,

@@ -5,7 +5,7 @@ windows (BGEN), greedy.  Every slot's tokens must equal its solo tokens; prints 
   python3 tools/batch_test.py --exe engine/strata --config strata-<model>.json --batch 4 --n 4 \
       --extra "--layer-split 12,24,36 --trim-stage-weights --pcie-frac 0 --adapt-every 1000000"
 """
-import argparse, json, os, subprocess, sys, threading, time
+import argparse, json, os, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,13 +44,16 @@ class Engine:
         args += extra_args
         env = dict(os.environ, **extra_env)
         env["LD_LIBRARY_PATH"] = ":".join(cfg.get("lib_dirs", []) + [env.get("LD_LIBRARY_PATH", "")])
-        self.log = open("/tmp/batch_test_engine.log", "w")
+        if os.name == "nt":
+            env["PATH"] = os.pathsep.join(cfg.get("lib_dirs", []) + [env.get("PATH", "")])
+        self.log_path = os.environ.get("BATCH_TEST_LOG") or os.path.join(tempfile.gettempdir(), "batch_test_engine.log")
+        self.log = open(self.log_path, "w")
         self.p = subprocess.Popen([exe, "--serve", *args], cwd=cfg.get("cwd"), stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1, env=env)
         for line in self.p.stdout:
             if line.startswith("READY"):
                 return
-        raise SystemExit("the engine ended before READY - see /tmp/batch_test_engine.log")
+        raise SystemExit(f"the engine ended before READY - see {self.log_path}")
 
     def send(self, line):
         self.p.stdin.write(line + "\n")
@@ -71,6 +74,7 @@ def main():
     ap.add_argument("--skip-solo", action="store_true")
     ap.add_argument("--keys", default="", help='sampling keys for every request, e.g. "temperature=0.7 top_k=20"')
     ap.add_argument("--extra", default="", help='more engine arguments in one string, e.g. "--adapt-every 1000000"')
+    ap.add_argument("--mt-min", default="1", help="STRATA_IQ_MT_MIN for the engine (1: exact; empty: the default)")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text())
     tok = tokenizer(cfg["tokenizer"])
@@ -78,7 +82,10 @@ def main():
     for q in QUESTIONS[: a.n]:
         text = f"<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         prompts.append(tok.encode(text, parse_special=True))
-    eng = Engine(a.exe, cfg, a.batch, {"STRATA_IQ_MT_MIN": "1", "STRATA_DECODE_TIMING": "1", **({"STRATA_VERIFY_PROFILE": "1"} if os.environ.get("PROF") else {})}, a.extra.split())
+    env = {"STRATA_DECODE_TIMING": "1", **({"STRATA_VERIFY_PROFILE": "1"} if os.environ.get("PROF") else {})}
+    if a.mt_min:
+        env["STRATA_IQ_MT_MIN"] = a.mt_min
+    eng = Engine(a.exe, cfg, a.batch, env, a.extra.split())
     out = eng.lines()
 
     solo = []
@@ -144,7 +151,7 @@ def main():
             ok &= same
             first_diff = next((k for k in range(min(len(b), len(solo[i]))) if b[k] != solo[i][k]), None)
             print(f"slot {i}: {len(b)} tokens, solo {len(solo[i])}: {'IDENTICAL' if same else f'DIFFERS at {first_diff}'}")
-        print("   ", repr(tok.decode(b)[:160]))
+        print("   ", ascii(tok.decode(b)[:160]))
     eng.send("QUIT")
     eng.p.wait(timeout=180)   # the next run needs the GPUs back
     return 0 if ok else 2
