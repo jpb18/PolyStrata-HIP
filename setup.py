@@ -2835,6 +2835,31 @@ def saved_draft_vocab(cfg_path: Path) -> str | None:
     return v if v in DRAFT_VOCABS else None
 
 
+def vision_tokens(asked: int | None, vision: str, earlier: Path | None) -> int:
+    """#625: the most image tokens a picture becomes (the config's vision.max_tokens): --vision-tokens N, else what an
+    earlier config of this model chose for the same encoder device (a setup run again keeps it), else the device's
+    default (VISION).  More is allowed with a note on the time it takes: setup recommends, it does not cap."""
+    default = VISION[vision]["max_tokens"]
+    if asked is None and earlier is not None:
+        try:
+            v = json.loads(earlier.read_text(encoding="utf-8-sig")).get("vision")
+        except (OSError, ValueError, AttributeError):
+            v = None
+        mt = v.get("max_tokens") if isinstance(v, dict) and bool(v.get("gpu")) == (vision == "gpu") else None
+        if isinstance(mt, int) and mt > 0 and mt != default:
+            asked = mt
+    if asked is None:
+        return default
+    note = ""
+    if vision == "cpu" and asked > default:
+        note = (" - on the CPU a picture takes longer to encode the more tokens it gets (several seconds more at "
+                "1,024 than at 300)")
+    elif asked > VISION["gpu"]["max_tokens"]:
+        note = " - more than the encoder's default needs more VRAM and context per picture"
+    ok(f"images: up to {asked} image tokens per picture (--vision-tokens; default {default}){note}")
+    return asked
+
+
 DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "en": 133}   # the draft head's VRAM per subset (IQ3_S: the largest)
 SMALL_DRAFT_VRAM_GB = 14   # #474: below this the default subset's head can be what does not fit
 
@@ -3020,6 +3045,10 @@ def main() -> int:
                          "precise) or k8v4 (hybrid: INT8 K + 4-bit V, 816 B/cell)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (yes = the encoder on the GPU)")
+    ap.add_argument("--vision-tokens", type=int, metavar="N",
+                    help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
+                         "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
+                         "for this model")
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
@@ -3081,6 +3110,8 @@ def main() -> int:
     a = ap.parse_args()
     if a.resident_budget_gib is not None and not a.resident_budget_gib > 0:
         ap.error("--resident-budget-gib takes a number of GiB above 0, e.g. --resident-budget-gib 32")
+    if a.vision_tokens is not None and a.vision_tokens < 1:
+        ap.error("--vision-tokens takes a number of image tokens, 1 or more, e.g. --vision-tokens 768")
     if a.vram_reserve_mib is not None and a.vram_reserve_mib < 0:
         ap.error("--vram-reserve-mib takes a number of MiB, 0 or more, e.g. --vram-reserve-mib 2048")
     if a.gpu is not None:                             # --gpu 0,2 means --gpus 0,2 (a user tried it: issue report)
@@ -3748,10 +3779,14 @@ def main() -> int:
     if a.browser is not None:                          # #609: only when given (else an earlier choice is carried over)
         cfg["open_browser"] = a.browser
     if vision != "none":
+        old_cfg = ROOT / f"strata-{tag.lower()}.json"
+        vt = vision_tokens(a.vision_tokens, vision, old_cfg if old_cfg.is_file() else adopted)
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
-                         "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
+                         "gpu": vision == "gpu", "max_tokens": vt}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
+    elif a.vision_tokens is not None:
+        warn("--vision-tokens: images are off for this model, so it is not used")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     cal = None if hip else saved_calibration(cfg)     # tools/calibrate.py is NVIDIA-only for now
     if cal is not None:

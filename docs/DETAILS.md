@@ -748,6 +748,17 @@ helper (`strata-vision`, from llama.cpp's `mtmd` library) and adds it to your st
 A picture becomes up to 1,024 tokens of the context (a 640x480 photo: 300). The same picture sent again, as chat apps
 do on every turn, is encoded only once.
 
+**More image tokens (0.1.39, #625):** `--vision-tokens N` at setup (`START-HERE.bat --setup --vision cpu
+--vision-tokens 768`) sets the most tokens a picture becomes - `"max_tokens"` in the `"vision"` section of
+`strata-<model>.json`, which you can also edit by hand. More tokens keep more detail (small text, charts, screenshots)
+and take longer to encode, on the CPU most of all; a setup run again keeps the value.
+
+**A Q8_0 encoder (#625):** `"mmproj"` in the `"vision"` section can point to another mmproj file of this model, for
+example a Q8_0 one (llama.cpp's `convert_hf_to_gguf.py --mmproj --outtype q8_0` makes one): the encoder's library
+reads quantized weights, the file is half the size, and on the CPU it can encode faster than BF16. Setup downloads
+the BF16 file, and a setup run again keeps a file of your own that still exists. We have not measured its accuracy
+against BF16 yet; numbers are welcome in #625.
+
 **A spare GPU for the encoder (0.1.33, #408):** with a card the engine doesn't use, add `"cuda_device": 2` (numbered
 like `nvidia-smi`) to the `"vision"` section of `strata-<model>.json`: the encoder then runs on that card alone. Lower
 `--vram-reserve-mib` in `"args"` to 700 as well, so the engine's cards keep that VRAM for the expert cache. The

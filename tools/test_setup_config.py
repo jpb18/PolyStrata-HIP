@@ -194,5 +194,51 @@ class NoBrowser(unittest.TestCase):
         self.assertIs(saved["open_browser"], True)
 
 
+class VisionTokens(unittest.TestCase):
+    """#625: --vision-tokens N sets the config's vision.max_tokens (the most image tokens a picture becomes); a setup
+    run again keeps it for the same encoder device; without it the device's default, as before."""
+
+    def setUp(self):
+        self.ram, self.found = PROFILES["64GB-1x32GB"]
+
+    def run_setup(self, *extra, configs=()):
+        return install(self.ram, self.found, ["--family", "qwen", "--model", "Q2_0", "--no-start", *extra],
+                       configs=configs)
+
+    def test_the_flag(self):
+        code, out, cfg, _ = self.run_setup("--vision", "cpu")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["vision"]["max_tokens"], 300)               # the default, as before
+        self.assertNotIn("--vision-tokens", out)
+        code, out, cfg, _ = self.run_setup("--vision", "cpu", "--vision-tokens", "768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["vision"]["max_tokens"], 768)
+        self.assertIn("up to 768 image tokens", out)
+        self.assertIn("longer to encode", out)                            # a note, not a cap
+        code, out, cfg, _ = self.run_setup("--vision", "gpu", "--vision-tokens", "2048")
+        self.assertEqual(cfg["vision"]["max_tokens"], 2048)
+        self.assertIn("more VRAM", out)
+
+    def test_kept_when_setup_runs_again(self):
+        code, out, first, _ = self.run_setup("--vision", "cpu", "--vision-tokens", "768")
+        old = [("strata-q2_0.json", first)]
+        code, out, cfg, _ = self.run_setup("--vision", "cpu", "--context", "65536", configs=old)
+        self.assertEqual(cfg["vision"]["max_tokens"], 768)
+        code, out, cfg, _ = self.run_setup("--vision", "cpu", "--vision-tokens", "300", configs=old)
+        self.assertEqual(cfg["vision"]["max_tokens"], 300)               # given again: the new value
+        code, out, cfg, _ = self.run_setup("--vision", "gpu", configs=old)
+        self.assertEqual(cfg["vision"]["max_tokens"], 1024)              # another device: its own default
+
+    def test_refused_and_unused(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code, out, cfg, _ = self.run_setup("--vision-tokens", "0")
+        self.assertEqual(code, 2)
+        self.assertIn("--vision-tokens takes a number", err.getvalue())
+        code, out, cfg, _ = self.run_setup("--vision", "no", "--vision-tokens", "768")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("vision", cfg)
+        self.assertIn("images are off", out)
+
+
 if __name__ == "__main__":
     unittest.main()
