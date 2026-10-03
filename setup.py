@@ -341,11 +341,15 @@ def cpu_cores():
 def hybrid_pool_workers(cores) -> int | None:
     """#642 (Hardin22's measurement): on a hybrid CPU the expert pool runs best on the P-cores but the host loop's one
     plus HALF of the E-cores - an E-core runs the expert kernels ~2.2x slower and each layer waits for its slowest
-    part (i9-14900KF, 8P + 16E: 15 workers decoded 165 / 116 tok/s against 106 / 84 with all 23).  None: not hybrid
-    (the engine's own default, one worker per physical core but the host's, stays)."""
+    part (i9-14900KF, 8P + 16E: 15 workers decoded 165 / 116 tok/s against 106 / 84 with all 23).  Only on a CPU with
+    more E-cores than P-cores: on an i7-13700KF (8P + 8E, docs/AMD_HIP.md's gfx1030 report) all 15 workers decoded
+    38-42 tok/s against 36 with 8, so there the engine's own count stays.  None: the engine's own default (one worker
+    per physical core but the host's) stays."""
     if not cores:
         return None
     p, e = cores
+    if e <= p:
+        return None
     return max(1, p - 1 + e // 2)
 
 

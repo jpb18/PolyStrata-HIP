@@ -23,7 +23,8 @@ class HybridWorkers(unittest.TestCase):
         self.assertEqual(setup.hybrid_pool_workers((8, 16)), 15)   # i9-14900K: the fork's measured 15
         self.assertEqual(setup.hybrid_pool_workers((6, 8)), 9)     # i5-13600K
         self.assertEqual(setup.hybrid_pool_workers((4, 8)), 7)     # Ryzen AI 9 HX 370 (Zen 5 + Zen 5c)
-        self.assertEqual(setup.hybrid_pool_workers((1, 1)), 1)
+        self.assertIsNone(setup.hybrid_pool_workers((8, 8)))       # i7-13700K: all cores measured faster (AMD_HIP.md)
+        self.assertIsNone(setup.hybrid_pool_workers((8, 4)))
 
     def test_recommend_keeps_a_given_count(self):
         with mock.patch.object(setup, "cpu_cores", lambda: (8, 16)), mock.patch.object(setup, "ok", lambda *a: None):
