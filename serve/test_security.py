@@ -1,4 +1,5 @@
-"""serve/test_security.py - the Host check (DNS rebinding), against the mock engine (no GPU, no pack).
+"""serve/test_security.py - the Host check (DNS rebinding) and the Origin check for requests without an API key,
+against the mock engine (no GPU, no pack).
 
     python -m unittest serve.test_security -v
 """
@@ -17,7 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (ByteTokenizer, MockEngine, Service, allowed_hosts_of, host_allowed,  # noqa: E402
-                          host_name, host_names_for, serve)
+                          host_name, host_names_for, origin_allowed, serve)
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL = {"localhost", "127.0.0.1", "::1"}
@@ -70,6 +71,27 @@ class HostCheck(unittest.TestCase):
 
     def test_any_host(self):
         self.assertTrue(host_allowed("evil.example.com", LOCAL, any_host=True))
+
+
+class OriginCheck(unittest.TestCase):
+    def test_accepted(self):
+        names = LOCAL | {"box"}
+        self.assertTrue(origin_allowed("http://127.0.0.1:8095", "127.0.0.1:8095", names))      # Strata's own page
+        self.assertTrue(origin_allowed("http://192.168.1.20:8095", "192.168.1.20:8095", names))  # ... by LAN IP
+        self.assertTrue(origin_allowed("http://localhost:3000", "127.0.0.1:8095", names))      # a local app
+        self.assertTrue(origin_allowed("http://[::1]:3000/", "127.0.0.1:8095", names))
+        self.assertTrue(origin_allowed("https://box", "127.0.0.1:8095", names))
+        self.assertTrue(origin_allowed("https://chat.example.com", "x", names, ["https://chat.example.com"]))
+        self.assertTrue(origin_allowed("https://any.example.com", "x", names, ["*"]))           # cors_origins ["*"]
+        # browser extensions and desktop apps: no web site can send another scheme than http(s) (or "null")
+        for origin in ("chrome-extension://abcdef", "moz-extension://1234-5678", "app://."):
+            self.assertTrue(origin_allowed(origin, "127.0.0.1:8095", names), origin)
+
+    def test_refused(self):
+        names = LOCAL | {"box"}
+        for origin in ("http://evil.example.com", "http://1.2.3.4", "http://192.168.1.99:8095", "null", "",
+                       "http://localhost.evil.com", "https://box.evil.com", "://x"):
+            self.assertFalse(origin_allowed(origin, "127.0.0.1:8095", names, ["https://chat.example.com"]), origin)
 
 
 class OverHttp(unittest.TestCase):
@@ -151,6 +173,64 @@ class OverHttp(unittest.TestCase):
     def test_a_trusted_origin_s_host_is_allowed(self):
         self.start(trusted_origins=["https://strata.example.com"])
         self.assertEqual(self.req("GET", "/status", host="strata.example.com")[0], 200)
+
+    # --- Origin on /v1 without an API key
+    def test_curl_and_sdks_without_origin(self):
+        self.start()
+        for ctype in ("application/json", "text/plain", None):              # curl -d sends a form type
+            code, body, _ = self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                     {"Content-Type": ctype} if ctype else {})
+            self.assertEqual(code, 200, ctype)
+            self.assertEqual(body["choices"][0]["message"]["content"], "ok")
+
+    def test_cross_site_page_is_refused(self):
+        self.start()
+        for path in ("/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens"):
+            for ctype in ("text/plain", "application/json"):
+                code, body, log = self.req("POST", path, self.chat_body(),
+                                           {"Content-Type": ctype, "Origin": "http://evil.example.com"})
+                self.assertEqual(code, 403, (path, ctype))
+                self.assertIn("api_key", body["error"]["message"])
+                self.assertIn("evil.example.com", log)
+        self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                  {"Content-Type": "text/plain", "Origin": "null"})[0], 403)
+
+    def test_own_and_local_pages_pass(self):
+        self.start()
+        json_type = {"Content-Type": "application/json"}
+        for origin in (f"http://127.0.0.1:{self.port}", "http://localhost:3000", "chrome-extension://abcdef"):
+            self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                      {**json_type, "Origin": origin})[0], 200, origin)
+        # a browser page sends JSON; text/plain from a page is the cross-site "simple request" shape
+        self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                  {"Content-Type": "text/plain", "Origin": f"http://127.0.0.1:{self.port}"})[0], 415)
+
+    def test_configured_origins_pass(self):
+        self.start(cors_origins=["https://chat.example.com"], trusted_origins=["https://strata.example.com"],
+                   allowed_hosts=["webui.lan"])
+        for origin in ("https://chat.example.com", "https://strata.example.com", "http://webui.lan:3000"):
+            self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                      {"Content-Type": "application/json", "Origin": origin})[0], 200, origin)
+
+    def test_with_a_key_the_key_decides(self):
+        self.start(api_key="s3cret")
+        headers = {"Content-Type": "text/plain", "Origin": "http://evil.example.com"}
+        self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(), headers)[0], 401)
+        self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(),
+                                  {**headers, "Authorization": "Bearer s3cret"})[0], 200)
+
+    # --- /unload and /load
+    def test_unload_and_load_need_json_from_the_own_page(self):
+        self.start()
+        form = {"Content-Type": "application/x-www-form-urlencoded"}
+        for path in ("/unload", "/load"):
+            self.assertEqual(self.req("POST", path, b"a=1", form)[0], 415, path)
+            self.assertEqual(self.req("POST", path, b"", {})[0], 415, path)
+            self.assertEqual(self.req("POST", path, {}, {"Content-Type": "application/json",
+                                                         "Origin": "http://evil.example.com"})[0], 403, path)
+        self.assertEqual(self.req("POST", "/unload", {}, {"Content-Type": "application/json"})[0], 200)
+        self.assertEqual(self.req("POST", "/load", {}, {"Content-Type": "application/json",
+                                                        "Origin": f"http://127.0.0.1:{self.port}"})[0], 200)
 
 
 if __name__ == "__main__":

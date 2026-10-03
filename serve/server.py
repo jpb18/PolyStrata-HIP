@@ -1987,6 +1987,27 @@ def make_handler(svc: Service):
                              f"the STRATA_ALLOWED_HOSTS environment variable"}})
             return False
 
+        def _foreign_page(self) -> bool:
+            """Without an API key, a /v1 POST from a browser page of another site (any site can POST text/plain
+            there without a CORS preflight) would burn GPU time: an Origin header must name an allowed page, and
+            then the body must be JSON.  No Origin (curl, the SDKs, other servers): any content type, as before."""
+            origin = self.headers.get("Origin")
+            if svc.api_key or not origin:
+                return False
+            if not origin_allowed(origin, self.headers.get("Host"), svc.host_names,
+                                  [*svc.trusted_origins, *svc.cors_origins]):
+                print(f"[strata] refused an API request from the web page {origin!r} (no API key; add its host to "
+                      f"\"allowed_hosts\" or its origin to \"cors_origins\" in the config)", flush=True)
+                self._json(403, {"error": {"type": "forbidden", "message":
+                                 f"web pages of {origin} may not use this server without an API key; set \"api_key\", "
+                                 f"or add the page's host to \"allowed_hosts\" (or its origin to \"cors_origins\") "
+                                 f"in the config"}})
+                return True
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                self._json(415, {"error": {"message": "send application/json"}})
+                return True
+            return False
+
         def _watch_client(self, cancel: threading.Event) -> None:
             """#430 #431: cancel the request as soon as its client hangs up.  A non-streamed request writes nothing
             until it ends, and a streamed one only a keep-alive per prompt chunk (and the first write after a hang-up
@@ -2190,8 +2211,13 @@ def make_handler(svc: Service):
             if not self._authorized():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
+            if path.startswith("/v1/") and self._foreign_page():
+                return
             if path == "/settings":
                 self._settings()
+                return
+            # JSON from Strata's own page only, as /settings: else a plain form POST from any site unloads the model
+            if path in ("/unload", "/load") and not self._own_page("the model can be loaded or unloaded"):
                 return
             if path == "/unload":                            # give the GPU back now (between requests)
                 try:
@@ -2611,6 +2637,26 @@ def host_allowed(host, names, any_host=False) -> bool:
     name = host_name(host)
     return bool(name) and (_is_ip(name) or name == "localhost" or name.endswith(".localhost")
                            or _name_in(name, names))
+
+
+def origin_allowed(origin: str, host, names, origins=()) -> bool:
+    """A browser page's Origin that may use the model without an API key: this server's own page (the Origin is the
+    request's own Host), a page on one of the names this server answers to (any port), or an origin the config lists
+    (trusted_origins, cors_origins).  Unlike the Host check no IP passes on trust: a page served from any other IP is
+    another site.  "null" (a sandboxed frame, a file:// page) does not pass: any site can send it.  An origin of another
+    scheme (chrome-extension://, moz-extension://, an Electron app's app://) does: no web site can send one."""
+    origin = (origin or "").strip().rstrip("/")
+    if origin in origins or "*" in origins:             # cors_origins ["*"]: the config lets every page in
+        return True
+    scheme, sep, rest = origin.lower().partition("://")
+    if not sep or not scheme:
+        return False
+    if scheme not in ("http", "https"):
+        return True
+    if host and rest == host.strip().lower():
+        return True
+    name = host_name(rest)
+    return bool(name) and (name in LOOPBACK_NAMES or name.endswith(".localhost") or _name_in(name, names))
 
 
 def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
