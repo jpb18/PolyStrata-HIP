@@ -282,8 +282,129 @@ bool strata_wmma_gemm_bf16(const uint16_t* X, const uint16_t* W, float* Y,
     return strata_wmma_gemm_dispatch<__bf16>(X, W, Y, T, N, K, ldy, beta, stream);
 }
 
+// ===========================================================================
+// S23 (opt-in STRATA_PF_GEMM=1): the prompt projections' FP16 GEMM on gfx11 (gfx1151: 30-33 TFLOPS on the 16K-row
+// projection shapes where the tuned hipBLASLt reaches 25-27; s23/gemm_probe4.hip).  Block 128 x BN (BN 256 or 128),
+// BK 32, 8 waves of 64 x BN/4, LDS double buffer with the next stage prefetched into named registers (arrays there
+// went to scratch), grouped tile order (8 row tiles sweep all column tiles: the weights stream from DRAM once per
+// group).  FP32 accumulation, K in another order than hipBLASLt: rounding-level, quality-gated.
+// ===========================================================================
+namespace pfg {
+typedef _Float16 h16 __attribute__((ext_vector_type(16)));
+typedef float f8 __attribute__((ext_vector_type(8)));
+constexpr int BM = 128, BK = 32, LDK = BK + 8, GM = 8;
+__device__ __forceinline__ h16 frag(const _Float16* p) {
+    const uint4 a = *reinterpret_cast<const uint4*>(p), b = *reinterpret_cast<const uint4*>(p + 8);
+    const uint32_t w[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+    return __builtin_bit_cast(h16, w);
+}
+template <int BN, int WN>
+__global__ void __launch_bounds__(256) kernel(const _Float16* __restrict__ X, const _Float16* __restrict__ W,
+                                              float* __restrict__ Y, int M, int N, int K, int ldy, int accumulate) {
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__)
+    constexpr int TN = WN / 16, NB = BN / 64;
+    __shared__ __align__(16) _Float16 sA[2][BM][LDK];
+    __shared__ __align__(16) _Float16 sB[2][BN][LDK];
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, l16 = lane & 15, hi = lane >> 4;
+    const int wm = wave & 1, wn = wave >> 1;
+    const int num_m = (M + BM - 1) / BM, num_n = (N + BN - 1) / BN, b = blockIdx.x;
+    const int group = b / (GM * num_n), first_m = group * GM, gsize = min(GM, num_m - first_m);
+    const int m0 = (first_m + (b % (GM * num_n)) % gsize) * BM, n0 = ((b % (GM * num_n)) / gsize) * BN;
+    const int sr = tid >> 2, sq = tid & 3;
+    auto ldA = [&](int k0, int r) -> uint4 {
+        return *reinterpret_cast<const uint4*>(X + (size_t) min(m0 + r, M - 1) * K + k0 + 8 * sq);
+    };
+    auto ldB = [&](int k0, int r) -> uint4 {
+        return *reinterpret_cast<const uint4*>(W + (size_t) min(n0 + r, N - 1) * K + k0 + 8 * sq);
+    };
+    f8 acc[4][TN];
+    for (int i = 0; i < 4; ++i) for (int j = 0; j < TN; ++j) acc[i][j] = f8{0, 0, 0, 0, 0, 0, 0, 0};
+    uint4 ra0 = ldA(0, sr), ra1 = ldA(0, sr + 64), rb0 = ldB(0, sr), rb1 = ldB(0, sr + 64), rb2 = rb0, rb3 = rb0;
+    if constexpr (NB > 2) { rb2 = ldB(0, sr + 128); rb3 = ldB(0, sr + 192); }
+    int buf = 0;
+    *reinterpret_cast<uint4*>(&sA[0][sr][8 * sq]) = ra0; *reinterpret_cast<uint4*>(&sA[0][sr + 64][8 * sq]) = ra1;
+    *reinterpret_cast<uint4*>(&sB[0][sr][8 * sq]) = rb0; *reinterpret_cast<uint4*>(&sB[0][sr + 64][8 * sq]) = rb1;
+    if constexpr (NB > 2) { *reinterpret_cast<uint4*>(&sB[0][sr + 128][8 * sq]) = rb2; *reinterpret_cast<uint4*>(&sB[0][sr + 192][8 * sq]) = rb3; }
+    __syncthreads();
+    for (int k0 = 0; k0 < K; k0 += BK) {
+        const bool more = k0 + BK < K;
+        if (more) {
+            ra0 = ldA(k0 + BK, sr); ra1 = ldA(k0 + BK, sr + 64); rb0 = ldB(k0 + BK, sr); rb1 = ldB(k0 + BK, sr + 64);
+            if constexpr (NB > 2) { rb2 = ldB(k0 + BK, sr + 128); rb3 = ldB(k0 + BK, sr + 192); }
+        }
+#pragma unroll
+        for (int ks = 0; ks < BK; ks += 16) {
+            h16 a[4], bb[TN];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) a[i] = frag(&sA[buf][64 * wm + 16 * i + l16][ks]);
+#pragma unroll
+            for (int j = 0; j < TN; ++j) bb[j] = frag(&sB[buf][WN * wn + 16 * j + l16][ks]);
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[i], bb[j], acc[i][j]);
+        }
+        if (more) {
+            const int nb = buf ^ 1;
+            *reinterpret_cast<uint4*>(&sA[nb][sr][8 * sq]) = ra0; *reinterpret_cast<uint4*>(&sA[nb][sr + 64][8 * sq]) = ra1;
+            *reinterpret_cast<uint4*>(&sB[nb][sr][8 * sq]) = rb0; *reinterpret_cast<uint4*>(&sB[nb][sr + 64][8 * sq]) = rb1;
+            if constexpr (NB > 2) { *reinterpret_cast<uint4*>(&sB[nb][sr + 128][8 * sq]) = rb2; *reinterpret_cast<uint4*>(&sB[nb][sr + 192][8 * sq]) = rb3; }
+            __syncthreads();
+            buf = nb;
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            const int n = n0 + WN * wn + 16 * j + l16;
+            if (n >= N) continue;
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int m = m0 + 64 * wm + 16 * i + 2 * e + hi;
+                if (m < M) {
+                    float* y = Y + (size_t) m * ldy + n;
+                    *y = accumulate ? *y + acc[i][j][e] : acc[i][j][e];
+                }
+            }
+        }
+#endif
+}
+}  // namespace pfg
+
+bool strata_pf_gemm_f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K, int64_t ldy,
+                        float beta, void* stream) {
+    if (!X || !W || !Y || T < 64 || N < 512 || K % pfg::BK != 0 || K < pfg::BK) return false;
+    if (beta != 0.0f && beta != 1.0f) return false;
+    if (ldy <= 0) ldy = N;
+    if (ldy < N || T > (1LL << 30) || N > (1LL << 30) || K > (1LL << 30)) return false;
+    static const bool gfx11 = [] {
+        int dev = 0;
+        hipDeviceProp_t prop{};
+        if (hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&prop, dev) != hipSuccess) return false;
+        return std::strncmp(prop.gcnArchName, "gfx11", 5) == 0;
+    }();
+    if (!gfx11) return false;
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    const int acc = beta == 1.0f ? 1 : 0;
+    const int64_t mt = (T + pfg::BM - 1) / pfg::BM;
+    if (N >= 1024) {
+        const unsigned grid = (unsigned) (mt * ((N + 255) / 256));
+        pfg::kernel<256, 64><<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,
+                                                  (int) ldy, acc);
+    } else {
+        const unsigned grid = (unsigned) (mt * ((N + 127) / 128));
+        pfg::kernel<128, 32><<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,
+                                                  (int) ldy, acc);
+    }
+    return hipGetLastError() == hipSuccess;
+}
+
 #else
 // Non-HIP / Non-GFX11 compilation fallback
+bool strata_pf_gemm_f16(const uint16_t*, const uint16_t*, float*, int64_t, int64_t, int64_t, int64_t, float, void*) {
+    return false;
+}
 bool strata_wmma_gemm_f16(const uint16_t*, const uint16_t*, float*,
                           int64_t, int64_t, int64_t, int64_t, float,
                           void*) {
