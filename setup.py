@@ -2792,6 +2792,24 @@ def small_card_note(ctx: int, draft_vocab: str | None) -> list[str]:
     return lines
 
 
+DESKTOP_RESERVE_MIB = 3072     # #560 #516: what kept a KDE/Wayland desktop alive beside a full expert cache
+
+
+def linux_desktop(env=None) -> bool:
+    """A graphical session on Linux (Wayland or X)."""
+    env = os.environ if env is None else env
+    return sys.platform.startswith("linux") and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+
+
+def desktop_reserve_note() -> list[str]:
+    """#560 #516: an AMD card that also drives a Linux desktop - with the default 700 MiB reserve the expert cache
+    fills it, and when the desktop needs more VRAM amdgpu moves the cache to system RAM, where the OOM killer then ends
+    the compositor.  A recommendation, setup changes nothing."""
+    return [f"If this AMD card also drives your desktop and the desktop or apps crash once the model is loaded, keep "
+            f"more VRAM free: ./setup.sh --vram-reserve-mib {DESKTOP_RESERVE_MIB}",
+            "  (remembered for this model; the expert cache gets ~2.3 GB less, a few % of speed)"]
+
+
 def mtp_corrupt(mtp: Path, env=None) -> bool:
     """#327: True when the MTP tensors an install fetched are not the pinned checkpoint's (tools/mtp_fetch.py verify,
     which hashes only files that changed since they last checked out).  A mirror that ignored range requests left the
@@ -3600,6 +3618,9 @@ def main() -> int:
         # #496: on a 6 GB card the expert cache can get no room at all; the engine lowers its own reserve when that
         # is what it takes, and says what is short when even that is not enough.  Setup only says what helps.
         for line in small_card_note(ctx, draft_vocab):   # a recommendation: nothing changes
+            say("  " + line)
+    elif hip and a.vram_reserve_mib is None and linux_desktop():
+        for line in desktop_reserve_note():              # #560 #516: a recommendation: nothing changes
             say("  " + line)
     if esp is not None:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)

@@ -2544,6 +2544,36 @@ def warn_tight_ram(arena_mib) -> None:
               + "Close other programs, or run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS).", flush=True)
 
 
+DESKTOP_FREE_MIB = 2048          # #560 #516: below this, an AMD card that also drives a Linux desktop can run out
+DESKTOP_RESERVE_MIB = 3072       # what kept KDE/Wayland alive beside a full expert cache in both reports
+
+
+def linux_desktop(env=None) -> bool:
+    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has."""
+    env = os.environ if env is None else env
+    return os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+
+
+def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
+    """#560 #516: on Linux, when the desktop needs VRAM the AMD card does not have, amdgpu moves GPU memory (the expert
+    cache, ~24 GB) to system RAM, which the experts already fill - the OOM killer then ends the compositor.  The
+    default reserve (700 MiB) is sized for a card without a desktop.  A recommendation, nothing changes: "" when it
+    does not apply."""
+    if backend != "hip" or not desktop or not isinstance(vram_free_mib, int) or vram_free_mib >= DESKTOP_FREE_MIB:
+        return ""
+    try:
+        reserve = int(args[args.index("--vram-reserve-mib") + 1]) if "--vram-reserve-mib" in args else 700
+    except (ValueError, IndexError):
+        reserve = 700
+    if reserve >= DESKTOP_RESERVE_MIB:
+        return ""
+    return (f"[strata] note: {vram_free_mib} MiB of VRAM free with the model loaded. If this AMD card also drives your "
+            "desktop and the desktop or apps crash after the start (the driver moves the expert cache to RAM and "
+            "the OOM killer ends the session), keep more VRAM free: ./setup.sh --vram-reserve-mib "
+            f"{DESKTOP_RESERVE_MIB} (remembered; the expert cache gets "
+            f"{(DESKTOP_RESERVE_MIB - reserve) / 1024:.1f} GB less, a few % of speed)")
+
+
 def lan_addresses() -> list[str]:
     """This PC's IPv4 addresses on its networks (what another device types in), without loopback/link-local."""
     import socket
@@ -2895,6 +2925,10 @@ def main() -> int:
         engine = StrataEngine(exe, engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
+        note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
+                                 linux_desktop())
+        if note:                                        # #560 #516: before --open starts a browser on that card
+            print(note, flush=True)
     else:
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
             "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}

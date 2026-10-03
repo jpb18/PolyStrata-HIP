@@ -190,6 +190,11 @@ The worker count above was used on a 16-core CPU; measure it for your CPU.
 The 4K context is a smoke-test starting point, not a model limit. The expert cache
 sizes itself automatically and leaves 1 GiB of VRAM headroom.
 
+**The card also drives a Linux desktop (#560 #516):** keep more VRAM free than the default 700 MiB, e.g.
+`./setup.sh --vram-reserve-mib 3072`. With the cache filling the card, the desktop's next VRAM need makes amdgpu move
+GPU memory to system RAM (GTT), the OOM killer then ends KWin/plasmashell or `systemd-oomd` ends apps, or the
+compositor fails with "Failed to pin framebuffer with error -12".
+
 The installer supports this backend (see "Install with setup" above). Images run through the CPU encoder for now (`--vision cpu`).
 Setup installs one AMD card, or several with `--gpus` (the engine's layer split; see RDNA4 below).
 

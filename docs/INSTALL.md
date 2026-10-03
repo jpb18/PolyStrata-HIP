@@ -201,6 +201,12 @@ By hand: add `"--vram-reserve-mib", "2048"` to the config's `"args"` list and re
 much smaller, so answers can be a little slower. The engine sizes its cache from the VRAM free when it starts: what
 another program already holds then is left alone anyway; the reserve is room for what it takes later.
 
+**An AMD card that also drives a Linux desktop (#560 #516):** with the default reserve the expert cache fills the
+card, and when the desktop (the compositor, a browser, a new app) needs more VRAM, the amdgpu driver moves GPU memory
+to system RAM, which the model's experts already fill: the OOM killer then ends the desktop session (KWin, plasmashell)
+or the compositor fails ("Failed to pin framebuffer"). `./setup.sh --vram-reserve-mib 3072` fixed it in both reports
+(about 2.3 GB fewer experts in VRAM, a few % of speed). Setup and the server window say so on such a PC.
+
 **A card under 8 GB (#496):** when the default reserve leaves the expert cache too little room, the engine lowers the
 reserve (down to 300 MiB) until it fits, and warns if the card then ends nearly full. If the start stops with "no VRAM
 is left for the expert cache", that log line says how much is short; an 8K context and `--draft-vocab en` at setup
