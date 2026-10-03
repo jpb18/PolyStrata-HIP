@@ -147,7 +147,8 @@ More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [t
 - **It says port 8080 is already in use.** Strata is already running - look for its window.
 
 More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder.
+[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder. A
+security problem? Report it privately: [SECURITY.md](SECURITY.md).
 
 ## How does it work?
 
