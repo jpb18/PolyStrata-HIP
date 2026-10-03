@@ -267,6 +267,40 @@ class HipVision(unittest.TestCase):
         self.assertNotIn("vision_src", meta)
 
 
+class RotationalDisk(unittest.TestCase):
+    """#605: a model on a rotational disk gets --ple-io ram when the n-gram table fits the RAM, else a warning."""
+
+    def install(self, ram, disk):
+        from test_setup_golden import PROFILES, install
+        _, found = PROFILES["64GB-1x32GB"]
+        return install(ram, found, ["--family", "qwen", "--model", "Q2_0", "--no-start"],
+                       extra=[mock.patch.object(setup, "rotational_disk", lambda p: disk)])
+
+    def test_fits(self):
+        code, out, cfg, _ = self.install(127.8, "sdb")
+        self.assertEqual(code, 0, out)
+        a = cfg["args"]
+        self.assertEqual(a[a.index("--ple-io") + 1], "ram")
+        self.assertIn("rotational disk (sdb)", out)
+
+    def test_does_not_fit(self):
+        code, out, cfg, _ = self.install(63.7, "sdb")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("--ple-io", cfg["args"])
+        self.assertIn("An SSD is recommended", out)
+
+    def test_ssd(self):
+        code, out, cfg, _ = self.install(127.8, None)
+        self.assertNotIn("--ple-io", cfg["args"])
+        self.assertNotIn("rotational", out)
+
+    def test_sysfs(self):
+        if not sys.platform.startswith("linux"):
+            self.assertIsNone(setup.rotational_disk(__file__))   # Windows: never
+            return
+        self.assertIn(setup.rotational_disk(__file__), (None,) + tuple(os.listdir("/sys/block")))
+
+
 class VramReserve(unittest.TestCase):
     """#493: --vram-reserve-mib N - VRAM the engine leaves free for other programs - goes into the config only when
     given (the default config is tools/test_setup_golden.py's, unchanged), at setup and on a start."""

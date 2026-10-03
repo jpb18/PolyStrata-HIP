@@ -70,6 +70,8 @@
 #else
 #include <unistd.h>
 #include <cerrno>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #endif
 
 #include <cuda_runtime.h>
@@ -805,6 +807,55 @@ std::string stage_text() {
     return s;
 }
 
+#if !defined(_WIN32)
+// #605: whether `path` is on a rotational disk (1), not (0) or unknown (-1), from sysfs; `dev` is the disk's name
+int on_rotational_disk(const std::string& path, std::string& dev) {
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return -1;
+    char sys[64];
+    std::snprintf(sys, sizeof sys, "/sys/dev/block/%u:%u", (unsigned) major(st.st_dev), (unsigned) minor(st.st_dev));
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::canonical(sys, ec);
+    for (int up = 0; !ec && up < 2; ++up, p = p.parent_path()) {   // a partition has its disk's queue
+        std::ifstream q(p / "queue" / "rotational");
+        int r = -1;
+        if (q >> r) {
+            dev = p.filename().string();
+            return r;
+        }
+    }
+    return -1;
+}
+
+// #605: the engine's threads in uninterruptible sleep (state D - almost always waiting for the disk), and where
+// (wchan): 16 threads in blk_io_schedule is a disk that cannot keep up, not a deadlock in the engine
+void disk_wait_threads(std::FILE* f) {
+    std::map<std::string, int> where;
+    int waiting = 0, threads = 0;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        ++threads;
+        std::ifstream st(e.path() / "stat");
+        std::string line;
+        std::getline(st, line);
+        const size_t rp = line.rfind(')');
+        if (rp == std::string::npos || rp + 2 >= line.size() || line[rp + 2] != 'D') continue;
+        ++waiting;
+        std::ifstream w(e.path() / "wchan");
+        std::string wc;
+        std::getline(w, wc);
+        ++where[wc.empty() || wc == "0" ? "?" : wc];
+    }
+    if (threads == 0) return;
+    std::string list;
+    for (const auto& [name, n] : where) list += (list.empty() ? " (" : ", ") + name + " x" + std::to_string(n);
+    if (!list.empty()) list += ")";
+    std::fprintf(f, "  threads waiting on the disk (state D): %d of %d%s%s\n", waiting, threads, list.c_str(),
+                 waiting > 0 ? " - the engine is waiting for the drive: a rotational or failing disk with --ple-io "
+                               "direct (#605: --ple-io ram), or a drive too slow for the reads asked of it" : "");
+}
+#endif
+
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
     std::fprintf(f, "strata serve: stall report (engine %s): stage \"%s\" for %lld s; %llu layers served since the "
@@ -818,6 +869,9 @@ void stall_report(std::FILE* f, uint64_t layers_during) {
         }
         if (auto fn = strata::core::diag_pool_fn().load()) fn(f);
         if (auto fn = strata::core::diag_verify_fn().load()) fn(f);
+#if !defined(_WIN32)
+        disk_wait_threads(f);
+#endif
         const MemSample m = mem_sample();
         std::fprintf(f, "  memory: %llu MiB resident, %llu MiB %s, %llu MiB RAM available; %llu %s\n", m.rss_mib,
                      m.commit_mib,
@@ -2172,6 +2226,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
+#if !defined(_WIN32)
+        if (pio.mode == strata::kernels::PleIo::Direct) {
+            // #605: --ple-io direct's random reads (up to --ple-inflight at once) are for SSDs; a rotational disk
+            // can take longer than the stall watchdog's 60 s for one prompt chunk's rows.  Recommended, not forced.
+            std::string dev;
+            if (!under_wddm() && on_rotational_disk(o.ple_gguf, dev) == 1)   // (WSL's virtual disk says rotational)
+                std::fprintf(stderr, "strata generate: WARNING: the n-gram table (%s) is on a rotational disk (%s): "
+                                     "--ple-io direct reads it at random and can stall a prompt for minutes (#605). "
+                                     "--ple-io ram (it then needs RAM for the table) or the model on an SSD is "
+                                     "recommended\n", o.ple_gguf.c_str(), dev.c_str());
+        }
+#endif
         if (pio.lock)
             std::fprintf(stderr, "strata generate: PLE table %s (--ple-io ram) in %.1f s\n",
                          ple_table.locked() ? "locked in RAM" : "loaded (not locked)",
