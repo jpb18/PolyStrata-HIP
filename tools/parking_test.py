@@ -34,7 +34,8 @@ def gen(eng, out, ids, n):
 
 
 def run(a, cfg, tok, with_b):
-    eng = Engine(a.exe, cfg, 0, {"STRATA_IQ_MT_MIN": "1"}, a.extra.split())
+    # STRATA_SNAPSHOT_VERIFY: the engine reads the restored draft ring back (on the GPU that holds it) after a restore
+    eng = Engine(a.exe, cfg, 0, {"STRATA_IQ_MT_MIN": "1", "STRATA_SNAPSHOT_VERIFY": "1"}, a.extra.split())
     out = eng.lines()
     pa = tok.encode(chat(DOC * a.repeat + "\nSummarize this text in five sentences."), parse_special=True)
     ans, _ = gen(eng, out, pa, a.max_new)
@@ -53,6 +54,8 @@ def run(a, cfg, tok, with_b):
     eng.p.wait(timeout=180)
     log = open("/tmp/batch_test_engine.log").read()
     restored = re.findall(r"restored \d+ tokens[^\n]*", log)
+    if with_b and "SNAPSHOT_VERIFY draft=" not in log:
+        print("no SNAPSHOT_VERIFY line: the draft ring was not read back", flush=True)
     reparked = [int(x) for x in re.findall(r"parked \d+ tokens .*reused_kv_bytes=(\d+)", log)]
     return len(pa), len(follow), got, done, dt, restored, reparked
 

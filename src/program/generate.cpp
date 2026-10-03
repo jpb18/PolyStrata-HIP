@@ -1398,6 +1398,11 @@ int main(int argc, char** argv) {
             for (int d = 1; d < n_dev && (split_auto || split_devs.size() < split_at.size()); ++d) split_devs.push_back(d);
         if (ok && !split_auto && split_devs.empty() && split_at.size() == 1) split_devs.push_back(0);   // one GPU
         split_same = ok && split_devs.size() == 1 && split_devs[0] == 0 && !split_auto;
+        if (split_same && o.conversation_cache_mib > 0 && o.conversation_cache_slots > 0 && o.prompt_cache > 0) {
+            std::fprintf(stderr, "strata serve: conversation parking does not support a layer split on one GPU "
+                                 "(--split-device 0); disable parking with --conversation-cache-mib 0\n");
+            return 2;
+        }
         if (ok && split_auto && split_devs.empty()) {
             std::fprintf(stderr, "strata generate: --layer-split auto: one GPU visible, so no split\n");
             o.layer_split.clear();
@@ -2003,6 +2008,12 @@ int main(int argc, char** argv) {
         std::ifstream idx(o.pack + "/index.txt");
         for (std::string ln; std::getline(idx, ln);)
             if (!ln.empty() && ln[0] != '#') pack_names.push_back(ln.substr(0, ln.find(' ')));
+        if (pack_names.empty()) {
+            std::fprintf(stderr, "strata generate: --trim-stage-weights: cannot read %s/index.txt\n", o.pack.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "strata generate: --trim-stage-weights: CUDA0 loads the dense weights of layers 0-%lld\n",
+                     (long long) split_at[0] - 1);
     }
     auto range_skip = [&](int64_t lo, int64_t hi) {   // skip + every blk.<l>. tensor outside [lo, hi)
         std::set<std::string> out = skip;
@@ -2337,6 +2348,9 @@ int main(int argc, char** argv) {
         // --trim-stage-weights: this stage's layers only
         const int64_t s_lo = trim ? split_at[i] : 0, s_hi = trim ? (i + 1 < split_at.size() ? split_at[i + 1] : g.n_layers) : -1;
         const std::set<std::string> skip_s = trim ? range_skip(s_lo, s_hi) : skip;
+        if (trim)
+            std::fprintf(stderr, "strata generate: --trim-stage-weights: CUDA%d loads the dense weights of layers %lld-%lld\n",
+                         st.dev, (long long) s_lo, (long long) s_hi - 1);
         uint64_t pool_s = pool_bytes;
         if (trim && !strata::core::WeightTable::pool_bytes(o.pack, pool_s, err, &skip_s)) {
             std::fprintf(stderr, "strata generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
@@ -4663,6 +4677,10 @@ int main(int argc, char** argv) {
             // later stage (without it - the draft ring is saved once).  The checkpoints are MOVED apart into their
             // stage parts for the capture and put back together whichever way this ends (no running state copied).
             const size_t n_st = stages.size();
+            // the draft layer's K/V lives on the last stage's GPU (the drafter is loaded there): with a split it is
+            // saved with that stage's image, under its device; stage 0's image holds none
+            const strata::core::QsaState* draft0 = n_st > 0 ? nullptr : &mtp.kv_state();
+            auto draft_of = [&](size_t k) -> const strata::core::QsaState* { return k + 1 == n_st ? &mtp.kv_state() : nullptr; };
             strata::core::ConversationCheckpointSplit cs;
             if (n_st > 0) cs = strata::core::conversation_checkpoints_split(std::move(checks), n_st);
             struct MergeBack {
@@ -4681,7 +4699,7 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(st->dev);
                 const strata::core::ConversationView view_k{live, live_imgs, cs.parts[k], cvec_cached};
                 size_t b = 0;
-                if (!strata::core::conversation_snapshot_bytes(view_k, st->ss, g, nullptr, b, err)) {
+                if (!strata::core::conversation_snapshot_bytes(view_k, st->ss, g, draft_of(k), b, err)) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (stage CUDA%d: %s)\n",
                                  st->dev, err.c_str());
                     err.clear();
@@ -4689,7 +4707,7 @@ int main(int argc, char** argv) {
                 }
                 if (!stage_reuse[k].kv.empty()) {
                     size_t r = 0;
-                    if (strata::core::conversation_snapshot_capture_bytes(stage_reuse[k], view_k, st->ss, g, nullptr,
+                    if (strata::core::conversation_snapshot_capture_bytes(stage_reuse[k], view_k, st->ss, g, draft_of(k),
                                                                           r, err)) {
                         b = r;
                         stage_retained += stage_reuse[k].bytes();
@@ -4701,14 +4719,14 @@ int main(int argc, char** argv) {
                 stage_estimate += b;
             }
             size_t estimate = 0;
-            if (!strata::core::conversation_snapshot_bytes(view, ss, g, mtp.kv_state(), estimate, err)) {
+            if (!strata::core::conversation_snapshot_bytes(view, ss, g, draft0, estimate, err)) {
                 std::fprintf(stderr, "strata serve: conversation cache: skip parking (%s)\n", err.c_str());
                 err.clear(); // A recoverable miss must not poison the batched draft prefill's error channel.
                 return true;
             }
             const size_t fresh_estimate = estimate;
             if (!reuse.kv.empty() && !strata::core::conversation_snapshot_capture_bytes(
-                    reuse, view, ss, g, mtp.kv_state(), estimate, err)) {
+                    reuse, view, ss, g, draft0, estimate, err)) {
                 reuse = {};
                 estimate = fresh_estimate;
                 err.clear();
@@ -4738,15 +4756,15 @@ int main(int argc, char** argv) {
                 }
                 strata::core::SavedConversation image;
                 size_t reused_bytes = 0;
-                if (!strata::core::conversation_snapshot_save(image, view, ss, g, mtp.kv_state(), err,
+                if (!strata::core::conversation_snapshot_save(image, view, ss, g, draft0, err,
                         std::move(reuse), &reused_bytes)) return false;
-                for (size_t k = 0; k < n_st; ++k) {   // the later stages, without the draft layer's K/V
+                for (size_t k = 0; k < n_st; ++k) {   // the later stages (the last one with the draft layer's K/V)
                     auto& st = stages[k];
                     const strata::core::OnDevice on(st->dev);
                     if (cudaDeviceSynchronize() != cudaSuccess) { err = "stage sync failed"; return false; }
                     const strata::core::ConversationView view_k{live, live_imgs, cs.parts[k], cvec_cached};
                     strata::core::SavedConversation part;
-                    if (!strata::core::conversation_snapshot_save(part, view_k, st->ss, g, nullptr, err,
+                    if (!strata::core::conversation_snapshot_save(part, view_k, st->ss, g, draft_of(k), err,
                             std::move(stage_reuse[k]), &reused_bytes))
                         return false;
                     image.stage_images.push_back(std::move(part));
@@ -5696,7 +5714,7 @@ int main(int argc, char** argv) {
             if (incoming) for (size_t i = 0; i < stages.size(); ++i) {
                 const strata::core::OnDevice on(stages[i]->dev);
                 if (!strata::core::conversation_snapshot_validate(incoming->stage_images[i], stages[i]->ss, g,
-                        nullptr, err)) {   // a later stage's image holds no draft K/V
+                        i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err)) {   // the draft: the last stage's
                     std::fprintf(stderr, "strata serve: conversation cache: discard invalid stage snapshot (%s)\n",
                                  err.c_str());
                     incoming.reset();
@@ -5704,7 +5722,8 @@ int main(int argc, char** argv) {
                     break;
                 }
             }
-            if (incoming && !strata::core::conversation_snapshot_validate(*incoming, ss, g, mtp.kv_state(), err)) {
+            if (incoming && !strata::core::conversation_snapshot_validate(*incoming, ss, g,
+                    stages.empty() ? &mtp.kv_state() : nullptr, err)) {
                 std::fprintf(stderr, "strata serve: conversation cache: discard invalid snapshot (%s)\n", err.c_str());
                 incoming.reset();
                 err.clear();
@@ -5717,7 +5736,8 @@ int main(int argc, char** argv) {
             }
             if (incoming) {
                 const auto t0 = Clock::now();
-                if (strata::core::conversation_snapshot_restore(*incoming, ss, g, mtp.kv_state(), err) !=
+                if (strata::core::conversation_snapshot_restore(*incoming, ss, g,
+                        stages.empty() ? &mtp.kv_state() : nullptr, err) !=
                     strata::core::ConversationRestore::restored) {
                     // Already prevalidated above: a failure here is fatal, never
                     // permission to decode from a partially restored session.
@@ -5727,7 +5747,8 @@ int main(int argc, char** argv) {
                 for (size_t i = 0; i < stages.size(); ++i) {   // the later stages' parts
                     const strata::core::OnDevice on(stages[i]->dev);
                     if (strata::core::conversation_snapshot_restore(incoming->stage_images[i], stages[i]->ss, g,
-                            nullptr, err) != strata::core::ConversationRestore::restored) {
+                            i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err) !=
+                        strata::core::ConversationRestore::restored) {
                         std::printf("ERR restoring parked conversation (stage CUDA%d): %s\n", stages[i]->dev,
                                     err.c_str());
                         return 1;
@@ -5736,13 +5757,15 @@ int main(int argc, char** argv) {
                 }
                 if (std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr) {
                     uint64_t draft_hash = 0;
-                    if (!strata::core::conversation_kv_verify(incoming->kv.back(), mtp.kv_state(), g,
+                    const auto& draft_kv = stages.empty() ? incoming->kv.back() : incoming->stage_images.back().kv.back();
+                    const strata::core::OnDevice on_d(stages.empty() ? 0 : stages.back()->dev);
+                    if (!strata::core::conversation_kv_verify(draft_kv, mtp.kv_state(), g,
                             int64_t(incoming->live.ids.size()), false, draft_hash, err)) {
                         std::printf("ERR verifying restored draft KV: %s\n", err.c_str());
                         return 1;
                     }
                     std::fprintf(stderr, "strata serve: SNAPSHOT_VERIFY draft=%016llx cells=%lld mode=%d source=%s resident=%lld\n",
-                                 (unsigned long long) draft_hash, (long long) incoming->kv.back().cells,
+                                 (unsigned long long) draft_hash, (long long) draft_kv.cells,
                                  mtp.kv_state().kv_mode, "ram",
                                  (long long) (mtp.kv_state().n_slots * strata::kernels::qsa_real_shapes().page_size));
                 }

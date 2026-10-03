@@ -275,7 +275,8 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
 
 bool conversation_snapshot_validate(const SavedConversation& image, const SessionState& ss,
                                     const ModelGeometry& g, const QsaState* draft, std::string& error) {
-    if (!image.live.stage_parts.empty()) return fail(error, "layer-split parking is not supported");
+    if (!image.live.stage_parts.empty())
+        return fail(error, "a running checkpoint's stage parts belong in the stage images, not in live.stage_parts");
     if (image.geometry != geometry_key(g)) return fail(error, "incompatible runtime geometry");
     // an image holds exactly one carve's running state and K/V: same layer range or nothing
     if (image.layer_lo != ss.layer_lo || image.layer_hi != ss.layer_hi)
@@ -320,6 +321,8 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
 }
 bool conversation_snapshot_validate(const SavedConversation& image, const SessionState& ss, const ModelGeometry& g,
                                     const QsaState& draft, std::string& error) {
+    // the whole-session form: a layer split's image (stage images) is restored stage by stage, never through here
+    if (!image.stage_images.empty()) return fail(error, "a layer split's image restored as a single session");
     return conversation_snapshot_validate(image, ss, g, &draft, error);
 }
 ConversationRestore conversation_snapshot_restore(const SavedConversation& image, SessionState& ss,

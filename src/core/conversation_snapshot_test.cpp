@@ -220,6 +220,10 @@ void full_session(int fmt, int mode, int experts) {
         check(conversation_snapshot_save(incremental,view,ss,g,nullptr,err,std::move(reuse),&reused),"incremental stage capture");
         check(reused>0 && incremental.bytes()<=peak && equal(incremental.kv[0],fresh.kv[0]) &&
               incremental.live.gdn==fresh.live.gdn,"an incremental stage capture reuses pages and equals a full one");
+        SavedConversation split_image=stage;
+        split_image.stage_images.push_back(stage);
+        check(!conversation_snapshot_validate(split_image,ss,g,draft.state,err),
+              "a layer split's image is refused by the whole-session form");
         ConversationKvReuse wrong{a.kv,65,65,{}};
         check(!conversation_snapshot_capture_bytes(wrong,view,ss,g,nullptr,peak,err),"a draft image's K/V is not a stage's reuse");
     }
