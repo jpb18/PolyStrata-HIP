@@ -405,7 +405,8 @@ server, three server options (all off by default; also as keys in `strata-<model
 | `--min-free-vram-mib 11000` | `"min_free_vram_mib": 11000` | load an unloaded model only when that much VRAM is free (it waits up to 15 s for memory being given back), else answer **503** "the GPU is in use by another program" instead of starting into what a game left (with several GPUs it checks the first one) |
 | `--before-load "cmd"` | `"before_load": "cmd"` or `["cmd", "arg"]` | a command run before the model is loaded again, e.g. one that unloads another server's model |
 
-`POST /unload` unloads it now (`409` while a request is running) and `POST /load` loads it ahead of a request;
+`POST /unload` unloads it now (`409` while a request is running) and `POST /load` loads it ahead of a request (both
+with `Content-Type: application/json`, e.g. `curl -X POST -H "Content-Type: application/json" localhost:8080/unload`);
 `/health` says `"loaded"`, `/v1/models` lists it as `unloaded` (like llama.cpp's router), `/props` sets
 `is_sleeping` and the Monitor shows the state. Unloading ends the engine process - and the image encoder, when images
 are on; it is started again first, as at a start - so their VRAM and RAM go straight back. The model files stay in
@@ -539,9 +540,30 @@ print(r.choices[0].message.content)
   clients then send it as their API key. Streamed answers carry `X-Accel-Buffering: no`, so nginx-style proxies pass
   each token on at once. The web app's settings and MCP tools only answer Strata's own page: when you open it through
   a proxy or tunnel whose address differs, add that address, e.g. `"trusted_origins": ["https://strata.example.com"]`.
+  With the key set, any `Host` name reaches the server (see Host names below).
 - **From web apps in a browser (CORS).** Off by default. `"cors_origins": ["https://chat.example.com"]` lets pages of
   those origins call `/v1/*` from the browser (Open WebUI's direct connections, browser extensions); `["*"]` lets any
   page do it - only sensible with an API key. It never opens `/settings`, `/unload` or the MCP tools.
+- **Host names (DNS rebinding).** A web page of another site can point its own name at `127.0.0.1` and then reach
+  this server as if it were its own, so without an API key the server answers only requests whose `Host` is a name
+  it knows (with a key the check is off: such a page cannot send the key, and tunnels and proxies that pass their
+  own name on keep working):
+  `localhost` (and `*.localhost`), any IP address (`127.0.0.1`, `[::1]`, `192.168.x.x`, ...), the address it
+  listens on and, when it listens beyond this PC (`0.0.0.0` or a LAN address), this PC's name (`mypc`, `mypc.local`)
+  and `host.docker.internal`; any port. Others get **403** naming the setting, and the server window prints one line
+  for each. Reach it under another name (a reverse proxy that keeps the name, a tunnel, a DNS name on your network,
+  another container's name for it)? Add the name: `"allowed_hosts": ["strata.example.com"]` in
+  `strata-<model>.json` or `STRATA_ALLOWED_HOSTS=strata.example.com` (comma-separated); `".example.com"` allows that
+  name and every name below it, and `["*"]` turns the check off (so does setting `api_key`). The hosts of
+  `trusted_origins` count as allowed. Requests without a `Host` header (HTTP/1.0 clients) pass.
+- **Web pages without an API key.** Without `api_key`, a `POST` to `/v1/*` that carries an `Origin` header (a
+  browser page sent it) is answered only for Strata's own page, pages on `localhost` or an allowed host name (any
+  port), the origins in `trusted_origins` or `cors_origins`, and browser extensions and desktop apps
+  (`chrome-extension://`, `moz-extension://`, `app://`: no web site can send those), and only with a JSON body; any
+  other page, and `Origin: null`, gets **403**. Clients that send no `Origin` (curl, the OpenAI and Anthropic SDKs,
+  other servers) are not affected. With
+  an API key, the key decides. `POST /unload` and `POST /load` take `Content-Type: application/json` from Strata's
+  own page (or no `Origin`), like `/settings`.
 
 **Conversation cache.** A request that continues a chat reads only the part after what the engine already holds: the
 live session, or one of the checkpoints it keeps in RAM (up to 6, ~118 MB each, taken at the start of each new
