@@ -3212,7 +3212,7 @@ def sycl_setup(argv) -> int:
          "maintainers (no Intel card here). Expect rough edges; issues with your card and driver versions help.")
     if WIN:
         fail("the Intel Arc engine has no Windows setup yet (no ready-made Intel engine either)",
-             "run it on Linux, or in WSL2 Ubuntu with Intel's GPU driver: docs/INTEL_ARC.md")
+             "run it on Linux (Ubuntu 24.04 with Intel's GPU driver and oneAPI): docs/INTEL_ARC.md")
     say("  There is no ready-made Intel engine: it is built from source with Intel oneAPI (icpx + oneMKL),")
     say("  docs/INTEL_ARC.md. Setup continues with sycl/setup_intel.py.")
     rest, skip = [], False
