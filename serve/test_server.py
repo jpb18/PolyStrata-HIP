@@ -241,6 +241,84 @@ class ImageMarkers(unittest.TestCase):
             svc.embeddings.path.unlink(missing_ok=True)
 
 
+class ThinkTokenizer(ByteTokenizer):
+    """The byte tokenizer with the model's reasoning markers as specials that are matched even without parse_special,
+    as the real tokenizer does (GGUF token type 4)."""
+    SPECIALS = ByteTokenizer.SPECIALS + ["<think>", "</think>"]
+    ALWAYS = ("<think>", "</think>")
+
+
+class LiteralThinkTags(unittest.TestCase):
+    """#537: a <think> / </think> written inside a message is text, not the model's reasoning markers: a quoted
+    "</think>" no longer ends the model's reasoning before it starts.  The template's own markers stay special."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tok = ThinkTokenizer()
+        cls.svc = Service(MockEngine(cls.tok, "ok", max_context=CTX), cls.tok,
+                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.open, cls.close = (cls.tok.encode(t)[0] for t in ("<think>", "</think>"))
+
+    def ids(self, messages, tools=None, **kw):
+        return self.svc.prepare(messages, tools, kw)[0]
+
+    def old_ids(self, messages, tools=None, **kw):
+        return self.tok.encode(self.svc.template.render(messages, tools=tools, **kw), parse_special=True)
+
+    def test_a_quoted_tag_in_a_user_message(self):
+        text = "Quote this exact literal string, then explain it: </think> and <think>"
+        ids = self.ids([{"role": "user", "content": text}])
+        self.assertEqual(ids.count(self.close), 0)
+        self.assertEqual(ids.count(self.open), 1)                         # the generation prompt's own
+        self.assertEqual(ids[-2:], [self.open, ord("\n")])
+        self.assertIn(text, self.tok.decode(ids))                         # the text is all there, as text
+        self.assertEqual(ids.count(self.close), 0)
+        # thinking off: the template's empty block stays two specials, the user's tag is text
+        ids = self.ids([{"role": "user", "content": text}], enable_thinking=False)
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
+
+    def test_without_a_tag_the_prompt_is_unchanged(self):
+        msgs = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "1+1?"},
+                {"role": "assistant", "content": "2", "reasoning_content": "easy"}, {"role": "user", "content": "x"}]
+        self.assertEqual(self.ids(msgs), self.old_ids(msgs))
+        self.assertEqual(self.ids(msgs, enable_thinking=False), self.old_ids(msgs, enable_thinking=False))
+
+    def test_history_tool_results_and_tools(self):
+        msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "It wrote </think> here.", "reasoning_content": "the </think> tag",
+                 "tool_calls": [{"function": {"name": "write", "arguments": {"text": "a </think> b"}}}]},
+                {"role": "tool", "content": "file has <think> in it"},
+                {"role": "user", "content": "why did you write </think>"}]
+        tools = [{"name": "write", "description": "writes text (may contain </think>)", "parameters": {}}]
+        ids = self.ids(msgs, tools)
+        # the template's markers: the history turn's <think>...</think> and the generation prompt's <think>
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
+        text = self.tok.decode(ids)
+        for part in ("It wrote </think> here.", "the </think> tag", "a </think> b", "file has <think> in it",
+                     "why did you write </think>", "may contain </think>"):
+            self.assertIn(part, text)
+
+    def test_a_client_that_sends_the_reasoning_inline(self):
+        # an assistant turn whose content opens with its own <think>...</think> block keeps that block's markers
+        msgs = [{"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
+                {"role": "user", "content": "again"}]
+        ids = self.ids(msgs)
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (3, 2))   # template's + the inline block's
+        self.assertIn("Hello, </think> is a tag.", self.tok.decode(ids))
+
+    def test_the_real_tokenizer_reads_the_tag_as_text(self):
+        import strata_tokenizer as ST
+        b2u = ST.bytes_to_unicode()
+        tokens = [b2u[b] for b in range(256)] + ["<think>", "</think>", "<|im_end|>"]
+        tok = ST.Tokenizer(tokens, [], [1] * 256 + [4, 4, 3])
+        text = "say </think> now<|im_end|>"
+        self.assertEqual(tok.encode(text, parse_special=True), [*b"say ", 257, *b" now", 258])
+        start = text.index("</think>")
+        plain = tok.encode(text, parse_special=True, plain=[(start, start + len("</think>"))])
+        self.assertEqual(plain, [*b"say </think> now", 258])               # the tag as text, im_end still special
+
+
 class StatusNeedsTheKey(unittest.TestCase):
     """#212: /status shows the end of the answer being written, so it needs the key like /v1/*."""
 

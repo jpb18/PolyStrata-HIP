@@ -16,6 +16,7 @@ and the formats change often; the engine boundary is token ids in, text deltas o
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,6 +134,81 @@ def images_of(messages: list[dict]) -> list[str]:
     <|vision_start|><|image_pad|><|vision_end|> per image item, message by message)."""
     return [item["source"] for m in messages if isinstance(m.get("content"), list)
             for item in m["content"] if item.get("type") == "image"]
+
+
+# #537: a literal <think> / </think> inside a message's text is plain text, not the model's reasoning markers.  The
+# tokenizer matches those two strings as their special tokens everywhere (GGUF token type 4, as llama.cpp does), so
+# a user quoting "</think>" used to hand the model a real end-of-reasoning token.  Before the template is rendered
+# they are swapped for these private-use characters, and the server encodes the spans they mark as ordinary text.
+THINK_TAGS = {"<think>": "\U000F0E01", "</think>": "\U000F0E02"}
+THINK_MARKS = {v: k for k, v in THINK_TAGS.items()}
+
+
+def _mark(text: str) -> str:
+    for tag, mark in THINK_TAGS.items():
+        text = text.replace(tag, mark)
+    return text
+
+
+def _mark_deep(v):
+    if isinstance(v, str):
+        return _mark(v)
+    if isinstance(v, dict):
+        return {k: _mark_deep(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_mark_deep(x) for x in v]
+    return v
+
+
+def _has_tag(v) -> bool:
+    if isinstance(v, str):
+        return "<think>" in v or "</think>" in v
+    if isinstance(v, dict):
+        return any(_has_tag(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_has_tag(x) for x in v)
+    return False
+
+
+def mark_think_literals(messages: list[dict], tools: list[dict] | None):
+    """#537: (messages, tools) with every literal <think> / </think> in their text swapped for THINK_TAGS' marks, and
+    whether there was one (None: no change, the same objects back - a prompt without them renders as it always did).
+    An assistant message whose content opens with a whole <think>...</think> block (clients that send the reasoning
+    inline) keeps that one block as the model's markers, as before."""
+    if not _has_tag(messages) and not _has_tag(tools):
+        return messages, tools, False
+    out = []
+    for m in messages:
+        m = dict(m)
+        content = m.get("content")
+        for k, v in m.items():
+            if k != "role":
+                m[k] = _mark_deep(v)
+        if m.get("role") == "assistant" and isinstance(content, str) and content.lstrip().startswith("<think>") \
+                and "</think>" in content:
+            i, j = content.index("<think>") + len("<think>"), content.index("</think>")
+            m["content"] = content[:i] + _mark(content[i:j]) + "</think>" + _mark(content[j + len("</think>"):])
+        out.append(m)
+    return out, _mark_deep(tools), True
+
+
+_THINK_MARK_RE = re.compile("|".join(THINK_MARKS))
+
+
+def unmark_think_literals(prompt: str) -> tuple[str, list[tuple[int, int]]]:
+    """The rendered prompt with THINK_TAGS' marks turned back into the tags' text, and the (start, end) spans of those
+    tags in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans)."""
+    out, spans, pos, n = [], [], 0, 0
+    for m in _THINK_MARK_RE.finditer(prompt):
+        out.append(prompt[pos:m.start()])
+        n += m.start() - pos
+        tag = THINK_MARKS[m.group(0)]
+        out.append(tag)
+        spans.append((n, n + len(tag)))
+        n += len(tag)
+        pos = m.end()
+    out.append(prompt[pos:])
+    return "".join(out), spans
 
 
 def _late_system_to_user(messages: list[dict]) -> list[dict]:

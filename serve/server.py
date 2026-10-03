@@ -51,7 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            images_of, openai_to_messages)
+                            images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
@@ -893,11 +893,14 @@ class ByteTokenizer:
     """Tiny stand-in tokenizer for tests without the pack: one id per UTF-8 byte, specials as ids >= 256."""
     SPECIALS = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|vision_start|>", "<|image_pad|>", "<|vision_end|>"]
 
-    def encode(self, text, parse_special=False):
+    ALWAYS = ()                                     # specials matched without parse_special (type 4, as <think>)
+
+    def encode(self, text, parse_special=False, plain=()):
         out, i = [], 0
         while i < len(text):
             for k, s in enumerate(self.SPECIALS):
-                if parse_special and text.startswith(s, i):
+                if (parse_special or s in self.ALWAYS) and text.startswith(s, i) and not any(
+                        a <= i < b for a, b in plain):
                     out.append(256 + k)
                     i += len(s)
                     break
@@ -1334,11 +1337,20 @@ class Service:
                 "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
+    def encode_prompt(self, messages, tools, kwargs) -> list[int]:
+        """The request's prompt: the template rendered and tokenized.  #537: a <think> / </think> written inside a
+        message's text is encoded as the text it is, not as the model's reasoning markers (the template's own are)."""
+        marked, marked_tools, changed = mark_think_literals(messages, tools)
+        prompt = self.template.render(marked, tools=marked_tools, **kwargs)
+        if not changed:
+            return self.tok.encode(prompt, parse_special=True)
+        prompt, plain = unmark_think_literals(prompt)
+        return self.tok.encode(prompt, parse_special=True, plain=plain)
+
     def prepare(self, messages, tools, kwargs, max_new=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context."""
-        prompt = self.template.render(messages, tools=tools, **kwargs)
-        ids = self.tok.encode(prompt, parse_special=True)
+        ids = self.encode_prompt(messages, tools, kwargs)
         self.embeddings.path = None
         images = images_of(messages)
         if images:
@@ -2471,8 +2483,7 @@ def make_handler(svc: Service):
             read for the same request, rendered and tokenized - the model does not run."""
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
-            prompt = svc.template.render(messages, tools=tools, **kw)
-            self._json(200, {"input_tokens": len(svc.tok.encode(prompt, parse_special=True))})
+            self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
             svc.load()
