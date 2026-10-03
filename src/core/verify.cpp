@@ -1423,7 +1423,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
         ms_pool += ms_since(b);
     }
-    if (next_ != nullptr) next_->stage_inputs(T, tokens, pos0);
+    // (#646 staged the next stage's inputs here; 0.1.39b keeps the layer split's order: each stage stages its own)
     progress_at("verify window: waiting for the GPU to finish the window (flags A/B/M raised)", (int64_t) T);
     // #267: a window the GPU never finishes (a spin kernel that never sees its flag) holds the host here; the stall
     // watchdog then releases every verifier's GPU waits (release_live_verifiers) before it ends the engine, so no
@@ -1642,7 +1642,7 @@ bool Verifier::commit(int n_keep, std::string& err) {
     // set_commit_async: no wait here - the next window runs on the same stream after it, and the drafter (its own
     // stream) reads only this window's final rows and its own K/V. h_commit_ is next written after the next window's
     // results are read, i.e. after this graph has run.  Everything else waits on commit_done_ (wait_commit).
-    if (!g_commit_async) {
+    if (!g_commit_async || next_ != nullptr) {
         const cudaError_t se = cudaStreamSynchronize(cs_);
         if (se != cudaSuccess) { err = std::string("verify: commit: ") + cudaGetErrorString(se); return false; }
     } else {

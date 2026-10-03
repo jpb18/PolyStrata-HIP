@@ -2100,7 +2100,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         }
     }
     static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
-    const bool gpu_zeroes_hits = (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap && dec_batch);
+    // the GPU's copy_rows_from_mapped zeroes the rows it computed itself (dec_batch); STRATA_VERIFY_DEVICE_PLAN's
+    // copy_or_zero_from_mapped copies every row, so there the host still zeroes them
+    static const bool device_plan = [] { const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN"); return v != nullptr && std::atoi(v) != 0; }();
+    const bool gpu_zeroes_hits = (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap && dec_batch && !device_plan);
     bool any_cpu = false;
     for (int64_t i = 0; i < n; ++i)
         if (kind[i] < 0) { any_cpu = true; break; }

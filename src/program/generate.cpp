@@ -2505,7 +2505,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    strata::core::Verifier::set_commit_async(!split_same);   // see Verifier::set_commit_async
+    strata::core::Verifier::set_commit_async(!multi_gpu);   // see Verifier::set_commit_async
     // ---- layer split across GPUs: each later stage's own copy of the dense weights, its session and (the last) the
     // head, made on its device before the host arena is mapped (as the drafter below, for the same WDDM reason)
     std::vector<std::unique_ptr<GpuStage>> stages;
@@ -2680,7 +2680,7 @@ int main(int argc, char** argv) {
     // those allocations are already made before a stage's cache is sized, so what has to be held back here is
     // the windows and - only on the stage that carries them - the drafter and the head.
     const int64_t kWindowMib = 96;       // the verify windows; 75 MiB measured, rounded up
-    const int64_t kDrafterMib = 1320;    // the MTP drafter (839 MiB) + the native Q5_K head (466 MiB), on the last stage only
+    const int64_t kDrafterMib = 1000;    // the MTP drafter (839 MiB) + the head, on the last stage only
     // #340: with the own prompt buffers chosen by the split's rule (not asked for with --no-prefill-borrow) the
     // boundary is searched as the borrowing configuration would (no reserve): the reserve then only makes the caches
     // smaller, which measured cost no decode (K=28 on 9070 XT + R9700: 58.4 tok/s own vs 58.5 borrowing), while a

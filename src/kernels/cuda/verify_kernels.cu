@@ -500,15 +500,19 @@ __global__ void wait_flag_ge_kernel(const volatile uint32_t* flag, uint32_t valu
 }  // namespace
 
 namespace {
-__global__ void resident_plan_kernel(const int32_t* __restrict__ ids, int n, int k, const int32_t* __restrict__ res,
+// one thread per window entry: up to kVerifyMaxT tokens x 10 routed experts (80), so 128 (#646 had 64: a window of
+// 7+ tokens lost its last entries)
+constexpr int kResidentPlanMax = 128;
+static_assert(kVerifyMaxT * 10 <= kResidentPlanMax, "resident_plan: one thread per entry");
+__global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const int32_t* __restrict__ ids, int n, int k, const int32_t* __restrict__ res,
                                      int n_expert, const uint8_t* cache_base, const unsigned long long* slot_off,
                                      long long blob, int32_t* __restrict__ pl, long long capx, uint32_t* skip,
                                      uint32_t ring) {
-    __shared__ int32_t s_ids[64];
-    __shared__ unsigned long long s_ptr[64];
-    __shared__ int32_t s_first[64];
-    __shared__ int32_t s_cnt[64];
-    __shared__ int32_t s_gstart[64];
+    __shared__ int32_t s_ids[kResidentPlanMax];
+    __shared__ unsigned long long s_ptr[kResidentPlanMax];
+    __shared__ int32_t s_first[kResidentPlanMax];
+    __shared__ int32_t s_cnt[kResidentPlanMax];
+    __shared__ int32_t s_gstart[kResidentPlanMax];
     __shared__ int s_bad;
     const int tid = threadIdx.x;
     if (tid == 0) s_bad = 0;
@@ -609,7 +613,7 @@ __global__ void copy_or_zero_kernel(float4* __restrict__ dst, const volatile flo
 void resident_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_layer, int n_expert,
                    const uint8_t* cache_base, const unsigned long long* slot_off, long long blob, int32_t* plan,
                    long long capx, uint32_t* skip, uint32_t ring, void* stream) {
-    resident_plan_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(ids, n_entries, k, res_layer, n_expert, cache_base, slot_off,
+    resident_plan_kernel<<<1, kResidentPlanMax, 0, (cudaStream_t) stream>>>(ids, n_entries, k, res_layer, n_expert, cache_base, slot_off,
                                                               blob, plan, capx, skip, ring);
     check("resident_plan");
 }
