@@ -4673,7 +4673,18 @@ int main(int argc, char** argv) {
         std::vector<int64_t> part_next(stages.size() + 1, INT64_MAX);
         // a checkpoint of the state after `cur[0, L)`; false only when the copy itself failed.  `parts`: the stages'
         // states saved at L (a split's mid-prompt checkpoint); without, they are read now (everything is at L)
+        // #613: why the last checkpoint_at failed - a failed device sync is the GPU itself (a hang Windows then resets),
+        // not the checkpoint, and the error says so
+        std::string ckpt_why;
+        auto gpu_sync_ok = [&]() -> bool {
+            const cudaError_t e = cudaDeviceSynchronize();
+            if (e == cudaSuccess) return true;
+            ckpt_why = std::string(": the GPU stopped responding before it (") + cudaGetErrorString(e) +
+                       ") - a GPU hang; on Windows the driver is then reset";
+            return false;
+        };
         auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr) -> bool {
+            ckpt_why.clear();
             if (o.prompt_cache <= 0 || L < 1) return true;
             for (ConvCheckpoint& c : checks)
                 if ((int64_t) c.ids.size() == L) { c.used = ++check_clock; return true; }
@@ -4689,12 +4700,12 @@ int main(int argc, char** argv) {
                 c.block_pos = std::move((*parts)[0].block_pos);
                 for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
             } else {
-                if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(c, ss, g)) return false;
+                if (!gpu_sync_ok() || !checkpoint_save(c, ss, g)) return false;
                 for (auto& st : stages) {   // a layer split's later stages: their sessions' part
                     const strata::core::OnDevice on(st->dev);
                     ConvCheckpoint part;
                     part.ids = c.ids;
-                    if (cudaDeviceSynchronize() != cudaSuccess || !checkpoint_save(part, st->ss, g)) return false;
+                    if (!gpu_sync_ok() || !checkpoint_save(part, st->ss, g)) return false;
                     c.stage_parts.push_back(std::move(part));
                 }
             }
@@ -4744,7 +4755,7 @@ int main(int argc, char** argv) {
                 } else {
                     saved = checkpoint_at(done);
                 }
-                if (!saved) { e = "saving a conversation checkpoint failed"; return false; }
+                if (!saved) { e = "saving a conversation checkpoint failed" + ckpt_why; return false; }
                 pp_next_check = done + o.prompt_cache_every;
             }
             return true;
@@ -5800,7 +5811,7 @@ int main(int argc, char** argv) {
                 }
                 at = to;
                 if ((to == turn_at || to == root_at) && !checkpoint_at(to)) {
-                    std::printf("ERR saving a conversation checkpoint failed\n");
+                    std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
                     return 1;
                 }
             }
