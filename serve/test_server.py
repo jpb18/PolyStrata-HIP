@@ -319,6 +319,112 @@ class LiteralThinkTags(unittest.TestCase):
         self.assertEqual(plain, [*b"say </think> now", 258])               # the tag as text, im_end still special
 
 
+class EffortAtTheEnd(unittest.TestCase):
+    """#458 (opt-in "effort_position": "end"): a non-default effort goes in a system turn right before the answer, so
+    a request that changes only the effort keeps the cached conversation.  The engine's checkpoint rule is simulated
+    on the token ids (src/program/generate.cpp: the last <|im_start|>, and with --tail-role-token the one in front
+    of a trailing system turn); the default prompt does not change."""
+
+    TURN = 256                                       # the byte tokenizer's <|im_start|>
+    ROLE = ord("s")                                  # "system"'s first byte stands for its token
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.svc = Service(MockEngine(self.tok, "ok", max_context=1 << 20), self.tok,
+                           ChatTemplate(ROOT / "serve/chat_template.jinja"))
+
+    def ids(self, messages, end, **kw):
+        self.svc.effort_end = end
+        return self.svc.encode_prompt(messages, None, kw)
+
+    def checkpoint(self, ids, tail, resume=0):
+        """Where the engine checkpoints a prompt (the tokens before it), as generate.cpp's serve loop does."""
+        turn_at = next((i for i in range(len(ids) - 1, resume, -1) if ids[i] == self.TURN), -1)
+        if turn_at > 0 and tail:
+            i = next((i for i in range(turn_at - 1, resume, -1) if ids[i] == self.TURN), None)
+            if i is not None and ids[i + 1] == self.ROLE:
+                turn_at = i
+        return ids[:turn_at]
+
+    def session(self, requests, end, tail):
+        """The reused tokens of each request after the first: the longest earlier checkpoint it starts with."""
+        checks, reused = [], []
+        for messages, kw in requests:
+            ids = self.ids(messages, end, **kw)
+            reused.append(max([len(c) for c in checks if ids[:len(c)] == c], default=0))
+            checks.append(self.checkpoint(ids, tail))
+        return reused[1:]
+
+    CHAT = [{"role": "system", "content": "You are a careful assistant. " * 40},
+            {"role": "user", "content": "Explain the conversation cache. " * 20}]
+    REPLY = {"role": "assistant", "content": "It keeps the prompt's state. " * 20, "reasoning_content": "ok"}
+    NEXT = {"role": "user", "content": "And the checkpoints?"}
+
+    def test_the_default_prompt_is_unchanged(self):
+        for kw in ({}, {"reasoning_effort": "xhigh"}):
+            self.assertEqual(self.ids(self.CHAT, True, **kw), self.ids(self.CHAT, False, **kw))
+            self.assertEqual(self.ids(self.CHAT, True, **kw),
+                             self.tok.encode(self.svc.template.render(self.CHAT, **kw), parse_special=True))
+        for kw in ({"reasoning_effort": "low"}, {"reasoning_effort": "medium"}, {"enable_thinking": False}):
+            self.assertEqual(self.ids(self.CHAT, False, **kw),        # off: every effort renders as before
+                             self.tok.encode(self.svc.template.render(self.CHAT, **kw), parse_special=True))
+
+    def test_the_trailing_turn(self):
+        text = self.tok.decode(self.ids(self.CHAT, True, reasoning_effort="low"))
+        self.assertTrue(text.endswith("<|im_end|>\n<|im_start|>system\nReasoning effort is set to low. Keep your "
+                                      "thinking brief and focused, moving directly to the conclusion without "
+                                      "unnecessary elaboration.<|im_end|>\n<|im_start|>assistant\n<think>\n"), text[-300:])
+        self.assertIn("Reasoning effort is set to xhigh", text)          # the top stays the default's
+        text = self.tok.decode(self.ids(self.CHAT, True, enable_thinking=False))
+        self.assertTrue(text.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n"))
+        self.assertNotIn("<|im_start|>system\nReasoning effort", text[-200:])
+        default = self.ids(self.CHAT, True)
+        for kw in ({"reasoning_effort": "low"}, {"reasoning_effort": "medium"}, {"enable_thinking": False}):
+            ids = self.ids(self.CHAT, True, **kw)
+            head = len(self.checkpoint(default, False))                       # all before the answer's turn
+            self.assertEqual(ids[:head], default[:head], kw)                 # the same prompt up to the answer
+
+    def test_changing_the_effort_keeps_the_conversation(self):
+        efforts = [{}, {"reasoning_effort": "low"}, {"enable_thinking": False}, {"reasoning_effort": "medium"}, {}]
+        history = len(self.checkpoint(self.ids(self.CHAT, False), False))
+        # at the top (the default): another effort differs a few tokens in, and the whole prompt is read again
+        self.assertEqual(self.session([(self.CHAT, kw) for kw in efforts], False, False)[:2], [0, 0])
+        # at the end, with the engine's rule: every request reuses the whole conversation
+        self.assertEqual(self.session([(self.CHAT, kw) for kw in efforts], True, True), [history] * 4)
+
+    def test_the_next_turn_reuses_the_checkpoint(self):
+        turn1, turn2 = self.CHAT, self.CHAT + [self.REPLY, self.NEXT]
+        low = {"reasoning_effort": "low"}
+        first = len(self.checkpoint(self.ids(turn1, True, **low), True))
+        # the engine's rule: the next turn (the same effort) reuses the first turn's whole conversation
+        self.assertEqual(self.session([(turn1, low), (turn2, low)], True, True), [first])
+        # without it the checkpoint held the effort turn and the next turn reused nothing (what #458 measured)
+        self.assertEqual(self.session([(turn1, low), (turn2, low)], True, False), [0])
+
+    def test_the_config(self):
+        from serve.server import effort_end_args
+
+        class Tok:
+            def encode(self, text, parse_special=False):
+                return [8678] if text == "system" else [1, 2]
+
+        with tempfile.TemporaryDirectory() as d:
+            new, old = Path(d) / "new.exe", Path(d) / "old.exe"
+            new.write_bytes(b"...  --tail-role-token ID --serve: ...")
+            old.write_bytes(b"... --turn-token ID ...")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(effort_end_args({}, str(new), Tok()))
+                self.assertIsNone(effort_end_args({"effort_position": "start"}, str(new), Tok()))
+                self.assertEqual(effort_end_args({"effort_position": "end"}, str(new), Tok()),
+                                 ["--tail-role-token", "8678"])
+                self.assertIsNone(effort_end_args({"effort_position": "end"}, str(old), Tok()))
+                self.assertIsNone(effort_end_args({"effort_position": "end"}, str(new), ByteTokenizer()))
+            self.assertIn("needs engine 0.1.39 or newer", out.getvalue())
+            with self.assertRaises(ValueError):
+                effort_end_args({"effort_position": "middle"}, str(new), Tok())
+
+
 class StatusNeedsTheKey(unittest.TestCase):
     """#212: /status shows the end of the answer being written, so it needs the key like /v1/*."""
 

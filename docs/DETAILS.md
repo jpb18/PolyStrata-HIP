@@ -473,6 +473,14 @@ print(r.choices[0].message.content)
   part of the thinking the client sees and counts as output tokens. `"reasoning_budget_tokens": N` in
   `strata-<model>.json` sets it for every request; a request's own value wins, and `0` means no budget. Off by default;
   Anthropic's `"thinking": {"budget_tokens": N}` still only chooses the level, as above.
+- **Changing the effort without re-reading the prompt (opt-in, 0.1.39, #458).** The effort's instruction is the
+  first thing in the prompt, so a request that only changes the effort (an agent's "think harder" switch, `none` for
+  a quick tool step) reads the whole conversation again. `"effort_position": "end"` in `strata-<model>.json` renders
+  every request's prompt start as the default effort's and puts a `low` / `medium` effort in a short system turn
+  right before the answer (no thinking: the empty thinking block, as always); the engine (0.1.39+, which the server
+  checks) keeps its checkpoint in front of that turn, so the next request reuses the conversation whatever its
+  effort. The default (`"start"`) prompt is unchanged. The model sees a level that is not the default in another
+  place than it was trained with; how well it follows it there is not measured yet.
 - **Anthropic requests that don't ask for thinking (opt-in, 0.1.32, #278).** By default a `/v1/messages` request
   with no `"thinking"`, effort or budget thinks as the model's template does. `"anthropic_thinking": "on_request"` in
   `strata-<model>.json` renders such a request without thinking - Anthropic's own rule, and what Claude Code's short

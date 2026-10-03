@@ -58,6 +58,13 @@ from serve.structured import StructuredOutputError, prepare_format, validated_js
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
+# #458: the trailing effort turn ("effort_position": "end"); low is the template's own sentence, medium (which the
+# template says nothing for: no xhigh sentence is medium there) says it, since the xhigh one stays at the top
+EFFORT_TURN = "<|im_start|>system\n{}<|im_end|>\n"
+EFFORT_TEXT = {"low": "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the "
+                      "conclusion without unnecessary elaboration.",
+               "medium": "Reasoning effort is set to medium. Think as much as the task needs, without unnecessary "
+                         "elaboration."}
 VISION_START = "<|vision_start|>"
 # #123: what closes the thinking when it reaches reasoning_budget_tokens (the model's own end-of-thinking tag after it)
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
@@ -778,6 +785,31 @@ def gpu_list(cfg: dict) -> list[int]:
     return [int(str(x).strip()) for x in items if str(x).strip() != ""]
 
 
+def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
+    """#458 (opt-in): the engine arguments for "effort_position": "end" - the id of "system" as --tail-role-token, so
+    the engine checkpoints in front of the trailing effort turn - or None when the config leaves it at the top (the
+    default) or the engine is too old for it (said once; the prompt stays the default one).  ValueError for a value
+    other than "start" / "end"."""
+    pos = cfg.get("effort_position", "start")
+    if pos not in ("start", "end"):
+        raise ValueError(f'"effort_position" must be "start" (the default) or "end", not {pos!r}')
+    if pos == "start":
+        return None
+    try:
+        with open(exe, "rb") as f:
+            known = b"--tail-role-token" in f.read()
+    except OSError:
+        known = False
+    role = tok.encode("system", parse_special=True)
+    if not known or len(role) != 1:
+        print("[strata] effort_position \"end\" needs engine 0.1.39 or newer (--tail-role-token): the reasoning "
+              "effort stays at the top of the prompt", flush=True)
+        return None
+    print("[strata] effort_position end: a request's non-default reasoning effort goes right before the answer, so "
+          "changing it keeps the cached conversation", flush=True)
+    return ["--tail-role-token", str(role[0])]
+
+
 def engine_silence_s(cfg: dict) -> float:
     """#481: the config's "engine_silence_s" - seconds an engine may print nothing during a request before the server
     ends it (default ENGINE_SILENCE_S; 0 = wait forever).  ValueError for anything but a number >= 0."""
@@ -958,6 +990,9 @@ class Service:
         self.fifo = threading.Lock()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+        # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
+        # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
+        self.effort_end = False
         # #321: browser pages of these origins may call /v1/* (CORS; "*" = any page - only with an api_key that
         # matters); empty = no CORS headers at all, as before
         self.cors_origins: list[str] = []
@@ -1337,11 +1372,29 @@ class Service:
                 "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
+    def render_prompt(self, messages, tools, kwargs) -> str:
+        """The template rendered.  #458: with `effort_end`, a request with a non-default effort (low, medium or no
+        thinking) is rendered as a default one up to the answer - the same prompt start, so the conversation cache
+        keeps it - and its effort follows in a short system turn right before the answer (thinking off: the template's
+        empty thinking block).  The engine (--tail-role-token) checkpoints in front of that turn."""
+        effort = kwargs.get("reasoning_effort")
+        off = kwargs.get("enable_thinking") is False
+        if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
+            return self.template.render(messages, tools=tools, **kwargs)
+        base = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
+        history = self.template.render(messages, tools=tools, add_generation_prompt=False, **base)
+        full = self.template.render(messages, tools=tools, add_generation_prompt=True, **kwargs)
+        mine = self.template.render(messages, tools=tools, add_generation_prompt=False, **kwargs)
+        if not full.startswith(mine):                  # a template this cannot take apart: rendered as asked
+            return full
+        tail = "" if off else EFFORT_TURN.format(EFFORT_TEXT.get(effort, EFFORT_TEXT["medium"]))
+        return history + tail + full[len(mine):]
+
     def encode_prompt(self, messages, tools, kwargs) -> list[int]:
         """The request's prompt: the template rendered and tokenized.  #537: a <think> / </think> written inside a
         message's text is encoded as the text it is, not as the model's reasoning markers (the template's own are)."""
         marked, marked_tools, changed = mark_think_literals(messages, tools)
-        prompt = self.template.render(marked, tools=marked_tools, **kwargs)
+        prompt = self.render_prompt(marked, marked_tools, kwargs)
         if not changed:
             return self.tok.encode(prompt, parse_special=True)
         prompt, plain = unmark_think_literals(prompt)
@@ -2933,7 +2986,12 @@ def main() -> int:
             silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
-        engine = StrataEngine(exe, engine_args(cfg), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env, lazy=lazy)
+        try:
+            effort_end = effort_end_args(cfg, exe, tok)  # #458
+        except ValueError as e:
+            raise SystemExit(f"[strata] config {e}")
+        engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
+                              env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
         note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
@@ -2941,6 +2999,7 @@ def main() -> int:
         if note:                                        # #560 #516: before --open starts a browser on that card
             print(note, flush=True)
     else:
+        effort_end = None
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
             "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}
     # the model's own chat template (exported with its tokenizer), else the original model's
@@ -2988,6 +3047,7 @@ def main() -> int:
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[strata] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
     svc.anthropic_think_unasked = mode == "model"
+    svc.effort_end = bool(effort_end)                   # #458: "effort_position": "end" with an engine that has it
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         try:
             svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]
