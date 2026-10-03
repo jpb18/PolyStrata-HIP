@@ -448,6 +448,7 @@ The server listens on `http://127.0.0.1:8080` (change with `--port` in setup, or
 | --- | --- |
 | OpenAI Chat Completions (stream and non-stream, tools) | `POST /v1/chat/completions` |
 | Anthropic Messages (stream and non-stream, tools) | `POST /v1/messages` |
+| OpenAI Responses (stream and non-stream, tools; stateless, [below](#the-responses-api-and-codex-cli)) | `POST /v1/responses` |
 | Model list / health | `GET /v1/models`, `GET /models`, `GET /health` |
 | Model properties | `GET /props` (also accepts `?model=<loaded-model-id>`) |
 | What the model is doing right now | `GET /status`, `GET /slots` (single slot, busy or idle) |
@@ -545,6 +546,7 @@ print(r.choices[0].message.content)
 - **Claude Code** (Strata 0.1.17 or newer): set `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and
   `ANTHROPIC_MODEL` to a Claude model name it knows (it refuses names it doesn't; Strata ignores the name), plus any
   `ANTHROPIC_AUTH_TOKEN` (or your `api_key`, if you set one).
+- **Codex CLI** (0.1.39): see [the Responses API](#the-responses-api-and-codex-cli) below.
 - **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
   `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
   can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
@@ -668,6 +670,65 @@ each batch got them). That makes requests with penalties 1-11% slower than in 0.
 without penalties, so more of its guesses are now rejected. Requests without penalties are unchanged. `top_k` keeps at most 64 candidates: `0` ("off") or anything above 64 uses all 64.
 
 ---
+
+### The Responses API and Codex CLI
+
+`POST /v1/responses` (0.1.39, #451) speaks OpenAI's newer Responses API, which Codex CLI uses (it no longer
+speaks Chat Completions). It runs on the same path as `/v1/chat/completions`, so the thinking levels, the thinking
+budget, the conversation cache and the same API key, Host and Origin checks apply.
+
+It is **stateless**: nothing is stored, so the client sends the whole conversation in `input` every time (Codex does,
+with `store: false`). `previous_response_id`, `conversation`, `background` and the retrieve/delete/cancel endpoints
+are refused with an error that says so.
+
+| Request | What Strata does |
+| --- | --- |
+| `input` as a string, or as items | `message` items (`user`, `assistant`, `system`, `developer`; text and images), `reasoning`, `function_call`, `function_call_output`, `custom_tool_call(_output)` |
+| `instructions` | The system message (with leading `developer` messages; later ones become user messages, as on the chat path) |
+| `tools` | `function` tools, `namespace` tools (the model sees `namespace.name`; calls come back with `namespace` and `name`), `custom` tools (one free-form `input` string). Hosted tools (`web_search`, `file_search`, ...) are left out: the model cannot run them |
+| `tool_choice` | `"none"` hides the tools; anything else lets the model choose (it cannot be forced) |
+| `reasoning.effort` | `none`/`minimal`, `low`, `medium`, `high`/`xhigh`; without it the model's default (high) |
+| `max_output_tokens` | The output cap (thinking included). Running out ends the response `incomplete` (`max_output_tokens`) |
+| `text.format` | `json_schema` and `json_object` use the [JSON response formats](#json-response-formats) (checked, not constrained) |
+| `temperature`, `top_p`, `reasoning_budget_tokens`, ... | As on the chat path |
+
+The model's thinking comes back as a `reasoning` output item with `reasoning_text` content (streamed as
+`response.reasoning_text.delta`). This model writes no separate summaries, so `summary` is empty. With
+`"include": ["reasoning.encrypted_content"]` the item also carries `encrypted_content`: an opaque string (base64, not
+encrypted; the client already holds the text). Send the reasoning items back with the rest of the conversation, as
+Codex does: their thinking goes back into the prompt, so it matches what the model wrote and the conversation cache
+is reused.
+
+With `"stream": true` the events are the official ones, in order: `response.created`, `response.in_progress`, then
+for each output item `response.output_item.added`, its deltas (`response.reasoning_text.delta`,
+`response.output_text.delta`, `response.function_call_arguments.delta`), its `...done` events and
+`response.output_item.done`, and at the end `response.completed`, `response.incomplete` or `response.failed`.
+While a long prompt is read, a `response.in_progress` event goes out every 15 s, which Codex counts as activity.
+Errors before the answer starts have the Responses form (`{"error": {"message", "type", "param", "code"}}`); after
+it started they arrive as `response.failed`.
+
+**Codex CLI.** In `~/.codex/config.toml` (Windows: `%USERPROFILE%\.codex\config.toml`):
+
+```toml
+model = "strata"                        # any name; Strata answers with its model
+model_provider = "strata"
+model_context_window = 32768            # the context you chose in setup: Codex compacts before it gets there
+show_raw_agent_reasoning = true         # show the model's thinking (it writes no summaries)
+# model_reasoning_effort = "medium"     # none, low, medium or high; default: the model's (high)
+
+[model_providers.strata]
+name = "Strata (local)"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+stream_idle_timeout_ms = 600000         # a first, long prompt can take minutes to read
+# env_key = "STRATA_API_KEY"            # only if the server has an api_key: the variable holding it
+```
+
+Then run `codex` (or `codex exec "..."`) as usual. Codex warns `Model metadata for ... not found` for a local model
+name; that is expected. Measured with Codex CLI 0.160.0 and Q2_0 on an RTX 5070: its first prompt (instructions and
+tool descriptions) was 9,443 tokens, read in 10 s; in a tool loop, each later turn reused about 96% of the prompt from
+the cache and read only the new part in 1-2 s. On Windows, Codex's sandbox rejected every shell command in that test
+until it was started with `-c 'windows.sandbox="unelevated"'` (a Codex setting, not Strata's).
 
 ## Tools from MCP servers
 
