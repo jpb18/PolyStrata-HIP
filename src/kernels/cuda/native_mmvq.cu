@@ -998,7 +998,7 @@ struct SmallTraits {
 bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)
 
 template<typename F, int NCOLS, int NW, int ROWS>
-__launch_bounds__(NW * WARP, 1)
+__launch_bounds__(NW * WARP, (ROWS <= 2 ? 4 : 1))
 __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w,
                                          const Q81Block* __restrict__ x,
                                          float* __restrict__ y, int n_in, int n_out) {
@@ -1055,8 +1055,9 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
     }
     const dim3 threads(WARP, WARPS);
     if (n_in / F::DIV < F::BPI) {
-        const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_mmvq_multi_kernel<F, NCOLS, WARPS, WARPS><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        constexpr int ROWS = 2;
+        const unsigned blocks = unsigned((std::size_t(n_out) + ROWS - 1) / ROWS);
+        native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
     } else {
         native_mmvq_multi_kernel<F, NCOLS, WARPS, 1><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
     }
