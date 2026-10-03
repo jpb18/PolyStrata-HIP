@@ -53,6 +53,7 @@ sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
+from serve import runconfig  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 
@@ -1065,6 +1066,8 @@ class Service:
         # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
         self.effort_end = False
         self.conv_log = ConvCacheLog()                  # #596: the parked conversations, from the engine's log
+        self.config_path = None                         # #564: the run config the web page's Settings view edits
+        self.config_lock = threading.Lock()
         # #321: browser pages of these origins may call /v1/* (CORS; "*" = any page - only with an api_key that
         # matters); empty = no CORS headers at all, as before
         self.cors_origins: list[str] = []
@@ -2296,6 +2299,10 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
                 return
+            if path == "/config":                            # #564: the Settings view's keys of the run config
+                if self._authorized():
+                    self._config_get()
+                return
             if path == "/mcp":
                 # the MCP servers, their state and tools (the web app's switch and Monitor card)
                 if self._authorized():
@@ -2364,6 +2371,9 @@ def make_handler(svc: Service):
                 return
             if path == "/settings":
                 self._settings()
+                return
+            if path == "/config":
+                self._config_post()
                 return
             # JSON from Strata's own page only, as /settings: else a plain form POST from any site unloads the model
             if path in ("/unload", "/load") and not self._own_page("the model can be loaded or unloaded"):
@@ -2490,6 +2500,44 @@ def make_handler(svc: Service):
                                                       f"config's trusted_origins)"}})
                 return False
             return True
+
+        def _config_get(self):
+            if not svc.config_path:
+                self._json(404, {"error": {"message": "this server was started without a run config"}})
+                return
+            try:
+                cfg = runconfig.load(svc.config_path)
+            except (OSError, ValueError) as e:
+                self._json(500, {"error": {"type": "server_error", "message": f"the run config cannot be read: {e}"}})
+                return
+            self._json(200, runconfig.view(cfg, svc.config_path))
+
+        def _config_post(self):
+            """#564: change a few documented keys of the run config - JSON from Strata's own page only, as
+            /settings (the key is checked before); every other key of the file stays as it is."""
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not self._own_page("the run config can be changed"):
+                return
+            if not svc.config_path:
+                self._json(404, {"error": {"message": "this server was started without a run config"}})
+                return
+            try:
+                req = json.loads(body or b"{}")
+                with svc.config_lock:
+                    cfg = runconfig.load(svc.config_path)
+                    new, changed = runconfig.apply(cfg, req.get("set") if isinstance(req, dict) else None)
+                    if changed:
+                        bak = runconfig.save(svc.config_path, new)
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            except OSError as e:
+                self._json(500, {"error": {"type": "server_error", "message": f"the run config cannot be written: {e}"}})
+                return
+            if changed:
+                print(f"[strata] the Settings view changed {', '.join(changed)} in {Path(svc.config_path).name} "
+                      f"(the earlier file: {bak.name}); used from the next start", flush=True)
+            self._json(200, {**runconfig.view(new, svc.config_path), "changed": changed})
 
         def _settings(self):
             # They change what every client gets, so only the app's own page may set them
@@ -3134,6 +3182,8 @@ def main() -> int:
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+    if a.config:
+        svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:

@@ -535,6 +535,14 @@ print(r.choices[0].message.content)
 - **Model aliases** (0.1.32). `"aliases": ["qwen", "local-model"]` in `strata-<model>.json` lists the model under
   those names too in `/v1/models` (each with its own `id`, and in the model's `aliases`), like llama-server's
   `--alias`; a request naming one is answered under that name. Any other name is still served, as before.
+- **Model settings in the web page (0.1.39, #564).** The About tab's Model settings card shows and changes a few of
+  the keys above in `strata-<model>.json`: the `sampling` defaults (temperature, top_p, top_k, min_p),
+  `reasoning_budget_tokens`, `fit_max_tokens`, `anthropic_thinking`, `effort_position`, `aliases`, `idle_unload_s`,
+  `lazy_load`, `engine_silence_s`, `api_monitor`, `open_browser` and `--vram-reserve-mib`. An empty field removes the
+  key (its default). Every other key of the file stays as it is, the earlier file is kept as
+  `strata-<model>.json.bak`, and the model uses the change from its next start. Only Strata's own page can save
+  (JSON, the API key when one is set, as for the Chat settings); the network, key, MCP and program keys are not
+  editable there.
 - **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
   run setup with `START-HERE.bat --setup --host 0.0.0.0 --api-key some-long-secret` (or add `"host": "0.0.0.0"` and
   `"api_key": "..."` to `strata-<model>.json`). The server window then prints this PC's addresses
