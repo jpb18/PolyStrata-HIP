@@ -31,6 +31,12 @@ bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const 
               float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream);
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr);
+/// S23 (STRATA_CVEC_FUSE=1): gr_write, then the control vector (v_l = layer l's direction row, *s_l its scale,
+/// *on the request flag, mode 0 project / 1 add; cvec_kernel's arithmetic), then gr_norm_rs with the next half's
+/// norm - one pass over R, the same bits as the three kernels.
+void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,
+                           const float* s_l, const int* on, int mode, const float* w_norm_next, float eps, float* rs,
+                           uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr);
 /// lo16[t, k] = bf16(silu(lo[t, k] / hc))
 void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16_lo = nullptr);
 /// mixed[t, d] = mean_c xn[t, c, d] * sigmoid(gated[t, c, d]); FP32, BF16 and FP16 (either image may be null).

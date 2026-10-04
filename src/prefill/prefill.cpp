@@ -180,6 +180,12 @@ inline bool hc_upmix() {
     return v;
 }
 inline bool bf16x2_hc() { return bf16x2_mode() == 1; }
+// S23 (opt-in STRATA_CVEC_FUSE=1): a steered layer's FFN write + control vector + the next half's norm in one pass
+// over R (gr_write_cvec_norm_rs; bitwise the gr_write + cvec_apply + gr_norm_rs it replaces)
+inline bool cvec_fuse() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_CVEC_FUSE"); return e && e[0] == '1'; }();
+    return v;
+}
 // S23 (opt-in STRATA_PF_PAD=1 with STRATA_PF_GEMM=1): the FP16 activations of the two K 6144 projections (ssm_out's
 // y_h, attn_output's attn_h) with row stride 6144 + 64, so the GEMM's rows do not camp on the memory channels (the
 // 4 KB-multiple stride; Gemm::native pads the weight the same way).  Same bits.
@@ -2109,22 +2115,64 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 // touches R in between (not the stage's last half, not before the PLE block of layer 1, not under a
                 // control vector)
                 const int64_t nl = half == 0 ? l : l + 1;
-                const bool fuse = !gr_unfused() && nl < LE && !(half == 1 && nl == 1 && ple_on) &&
-                                  !(half == 1 && strata::kernels::cvec().covers(l));
+                const bool steered = half == 1 && strata::kernels::cvec().covers(l);
+                const float *cv_dir = nullptr, *cv_s = nullptr;
+                const int* cv_on = nullptr;
+                const bool cv_fused = steered && cvec_fuse() && !gr_unfused() && nl < LE && !(nl == 1 && ple_on) &&
+                                      strata::kernels::cvec().n_embd == N && strata::kernels::cvec().hc == HC &&
+                                      strata::kernels::cvec_tables(&cv_dir, &cv_s, &cv_on);
+                const bool fuse = !gr_unfused() && nl < LE && !(half == 1 && nl == 1 && ple_on) && (!steered || cv_fused);
                 const core::WeightRef* wnn = nullptr;
                 if (fuse) {
                     const core::LayerView vn(*m.wt, nl);
                     wnn = need(vn, half == 0 ? "hc_ffn_norm.weight" : "hc_attn_norm.weight", err);
                     if (!wnn) return false;
                 }
-                if (wnn) {
+                if (wnn && cv_fused) {
+                    // STRATA_CVEC_FUSE_CHECK=N: on the first N fused writes, also run the three-kernel path on a copy
+                    // of R and report whether R, the row scales and the BF16 image are bit-identical
+                    static int checks = [] { const char* e = std::getenv("STRATA_CVEC_FUSE_CHECK"); return e ? std::atoi(e) : 0; }();
+                    if (checks > 0) {
+                        --checks;
+                        float *Rc = nullptr, *rc = nullptr;
+                        uint16_t* xc = nullptr;
+                        cudaMalloc(&Rc, (size_t) T * D * 4); cudaMalloc(&rc, (size_t) T * HC * 4);
+                        cudaMalloc(&xc, (size_t) T * D * 2);
+                        cudaMemcpyAsync(Rc, m.R, (size_t) T * D * 4, cudaMemcpyDeviceToDevice, m.cs);
+                        gr_write(Rc, m.bo, m.inj, HC, T, m.cs);
+                        strata::kernels::cvec_apply(Rc, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
+                        gr_norm_rs(Rc, (const float*) wnn->data, EPS, rc, xc, T, m.cs);
+                        gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
+                                              strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs,
+                                              m.xn16, T, m.cs, m.xn16_lo);
+                        std::vector<float> a((size_t) T * D), b((size_t) T * D), ra((size_t) T * HC), rb((size_t) T * HC);
+                        std::vector<uint16_t> xa((size_t) T * D), xb((size_t) T * D);
+                        cudaMemcpyAsync(a.data(), m.R, a.size() * 4, cudaMemcpyDeviceToHost, m.cs);
+                        cudaMemcpyAsync(b.data(), Rc, b.size() * 4, cudaMemcpyDeviceToHost, m.cs);
+                        cudaMemcpyAsync(ra.data(), m.grs, ra.size() * 4, cudaMemcpyDeviceToHost, m.cs);
+                        cudaMemcpyAsync(rb.data(), rc, rb.size() * 4, cudaMemcpyDeviceToHost, m.cs);
+                        cudaMemcpyAsync(xa.data(), m.xn16, xa.size() * 2, cudaMemcpyDeviceToHost, m.cs);
+                        cudaMemcpyAsync(xb.data(), xc, xb.size() * 2, cudaMemcpyDeviceToHost, m.cs);
+                        cudaStreamSynchronize(m.cs);
+                        cudaFree(Rc); cudaFree(rc); cudaFree(xc);
+                        std::fprintf(stderr, "strata: STRATA_CVEC_FUSE_CHECK layer %lld T %lld: R %s, rs %s, xn16 %s\n",
+                                     (long long) l, (long long) T,
+                                     std::memcmp(a.data(), b.data(), a.size() * 4) ? "DIFFERS" : "identical",
+                                     std::memcmp(ra.data(), rb.data(), ra.size() * 4) ? "DIFFERS" : "identical",
+                                     std::memcmp(xa.data(), xb.data(), xa.size() * 2) ? "DIFFERS" : "identical");
+                    } else
+                    gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
+                                          strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs, m.xn16,
+                                          T, m.cs, m.xn16_lo);
+                    normed = true;
+                } else if (wnn) {
                     gr_write_norm_rs(m.R, m.bo, m.inj, HC, (const float*) wnn->data, EPS, m.grs, m.xn16, T, m.cs,
                                      m.xn16_lo);
                     normed = true;
                 } else {
                     gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
                 }
-                if (half == 1 && strata::kernels::cvec().covers(l))   // --control-vector-scaled
+                if (steered && !cv_fused)   // --control-vector-scaled
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
         }

@@ -159,6 +159,68 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
         if (xn16_lo) xn16_lo[row * N + d] = bf_lo(x, h);
     }
 }
+// S23 (opt-in STRATA_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
+// pass over R (was gr_write + cvec_apply + gr_norm_rs: three).  The write is gr_write_kernel's, the vector
+// cvec_kernel's (the same per-thread dot order over d = tid + 256 k, the same two-level xor reduction), the norm
+// gr_norm_rs_kernel's (the same ss order and block_sum): the same bits.
+__global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(
+    float* __restrict__ R, const float* __restrict__ bo, const float* __restrict__ inj, int64_t inj_ld,
+    const float* __restrict__ v_l, const float* __restrict__ s_l, const int* __restrict__ on, int mode,
+    const float* __restrict__ w, float eps, float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
+    uint16_t* __restrict__ xn16_lo) {
+    __shared__ float sh[32];
+    __shared__ float part[8];
+    const int64_t row = blockIdx.x;                 // t * 4 + c
+    const int64_t t = row / HC;
+    const int c = (int) (row % HC);
+    float* r = R + row * N;
+    const float sc = 2.0f * sigm(inj[t * inj_ld + c] / (float) HC);
+    const float s = *s_l;
+    const bool steer = *on != 0 && s != 0.0f;
+    float x[GRW_PER];
+    float dot = 0.0f;
+    int k = 0;
+#pragma unroll
+    for (int d = threadIdx.x; d < N; d += 256, ++k) {
+        const float xv = fmaf(bo[t * N + d], sc, r[d]);
+        x[k] = xv;
+        if (steer && mode == 0) dot = fmaf(xv, v_l[d], dot);
+    }
+    if (steer && mode == 0) {
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, o);
+        if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = dot;
+        __syncthreads();
+        if (threadIdx.x < 32) {
+            float p = threadIdx.x < 8 ? part[threadIdx.x] : 0.0f;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) p += __shfl_xor_sync(0xffffffffu, p, o);
+            if (threadIdx.x == 0) part[0] = p;
+        }
+        __syncthreads();
+        dot = part[0] * s;
+    }
+    float ss = 0.0f;
+    k = 0;
+#pragma unroll
+    for (int d = threadIdx.x; d < N; d += 256, ++k) {
+        float xv = x[k];
+        if (steer) xv = mode == 0 ? fmaf(-dot, v_l[d], xv) : xv + v_l[d];
+        r[d] = xv;
+        x[k] = xv;
+        ss += xv * xv;
+    }
+    const float rs = rsqrtf(block_sum(ss, sh) / (float) N + eps);
+    if (threadIdx.x == 0) rs_out[row] = rs;
+    k = 0;
+#pragma unroll
+    for (int d = threadIdx.x; d < N; d += 256, ++k) {
+        const float y = x[k] * rs * w[c * N + d];
+        const uint16_t h = bf(y);
+        xn16[row * N + d] = h;
+        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(y, h);
+    }
+}
 __global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restrict__ lo16, uint16_t* __restrict__ lo16_lo,
                                int64_t n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -940,6 +1002,13 @@ void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_l
     gr_write_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, bo, inj, inj_ld, w_norm_next, eps,
                                                                                       rs, xn16, xn16_lo);
     check("gr_write_norm_rs");
+}
+void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,
+                           const float* s_l, const int* on, int mode, const float* w_norm_next, float eps, float* rs,
+                           uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo) {
+    gr_write_cvec_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(
+        R, bo, inj, inj_ld, v_l, s_l, on, mode, w_norm_next, eps, rs, xn16, xn16_lo);
+    check("gr_write_cvec_norm_rs");
 }
 void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16_lo) {
     gr_silu_kernel<<<blocks_for(T * LR), 256, 0, (cudaStream_t) stream>>>(lo, lo16, lo16_lo, T * LR);
