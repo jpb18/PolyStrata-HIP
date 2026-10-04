@@ -4335,7 +4335,7 @@ int main(int argc, char** argv) {
     };
     auto plan_lend = [&](int64_t& chunk) -> int64_t {
         auto slots_for = lend_slots;
-        if (o.prefill_auto && !strata::prefill::Prefill::ring_bytes_enabled()) {   // 0.1.39's list (the default)
+        if (o.prefill_auto && !strata::prefill::Prefill::ring_bytes_enabled()) {   // STRATA_RING_BYTES=0: 0.1.39's list
             static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
             for (const int64_t c : kAutoChunks) {
                 // above 8192: only when asked for, and only when a prompt of the context can use it
@@ -4345,7 +4345,7 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
-        if (o.prefill_auto) {   // STRATA_RING_BYTES=1 (#583)
+        if (o.prefill_auto) {   // the default since 0.1.39b (#583)
             // The chunk and the ring are one budget, and the ring is the better buy.  Measured on this 4-way
             // IQ3_S rig (2x RTX 3060 + 2x RTX 5060, CUDA3 lending at its 90% cap) on a 120K prompt: 8960 tokens
             // with the 17-slot ring that leaves reads at 963 tok/s, 8192/130 at 1,008, 7168 with the ring full at
@@ -4606,7 +4606,7 @@ int main(int argc, char** argv) {
                         if (fits(c, false, only)) return c;
                     return 0;
                 }
-                if (!strata::prefill::Prefill::ring_bytes_enabled()) {   // 0.1.39's list (the default)
+                if (!strata::prefill::Prefill::ring_bytes_enabled()) {   // STRATA_RING_BYTES=0: 0.1.39's list
                     static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
                     for (const int64_t c : kAutoChunks) {
                         if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;   // #282, as plan_lend

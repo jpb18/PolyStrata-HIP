@@ -1031,12 +1031,15 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
   0.1.7) drafts up to 5 tokens from the earlier copy, but only where its measured acceptance and cost say it pays:
   code edits 6-11% faster, other text unchanged. The drafts are checked like the MTP's, so the output is the same.
 - **Prompts** are processed in chunks of up to 8,192 tokens (`--prefill auto`; 32,768 opt-in) with the experts
-  streamed to the GPU over PCIe. `STRATA_RING_BYTES=1` (opt-in, engine 0.1.39b, #583) sizes the streamed ring in
-  bytes for the pack and picks the largest auto chunk that keeps that ring full: an RTX 5070 with IQ3_XXS and a
-  partly pinned arena read a 32K prompt 14-26% faster (4K: 1-4% slower). It changes the bits of a long prompt
-  (the experts go through a different mix of cached and streamed groups), which is why it is not the default; in a
-  teacher-forced check against the FP16 prompt path its KL and top-1 agreement match the default's (8K KL 0.042 vs
-  0.054, 32K 0.020 vs 0.019).
+  streamed to the GPU over PCIe. Since engine 0.1.39b (#583) the streamed ring is sized in bytes for the pack (a
+  native pack with bigger blobs gets fewer ring slots and keeps more cache slots) and `--prefill auto` picks the
+  largest chunk that keeps that ring full: an RTX 5070 with IQ3_XXS and a partly pinned arena reads a 32K prompt
+  14-26% faster (1,045 -> 1,190 tok/s at a 1,500-slot cache, -> 1,315 at 2,400; a 4K prompt 1-4% slower). Q2_0
+  keeps its 384-slot ring. It changes the bits of a long prompt against 0.1.39 (the experts go through a different
+  mix of cached and streamed groups). Measured quality, teacher-forced over the next 2,001 tokens of a long document
+  against the FP16 prompt path (IQ3_XXS, `--prefill auto`): 8K prompt KL 0.042 (0.1.39: 0.054), top-1 agreement
+  93.5% (92.2%); 32K prompt KL 0.020 (0.019), top-1 95.3% (95.0%) - the same band as before. `STRATA_RING_BYTES=0`
+  restores 0.1.39's ring, loan and chunk choice.
 
 The full story, with measurements, bottlenecks and what comes next: **[docs/paper/Strata-Paper.pdf](paper/Strata-Paper.pdf)**.
 

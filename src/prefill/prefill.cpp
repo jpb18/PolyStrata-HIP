@@ -156,11 +156,12 @@ inline uint64_t ring_bytes() {
 // ...and what that buys on THIS pack, never past ring_cap(): the slot count `init` lays out, and what the auto
 // chunk scan treats as a full ring.  A pack whose blobs are larger than Q2_0's gets fewer slots for the same
 // bytes, which is the point - the ring competes with the expert cache for the same VRAM.
-// 0.1.39b: opt-in (STRATA_RING_BYTES=1).  It moves the prompt path's loan on a native pack (fewer ring slots, the
-// rest kept as cache slots), so a long prompt's experts are read through a different mix of resident and streamed
-// groups and its bits differ from the default's (RTX 5070, IQ3_XXS, 32K prompt: +14% to +26%).
+// 0.1.39b: on by default (#583); STRATA_RING_BYTES=0 restores 0.1.39's ring, loan and auto chunk list.  It moves the
+// prompt path's loan on a native pack (fewer ring slots, the rest kept as cache slots, a larger auto chunk), so a long
+// prompt's experts are read through a different mix of resident and streamed groups and its bits differ from 0.1.39's
+// (RTX 5070, IQ3_XXS, 32K prompt: +14% to +26%; teacher-forced against the FP16 prompt path in the same band).
 inline bool ring_bytes_on() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_RING_BYTES"); return v != nullptr && v[0] == '1'; }();
+    static const bool on = [] { const char* v = std::getenv("STRATA_RING_BYTES"); return v == nullptr || v[0] != '0'; }();
     return on;
 }
 inline int ring_budget_slots() {
@@ -1360,7 +1361,7 @@ uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::Session
         f(T * N); f(T * D);
         if (gr_unfused()) f(T * D);
         f(T * HC);
-    } else {   // 0.1.39's count (the default loan stays as it was)
+    } else {   // STRATA_RING_BYTES=0: 0.1.39's count
         f(T * N); f(T * D); f(T * D);
     }
     o.take<uint16_t>(T * D, ok); f(T * LR); o.take<uint16_t>(T * LR, ok);
