@@ -1646,6 +1646,324 @@ void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t 
     const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
     s26_down_l_kernel<LX, RD, SL, TS, BD><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
+// ---------------------------------------------------------------- stream B: UD-Q4_K_XL grouped decode experts
+// STRATA_EXPERT_V2K=1: s26_gu_l_kernel / s26_down_l_kernel's structure (4 interleaved rows per warp, the chunk's q8_1
+// activation rows in LDS, SwiGLU + q8_1 fused, optionally STRATA_TSUM's transposed butterfly) for Q4_K / Q5_K gate/up
+// and Q5_1 / Q8_0 down, which otherwise run native_gu_kernel / native_down_kernel (one entry at a time, the weight
+// words re-read per column).  Each Fmt<TY>::dot is split into S27<TY>::load (everything that depends on the weight) and
+// apply (the activation words and the same integer / float expression), the same impl functions, so a row's lane-strided
+// k order, its terms and warp_sum are the old kernels': every output is bitwise the old one's (iq harness, memcmp).
+template<int TY> struct S27;
+template<> struct S27<12> {   // Q4_K
+    struct W { int v[2]; uint16_t aux[2]; half2 dm; };
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs) {
+        const block_q4_K* b = (const block_q4_K*) vbq + kbx;
+        W r;
+        const int bq8_offset = QR4_K * ((iqs / 2) / (QI8_1 / 2));
+        const int* q4 = (const int*) (b->qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
+        r.v[0] = q4[0];
+        r.v[1] = q4[4];
+        k_scale_min(b->scales, bq8_offset, r.aux);
+        r.dm = b->dm;
+        return r;
+    }
+    __device__ static float apply(const W& r, const block_q8_1* __restrict__ bq8_1, int iqs) {
+        const int bq8_offset = QR4_K * ((iqs / 2) / (QI8_1 / 2));
+        int u[2 * QR4_K];
+        float d8[QR4_K];
+#pragma unroll
+        for (int i = 0; i < QR4_K; ++i) {
+            const block_q8_1* bq8i = bq8_1 + bq8_offset + i;
+            d8[i] = __low2float(bq8i->ds);
+            const int* q8 = (const int*) bq8i->qs + ((iqs / 2) % 4);
+            u[2 * i + 0] = q8[0];
+            u[2 * i + 1] = q8[4];
+        }
+        const uint8_t* sc = (const uint8_t*) r.aux;
+        const uint8_t* m = sc + 2;
+        return vec_dot_q4_K_q8_1_impl_vmmq(r.v, u, sc, m, r.dm, d8);
+    }
+};
+template<> struct S27<13> {   // Q5_K
+    struct W { int vl[2]; int vh[2]; uint16_t aux[2]; half2 dm; };
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs) {
+        const block_q5_K* b = (const block_q5_K*) vbq + kbx;
+        W r;
+        const int bq8_offset = QR5_K * ((iqs / 2) / (QI8_1 / 2));
+        const int* ql = (const int*) (b->qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
+        const int* qh = (const int*) (b->qh + 4 * ((iqs / 2) % 4));
+        r.vl[0] = ql[0];
+        r.vl[1] = ql[4];
+        r.vh[0] = qh[0] >> bq8_offset;
+        r.vh[1] = qh[4] >> bq8_offset;
+        k_scale_min(b->scales, bq8_offset, r.aux);
+        r.dm = b->dm;
+        return r;
+    }
+    __device__ static float apply(const W& r, const block_q8_1* __restrict__ bq8_1, int iqs) {
+        const int bq8_offset = QR5_K * ((iqs / 2) / (QI8_1 / 2));
+        int u[2 * QR5_K];
+        float d8[QR5_K];
+#pragma unroll
+        for (int i = 0; i < QR5_K; ++i) {
+            const block_q8_1* bq8i = bq8_1 + bq8_offset + i;
+            d8[i] = __low2float(bq8i->ds);
+            const int* q8 = (const int*) bq8i->qs + ((iqs / 2) % 4);
+            u[2 * i + 0] = q8[0];
+            u[2 * i + 1] = q8[4];
+        }
+        const uint8_t* sc = (const uint8_t*) r.aux;
+        const uint8_t* m = sc + 2;
+        return vec_dot_q5_K_q8_1_impl_vmmq(r.vl, r.vh, u, sc, m, r.dm, d8);
+    }
+};
+template<> struct S27<7> {   // Q5_1
+    struct W { int vl[VDR_Q5_1]; int qh; half2 dm; };
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs) {
+        const block_q5_1* b = (const block_q5_1*) vbq + kbx;
+        W r;
+#pragma unroll
+        for (int i = 0; i < VDR_Q5_1; ++i) r.vl[i] = get_int_b4(b->qs, iqs + i);
+        r.qh = get_int_b4(b->qh, 0);
+        r.dm = b->dm;
+        return r;
+    }
+    __device__ static float apply(const W& r, const block_q8_1* __restrict__ bq8_1, int iqs) {
+        int sumi = 0, sumu = 0;
+#pragma unroll
+        for (int i = 0; i < VDR_Q5_1; ++i) {
+            const int vl = r.vl[i];
+            const int vh = r.qh >> (4 * (iqs + i));
+            const int u0 = get_int_b4(bq8_1->qs, iqs + i), u1 = get_int_b4(bq8_1->qs, iqs + i + QI5_1);
+            int vi0 = (vl >> 0) & 0x0F0F0F0F;
+            vi0 |= (vh << 4) & 0x00000010;
+            vi0 |= (vh << 11) & 0x00001000;
+            vi0 |= (vh << 18) & 0x00100000;
+            vi0 |= (vh << 25) & 0x10000000;
+            sumi = ggml_cuda_dp4a(vi0, u0, sumi);
+            int vi1 = (vl >> 4) & 0x0F0F0F0F;
+            vi1 |= (vh >> 12) & 0x00000010;
+            vi1 |= (vh >> 5) & 0x00001000;
+            vi1 |= (vh << 2) & 0x00100000;
+            vi1 |= (vh << 9) & 0x10000000;
+            sumi = ggml_cuda_dp4a(vi1, u1, sumi);
+            sumu = ggml_cuda_dp4a(0x01010101, u1, ggml_cuda_dp4a(0x01010101, u0, sumu));
+        }
+        const float2 dm5 = __half22float2(r.dm);
+        const float d8 = __low2float(bq8_1->ds);
+        return sumi * (dm5.x * d8) + sumu * (dm5.y * d8);
+    }
+};
+template<> struct S27<8> {   // Q8_0
+    struct W { int q[VDR_Q8_0]; float d; };
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs) {
+        const block_q8_0* b = (const block_q8_0*) vbq + kbx;
+        W r;
+#pragma unroll
+        for (int i = 0; i < VDR_Q8_0; ++i) r.q[i] = get_int_b2(b->qs, iqs + i);
+        r.d = __half2float(b->d);
+        return r;
+    }
+    __device__ static float apply(const W& r, const block_q8_1* __restrict__ bq8_1, int iqs) {
+        int sumi = 0;
+#pragma unroll
+        for (int i = 0; i < VDR_Q8_0; ++i) sumi = ggml_cuda_dp4a(r.q[i], get_int_b4(bq8_1->qs, iqs + i), sumi);
+        const float d8_1 = __low2float(bq8_1->ds);
+        return r.d * d8_1 * ((float) sumi);
+    }
+};
+
+template<int TG, bool LX, int RPW, bool TS>
+__global__ void __launch_bounds__(256) s27_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                     const int32_t* __restrict__ grp_start,
+                                                     const int32_t* __restrict__ n_groups,
+                                                     const int32_t* __restrict__ ent_tok,
+                                                     const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                     float* __restrict__ gate, float* __restrict__ up) {
+    using F = Fmt<TG>;
+    using S = S27<TG>;
+    __shared__ block_q8_1 s_x[LX ? GRP_NC * S26_XMAX : 1];
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int row0 = blockIdx.x * GU_ROWS * RPW + warp;
+    const bool live = row0 + GU_ROWS * (RPW - 1) < 2 * L.n_ff;
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* wr[RPW];
+    int rr[RPW];
+    bool upq[RPW];
+#pragma unroll
+    for (int q = 0; q < RPW; ++q) {
+        const int row = row0 + q * GU_ROWS;
+        upq[q] = row >= L.n_ff;
+        rr[q] = upq[q] ? row - (int) L.n_ff : row;
+        wr[q] = blob + (upq[q] ? L.up_off : 0) + (size_t) rr[q] * L.gu_row;
+    }
+    const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32);
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    for (int e = e0; e < e1; e += GRP_NC) {
+        const int n = min(GRP_NC, e1 - e);
+        const block_q8_1* xbase = xq;
+        int off[GRP_NC];
+        if constexpr (LX) {
+            __syncthreads();   // the previous chunk is done with s_x
+            for (int i = threadIdx.x; i < n * xb; i += 256) {
+                const int c = i / xb, j = i - c * xb;
+                s_x[c * S26_XMAX + j] = xq[(size_t) ent_tok[e + c] * xb + j];
+            }
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c) off[c] = min(c, n - 1) * S26_XMAX;
+            xbase = s_x;
+            __syncthreads();
+        } else {
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c) off[c] = ent_tok[e + min(c, n - 1)] * xb;
+        }
+        if (!live) continue;
+        float s[RPW][GRP_NC];
+#pragma unroll
+        for (int q = 0; q < RPW; ++q)
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c) s[q][c] = 0.0f;
+        for (int k = lane; k < nb * F::ipb; k += 32) {
+            const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+            typename S::W w[RPW];
+#pragma unroll
+            for (int q = 0; q < RPW; ++q) w[q] = S::load(wr[q], kbx, iqs);
+#pragma unroll
+            for (int q = 0; q < RPW; ++q)
+#pragma unroll
+                for (int c = 0; c < GRP_NC; ++c)
+                    if (c < n) s[q][c] += S::apply(w[q], xbase + off[c] + kbx * (F::qk / 32), iqs);
+        }
+        if constexpr (TS) {
+            constexpr int P = s26ts::pow2_ceil(RPW * GRP_NC);
+            float v[P];
+#pragma unroll
+            for (int j = 0; j < P; ++j) v[j] = j < RPW * GRP_NC ? s[j / GRP_NC][j % GRP_NC] : 0.0f;
+            const float sum = s26ts::tsum<P>(v, lane);
+            const int j = s26ts::tsum_token<P>(lane);
+            if (lane == s26ts::tsum_lane<P>(j) && j < RPW * GRP_NC) {
+                const int c = j % GRP_NC;
+#pragma unroll
+                for (int q = 0; q < RPW; ++q)
+                    if (j / GRP_NC == q && c < n) (upq[q] ? up : gate)[(size_t) (e + c) * L.n_ff + rr[q]] = sum;
+            }
+            continue;
+        }
+#pragma unroll
+        for (int q = 0; q < RPW; ++q)
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c)
+                if (c < n) s[q][c] = warp_sum(s[q][c]);
+#pragma unroll
+        for (int q = 0; q < RPW; ++q)
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c)
+                if (c < n && lane == c) (upq[q] ? up : gate)[(size_t) (e + c) * L.n_ff + rr[q]] = s[q][c];
+    }
+}
+
+template<int TD, bool LX, int RPW, bool TS>
+__global__ void __launch_bounds__(256) s27_down_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                       const int32_t* __restrict__ grp_start,
+                                                       const int32_t* __restrict__ n_groups,
+                                                       const int32_t* __restrict__ ent_dst,
+                                                       const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                       float* __restrict__ out) {
+    using F = Fmt<TD>;
+    using S = S27<TD>;
+    __shared__ block_q8_1 s_h[LX ? GRP_NC * S26_HMAX : 1];
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int r0 = blockIdx.x * 8 * RPW + warp;
+    const bool live = r0 + 8 * (RPW - 1) < L.n_embd;
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const uint8_t* wr[RPW];
+#pragma unroll
+    for (int q = 0; q < RPW; ++q) wr[q] = blob + L.down_off + (size_t) (r0 + 8 * q) * L.d_row;
+    const int nb = (int) (L.n_ff / F::qk), hb = (int) (L.n_ff / 32);
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    for (int e = e0; e < e1; e += GRP_NC) {
+        const int n = min(GRP_NC, e1 - e);
+        const block_q8_1* hbase = hq;
+        int off[GRP_NC];
+        if constexpr (LX) {
+            __syncthreads();
+            for (int i = threadIdx.x; i < n * hb; i += 256) {
+                const int c = i / hb, j = i - c * hb;
+                s_h[c * S26_HMAX + j] = hq[(size_t) (e + c) * hb + j];
+            }
+            __syncthreads();
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c) off[c] = min(c, n - 1) * S26_HMAX;
+            hbase = s_h;
+        } else {
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c) off[c] = (e + min(c, n - 1)) * hb;
+        }
+        if (!live) continue;
+        float s[RPW][GRP_NC];
+#pragma unroll
+        for (int q = 0; q < RPW; ++q)
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c) s[q][c] = 0.0f;
+        for (int k = lane; k < nb * F::ipb; k += 32) {
+            const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+            typename S::W w[RPW];
+#pragma unroll
+            for (int q = 0; q < RPW; ++q) w[q] = S::load(wr[q], kbx, iqs);
+#pragma unroll
+            for (int q = 0; q < RPW; ++q)
+#pragma unroll
+                for (int c = 0; c < GRP_NC; ++c)
+                    if (c < n) s[q][c] += S::apply(w[q], hbase + off[c] + kbx * (F::qk / 32), iqs);
+        }
+        if constexpr (TS) {
+            constexpr int P = s26ts::pow2_ceil(RPW * GRP_NC);
+            float v[P];
+#pragma unroll
+            for (int j = 0; j < P; ++j) v[j] = j < RPW * GRP_NC ? s[j / GRP_NC][j % GRP_NC] : 0.0f;
+            const float sum = s26ts::tsum<P>(v, lane);
+            const int j = s26ts::tsum_token<P>(lane);
+            const int q = j / GRP_NC, c = j % GRP_NC;
+            if (lane == s26ts::tsum_lane<P>(j) && j < RPW * GRP_NC && c < n)
+                out[(size_t) ent_dst[e + c] * L.n_embd + r0 + 8 * q] = sum;
+            continue;
+        }
+#pragma unroll
+        for (int q = 0; q < RPW; ++q)
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c)
+                if (c < n) s[q][c] = warp_sum(s[q][c]);
+#pragma unroll
+        for (int q = 0; q < RPW; ++q)
+#pragma unroll
+            for (int c = 0; c < GRP_NC; ++c)
+                if (c < n && lane == c) out[(size_t) ent_dst[e + c] * L.n_embd + r0 + 8 * q] = s[q][c];
+    }
+}
+
+template<int TG, int TD, bool LX, int RG, int RD, bool TS>
+void s27_launch(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr,
+                const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok,
+                const block_q8_1* X, float* gate, float* up, float* h, block_q8_1* hq, float* out, long long nh) {
+    const dim3 ggu((unsigned) (2 * L.n_ff / (GU_ROWS * RG)), (unsigned) cap_groups);
+    s27_gu_kernel<TG, LX, RG, TS><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    s26_swiglu_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, hq, nh);
+    const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
+    s27_down_kernel<TD, LX, RD, TS><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+}
+template<int TG, int TD>
+void s27_launch_ts(bool ts, const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t s,
+                   const unsigned long long* grp_ptr, const int32_t* grp_start, const int32_t* n_groups,
+                   const int32_t* ent_dst, const int32_t* ent_tok, const block_q8_1* X, float* gate, float* up, float* h,
+                   block_q8_1* hq, float* out, long long nh) {
+    if (ts) s27_launch<TG, TD, true, 4, 4, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh);
+    else s27_launch<TG, TD, true, 4, 4, false>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh);
+}
+
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
@@ -1801,6 +2119,21 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         else s26_launch_l<true, true, 4, 4, true, true>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h,
                                                         hq, out, (long long) cap_entries * L.n_ff);
         check("native_expert_grouped (v2)");
+        return;
+    }
+    // stream B: UD-Q4_K_XL's Q4_K / Q5_K gate/up and Q5_1 / Q8_0 down (see S27 above)
+    static const bool v2k = [] { const char* v = std::getenv("STRATA_EXPERT_V2K"); return v && v[0] == '1'; }();
+    if (v2k && (L.gu_type == 12 || L.gu_type == 13) && (L.d_type == 7 || L.d_type == 8) && L.n_embd == 2560 &&
+        L.n_ff == 640) {
+        static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
+        const long long nh = (long long) cap_entries * L.n_ff;
+#define STRATA_V2K(G, D) s27_launch_ts<G, D>(ts, L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh)
+        if (L.gu_type == 12 && L.d_type == 7) STRATA_V2K(12, 7);
+        else if (L.gu_type == 12) STRATA_V2K(12, 8);
+        else if (L.d_type == 7) STRATA_V2K(13, 7);
+        else STRATA_V2K(13, 8);
+#undef STRATA_V2K
+        check("native_expert_grouped (v2k)");
         return;
     }
     const dim3 ggu((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) cap_groups);
