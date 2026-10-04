@@ -61,7 +61,7 @@ int main() {
         const float* dgm = dev(gamma);
         std::vector<float> y_ref, st_ref;
         std::vector<uint16_t> y16_ref;
-        for (int variant : {0, 3, 1}) {
+        for (int variant : {0, 3, 1, 4, 5}) {
             float* dst = dev(state);
             float* dy = nullptr;
             uint16_t* dy16 = nullptr;
