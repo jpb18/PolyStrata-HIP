@@ -6,6 +6,13 @@ chunks interleaved with their windows), and a conversation's next turn continued
   2. the same in the slots: A in slot 0, B in slot 1 next to it, then C in slot 2 while A and B decode - every slot's
      tokens must equal its solo tokens
   3. A's next turn (BGEN into slot 0, which still holds A): read from the slot, its tokens must equal the solo next turn
+  4. a long prompt D gives way (BYIELD) at its first chunk boundary, a short E is admitted, D goes on from its slot
+     while E decodes: both equal their solo tokens
+  6. A in a slot, stopped after 50 tokens and continued on the solo path (GEN of A + its tokens, from the slot): the
+     whole equals solo A (what the server does with a request left alone in a slot)
+  5. (a measurement) a solo next turn continued from a slot: the drafts accepted
+  7. F, A's history as a client sends it back without the reply's thinking, from slot 1's turn checkpoint: equal to
+     F solo (which continues from the same checkpoint of the live chain)
 
 Exact comparisons need the same settings as batch_test.py (this script sets STRATA_IQ_MT_MIN=1):
   python tools/batch_interleave_test.py --exe build/strata --config strata-<model>.json \\
@@ -72,6 +79,12 @@ def main():
     sA, _ = run(eng, out, f"GEN {M} {ids(A)}")
     A2 = A + sA + chat("Now do the same in Rust.")
     sA2, _ = run(eng, out, f"GEN {M} {ids(A2)}")
+    # F: A's history as a client sends it back WITHOUT the reply's thinking - it shares A only up to A's last turn
+    # boundary (the checkpoint there); solo it continues from that checkpoint of the live chain
+    turn_at = max(i for i, t in enumerate(A) if t == A[0])          # A[0] is <|im_start|>
+    F = A[:turn_at] + tok.encode("<|im_start|>assistant\nA short answer.<|im_end|>\n", parse_special=True) + \
+        chat("Now in Go.")
+    sF, _ = run(eng, out, f"GEN {M} {ids(F)}")
     sB, _ = run(eng, out, f"GEN {M} {ids(B)}")
     sC, _ = run(eng, out, f"GEN {M} {ids(C)}")
     sD, _ = run(eng, out, f"GEN {M} {ids(D)}")
@@ -161,6 +174,27 @@ def main():
         d = next((k for k in range(min(len(got4[s]), len(ref))) if got4[s][k] != ref[k]), None)
         print(f"slot {s} {name}: {len(got4[s])} tokens, solo {len(ref)}: "
               f"{'IDENTICAL' if same else f'DIFFERS at {d}'}", flush=True)
+    # 6. back to the solo path (what the server does with a request left alone in a slot): A in slot 1, BSTOP after
+    # 50 tokens, then GEN of A + what it produced - the engine continues from the slot with MTP drafts again
+    first, cont = run(eng, out, f"BGEN 1 {M} {ids(A)}", slot=1)
+    got6, sent = list(first), False
+    while cont:
+        l = eng.pending.pop(0) if eng.pending else next(out)
+        if l.startswith("BT 1 "):
+            got6.append(int(l.split()[2]))
+            if len(got6) >= 50 and not sent:
+                eng.send("BSTOP 1")
+                sent = True
+        elif l.startswith("BDONE 1 "):
+            break
+    tail6, _ = run(eng, out, f"GEN {M - len(got6)} {ids(A + got6)}") if len(got6) < M else ([], None)
+    same = got6 + tail6 == sA
+    ok &= same
+    both = got6 + tail6
+    d = next((k for k in range(min(len(both), len(sA))) if both[k] != sA[k]), None)
+    print(f"A in a slot, then solo again after {len(got6)} tokens: {len(both)} tokens, solo {len(sA)}: "
+          f"{'IDENTICAL' if same else f'DIFFERS at {d}'}", flush=True)
+
     # 5. (a measurement, not a check) a SOLO next turn continued from slot 0: its tokens are exact either way, but the
     # draft layer's own K/V was built for another conversation, so fewer drafts may be accepted than in a solo next
     # turn whose drafter read the conversation (A2 in step 1)
@@ -174,13 +208,27 @@ def main():
             print(f"solo next turn from a slot: drafts accepted {f[6]} of {f[7]} ({f[1]} tokens in {f[4]} ms)",
                   flush=True)
             break
+    # 7. F from slot 1's turn checkpoint (slot 1 holds A since step 6): the engine log says "(its turn checkpoint)"
+    first, cont = run(eng, out, f"BGEN 2 {M} {ids(F)}", slot=2)
+    got7 = list(first)
+    while cont:
+        l = eng.pending.pop(0) if eng.pending else next(out)
+        if l.startswith("BT 2 "):
+            got7.append(int(l.split()[2]))
+        elif l.startswith("BDONE 2 "):
+            break
+    same = got7 == sF
+    ok &= same
+    d = next((k for k in range(min(len(got7), len(sF))) if got7[k] != sF[k]), None)
+    print(f"F (A's history without the reply's thinking) from slot 1's turn checkpoint: {len(got7)} tokens, solo "
+          f"{len(sF)}: {'IDENTICAL' if same else f'DIFFERS at {d}'}", flush=True)
     eng.send("QUIT")
     eng.p.wait(timeout=180)
     log = Path(eng.log_path).read_text(errors="replace")
     for l in log.splitlines():
         if "drafts accepted" in l:
             print("  log:", l.split("strata serve: ")[-1][:160], flush=True)
-    for key in ("gave back", "takes", "the prompt was read in", "gives way"):
+    for key in ("gave back", "its turn checkpoint", "takes", "the prompt was read in", "gives way"):
         print(f"engine log '{key}': {log.count(key)} lines", flush=True)
     return 0 if ok else 2
 

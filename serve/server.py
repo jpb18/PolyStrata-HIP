@@ -843,6 +843,19 @@ class StrataEngine:
             self.slot_cv.notify_all()
         return True
 
+    SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
+    SOLO_AGAIN_MIN_LEFT = 32  # ... only with at least this many tokens still allowed (max_tokens)
+
+    def _may_go_solo(self, left: int, times: int, embeddings) -> bool:
+        """A request decoding in a slot that is alone now (no other slot busy, nobody waiting) goes back to the solo
+        path with its MTP drafts: the engine continues it from the slot's sessions (its slot cache; INFO
+        slot_cache=1).  STRATA_PARALLEL_SOLO=0 keeps it in the slot."""
+        if (embeddings or times >= self.SOLO_AGAIN_MAX or left < self.SOLO_AGAIN_MIN_LEFT or
+                not (self.info or {}).get("slot_cache") or os.environ.get("STRATA_PARALLEL_SOLO") == "0"):
+            return False
+        with self.slot_cv:
+            return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
+
     def _shorter_waiting(self, plen: int) -> bool:
         """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
         with self.slot_cv:
@@ -870,144 +883,169 @@ class StrataEngine:
         slot, gen0, reserved = None, None, None
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
         stop_sent = False
-        yields = 0
+        yields, solo_again = 0, 0
         try:
-            with self.slot_cv:
-                alone = not any(self.slot_busy) and self.waiting == 0
-            if alone and left > 1:
-                head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
-                self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
-                phase = "solo"
-                self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
-                def others():
-                    with self.slot_cv:
-                        return self.waiting > 0
-                for x in self._control(cancel, pending.append, stop_when=others):
-                    while pending:
-                        t = pending.pop(0)
-                        out.append(t)
-                        yield t
-                    if x is None:                       # a heartbeat (False: a token, flushed above)
-                        if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
-                                self._shorter_waiting(len(prompt))):
-                            with self.slot_cv:          # the slot the part read will wait in
-                                reserved = self.pick_slot(prompt)
-                                if reserved is not None:
-                                    self.slot_busy[reserved] = True
-                            if reserved is not None:
-                                self._send(f"BYIELD {reserved}")
-                        yield None
-                phase = "none"                          # its DONE is read
-                while pending:
-                    t = pending.pop(0)
-                    out.append(t)
-                    yield t
-                if self._yielded is not None and reserved is not None and self._yielded[0] == reserved:
-                    slot, reserved = reserved, None     # gave way: the read goes on in that slot (below)
-                elif reserved is not None:              # it did not give way: the slot is free again
-                    with self.slot_cv:
-                        self.slot_busy[reserved] = False
-                        self.slot_cv.notify_all()
-                    reserved = None
-                if slot is None:
-                    finish = (self.last or {}).get("finish") if isinstance(self.last, dict) else None
-                    left = int(max_new) - len(out)
-                    if cancel.is_set() or left <= 0 or finish in ("stop", "length") or (out and out[-1] in EOS_IDS):
-                        return
-                    prompt = list(ids) + out            # promoted: it continues in a batch slot from here
-            while True:
-                if slot is None:
-                    # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
-                    # the start of this prompt (its conversation's last turn), else the one used longest ago
-                    with self.slot_cv:
-                        while True:
-                            slot = self.pick_slot(prompt)
-                            if slot is not None:
-                                self.slot_busy[slot] = True
-                                break
-                            self.slot_cv.wait(timeout=10.0)
-                            if cancel.is_set():
-                                return
-                if self._yielded is not None:           # it gave way: the others waiting then go first
-                    self.slot_held[slot] = list(prompt[:self._yielded[1]])
-                    self._yielded = None
-                    yields += 1
-                    self.ctl.release()
-                    holding = False
-                    with self.slot_cv:
-                        epoch = self.ctl_epoch
-                    ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+            while True:   # a request in a slot that is left alone goes back to the solo path
+                if not holding:
+                    ok = yield from self._take_control(cancel, len(prompt))
                     if not ok:
                         return
                     holding = True
-                while not self.slot_q[slot].empty():
-                    self.slot_q[slot].get_nowait()
-                head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
-                live = {"slot": slot, "state": "reading", "prompt_tokens": len(prompt), "generated": 0,
-                        "started": time.time(), "first_token": None}
-                self.slot_live[slot] = live
-                self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
-                self.slot_held[slot] = []               # the admission overwrites what the slot held
-                phase = "admit"
-                self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
-                asked = False
-                for x in self._control(cancel, pending.append):
+                with self.slot_cv:
+                    alone = not any(self.slot_busy) and self.waiting == 0
+                if alone and left > 1:
+                    head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
+                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    phase = "solo"
+                    self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
+                    def others():
+                        with self.slot_cv:
+                            return self.waiting > 0
+                    for x in self._control(cancel, pending.append, stop_when=others):
+                        while pending:
+                            t = pending.pop(0)
+                            out.append(t)
+                            yield t
+                        if x is None:                       # a heartbeat (False: a token, flushed above)
+                            if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
+                                    self._shorter_waiting(len(prompt))):
+                                with self.slot_cv:          # the slot the part read will wait in
+                                    reserved = self.pick_slot(prompt)
+                                    if reserved is not None:
+                                        self.slot_busy[reserved] = True
+                                if reserved is not None:
+                                    self._send(f"BYIELD {reserved}")
+                            yield None
+                    phase = "none"                          # its DONE is read
                     while pending:
                         t = pending.pop(0)
                         out.append(t)
                         yield t
-                    if x is None:
-                        if (not asked and not embeddings and yields < self.YIELDS_MAX and
-                                self._shorter_waiting(len(prompt))):
-                            self._send(f"BYIELD {slot}")
-                            asked = True
-                        yield None
-                cont = bool(self._ctl_result and self._ctl_result[1])
-                phase = "slot" if cont else "none"
-                while pending:
-                    t = pending.pop(0)
-                    out.append(t)
-                    yield t
-                if not cont and self._yielded is not None and self._yielded[0] == slot and not cancel.is_set():
-                    continue                            # gave way: again once the shorter request is in
-                break
-            self.ctl.release()
-            holding = False
-            if not cont:
-                return
-            live.update(state="decoding", first_token=time.time(), generated=len(out))
-            gen0 = len(out) - 1                         # the admission's own token: the slot feeds it first
-            while True:
-                try:
-                    line = self.slot_q[slot].get(timeout=10.0)
-                except queue.Empty:
-                    if cancel.is_set() and not stop_sent:
-                        self._send(f"BSTOP {slot}")
-                        stop_sent = True
-                    yield None
-                    continue
-                if line is None:
-                    phase = "none"
-                    raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
-                if line.startswith("BT "):
-                    t = int(line.split()[2])
-                    out.append(t)
-                    live["generated"] = len(out)
-                    if cancel.is_set():
-                        if not stop_sent:
+                    if self._yielded is not None and reserved is not None and self._yielded[0] == reserved:
+                        slot, reserved = reserved, None     # gave way: the read goes on in that slot (below)
+                    elif reserved is not None:              # it did not give way: the slot is free again
+                        with self.slot_cv:
+                            self.slot_busy[reserved] = False
+                            self.slot_cv.notify_all()
+                        reserved = None
+                    if slot is None:
+                        finish = (self.last or {}).get("finish") if isinstance(self.last, dict) else None
+                        left = int(max_new) - len(out)
+                        if cancel.is_set() or left <= 0 or finish in ("stop", "length") or (out and out[-1] in EOS_IDS):
+                            return
+                        prompt = list(ids) + out            # promoted: it continues in a batch slot from here
+                while True:
+                    if slot is None:
+                        # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
+                        # the start of this prompt (its conversation's last turn), else the one used longest ago
+                        with self.slot_cv:
+                            while True:
+                                slot = self.pick_slot(prompt)
+                                if slot is not None:
+                                    self.slot_busy[slot] = True
+                                    break
+                                self.slot_cv.wait(timeout=10.0)
+                                if cancel.is_set():
+                                    return
+                    if self._yielded is not None:           # it gave way: the others waiting then go first
+                        self.slot_held[slot] = list(prompt[:self._yielded[1]])
+                        self._yielded = None
+                        yields += 1
+                        self.ctl.release()
+                        holding = False
+                        with self.slot_cv:
+                            epoch = self.ctl_epoch
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        if not ok:
+                            return
+                        holding = True
+                    while not self.slot_q[slot].empty():
+                        self.slot_q[slot].get_nowait()
+                    head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
+                    live = {"slot": slot, "state": "reading", "prompt_tokens": len(prompt), "generated": 0,
+                            "started": time.time(), "first_token": None}
+                    self.slot_live[slot] = live
+                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    self.slot_held[slot] = []               # the admission overwrites what the slot held
+                    phase = "admit"
+                    self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
+                    asked = False
+                    for x in self._control(cancel, pending.append):
+                        while pending:
+                            t = pending.pop(0)
+                            out.append(t)
+                            yield t
+                        if x is None:
+                            if (not asked and not embeddings and yields < self.YIELDS_MAX and
+                                    self._shorter_waiting(len(prompt))):
+                                self._send(f"BYIELD {slot}")
+                                asked = True
+                            yield None
+                    cont = bool(self._ctl_result and self._ctl_result[1])
+                    phase = "slot" if cont else "none"
+                    while pending:
+                        t = pending.pop(0)
+                        out.append(t)
+                        yield t
+                    if not cont and self._yielded is not None and self._yielded[0] == slot and not cancel.is_set():
+                        continue                            # gave way: again once the shorter request is in
+                    break
+                self.ctl.release()
+                holding = False
+                if not cont:
+                    return
+                live.update(state="decoding", first_token=time.time(), generated=len(out))
+                gen0 = len(out) - 1                         # the admission's own token: the slot feeds it first
+                going_solo = False
+                while True:
+                    try:
+                        line = self.slot_q[slot].get(timeout=10.0)
+                    except queue.Empty:
+                        if cancel.is_set() and not stop_sent:
                             self._send(f"BSTOP {slot}")
                             stop_sent = True
+                        yield None
                         continue
-                    yield t
-                elif line.startswith("BDONE "):
-                    phase = "none"
-                    f = line.split()
-                    if len(f) >= 5 and isinstance(self.last, dict):
-                        self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
-                                     "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
-                    # what the slot's sessions hold now: the prompt and every token fed (all but the last one)
-                    self.slot_held[slot] = list(prompt) + out[gen0:-1] if len(out) > gen0 else []
-                    return
+                    if line is None:
+                        phase = "none"
+                        raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
+                    if line.startswith("BT "):
+                        t = int(line.split()[2])
+                        out.append(t)
+                        live["generated"] = len(out)
+                        if cancel.is_set():
+                            if not stop_sent:
+                                self._send(f"BSTOP {slot}")
+                                stop_sent = True
+                            continue
+                        yield t
+                        if not going_solo and not stop_sent and self._may_go_solo(int(max_new) - len(out), solo_again,
+                                                                                  embeddings):
+                            self._send(f"BSTOP {slot}")         # alone now: on with the drafts (below)
+                            going_solo = True
+                    elif line.startswith("BDONE "):
+                        phase = "none"
+                        f = line.split()
+                        if len(f) >= 5 and isinstance(self.last, dict):
+                            self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
+                                         "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
+                        # what the slot's sessions hold now: the prompt and every token fed (all but the last one)
+                        self.slot_held[slot] = list(prompt) + out[gen0:-1] if len(out) > gen0 else []
+                        if (going_solo and f[3:4] == ["cancel"] and not cancel.is_set() and len(out) < int(max_new)
+                                and not (out and out[-1] in EOS_IDS)):
+                            # the solo path continues it: the engine copies the slot's sessions back (all but the
+                            # last token are in them) and decodes with MTP drafts again
+                            self.slot_live[slot] = None
+                            self.slot_used[slot] = time.time()
+                            with self.slot_cv:
+                                self.slot_busy[slot] = False
+                                self.slot_cv.notify_all()
+                            slot, gen0 = None, None
+                            prompt, left = list(ids) + out, int(max_new) - len(out)
+                            solo_again += 1
+                            btrace("back to the solo path")
+                            break
+                        return
         finally:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)

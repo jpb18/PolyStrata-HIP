@@ -36,14 +36,18 @@ def reader():
             lines.put(l)
     lines.put(None)
 threading.Thread(target=reader, daemon=True).start()
-print("INFO engine=0.1.39" + (f" batch_slots={fit}" if fit >= 2 else ""), flush=True)
+print("INFO engine=0.1.39" + (f" batch_slots={fit}" if fit >= 2 else "") +
+      (" slot_cache=1" if "--slotcache" in args else ""), flush=True)
 print("READY 4096 stop", flush=True)
-R = list(b"ok, done.") + [257]
-def reply(ids):            # the rest of R after what the prompt already ends with (a request continued in a slot)
+LONG = list(b"LONGREPLY")
+def reply(ids):            # the rest of the reply after what the prompt already ends with (a request continued)
     ids = [int(x) for x in ids]
+    long_one = any(ids[i:i + len(LONG)] == LONG for i in range(len(ids)))
+    R = list(b"ok, " + b"la " * 15 + b"done." if long_one else b"ok, done.") + [257]
     k = max(k for k in range(len(R)) if k == 0 or ids[-k:] == R[:k])
     return R[k:]
 active = {}          # slot -> [tokens left, max_new, produced]
+stopped = set()      # BSTOPped slots: they end "cancel"
 def window():        # one batch window: every active slot one token
     for b in sorted(active):
         left, max_new, produced = active[b]
@@ -51,7 +55,9 @@ def window():        # one batch window: every active slot one token
         produced += 1
         print(f"BT {b} {t}", flush=True)
         if t == 257 or produced >= max_new:
-            print(f"BDONE {b} {produced} {'stop' if t == 257 else 'length'} 1.0", flush=True)
+            fin = 'stop' if t == 257 else 'cancel' if b in stopped else 'length'
+            stopped.discard(b)
+            print(f"BDONE {b} {produced} {fin} 1.0", flush=True)
             del active[b]
         else:
             active[b] = [left, max_new, produced]
@@ -69,6 +75,7 @@ while True:
         b = int(line.split()[1])
         if b in active:
             active[b][1] = 0
+            stopped.add(b)
         continue
     if line.startswith(("GEN ", "BGEN ")):
         f = line.split()
@@ -185,7 +192,7 @@ class PickSlot(unittest.TestCase):
 class ParallelService(unittest.TestCase):
     """The real StrataEngine and Service over HTTP, the fake engine behind them."""
 
-    def start(self, slots, fit=None):
+    def start(self, slots, fit=None, slot_cache=False):
         import serve.server as server
         self.tmp = tempfile.TemporaryDirectory()
         script = Path(self.tmp.name) / "fake_strata.py"
@@ -193,6 +200,7 @@ class ParallelService(unittest.TestCase):
         self.log = Path(self.tmp.name) / "requests.log"
         real = server.subprocess.Popen
         extra = ["--batch", str(slots)] + (["--fit", str(fit)] if fit is not None else []) + ["--log", str(self.log)]
+        extra += ["--slotcache"] if slot_cache else []
         with mock.patch.object(server.subprocess, "Popen",
                                lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
             self.engine = StrataEngine("strata", extra)
@@ -323,6 +331,26 @@ class ParallelService(unittest.TestCase):
         res = self.race("long " * 600, "lung " * 600)
         self.assertEqual(sorted(r[0] for r in res.values()), ["ok, done."] * 2)
         self.assertFalse(any(x.startswith("YIELD ") for x in self.log.read_text().splitlines()))
+
+    def test_left_alone_it_goes_back_to_the_solo_path(self):
+        """A request decoding in a slot whose neighbour finished goes back to the solo path (MTP drafts), continued
+        from its slot - only with an engine that keeps the slots' conversations (INFO slot_cache=1)."""
+        self.start(2, slot_cache=True)
+        res = {}
+        long = threading.Thread(target=lambda: res.setdefault("long", self.chat("LONGREPLY please", max_tokens=200)))
+        long.start()
+        time.sleep(0.05)
+        short = self.chat("short", max_tokens=200)
+        long.join(30)
+        self.assertEqual(short["choices"][0]["message"]["content"], "ok, done.")
+        self.assertEqual(res["long"]["choices"][0]["message"]["content"], "ok, " + "la " * 15 + "done.")
+        kinds = [x.split()[0] for x in self.log.read_text().splitlines()]
+        # solo, then both in slots, then the long one alone again: a GEN after the BGENs
+        self.assertIn("BGEN", kinds)
+        self.assertEqual(kinds[-1], "GEN", kinds)
+        self.assertFalse(any(self.engine.slot_busy))
+        with self.svc.status_lock:
+            self.assertEqual(len(self.svc.history), 2)
 
     def test_next_turn_goes_back_to_its_slot(self):
         self.start(2)

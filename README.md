@@ -134,7 +134,8 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). You can 
 - **Pictures:** say yes to "Images?" in setup, then click **Picture** in the chat, or attach them in your app
   (AMD cards: on Linux through the processor, not on Windows yet).
 - **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>` - always with a key.
-- **Good to know:** it answers one request at a time. The first message of a chat is read in full (about 1 minute
+- **Good to know:** it answers one request at a time (several at once is opt-in: `"parallel": 2`,
+  [BATCHING.md](docs/BATCHING.md)). The first message of a chat is read in full (about 1 minute
   per 30,000 tokens); follow-ups start in seconds.
 
 More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [the API](docs/DETAILS.md#using-it).
