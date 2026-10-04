@@ -22,6 +22,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
 
+#include <cstdlib>
 #include <cstring>
 
 // STRATA_WMMA_GFX11 is defined by the BUILD (CMakeLists.txt, from CMAKE_HIP_ARCHITECTURES), not inferred
@@ -371,6 +372,93 @@ __global__ void __launch_bounds__(256) kernel(const _Float16* __restrict__ X, co
         }
 #endif
 }
+// The 128 x 256 kernel with a 64-k LDS tile (single buffer, the next tile in 12 named staging registers, 2 barriers
+// per tile: half the loop trips and barriers per k of the BK 32 double buffer). Each accumulator takes the same
+// WMMAs in the same k order as `kernel`: the same bits (s23/gemm_probe11.hip, memcmp). gfx1151, M 16384, both
+// operands padded: 38.0 -> 41.3 TFLOPS (N 2560 K 6144), 38.9 -> 40.9 (N 12288 K 2560), 40.3 -> 40.4 (N 10240).
+// K a multiple of 64.
+__global__ void __launch_bounds__(256) kernel_bk64(const _Float16* __restrict__ X, const _Float16* __restrict__ W,
+                                                   float* __restrict__ Y, int M, int N, int K, int ldy, int accumulate,
+                                                   int ldx, int ldw) {
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__)
+    constexpr int BN = 256, WN = 64, BK64 = 64, LDK64 = BK64 + 8;
+    __shared__ __align__(16) _Float16 sA[BM][LDK64];
+    __shared__ __align__(16) _Float16 sB[BN][LDK64];
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, l16 = lane & 15, hi = lane >> 4;
+    const int wm = wave & 1, wn = wave >> 1;
+    const int num_m = (M + BM - 1) / BM, num_n = (N + BN - 1) / BN, b = blockIdx.x;
+    const int group = b / (GM * num_n), first_m = group * GM, gsize = min(GM, num_m - first_m);
+    const int m0 = (first_m + (b % (GM * num_n)) % gsize) * BM, n0 = ((b % (GM * num_n)) / gsize) * BN;
+    const int sr = tid >> 3, sq = tid & 7;            // 32 rows per pass, 8 x 8 halves per row
+    auto ldA = [&](int k0, int r) -> uint4 {
+        return *reinterpret_cast<const uint4*>(X + (size_t) min(m0 + r, M - 1) * ldx + k0 + 8 * sq);
+    };
+    auto ldB = [&](int k0, int r) -> uint4 {
+        return *reinterpret_cast<const uint4*>(W + (size_t) min(n0 + r, N - 1) * ldw + k0 + 8 * sq);
+    };
+    uint4 ra0, ra1, ra2, ra3, rb0, rb1, rb2, rb3, rb4, rb5, rb6, rb7;
+    auto load = [&](int k0) {
+        ra0 = ldA(k0, sr); ra1 = ldA(k0, sr + 32); ra2 = ldA(k0, sr + 64); ra3 = ldA(k0, sr + 96);
+        rb0 = ldB(k0, sr); rb1 = ldB(k0, sr + 32); rb2 = ldB(k0, sr + 64); rb3 = ldB(k0, sr + 96);
+        rb4 = ldB(k0, sr + 128); rb5 = ldB(k0, sr + 160); rb6 = ldB(k0, sr + 192); rb7 = ldB(k0, sr + 224);
+    };
+    auto store = [&]() {
+        *reinterpret_cast<uint4*>(&sA[sr][8 * sq]) = ra0; *reinterpret_cast<uint4*>(&sA[sr + 32][8 * sq]) = ra1;
+        *reinterpret_cast<uint4*>(&sA[sr + 64][8 * sq]) = ra2; *reinterpret_cast<uint4*>(&sA[sr + 96][8 * sq]) = ra3;
+        *reinterpret_cast<uint4*>(&sB[sr][8 * sq]) = rb0; *reinterpret_cast<uint4*>(&sB[sr + 32][8 * sq]) = rb1;
+        *reinterpret_cast<uint4*>(&sB[sr + 64][8 * sq]) = rb2; *reinterpret_cast<uint4*>(&sB[sr + 96][8 * sq]) = rb3;
+        *reinterpret_cast<uint4*>(&sB[sr + 128][8 * sq]) = rb4; *reinterpret_cast<uint4*>(&sB[sr + 160][8 * sq]) = rb5;
+        *reinterpret_cast<uint4*>(&sB[sr + 192][8 * sq]) = rb6; *reinterpret_cast<uint4*>(&sB[sr + 224][8 * sq]) = rb7;
+    };
+    f8 acc[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc[i][j] = f8{0, 0, 0, 0, 0, 0, 0, 0};
+    load(0);
+    store();
+    __syncthreads();
+    const int ar = 64 * wm + l16, br = WN * wn + l16;
+    for (int k0 = 0; k0 < K; k0 += BK64) {
+        const bool more = k0 + BK64 < K;
+        if (more) load(k0 + BK64);
+#pragma unroll
+        for (int ks = 0; ks < BK64; ks += 16) {
+            const h16 a0 = frag(&sA[ar][ks]), a1 = frag(&sA[ar + 16][ks]), a2 = frag(&sA[ar + 32][ks]),
+                      a3 = frag(&sA[ar + 48][ks]);
+            const h16 b0 = frag(&sB[br][ks]), b1 = frag(&sB[br + 16][ks]), b2 = frag(&sB[br + 32][ks]),
+                      b3 = frag(&sB[br + 48][ks]);
+#define PFG_ROW(i, a)                                                                                                 \
+    acc[i][0] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b0, acc[i][0]);                                         \
+    acc[i][1] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b1, acc[i][1]);                                         \
+    acc[i][2] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b2, acc[i][2]);                                         \
+    acc[i][3] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b3, acc[i][3]);
+            PFG_ROW(0, a0) PFG_ROW(1, a1) PFG_ROW(2, a2) PFG_ROW(3, a3)
+#undef PFG_ROW
+        }
+        if (more) {
+            __syncthreads();   // every wave is done reading the tile
+            store();
+            __syncthreads();
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int n = n0 + WN * wn + 16 * j + l16;
+            if (n >= N) continue;
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int m = m0 + 64 * wm + 16 * i + 2 * e + hi;
+                if (m < M) {
+                    float* y = Y + (size_t) m * ldy + n;
+                    *y = accumulate ? *y + acc[i][j][e] : acc[i][j][e];
+                }
+            }
+        }
+#endif
+}
 }  // namespace pfg
 
 bool strata_pf_gemm_f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K, int64_t ldy,
@@ -395,7 +483,13 @@ bool strata_pf_gemm_f16_ld(const uint16_t* X, int64_t ldx, const uint16_t* W, in
     hipStream_t s = static_cast<hipStream_t>(stream);
     const int acc = beta == 1.0f ? 1 : 0;
     const int64_t mt = (T + pfg::BM - 1) / pfg::BM;
-    if (N >= 1024) {
+    // STRATA_PF_BK64=0: the BK 32 kernel for the wide shapes too (the A/B; the same bits)
+    static const bool bk64 = [] { const char* v = std::getenv("STRATA_PF_BK64"); return !v || v[0] != '0'; }();
+    if (N >= 1024 && bk64 && K % 64 == 0) {
+        const unsigned grid = (unsigned) (mt * ((N + 255) / 256));
+        pfg::kernel_bk64<<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,
+                                              (int) ldy, acc, (int) ldx, (int) ldw);
+    } else if (N >= 1024) {
         const unsigned grid = (unsigned) (mt * ((N + 255) / 256));
         pfg::kernel<256, 64><<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,
                                                   (int) ldy, acc, (int) ldx, (int) ldw);
