@@ -83,7 +83,8 @@ A batch row's arithmetic is the single-token window's, so with greedy decoding *
 produces exactly the tokens it produces alone** - verified token by token for 8 concurrent conversations of 150
 tokens, with and without the pipeline (`tools/batch_test.py`), and on one RTX 5070 for 4 conversations, for a long
 prompt read while two others decode, for a prompt that gave way and went on, for a next turn continued from its
-slot, and for a request stopped in its slot and continued on the solo path (`tools/batch_interleave_test.py`). These
+slot (from all it holds, and from its turn checkpoint without the reply's thinking), and for a request stopped in
+its slot and continued on the solo path (`tools/batch_interleave_test.py`). These
 settings make the comparison exact:
 
 - `STRATA_IQ_MT_MIN=1` (the multi-token CPU expert kernels for every group, as for the solo path's own
@@ -123,17 +124,17 @@ sent at once (an 800-word essay each, 256 tokens per answer, greedy, thinking of
 | Concurrent | Setting | Total tok/s | Per request tok/s | First token: median / last of the round |
 | ---: | --- | ---: | ---: | ---: |
 | 1 | one at a time (default) | 74.3 | 83.6 | 0.4 s / 0.4 s |
-| 1 | `"parallel": 2` | 64.6 | 71.5 | 0.4 s / 0.4 s |
-| 1 | `"parallel": 4` | 58.2 | 63.9 | 0.5 s / 0.5 s |
+| 1 | `"parallel": 2` | 67.3 | 74.8 | 0.4 s / 0.4 s |
+| 1 | `"parallel": 4` | 57.9 | 63.8 | 0.4 s / 0.4 s |
 | 2 | one at a time | 71.6 | 77.3 | 2.1 s / 4.1 s |
-| 2 | `"parallel": 2` | 59.6 | 32.5 | 0.7 s / 0.9 s |
-| 2 | `"parallel": 4` | 55.7 | 30.3 | 0.4 s / 0.7 s |
+| 2 | `"parallel": 2` | 61.0 | 32.6 | 0.5 s / 0.9 s |
+| 2 | `"parallel": 4` | 54.6 | 28.7 | 0.6 s / 0.7 s |
 | 4 | one at a time | 70.7 | 79.6 | 6.0 s / 11.2 s |
-| 4 | `"parallel": 2` | 61.9 | 32.8 | 4.7 s / 9.2 s |
-| 4 | `"parallel": 4` | 63.8 | 17.3 | 0.9 s / 1.7 s |
+| 4 | `"parallel": 2` | 61.2 | 32.2 | 4.5 s / 9.3 s |
+| 4 | `"parallel": 4` | 63.1 | 16.9 | 1.0 s / 1.8 s |
 
-On this card the slots buy **waiting time, not speed**: the fourth of four requests starts after 1.7 s instead of
-11.2 s, but together they decode ~10-20 % slower than one after the other, and a request alone loses 13 % (2 slots)
+On this card the slots buy **waiting time, not speed**: the fourth of four requests starts after 1.8 s instead of
+11.2 s, but together they decode 11-24 % slower than one after the other, and a request alone loses 11 % (2 slots)
 or 24 % (4 slots), because the slots' sessions (0.56 GiB each) come out of the expert cache and most experts run
 on the CPU: a batch window over 4 conversations reads 24 CPU experts per layer against ~8 for one, so it costs about
 what the 4 tokens cost one after the other (`strata batch:` in the engine log: 54 ms per 4-row window, ~20 ms per
