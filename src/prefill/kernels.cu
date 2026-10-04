@@ -783,6 +783,133 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_pp_kernel(float* __restrict_
     }
 }
 
+// Aurora (S23, opt-in STRATA_GDN_PP=2): gdn_rec_quad_kernel with two columns per lane (a wave: 4 row groups x 8 lanes x
+// 2 columns = 16 columns; a block of 4 waves 64 columns, 96 blocks).  A lane's two columns share the k / q rows it
+// reads from shared memory (half the LDS reads and shuffles per column, the kernel's limit) and give each wave two
+// independent dependency chains; the 384 waves fit in one round at 230 VGPRs.  Per column the same arithmetic in
+// the same order (the same bits as gdn_rec_quad_kernel).  The store of the state goes through an asm for the reason
+// given at gdn_rec_quad_pp_kernel.
+
+// ---- C2: two columns per lane (a wave: 4 row groups x 8 lanes x 2 columns = 16 columns; a block of 4 waves 64
+// columns).  A lane's two columns share the k / q rows it reads from LDS (half the LDS reads and shuffles per column
+// and two independent dependency chains in each wave).  Per column the same arithmetic in the same order.
+constexpr int C2CB = 64;                          // columns per block
+constexpr int C2PF = HT * 2 * S / 4 / QTH;        // float4 of q/k each thread prefetches per chunk (2)
+__global__ void __launch_bounds__(QTH) gdn_rec_quad2c_kernel(float* __restrict__ state, const float* __restrict__ h,
+                                                             const float* __restrict__ gate, const float* __restrict__ beta,
+                                                             float* __restrict__ oc_out, int64_t T) {
+    __shared__ __align__(16) float sqk[2][HT][2][4 * QRS];
+    __shared__ float sgb[2][2][HT];
+    __shared__ float sv[2][HT][C2CB];
+    const int head = blockIdx.x / (S / C2CB), cb = blockIdx.x % (S / C2CB);
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int g = lane >> 3, cl0 = wave * 16 + (lane & 7), cl1 = cl0 + 8;   // the lane's two columns in the block
+    const int col0 = cb * C2CB + cl0, col1 = cb * C2CB + cl1;
+    const int qh = head % HK;
+    float s0[32], s1[32];
+    {
+        const float* sb = state + (size_t) head * S;
+        const uint32_t voff = (uint32_t) ((g * 32) * HV * S);
+#pragma unroll
+        for (int r = 0; r < 32; ++r) { s0[r] = sb[(size_t) r * HV * S + voff + col0]; s1[r] = sb[(size_t) r * HV * S + voff + col1]; }
+    }
+    float4 pf[C2PF];
+    float pv[2][HT], pgb = 0.0f;
+    auto fetch = [&](int64_t c) {
+        const int64_t t0 = c * HT;
+#pragma unroll
+        for (int u = 0; u < C2PF; ++u) {
+            const int i = tid + u * QTH;
+            const int tt = i / (2 * S / 4), rem = i % (2 * S / 4), part = rem / (S / 4), r4 = rem % (S / 4);
+            const int64_t t = t0 + tt;
+            pf[u] = t < T ? *reinterpret_cast<const float4*>(h + t * C + part * HK * S + qh * S + r4 * 4)
+                          : make_float4(0.f, 0.f, 0.f, 0.f);
+        }
+        if (g == 0) {
+#pragma unroll
+            for (int tt = 0; tt < HT; ++tt) {
+                const int64_t t = t0 + tt;
+                pv[0][tt] = t < T ? h[t * C + 2 * HK * S + head * S + col0] : 0.0f;
+                pv[1][tt] = t < T ? h[t * C + 2 * HK * S + head * S + col1] : 0.0f;
+            }
+        }
+        if (tid < 2 * HT) {
+            const int64_t t = t0 + (tid % HT);
+            pgb = t < T ? (tid < HT ? gate : beta)[t * HV + head] : 0.0f;
+        }
+    };
+    const float rs_s = rsqrtf((float) S);
+    const int src0 = lane & 7;
+    const int64_t nch = (T + HT - 1) / HT;
+    if (nch > 0) fetch(0);
+    for (int64_t c = 0; c < nch; ++c) {
+        const int b = (int) (c & 1);
+        if (g == 0) {
+#pragma unroll
+            for (int tt = 0; tt < HT; ++tt) { sv[b][tt][cl0] = pv[0][tt]; sv[b][tt][cl1] = pv[1][tt]; }
+        }
+#pragma unroll
+        for (int u = 0; u < C2PF; ++u) {
+            const int i = tid + u * QTH;
+            const int tt = i / (2 * S / 4), rem = i % (2 * S / 4), part = rem / (S / 4), r4 = rem % (S / 4);
+            const int row = r4 * 4;
+            *reinterpret_cast<float4*>(&sqk[b][tt][part][(row >> 5) * QRS + (row & 31)]) = pf[u];
+        }
+        if (tid < 2 * HT) sgb[b][tid / HT][tid % HT] = pgb;
+        __syncthreads();
+        if (c + 1 < nch) fetch(c + 1);
+        const int64_t t0 = c * HT;
+        const int nt = (int) (T - t0 < HT ? T - t0 : HT);
+        for (int tt = 0; tt < nt; ++tt) {
+            float k[32], q[32];
+            {
+                const float4* k4 = reinterpret_cast<const float4*>(&sqk[b][tt][1][g * QRS]);
+                const float4* q4 = reinterpret_cast<const float4*>(&sqk[b][tt][0][g * QRS]);
+#pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    const float4 kk = k4[j], qq = q4[j];
+                    k[4 * j] = kk.x; k[4 * j + 1] = kk.y; k[4 * j + 2] = kk.z; k[4 * j + 3] = kk.w;
+                    q[4 * j] = qq.x; q[4 * j + 1] = qq.y; q[4 * j + 2] = qq.z; q[4 * j + 3] = qq.w;
+                }
+            }
+            const float g_exp = __expf(sgb[b][0][tt]);
+            float kv0 = 0.0f, kv1 = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 32; ++r) { kv0 = fmaf(s0[r], k[r], kv0); kv1 = fmaf(s1[r], k[r], kv1); }
+            const float a0 = __shfl_sync(0xffffffffu, kv0, src0), a1 = __shfl_sync(0xffffffffu, kv0, src0 + 8),
+                        a2 = __shfl_sync(0xffffffffu, kv0, src0 + 16), a3 = __shfl_sync(0xffffffffu, kv0, src0 + 24);
+            const float b0 = __shfl_sync(0xffffffffu, kv1, src0), b1 = __shfl_sync(0xffffffffu, kv1, src0 + 8),
+                        b2 = __shfl_sync(0xffffffffu, kv1, src0 + 16), b3 = __shfl_sync(0xffffffffu, kv1, src0 + 24);
+            const float kvc0 = a0 + a1 + a2 + a3, kvc1 = b0 + b1 + b2 + b3;
+            const float cbt = sgb[b][1][tt];
+            const float d0 = (sv[b][tt][cl0] - g_exp * kvc0) * cbt, d1 = (sv[b][tt][cl1] - g_exp * kvc1) * cbt;
+            float o0 = 0.0f, o1 = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 32; ++r) {
+                s0[r] = fmaf(g_exp, s0[r], k[r] * d0);
+                s1[r] = fmaf(g_exp, s1[r], k[r] * d1);
+                o0 = fmaf(s0[r], q[r], o0);
+                o1 = fmaf(s1[r], q[r], o1);
+            }
+            const float x0 = __shfl_sync(0xffffffffu, o0, src0), x1 = __shfl_sync(0xffffffffu, o0, src0 + 8),
+                        x2 = __shfl_sync(0xffffffffu, o0, src0 + 16), x3 = __shfl_sync(0xffffffffu, o0, src0 + 24);
+            const float y0 = __shfl_sync(0xffffffffu, o1, src0), y1 = __shfl_sync(0xffffffffu, o1, src0 + 8),
+                        y2 = __shfl_sync(0xffffffffu, o1, src0 + 16), y3 = __shfl_sync(0xffffffffu, o1, src0 + 24);
+            if (g == 0) {
+                oc_out[(t0 + tt) * HV * S + head * S + col0] = (x0 + x1 + x2 + x3) * rs_s;
+                oc_out[(t0 + tt) * HV * S + head * S + col1] = (y0 + y1 + y2 + y3) * rs_s;
+            }
+        }
+    }
+    {
+        float* sb = state + (size_t) head * S;
+        uint32_t voff = (uint32_t) ((g * 32) * HV * S);
+        asm volatile("" : "+v"(voff));
+#pragma unroll
+        for (int r = 0; r < 32; ++r) { sb[(size_t) r * HV * S + voff + col0] = s0[r]; sb[(size_t) r * HV * S + voff + col1] = s1[r]; }
+    }
+}
+
 // gdn_out_norm_kernel's body over a grid-stride walk of the (token, head) rows: the old kernel launched a 128-thread
 // block per row (T * 48 blocks; ~45 GB/s on the 8060S).  The same code per row (the same compiled arithmetic: a wave
 // per row with four values per lane rounded differently in its first xor step).
@@ -1249,8 +1376,10 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     }
     if (variant == 1) {
         if (T > 0) {
-            static const bool pp = [] { const char* v = std::getenv("STRATA_GDN_PP"); return v && std::atoi(v) != 0; }();
-            if (pp)
+            static const int pp = [] { const char* v = std::getenv("STRATA_GDN_PP"); return v ? std::atoi(v) : 0; }();
+            if (pp == 2)
+                gdn_rec_quad2c_kernel<<<HV * (S / C2CB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+            else if (pp)
                 gdn_rec_quad_pp_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             else
                 gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
