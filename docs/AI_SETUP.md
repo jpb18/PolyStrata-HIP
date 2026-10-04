@@ -174,7 +174,8 @@ line when it is ready; the engine log is `strata-<model>.log` in the Strata fold
 - **Claude Code:** `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`, `ANTHROPIC_MODEL` set to a Claude model name it knows
   (Strata ignores the name), and any `ANTHROPIC_AUTH_TOKEN` (or the configured key).
 - **Thinking level:** `"reasoning_effort": "none" | "low" | "medium" | "high"` (default high).
-- Strata answers one request at a time. API details: [DETAILS.md](DETAILS.md#using-it).
+- Strata answers one request at a time; `"parallel": N` in the model's config (or setup `--parallel N`) decodes up to
+  N together ([BATCHING.md](BATCHING.md)). API details: [DETAILS.md](DETAILS.md#using-it).
 
 ## 9. When something fails
 

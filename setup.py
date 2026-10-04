@@ -3276,6 +3276,60 @@ def small_card_note(ctx: int, draft_vocab: str | None) -> list[str]:
     return lines
 
 
+PARALLEL_MAX = 8               # #465: the engine's batch window holds at most 8 requests
+PARALLEL_SHARE = 0.2           # #465: the slots' sessions may take this share of the VRAM the expert cache would hold
+PARALLEL_HELD = 0.5            # #465: ... and only where the cache still holds this share of the experts beside them
+PARALLEL_COST_NOTE = ("parallel N reduces waiting for several users but costs about 10-25% speed per request on this "
+                      "card")
+
+
+def parallel_slot_gb(ctx: int, kv: str, streaming: bool) -> float:
+    """#465: the VRAM one batch slot's session takes: its KV cache (12 QSA layers; with KV streaming only the 32K
+    positions the attention reads stay in VRAM) and the DeltaNet state (~0.17 GB).  Measured: 0.56 GiB at 32K int8."""
+    kv_tok = 12 * (576 if kv == "q4_0" else 1056)
+    return (min(ctx, 32768) if streaming else ctx) * kv_tok / 1e9 + 0.17
+
+
+def parallel_recommend(vram_gbs, arena_gb: float, ctx: int, kv: str, streaming: bool) -> int:
+    """#465: how many requests at once ("parallel") to recommend: 0 = none (one at a time).  Only where the experts
+    mostly fit in VRAM - the expert cache (each card's VRAM less ~5 GB, every card of a layer split) still holds
+    PARALLEL_HELD of the model's experts beside the slots' sessions, which take at most PARALLEL_SHARE of it, up to 4.
+    Where the experts mostly run on the CPU a batch reads about as many experts as the requests one by one and every
+    slot's VRAM is expert cache lost: measured on a 12 GB RTX 5070 (Q2_0, 32K), a request alone 11-24% slower with 2-4
+    slots, 4 requests together 63 tok/s against 71 one after the other (docs/BATCHING.md)."""
+    if isinstance(vram_gbs, (int, float)):
+        vram_gbs = [vram_gbs]
+    cache_gb = sum(max(0.0, v - 5) for v in vram_gbs)
+    slot = parallel_slot_gb(ctx, kv, streaming)
+    best = 0
+    for n in (2, 3, 4):
+        if n * slot <= PARALLEL_SHARE * cache_gb and (cache_gb - n * slot) >= PARALLEL_HELD * arena_gb:
+            best = n
+    return best
+
+
+def parallel_note(asked: int | None, vram_gbs, arena_gb: float, ctx: int, kv: str, streaming: bool) -> list[str]:
+    """#465: what setup says about "parallel": the recommendation (or, where it would cost speed, why it is left at
+    one), or how the asked count compares with it (kept as asked: recommend, never force)."""
+    rec = parallel_recommend(vram_gbs, arena_gb, ctx, kv, streaming)
+    slot = parallel_slot_gb(ctx, kv, streaming)
+    if asked is None or asked <= 1:
+        if not rec:
+            return [f"Several requests at once: left at one at a time - {PARALLEL_COST_NOTE} (docs/BATCHING.md)."]
+        return [f"Several requests at once (opt-in): --parallel {rec} decodes up to {rec} together instead of one "
+                f"after the other (each takes ~{slot:.1f} GB of VRAM from the expert cache; docs/BATCHING.md)."]
+    lines = [f"parallel requests: {asked} at once (each takes ~{slot:.1f} GB of VRAM from the expert cache, "
+             f"{asked * slot:.1f} GB in all)"]
+    if asked > PARALLEL_MAX:
+        lines.append(f"the engine runs at most {PARALLEL_MAX} at once; it will use {PARALLEL_MAX}")
+    if not rec:
+        lines.append(f"recommended for this card: one at a time - {PARALLEL_COST_NOTE}; kept as you chose")
+    elif asked > rec:
+        lines.append(f"recommended for this card: {rec} - more slots leave fewer experts in VRAM, which can make every "
+                     "request slower; kept as you chose")
+    return lines
+
+
 DESKTOP_RESERVE_MIB = 3072     # #560 #516: what kept a KDE/Wayland desktop alive beside a full expert cache
 
 
@@ -3552,6 +3606,9 @@ def main() -> int:
     ap.add_argument("--vram-reserve-mib", type=int, metavar="N",
                     help="VRAM in MiB the engine leaves free for other programs (a game, another model; the engine's "
                          "default: 700); the expert cache takes that much less")
+    ap.add_argument("--parallel", type=int, metavar="N",
+                    help="up to N requests decode together (batch slots, opt-in; default: one at a time, the others "
+                         "wait). Each slot takes VRAM from the expert cache; setup says what it recommends")
     ap.add_argument("--kv-streaming", choices=["auto", "on", "off"], default="auto",
                     help="from a 64K context: keep the KV cache in RAM and only the attention's window in VRAM (more "
                          "experts fit on the GPU); auto: when the RAM has room for it")
@@ -4284,6 +4341,17 @@ def main() -> int:
         cfg["draft_vocab"] = draft_vocab
     if a.browser is not None:                          # #609: only when given (else an earlier choice is carried over)
         cfg["open_browser"] = a.browser
+    # #465: requests at once - written only when given (else an earlier "parallel" is carried over); a recommendation
+    streaming = "--kv-resident" in args
+    if a.parallel is not None:
+        if a.parallel >= 2:
+            cfg["parallel"] = a.parallel
+            for i, line in enumerate(parallel_note(a.parallel, [g.get("vram_gb", 0.0) for g in chosen],
+                                                   MODELS[model]["arena_gb"], ctx, kv, streaming)):
+                (ok if i == 0 else warn)(line)
+        else:
+            cfg["parallel"] = 1
+            ok("parallel requests: one at a time (--parallel 1)")
     if vision != "none":
         old_cfg = ROOT / f"strata-{tag.lower()}.json"
         vt = vision_tokens(a.vision_tokens, vision, old_cfg if old_cfg.is_file() else adopted)
@@ -4323,6 +4391,10 @@ def main() -> int:
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
+    if a.parallel is None:                             # #465: the opt-in, said once (nothing changes)
+        for line in parallel_note(None, [g.get("vram_gb", 0.0) for g in chosen], MODELS[model]["arena_gb"], ctx, kv,
+                                  "--kv-resident" in cfg["args"]):
+            say("  " + line)
     if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
         say("  Tuning:           FAILED (the reason is above): the default settings stay - "
             f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
