@@ -407,6 +407,48 @@ def cpu_info():
     return name, avx2, avx512
 
 
+def _cpuid_floor() -> str:
+    """Below AVX2 (Windows): "avx" when the CPU has AVX and the OS saves the YMM registers, "sse4.2" with SSE4.2 and
+    POPCNT, else ""."""
+    try:
+        regs = (ctypes.c_uint32 * 4)()
+        _run_stub(bytes([0x53, 0x49, 0x89, 0xC8, 0x89, 0xD0, 0x31, 0xC9, 0x0F, 0xA2,      # push rbx; r8=rcx; eax=edx; ecx=0; cpuid
+                         0x41, 0x89, 0x00, 0x41, 0x89, 0x58, 0x04, 0x41, 0x89, 0x48, 0x08,  # [r8]=eax, [r8+4]=ebx, [r8+8]=ecx
+                         0x41, 0x89, 0x50, 0x0C, 0x5B, 0xC3]),                             # [r8+12]=edx; pop rbx
+                  ctypes.addressof(regs), 1)
+        ecx1 = regs[2]
+        if (ecx1 >> 27) & 1 and (ecx1 >> 28) & 1:                     # OSXSAVE, AVX
+            xcr0 = (ctypes.c_uint32 * 2)()
+            _run_stub(bytes([0x49, 0x89, 0xC8, 0x31, 0xC9, 0x0F, 0x01, 0xD0,                    # r8=rcx; ecx=0; xgetbv
+                             0x41, 0x89, 0x00, 0x41, 0x89, 0x50, 0x04, 0xC3]), ctypes.addressof(xcr0))
+            if xcr0[0] & 6 == 6:
+                return "avx"
+        return "sse4.2" if (ecx1 >> 20) & 1 and (ecx1 >> 23) & 1 else ""
+    except Exception:
+        return ""
+
+
+def cpu_floor(avx2: bool) -> str:
+    """The experimental older-CPU build this PC needs (#394 #595 #623): "" with AVX2 (the normal engine), "avx" (Sandy /
+    Ivy Bridge, AMD Bulldozer), "none" (SSE4.2 + POPCNT: Nehalem, Westmere), or "unsupported".  STRATA_ISA_FLOOR=avx|
+    none asks for that build on any PC (testing it on a newer one)."""
+    forced = os.environ.get("STRATA_ISA_FLOOR", "").strip().lower()
+    if forced in ("avx", "none"):
+        return forced
+    if avx2:
+        return ""
+    if WIN:
+        f = _cpuid_floor()
+    else:
+        try:
+            txt = open("/proc/cpuinfo").read()
+            flags = set(re.search(r"^flags\s*:\s*(.*)$", txt, re.M).group(1).split())
+        except (OSError, AttributeError):
+            flags = set()
+        f = "avx" if "avx" in flags else "sse4.2" if {"sse4_2", "popcnt"} <= flags else ""
+    return {"avx": "avx", "sse4.2": "none"}.get(f, "unsupported")
+
+
 def _cpuid_avx512_full() -> bool:
     """Windows has no feature bit for VNNI / VBMI: ask the CPU (CPUID leaf 7) through a tiny machine-code stub."""
     try:
@@ -1708,7 +1750,9 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
     src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
     archs = sorted(set(gpu.get("archs") or [gpu["arch"]]))
     has_archs = set(archs) <= set(meta.get("archs", []))
-    engine_ok = meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and has_archs
+    floor = cpu_floor(cpu_info()[1])                     # "" on an AVX2 CPU: the normal engine
+    engine_ok = meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and has_archs and \
+        (meta.get("isa_floor") or "") == floor
     vision_ok = vision == "none" or ((eng / VEXE).exists() and meta.get("vision_src") == vsrc)
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
@@ -1736,10 +1780,10 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
                  f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
-                 f"-DSTRATA_GGML_DIR={llama}"], None, "")
+                 f"-DSTRATA_GGML_DIR={llama}", *isa_floor_defs(floor, ROOT / "build-hip", meta)], None, "")
     shutil.copy2(ROOT / "build-hip" / EXE, eng / EXE)
     meta = {"source": "local-hip", "backend": "hip", "version": source_version(), "archs": archs, "vision": "none",
-            "lib_dirs": dirs, "src": src}
+            "lib_dirs": dirs, "src": src, **({"isa_floor": floor} if floor else {})}
     if vision != "none":
         return build_vision_cpu(eng, stamp, meta, llama, vsrc)
     stamp.write_text(json.dumps(meta, indent=1))
@@ -2064,6 +2108,14 @@ def source_hash(parts) -> str:
     return h.hexdigest()[:16]
 
 
+def isa_floor_defs(floor: str, bdir: Path, meta: dict) -> list:
+    """The experimental older-CPU build's CMake definition (STRATA_ISA_FLOOR, CMakeLists.txt), none for the normal
+    build.  A build folder configured for another floor is configured afresh: ggml's CPU options are cached there."""
+    if (meta.get("isa_floor") or "") != floor and (bdir / "CMakeCache.txt").exists():
+        (bdir / "CMakeCache.txt").unlink()
+    return [f"-DSTRATA_ISA_FLOOR={floor}"] if floor else []
+
+
 def engine_defs(archs) -> list:
     """Extra CMake definitions for the engine: the experimental Pascal/Volta build (#295) for cards below sm_75."""
     return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 else []
@@ -2098,7 +2150,9 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     # a card the engine has no code for (a GPU added with --gpus, #128) needs a compile even when the source is the
     # same; the compile keeps the generations it was built for
     new_arch = local and not set(archs) <= built
-    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src and not new_arch
+    floor = cpu_floor(cpu_info()[1])                     # "" on an AVX2 CPU: the normal engine
+    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src and not new_arch and \
+        (meta.get("isa_floor") or "") == floor
     vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
@@ -2114,7 +2168,8 @@ def build_engine(gpu, vision, yes, llama) -> Path:
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, ROOT / "build", "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
-                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}", *engine_defs(archs)],
+                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}", *engine_defs(archs),
+                     *isa_floor_defs(floor, ROOT / "build", meta)],
                     vcvars, "build-strata.bat")
         shutil.copy2(ROOT / "build" / EXE, eng / EXE)
     if not vision_ok:
@@ -2128,7 +2183,8 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs,
                                  "vision": vision,
-                                 "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None}, indent=1))
+                                 "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None,
+                                 **({"isa_floor": floor} if floor else {})}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
 
@@ -3466,8 +3522,21 @@ def main() -> int:
              "the model may not start or may use less VRAM. Set it to \"System managed\": System > About > "
              "Advanced system settings > Performance > Advanced > Virtual memory")
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
+    floor = cpu_floor(avx2)
+    if floor == "unsupported":
+        fail("this CPU has neither AVX2 nor SSE4.2; Strata needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
     if not avx2:
-        fail("this CPU has no AVX2; Strata needs at least AVX2")
+        # #394 #595 #623: the ready-made engine is AVX2; an older CPU gets one compiled here, whose CPU experts run on
+        # ggml-cpu's kernels for this CPU.  Experimental: measured only on newer CPUs with the older path forced, and by
+        # users on a few Xeons.  A warning, not a stop.
+        warn(f"this CPU has no AVX2: Strata support for it is EXPERIMENTAL and slow. Setup compiles the engine on this "
+             f"PC for {'AVX' if floor == 'avx' else 'SSE4.2'} (STRATA_ISA_FLOOR={floor}; 10-20 minutes, once), and the "
+             "CPU's share of the experts runs on ggml-cpu's kernels, a few times slower than on an AVX2 CPU. "
+             "See \"Older CPUs\" in docs/INSTALL.md")
+        if hip and WIN:
+            fail("the older-CPU engine is compiled from source, and setup compiles the AMD engine on Linux only",
+                 "use Linux for an AMD card on this CPU, or an NVIDIA card")
+        a.build = True
     if a.check:
         say()
         for m, d in MODELS.items():

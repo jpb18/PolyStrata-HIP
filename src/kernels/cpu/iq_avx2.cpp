@@ -56,19 +56,30 @@ inline __m256i sc32(int s) { return _mm256_set1_epi16(s); }
 // keven_signs_q2xs (ggml keeps it static in arch/x86/quants.c): one u64 per 7-bit sign index, byte k
 // = 0xFF when bit k of ksigns_iq2xs[i] is set, 0x01 otherwise.  With this a whole 32-value sign vector
 // is four scalar loads and a set_epi64x - no ksigns byte packing chain and no bit_selector expansion.
-// Built once at load time from the shared ggml-common table so it can never drift from it.
+//
+// Computed at COMPILE time (constexpr), so this file has no static constructor at all.  This TU is compiled
+// for AVX2, and a runtime constructor here runs before main() on every CPU: MSVC turned its variable shift
+// into BMI2 `shlx` (#391, demetree: strata.exe exited 0xC000001D before printing anything on a Sandy Bridge
+// Xeon) and GCC vectorised the loop into AVX2 (`vpbroadcastb`, found on an AVX-only Xeon E5 by the
+// Strata_Dirigo fork).  ksigns_iq2xs[i] is i's 7 bits plus an even-parity bit 7 (ggml-common.h); a const
+// array is not usable in a constant expression, so the byte is derived the same way here, and
+// native_expert_parity checks these kernels against ggml-cpu's.
 struct EvenSigns {
     uint64_t v[128];
-    EvenSigns() {
+    constexpr EvenSigns() : v{} {
         for (int i = 0; i < 128; ++i) {
+            int par = 0;
+            for (int k = 0; k < 7; ++k) par ^= (i >> k) & 1;
+            const int s = i | (par << 7);          // == ksigns_iq2xs[i]
             uint64_t r = 0;
-            for (int k = 0; k < 8; ++k)
-                r |= (uint64_t) (((ksigns_iq2xs[i] >> k) & 1) ? 0xFF : 0x01) << (8 * k);
+            for (int k = 0; k < 8; ++k) r |= (uint64_t) (((s >> k) & 1) ? 0xFF : 0x01) << (8 * k);
             v[i] = r;
         }
     }
 };
-static const EvenSigns even_signs;
+static constexpr EvenSigns even_signs{};
+static_assert(even_signs.v[0] == 0x0101010101010101ull && even_signs.v[1] == 0xFF010101010101FFull,
+              "keven_signs_q2xs: byte k = 0xFF when bit k of ksigns_iq2xs[i] is set");
 
 inline float hsum8(__m256 v) {
     const __m128 lo = _mm256_castps256_ps128(v), hi = _mm256_extractf128_ps(v, 1);
