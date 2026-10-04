@@ -55,8 +55,9 @@ The choice is kept in the model's config (`"cuda": 12`): its starts and `UPDATE.
 their own engine. Setting the model up again chooses again (by its cards; add `--cuda 12` to keep a forced choice). A Pascal / Volta card added to a model at a start (`--gpus`) moves that model to the
 CUDA 12 engine.
 
-`--cuda 12` is also the way to run Strata with an NVIDIA driver older than 580 (CUDA 12 needs 525 or newer): setup's
-"driver too old" stop says so.
+`--cuda 12` is also the way to run Strata with an NVIDIA driver older than 580: CUDA 12 needs 528 or newer on Windows
+(527.41, NVIDIA's minor-version compatibility) and 525 on Linux; setup's "driver too old" stop says so. Such old
+drivers were not tested here.
 
 ### Mixed cards
 
