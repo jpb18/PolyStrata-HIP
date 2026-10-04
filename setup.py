@@ -138,14 +138,17 @@ MODELS = {
     # keeps a RAM budget of them (--resident-budget-gib, chosen below) and reads the rest from the GGUF on the SSD
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), EXPERIMENTAL: the best quality, but most experts come from the "
                             "SSD on a 64 GB PC (7-8.5 tokens/s measured)", "download_gb": 111.3, "ram_gb": 48,
-                   "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "nvidia_only": True},
-    # #621 EXPERIMENTAL: Unsloth's UD-IQ4_XS - IQ3_S gate/up experts with IQ4_NL (43 layers) or Q8_0 (5) downs, the
-    # dense side as UD-Q4_K_XL's; three shards.  Packed and run on a Strix Halo (AMD); not measured on NVIDIA yet.  Its
-    # 59.5 GB of experts: a RAM budget of them, like UD-Q4_K_XL, but far fewer read from the SSD on a 64 GB PC
-    "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), EXPERIMENTAL: between IQ3_S and UD-Q4_K_XL; part of "
-                           "its experts come from the SSD on a 64 GB PC (not measured on NVIDIA yet)",
+                   "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "nvidia_only": True,
+                   "experimental": True},
+    # #621: Unsloth's UD-IQ4_XS - IQ3_S gate/up experts with IQ4_NL (43 layers) or Q8_0 (5) downs, the dense side as
+    # UD-Q4_K_XL's; three shards.  A regular choice from 0.1.39 (no longer experimental).  Its 59.5 GB of experts: a
+    # RAM budget of them, like UD-Q4_K_XL, but far fewer read from the SSD on a 64 GB PC and none from ~80 GB of RAM.
+    # Images: the vision path has no restriction for this pack (the same base model and image encoder), so setup asks
+    "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), between IQ3_S and UD-Q4_K_XL in quality; on a PC with "
+                           "less than ~80 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
-                  "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38)},
+                  "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38),
+                  "vision": True},
 }
 # The experimental Unsloth file's four shards at the pinned revision: name -> (bytes, sha256), checked after the
 # download (setup trusts no other model file by name and size alone either: check_shards reads their directories).
@@ -200,16 +203,16 @@ FAMILIES = {
               "mmproj_hf": hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF"),
               "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-coder",
               "profile": "expert-profile-coder.bin"},
-    # EXPERIMENTAL: Unsloth's UD-Q4_K_XL (four shards) and UD-IQ4_XS (three, #621) of the original model
-    # (docs/UNSLOTH_Q4.md); no images yet
-    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "by": "Unsloth's 4-bit quantizations (EXPERIMENTAL)",
-                "about": "UD-Q4_K_XL (111 GB download) or UD-IQ4_XS (94 GB); part of the experts read from the SSD: "
-                         "slower (UD-Q4_K_XL: 7-8.5 tokens/s on a 64 GB PC)",
+    # Unsloth's UD-IQ4_XS (three shards, #621; a regular choice from 0.1.39) and the EXPERIMENTAL UD-Q4_K_XL (four)
+    # of the original model (docs/UNSLOTH_Q4.md); "experimental" and "vision" are per model (MODELS)
+    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "by": "Unsloth's ~4-bit quantizations",
+                "about": "UD-IQ4_XS: a 94 GB download; with less than ~80 GB of RAM part of its experts are read from "
+                         "the SSD (UD-Q4_K_XL, 111 GB: experimental)",
                 "hf": hf("unsloth/Qwen3.8-Flash-Next-GGUF") + "{q}/",
                 "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00004.gguf", "shards": 4, "tag": "unsloth-",
                 "mmproj_hf": hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"),
                 "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-unsloth",
-                "experimental": True, "vision": False, "pack_args": ["--compat-bf16"],
+                "vision": False, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
@@ -3836,7 +3839,8 @@ def main() -> int:
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
             if d.get("budget"):
-                verdict = (f"EXPERIMENTAL, fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
+                verdict = (("EXPERIMENTAL, " if d.get("experimental") else "") +
+                           f"fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
                            "read from the SSD" if ram >= d["ram_gb"] else "does not fit")
                 if hip:                                # #429: not run on AMD yet (its prompt kernels are CUDA-only)
                     verdict += " - NVIDIA only so far, untested on AMD"
@@ -3864,6 +3868,7 @@ def main() -> int:
         say(f"  Its license: {fam['license']}")
     say()
     names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
+    names.sort(key=lambda m: bool(MODELS[m].get("experimental")))   # an experimental size last, never the default
     if a.model and a.model not in names:
         # #444: say which family has that size, and (with --gguf-dir) which files Strata can run at all
         elsewhere_fams = [f for f in FAMILIES if f in MODELS[a.model].get("families", ("qwen", "swift"))]
@@ -3889,8 +3894,9 @@ def main() -> int:
         # Unsloth's UD-Q4_K_XL: a RAM budget of experts, the rest from the GGUF on the SSD - not the low-RAM mode (no
         # experts.bin: it would be another 77 GB on the disk), and one GPU (the budget mode has no layer split) unless
         # the RAM holds the GGUFs and 24 GB more: then several, without the budget, if asked for (#498)
-        warn(f"{model} is EXPERIMENTAL (docs/UNSLOTH_Q4.md): most of its experts are read from the SSD while it "
-             "answers, so it is several times slower than the 2-3-bit models; quality checked against llama.cpp")
+        if MODELS[model].get("experimental"):
+            warn(f"{model} is EXPERIMENTAL (docs/UNSLOTH_Q4.md): most of its experts are read from the SSD while it "
+                 "answers, so it is several times slower than the 2-3-bit models; quality checked against llama.cpp")
         if hip and MODELS[model].get("nvidia_only"):
             # #429 (jkuepker): checked before the 111 GB download.  The HIP engine has no prompt kernels for its
             # Q4_K / Q5_K experts (STRATA_MMQ_KQUANTS is CUDA-only) and it has not been run on AMD: asked, not refused
@@ -3986,7 +3992,7 @@ def main() -> int:
         kv = ["int8", "q4_0"][int(ask("KV cache?", ["1", "2"], "1", a.yes)) - 1]
     if ctx > 8192:
         ok(f"KV cache: {'8-bit' if kv == 'int8' else '4-bit (Hadamard-rotated)'}")
-    if fam.get("vision") is False:
+    if MODELS[model].get("vision", fam.get("vision")) is False:     # UD-IQ4_XS: images, unlike UD-Q4_K_XL
         vision = "none"
         if a.vision not in (None, "no", "none"):
             warn(f"images are not available with {model} yet: off")
@@ -4147,7 +4153,7 @@ def main() -> int:
                     pass
             download(fam["hf"].format(q=model) + s.name, s)
     check_shards(shards)
-    for s in shards:                                   # the experimental Unsloth file: pinned sizes and SHA-256
+    for s in shards:                                   # the Unsloth files: pinned sizes and SHA-256
         if s.name in fam.get("sha256", {}):
             verify_sha256(s, *fam["sha256"][s.name])
     ok("model files present")

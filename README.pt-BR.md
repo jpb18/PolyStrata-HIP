@@ -118,7 +118,7 @@ Os tamanhos menores são mais rápidos. Os maiores são um pouco mais inteligent
 | **32 GB** | **Coder** | cabe em 32 GB e é feito para código (com uma placa de 24 GB, Q2_0 e IQ2_XS também rodam) |
 | **48 GB** | **IQ2_XS** (ou Q2_0, o mais rápido) | os tamanhos maiores não cabem |
 | **64 GB** | **IQ2_XS** (recomendado), ou IQ3_XXS / IQ3_S | todos os tamanhos cabem; IQ3_S é o melhor e o mais lento |
-| **96 GB ou mais** | **IQ3_S**, ou o 4-bit da Unsloth (experimental) | espaço para os maiores tamanhos com todo o resto aberto |
+| **96 GB ou mais** | **IQ3_S**, ou o UD-IQ4_XS da Unsloth (~4-bit) | espaço para os maiores tamanhos com todo o resto aberto |
 
 - **[Coder](docs/MODELS.md#coder):** uma versão para programação com metade dos experts removida. Ela alcança 91%
   da pontuação do modelo completo no SWE-bench Verified (medido pelos autores) e cabe em 32 GB de RAM. É mais fraca
@@ -126,6 +126,9 @@ Os tamanhos menores são mais rápidos. Os maiores são um pouco mais inteligent
   mantêm todos os experts.
 - **[Swift 1.5](docs/MODELS.md#swift-15):** um fine-tune que pensa por bem menos tempo antes de responder. Você
   recebe a resposta mais cedo, com quase a mesma qualidade.
+- **[Unsloth UD-IQ4_XS](docs/MODELS.md#unsloth-ud-iq4_xs):** a versão de ~4 bits da Unsloth, entre IQ3_S e
+  UD-Q4_K_XL em qualidade. Um download de 94 GB. Com menos de ~80 GB de RAM, o Strata lê uma parte dele do SSD
+  enquanto responde, então ali ele fica mais lento (um SSD NVMe ajuda).
 - **[Unsloth UD-Q4_K_XL](docs/MODELS.md#unsloth-ud-q4_k_xl-experimental)** (experimental): o mais próximo do modelo
   completo. Mas o Strata lê a maior parte dele do SSD enquanto responde, então ele escreve só 7-8.5 tokens/s num PC
   com 64 GB.

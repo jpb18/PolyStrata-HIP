@@ -1,4 +1,5 @@
-"""Tests for setup.py's experimental Unsloth UD-Q4_K_XL choice (docs/UNSLOTH_Q4.md): the four pinned shards with
+"""Tests for setup.py's Unsloth choices (docs/UNSLOTH_Q4.md): UD-IQ4_XS (regular from 0.1.39) and the experimental
+UD-Q4_K_XL: the four pinned shards with
 their sizes and SHA-256, the RAM budget from the PC's RAM, the pack with --compat-bf16 (never experts.bin), the
 engine version it needs, one GPU, no images.  Mocked - no GPU, no downloads, nothing written outside a temp folder.
 
@@ -36,7 +37,8 @@ class Pins(unittest.TestCase):
         self.assertEqual(fam["hf"].format(q=M),
                          f"https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/{REV}/UD-Q4_K_XL/")
         self.assertEqual(setup.MODELS[M]["families"], ("unsloth",))   # no other family lists it
-        self.assertTrue(fam["experimental"])
+        self.assertTrue(setup.MODELS[M]["experimental"])               # 0.1.39: per model, not the family
+        self.assertFalse(fam.get("experimental"))
         self.assertEqual(list(setup.FAMILIES)[0], "qwen")             # not the default choice
 
     def test_not_in_the_other_families(self):
@@ -139,7 +141,18 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def main(self, argv, ram=63.7, version="0.1.32", n_gpus=1, model=True, amd=(), free=500.0, m=M):
+    def main(self, argv, ram=63.7, version="0.1.32", n_gpus=1, model=True, amd=(), free=500.0, m=M, answers=None,
+             family=True):
+        """answers: None = --yes; else {words of a question: its answer} (Enter for the others), and every question
+        asked is kept in self.asked.  family=False: no --family (the first menu is shown)."""
+        self.asked = []
+
+        def fake_input(prompt=""):
+            if answers is None:
+                raise AssertionError(f"asked {prompt!r}")
+            self.asked.append(prompt)
+            return next((v for k, v in answers.items() if k in prompt), "")
+
         eng = self.t / "engine"
         eng.mkdir(exist_ok=True)
         (eng / "BUILD.json").write_text(json.dumps({"version": version, "source": "local"}))
@@ -180,10 +193,11 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "saved_calibration", lambda cfg: None),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
             mock.patch.dict(sys.modules, {"gguf_reader": types.SimpleNamespace(GGUFFile=FakeGGUF)}),
-            mock.patch.object(sys, "argv", ["setup.py", "--family", "unsloth", *(["--model", m] if model else []),
-                                            "--yes", "--no-start",
+            mock.patch.object(sys, "argv", ["setup.py", *(["--family", "unsloth"] if family else []),
+                                            *(["--model", m] if model else []),
+                                            *(["--yes"] if answers is None else []), "--no-start",
                                             "--models-dir", str(self.t / "models"), *argv]),
-            mock.patch("builtins.input", mock.Mock(side_effect=AssertionError("asked"))),
+            mock.patch("builtins.input", fake_input),
         ]
         with contextlib.ExitStack() as st:
             for p in patches:
@@ -247,7 +261,7 @@ class Main(Base):
         code, out, cfg = self.main(["--context", "8192"], ram=31.9, model=False)   # --yes alone: still a stop
         self.assertEqual(code, 1)
         self.assertIn("needs 48 GB of RAM or more", out)
-        self.assertIn("--model UD-Q4_K_XL --yes", out)                             # the way to insist
+        self.assertIn("--model UD-IQ4_XS --yes", out)       # the way to insist (0.1.39: the family's default size)
         self.assertEqual(self.downloads, [])
 
     def test_amd_is_asked_before_the_download(self):
@@ -255,7 +269,9 @@ class Main(Base):
         download, saying why; it is not refused outright (the owner's rule: --model with --yes goes on)."""
         r9700 = [{"index": 0, "name": "AMD Radeon AI PRO R9700", "vram_gb": 31.9, "arch": "gfx1201",
                   "driver": "amdgpu"}]
-        code, out, cfg = self.main(["--context", "8192", "--backend", "hip"], model=False, amd=r9700)
+        # chosen in the menu (2 = UD-Q4_K_XL, after the regular UD-IQ4_XS), not by --model: the answer is no
+        code, out, cfg = self.main(["--context", "8192", "--backend", "hip", "--vision", "no"], model=False,
+                                   amd=r9700, answers={"Which size": "2", "Try it anyway": "n"})
         self.assertEqual(code, 1, out)
         self.assertIn("has not been run on AMD cards yet", out)
         self.assertIn("--model UD-Q4_K_XL --yes", out)
@@ -366,8 +382,9 @@ X = "UD-IQ4_XS"
 
 
 class IQ4XS(Base):
-    """#621 (EXPERIMENTAL): Unsloth's UD-IQ4_XS - three pinned shards, the same RAM-budget setup as UD-Q4_K_XL (the
-    pack with --compat-bf16, never experts.bin, one GPU, no images), engine 0.1.38 or newer, no AMD question."""
+    """#621: Unsloth's UD-IQ4_XS, a regular (not experimental) choice from 0.1.39 - three pinned shards, the same
+    RAM-budget setup as UD-Q4_K_XL (the pack with --compat-bf16, never experts.bin, one GPU), engine 0.1.38 or newer,
+    no AMD question; images are asked like the 2-3-bit models' (off by default)."""
 
     def test_pins(self):
         fam = setup.FAMILIES["unsloth"]
@@ -396,7 +413,7 @@ class IQ4XS(Base):
     def test_install(self):
         code, out, cfg = self.main(["--context", "8192"], version="0.1.38", m=X)
         self.assertEqual(code, 0, out)
-        self.assertIn("EXPERIMENTAL", out)
+        self.assertNotIn("is EXPERIMENTAL", out)                               # (the menu still lists UD-Q4_K_XL)
         base = f"https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/{REV}/UD-IQ4_XS/"
         self.assertEqual(self.downloads, [base + n for n in setup.UNSLOTH_IQ4_XS_SHARDS])
         self.assertEqual(self.verified, [(n, *v) for n, v in setup.UNSLOTH_IQ4_XS_SHARDS.items()])
@@ -411,11 +428,61 @@ class IQ4XS(Base):
         for flag in ("--ple-gguf", "--mmap-experts", "--resident-experts", "--vision"):
             self.assertNotIn(flag, args)
         self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-iq4_xs")
+        pack = self.t / "data" / "packs" / "unsloth-ud-iq4_xs"                 # its own pack and tokenizer
+        self.assertEqual(packs[0][packs[0].index("--out") + 1], str(pack))
+        self.assertEqual(args[args.index("--pack") + 1], str(pack))
+        self.assertEqual(cfg["tokenizer"], str(pack / "tokenizer"))
+        self.assertNotIn("vision", cfg)                                        # images: asked, off by default
         with tempfile.TemporaryDirectory() as t:                               # a start reads the choice back
             p = Path(t) / "strata-unsloth-ud-iq4_xs.json"
             p.write_text(json.dumps(cfg))
             ch = setup.choices_from_config(p)
             self.assertEqual((ch["family"], ch["model"]), ("unsloth", X))
+
+    def test_family_default_and_menus(self):
+        """The first menu lists the Unsloth family without [experimental]; its size menu puts UD-IQ4_XS first (the
+        default, Enter) and UD-Q4_K_XL second, still marked EXPERIMENTAL; --model names are unchanged."""
+        code, out, cfg = self.main(["--context", "8192", "--vision", "no"], version="0.1.38", model=False,
+                                   family=False, answers={"Which model": "4"}, m=X)
+        self.assertEqual(code, 0, out)
+        fam_line = next(ln for ln in out.splitlines() if ln.startswith("  4) "))
+        self.assertIn("Qwen3.8-Flash-Next (Unsloth)", fam_line)
+        self.assertIn("UD-IQ4_XS: a 94 GB download", fam_line)
+        self.assertNotIn("[experimental]", out)
+        size_lines = [ln for ln in out.splitlines() if ln.startswith(("  1) UD-", "  2) UD-"))]
+        self.assertEqual(len(size_lines), 2, out)
+        self.assertTrue(size_lines[0].startswith("  1) UD-IQ4_XS ~4-bit"), size_lines[0])
+        self.assertNotIn("EXPERIMENTAL", size_lines[0])
+        self.assertTrue(size_lines[1].startswith("  2) UD-Q4_K_XL 4-bit"), size_lines[1])
+        self.assertIn("EXPERIMENTAL", size_lines[1])
+        self.assertTrue(any("Which size" in q and "[1]" in q for q in self.asked), self.asked)
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-iq4_xs")
+        code, out, cfg = self.main(["--context", "8192"], version="0.1.38", model=False, m=X)   # --yes: same default
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-iq4_xs")
+        for m, name in ((M, "qwen3.8-flash-next-unsloth-ud-q4_k_xl"), (X, "qwen3.8-flash-next-unsloth-ud-iq4_xs")):
+            code, out, cfg = self.main(["--context", "8192"], version="0.1.38", m=m)        # --model by name
+            self.assertEqual((code, cfg["model_name"]), (0, name), out)
+
+    def test_images(self):
+        """Images on: the original model's image encoder (the same base model), the vision flags in the config."""
+        code, out, cfg = self.main(["--context", "8192", "--vision", "yes"], version="0.1.38", m=X)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("images are not available", out)
+        self.assertIn("images: on", out)
+        self.assertEqual(self.downloads[-1], setup.hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF")
+                         + "mmproj-Qwen3.8-Flash-Next-BF16.gguf")
+        self.assertIn("--vision", cfg["args"])
+        self.assertTrue(cfg["vision"]["model"].endswith("UD-IQ4_XS-00001-of-00003.gguf"))
+        self.assertIn("--resident-budget-gib", cfg["args"])
+
+    def test_check_verdict(self):
+        code, out, _ = self.main(["--check"], m=X)
+        self.assertEqual(code, 0, out)
+        line = next(ln for ln in out.splitlines() if ln.strip().startswith(X))
+        self.assertIn("fits with 40 GiB of its experts in RAM", line)
+        self.assertNotIn("EXPERIMENTAL", line)
+        self.assertIn("EXPERIMENTAL", next(ln for ln in out.splitlines() if ln.strip().startswith(M)))
 
     def test_engine_0138(self):
         code, out, cfg = self.main(["--context", "8192"], version="0.1.37", m=X)

@@ -145,7 +145,7 @@ class GgufDirUnsupported(unittest.TestCase):
             code, out, _, _ = install(ram, found, ["--gguf-dir", d, "--family", "unsloth", "--model", "IQ3_XXS"])
         self.assertEqual(code, 1)
         self.assertIn("has no IQ3_XXS model file", out)
-        self.assertIn("choose one of: UD-Q4_K_XL, UD-IQ4_XS (or IQ3_XXS: --family qwen --model IQ3_XXS, --family swift --model "
+        self.assertIn("choose one of: UD-IQ4_XS, UD-Q4_K_XL (or IQ3_XXS: --family qwen --model IQ3_XXS, --family swift --model "
                       "IQ3_XXS)", out)
         self.assertIn("Strata runs ISTA-DASLab's GSQ-RCO files", out)
 

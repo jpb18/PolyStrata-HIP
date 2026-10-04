@@ -221,10 +221,11 @@ engine with `--short-read` covering the positions to compare; llama.cpp's side w
 | `STRATA_PARTIAL_PIN=1` | Registers the hottest part of the RAM budget (up to `STRATA_PARTIAL_PIN_GIB`, default 24) with the GPU driver, so the GPU computes a share of the misses over PCIe (`--pcie-frac`). Measured no faster on this PC, and it changes the numerics of those experts (GPU kernels instead of the CPU's), so off. |
 | `STRATA_FETCH_THREADS=N` | Threads that read the experts from the GGUF while it answers (default 8; 16 was no faster). The prompt path has its own: `STRATA_STAGER_THREADS` (default 32 here) and `STRATA_STAGER_RING` (128). |
 
-## UD-IQ4_XS (experimental, setup from 0.1.39, #621)
+## UD-IQ4_XS (setup from 0.1.39, #621)
 
-Unsloth's `UD-IQ4_XS` at the same revision is in setup too: `START-HERE.bat --setup --family unsloth --model
-UD-IQ4_XS` (engine 0.1.38 or newer). It sits between IQ3_S and UD-Q4_K_XL: its routed experts are IQ3_S gate/up (IQ4_XS
+Unsloth's `UD-IQ4_XS` at the same revision is in setup too, as a regular choice (not experimental; the Unsloth
+family's first size and its default): `START-HERE.bat --setup --family unsloth --model UD-IQ4_XS` (engine 0.1.38 or
+newer). It sits between IQ3_S and UD-Q4_K_XL: its routed experts are IQ3_S gate/up (IQ4_XS
 in one layer) with IQ4_NL downs (Q8_0 in five layers), 59.5 GB of them; the dense side (Q8_0 projections, the IQ4_NL
 PLE table, a Q6_K head) is UD-Q4_K_XL's. Three shards, 93.7 GB:
 
@@ -235,8 +236,10 @@ PLE table, a Q6_K head) is UD-Q4_K_XL's. Three shards, 93.7 GB:
 | `Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf` | 43,836,407,744 | `d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833` |
 
 Setup treats it like UD-Q4_K_XL (the list above): the same RAM budget (your RAM less 24 GB; at most all 55 GiB of its
-experts, so a 96 GB PC holds all of them), the pack with `--compat-bf16`, no `experts.bin`, one GPU by default, no
-images. It does not ask on AMD: its experts' formats have prompt kernels there too.
+experts, so a PC with ~80 GB of RAM or more holds all of them), the pack with `--compat-bf16`, no `experts.bin`, one
+GPU by default. It does not ask on AMD: its experts' formats have prompt kernels there too. Images are an option (asked,
+off by default; NVIDIA): the image path has no restriction for this pack, which uses the original model's image
+encoder; not yet run with images.
 
 What is known so far: it packs and runs on a Strix Halo (AMD gfx1151, 128 GB unified memory), where prompts read at
 ~820 tokens/s at 8K and 64K and the answers passed the retrieval checks at 8K and 64K. It has **not** been measured on
