@@ -184,6 +184,25 @@ __device__ __forceinline__ void signed8(uint32_t gx, uint32_t gy, uint32_t s, ui
     qx = __vsub4(gx ^ m0, m0);
     qy = __vsub4(gy ^ m1, m1);
 }
+#if defined(__HIPCC__)
+// gfx11 (Aurora): the signs from a shared-memory table instead of the compare / subtract emulation.  An entry (one per
+// sign byte b; for the 7-bit sign formats per 7 bits, the parity bit folded in) is {m0, c0, m1, c1}: m = 0xFF in the
+// bytes whose sign bit is set (bits 0-3 for .x, 4-7 for .y), c = m & 0x01010101.  q = (g ^ m) + c is -g where the sign
+// is set - the two's complement, byte-wise - and g elsewhere; no byte carries into the next, because no codebook entry
+// has a zero byte (256 - g with g in 1..127; the grids' bytes are 1..62), so it is the bytes signed8 gives.
+__device__ __forceinline__ void signed8t(uint32_t gx, uint32_t gy, const uint4 sg, uint32_t& qx, uint32_t& qy) {
+    qx = (gx ^ sg.x) + sg.y;
+    qy = (gy ^ sg.z) + sg.w;
+}
+__host__ __device__ constexpr int sign_entries(int t) { return t == T_IQ2_S || t == T_IQ3_S ? 256 : 128; }
+__device__ __forceinline__ uint4 sign_entry(int i, bool parity) {
+    uint32_t b = (uint32_t) i;
+    if (parity) b ^= (__popc(b) & 1) << 7;
+    const uint32_t m0 = __vcmpne4(((b & 15) * 0x01010101u) & 0x08040201u, 0),
+                   m1 = __vcmpne4(((b >> 4) * 0x01010101u) & 0x08040201u, 0);
+    return make_uint4(m0, m0 & 0x01010101u, m1, m1 & 0x01010101u);
+}
+#endif
 // 8 nibbles of q4 through a 16-entry int8 table (4 words): the low nibbles' values in .x, the high ones' in .y
 __device__ __forceinline__ void table16(uint32_t q4, const uint32_t (&t)[4], uint32_t& lo, uint32_t& hi) {
     uint32_t tmp[2];
@@ -260,7 +279,7 @@ template <int T, int NW> __device__ __forceinline__ void load_unit(const uint8_t
 // The sub-block as 32 int8 (q[0..7], natural order) and its scales (s0: values 0-15, s1: 16-31).
 template <int T, int NW>
 __device__ __forceinline__ void convert(const uint32_t (&w)[NW], const uint8_t* grid, const uint32_t (&kv)[4],
-                                        uint32_t (&q)[8], float& s0, float& s1) {
+                                        uint32_t (&q)[8], float& s0, float& s1, const uint4* sgn = nullptr) {
     if constexpr (T == T_Q4_K || T == T_Q5_K) {
         const int ib = (int) (w[9] >> 24), sh = 4 * (ib & 1);
         uint32_t sc, mn;
@@ -294,7 +313,11 @@ __device__ __forceinline__ void convert(const uint32_t (&w)[NW], const uint8_t* 
 #pragma unroll
         for (int l = 0; l < 4; ++l) {
             const uint2 e = g[(w[0] >> (8 * l)) & 255];
+#if defined(__HIPCC__)
+            signed8t(e.x, e.y, sgn[(w[1] >> (7 * l)) & 127], q[2 * l], q[2 * l + 1]);
+#else
             signed8(e.x, e.y, unpack_ksigns(w[1] >> (7 * l)), q[2 * l], q[2 * l + 1]);
+#endif
         }
         s0 = s1 = half_at(w[2]) * (float) ((w[1] >> 27) | 1) * 0.125f;
     } else if constexpr (T == T_IQ2_XS) {
@@ -303,7 +326,11 @@ __device__ __forceinline__ void convert(const uint32_t (&w)[NW], const uint8_t* 
         for (int l = 0; l < 4; ++l) {
             const uint32_t c = (w[l >> 1] >> (16 * (l & 1))) & 0xFFFF;
             const uint2 e = g[c & 511];
+#if defined(__HIPCC__)
+            signed8t(e.x, e.y, sgn[(c >> 9) & 127], q[2 * l], q[2 * l + 1]);
+#else
             signed8(e.x, e.y, unpack_ksigns(c >> 9), q[2 * l], q[2 * l + 1]);
+#endif
         }
         const float d = half_at(w[2]);
         const uint32_t sc = w[2] >> 16;
@@ -315,7 +342,11 @@ __device__ __forceinline__ void convert(const uint32_t (&w)[NW], const uint8_t* 
 #pragma unroll
         for (int l = 0; l < 4; ++l) {
             const uint2 e = g[((w[0] >> (8 * l)) & 255) | ((qh << (8 - 2 * l)) & 0x300)];
+#if defined(__HIPCC__)
+            signed8t(e.x, e.y, sgn[(w[1] >> (8 * l)) & 255], q[2 * l], q[2 * l + 1]);
+#else
             signed8(e.x, e.y, ((w[1] >> (8 * l)) & 255) * 0x01010101u, q[2 * l], q[2 * l + 1]);
+#endif
         }
         const float d = half_at(w[2]);
         const uint32_t sc = w[2] >> 24;
@@ -326,7 +357,11 @@ __device__ __forceinline__ void convert(const uint32_t (&w)[NW], const uint8_t* 
 #pragma unroll
         for (int l = 0; l < 4; ++l) {
             const uint32_t i0 = (w[l >> 1] >> (16 * (l & 1))) & 255, i1 = (w[l >> 1] >> (16 * (l & 1) + 8)) & 255;
+#if defined(__HIPCC__)
+            signed8t(g[i0], g[i1], sgn[(w[2] >> (7 * l)) & 127], q[2 * l], q[2 * l + 1]);
+#else
             signed8(g[i0], g[i1], unpack_ksigns(w[2] >> (7 * l)), q[2 * l], q[2 * l + 1]);
+#endif
         }
         s0 = s1 = half_at(w[3]) * (float) (2 * (w[2] >> 28) + 1) * 0.25f;
     } else if constexpr (T == T_IQ3_S) {
@@ -335,8 +370,13 @@ __device__ __forceinline__ void convert(const uint32_t (&w)[NW], const uint8_t* 
 #pragma unroll
         for (int l = 0; l < 4; ++l) {
             const uint32_t i0 = (w[l >> 1] >> (16 * (l & 1))) & 255, i1 = (w[l >> 1] >> (16 * (l & 1) + 8)) & 255;
+#if defined(__HIPCC__)
+            signed8t(g[i0 | ((qh << (8 - 2 * l)) & 256)], g[i1 | ((qh << (7 - 2 * l)) & 256)],
+                     sgn[(w[2] >> (8 * l)) & 255], q[2 * l], q[2 * l + 1]);
+#else
             signed8(g[i0 | ((qh << (8 - 2 * l)) & 256)], g[i1 | ((qh << (7 - 2 * l)) & 256)],
                     ((w[2] >> (8 * l)) & 255) * 0x01010101u, q[2 * l], q[2 * l + 1]);
+#endif
         }
         s0 = s1 = half_at(w[3]) * (float) (1 + 2 * (w[3] >> 24));
     } else if constexpr (T == T_IQ4_XS || T == T_IQ4_NL) {
@@ -632,9 +672,13 @@ native_w11_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
     constexpr int BS = block_bytes(WT);
     constexpr bool K16 = per16(WT);
     constexpr int GB = grid_bytes(WT) > 0 ? grid_bytes(WT) : 16;
-    __shared__ __align__(16) uint8_t wt[2][NW_ROWS][WLD];      // decoded int8 weights of a stage (64 + 16 pad)
+    __shared__ __align__(16) uint8_t wtbuf[2 * NW_ROWS * WLD];
+    uint8_t(*wt)[NW_ROWS][WLD] = reinterpret_cast<uint8_t(*)[NW_ROWS][WLD]>(wtbuf);
     __shared__ __align__(16) float ws[2][NW_ROWS][4];           // their scales per 16 values
     __shared__ __align__(16) uint8_t sgrid[GB];
+    constexpr int SGN = (WT == T_IQ2_XXS || WT == T_IQ2_XS || WT == T_IQ2_S || WT == T_IQ3_XXS || WT == T_IQ3_S)
+                            ? sign_entries(WT) : 1;
+    __shared__ __align__(16) uint4 ssign[SGN];                   // the signs of a sign byte, as byte masks
     __shared__ int srow[kTileRows];
     __shared__ float hs[GU ? kTileRows : 1][GU ? 65 : 1];
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
@@ -642,6 +686,9 @@ native_w11_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
     if constexpr (grid_bytes(WT) > 0) {
         const uint32_t* gs = (const uint32_t*) grid_src<WT>();
         for (int i = tid; i < grid_bytes(WT) / 4; i += NW_THREADS) ((uint32_t*) sgrid)[i] = gs[i];
+    }
+    if constexpr (SGN > 1) {
+        for (int i = tid; i < SGN; i += NW_THREADS) ssign[i] = sign_entry(i, SGN == 128);
     }
     uint32_t kv[4] = {0, 0, 0, 0};
     if constexpr (WT == T_IQ4_XS || WT == T_IQ4_NL) {
@@ -665,7 +712,7 @@ native_w11_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
         auto put = [&](const uint32_t (&raw)[raw_words(WT)], int buf) {
             uint32_t q[8];
             float s0, s1;
-            convert<WT>(raw, sgrid, kv, q, s0, s1);
+            convert<WT>(raw, sgrid, kv, q, s0, s1, ssign);
             uint4* d = (uint4*) &wt[buf][ur][32 * uj];
             d[0] = make_uint4(q[0], q[1], q[2], q[3]);
             d[1] = make_uint4(q[4], q[5], q[6], q[7]);
