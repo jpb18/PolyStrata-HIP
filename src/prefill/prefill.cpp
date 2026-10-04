@@ -156,6 +156,13 @@ inline uint64_t ring_bytes() {
 // ...and what that buys on THIS pack, never past ring_cap(): the slot count `init` lays out, and what the auto
 // chunk scan treats as a full ring.  A pack whose blobs are larger than Q2_0's gets fewer slots for the same
 // bytes, which is the point - the ring competes with the expert cache for the same VRAM.
+// 0.1.39b: opt-in (STRATA_RING_BYTES=1).  It moves the prompt path's loan on a native pack (fewer ring slots, the
+// rest kept as cache slots), so a long prompt's experts are read through a different mix of resident and streamed
+// groups and its bits differ from the default's (RTX 5070, IQ3_XXS, 32K prompt: +14% to +26%).
+inline bool ring_bytes_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_RING_BYTES"); return v != nullptr && v[0] == '1'; }();
+    return on;
+}
 inline int ring_budget_slots() {
     const int64_t per = MAXBLOB();
     const int64_t n = per > 0 ? (int64_t) (ring_bytes() / (uint64_t) per) : 0;
@@ -176,7 +183,7 @@ inline int ring_slots(size_t T) {
     // the byte budget as this pack's slots: 1024 fused / 384 not on Q2_0, fewer on a pack with bigger blobs.  The
     // unpinned arm stays a slot count (96): it was measured where the host copies are the limit, and there the ring
     // is not what is competing for VRAM.
-    const int pinned_ring = g_pinned_share >= 0.9 ? ring_budget_slots() : 96;
+    const int pinned_ring = g_pinned_share >= 0.9 ? (ring_bytes_on() ? ring_budget_slots() : fused_ring() ? 1024 : 384) : 96;
     const int r = v ? std::atoi(v) : g_ring_override > 0 ? g_ring_override : pinned_ring;
     if (v && r == STAGE) return STAGE; // Explicit opt-in to routed-only staging, including large chunks.
     const int big = r < 16 ? 16 : r > ring_cap() ? ring_cap() : r;
@@ -1349,9 +1356,13 @@ uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::Session
     // `grs`.  Net over-count T*(D-HC)*4 bytes: 42 MB at a 1024-token chunk, 252 MB (48 Q8_0 slots) at 6144 - the
     // prompt path was told it had less room than it did.  Safe - the direction is over-estimating, and `take`
     // still bounds-checks - but it under-sizes every loan, so every chunk the scan picks is one step smaller.
-    f(T * N); f(T * D);
-    if (gr_unfused()) f(T * D);
-    f(T * HC);
+    if (ring_bytes_on()) {
+        f(T * N); f(T * D);
+        if (gr_unfused()) f(T * D);
+        f(T * HC);
+    } else {   // 0.1.39's count (the default loan stays as it was)
+        f(T * N); f(T * D); f(T * D);
+    }
     o.take<uint16_t>(T * D, ok); f(T * LR); o.take<uint16_t>(T * LR, ok);
     f(T * D); f(T * HC); f(T * N); o.take<uint16_t>(T * N, ok); o.take<uint16_t>(T * N, ok); f(T * N);
     if (bf16x2_hc()) { o.take<uint16_t>(T * D, ok); o.take<uint16_t>(T * LR, ok); }
