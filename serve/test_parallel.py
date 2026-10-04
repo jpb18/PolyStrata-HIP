@@ -241,7 +241,9 @@ class ParallelService(unittest.TestCase):
 
     def test_concurrent_requests_share_the_slots(self):
         self.start(2)
-        texts = ["first question", "second question, longer", "a third one waits for a slot"]
+        # the first one decodes long enough for the others to arrive while it runs (also on a busy PC)
+        texts = ["first question LONGREPLY", "second question, longer", "a third one waits for a slot"]
+        reply = {t: "ok, " + "la " * 15 + "done." if "LONGREPLY" in t else "ok, done." for t in texts}
         out, errors, seen = {}, [], []
 
         def go(t):
@@ -263,7 +265,7 @@ class ParallelService(unittest.TestCase):
             th.join(30)
         self.assertEqual(errors, [])
         for t in texts:
-            self.assertEqual(out[t]["choices"][0]["message"]["content"], "ok, done.")
+            self.assertEqual(out[t]["choices"][0]["message"]["content"], reply[t])
         # the slots were reported, and a request was admitted while another decoded in a slot (the fake logs how many
         # slots were active at each admission)
         self.assertTrue(any(m.get("parallel") == 2 and len(m.get("slots", [])) == 2 for m in seen))
@@ -274,7 +276,8 @@ class ParallelService(unittest.TestCase):
             self.assertEqual(len(self.svc.history), 3)
             self.assertEqual(self.svc.live_reqs, {})
             self.assertFalse(self.svc.status["busy"])
-        self.assertEqual([r["output_tokens"] for r in self.svc.history], [len("ok, done.") + 1] * 3)
+        self.assertEqual(sorted(r["output_tokens"] for r in self.svc.history),
+                         sorted(len(reply[t]) + 1 for t in texts))
         # never more than two in the slots at once (the fake logs how many were active at each admission)
         active = [int(x.split()[3]) for x in self.log.read_text().splitlines() if x.startswith("BGEN")]
         self.assertTrue(all(a <= 1 for a in active), active)
@@ -356,7 +359,7 @@ class ParallelService(unittest.TestCase):
         self.start(2)
         a = "conversation A, first turn"
         r1 = {}
-        th = threading.Thread(target=lambda: r1.setdefault("x", self.chat("blocker", max_tokens=40)))
+        th = threading.Thread(target=lambda: r1.setdefault("x", self.chat("blocker LONGREPLY", max_tokens=200)))
         th.start()
         time.sleep(0.05)
         first = self.chat(a)
