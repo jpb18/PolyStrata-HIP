@@ -657,6 +657,132 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_kernel(float* __restrict__ s
         for (int r = 0; r < 32; ++r) base[(size_t) r * HV * S] = s[r];
     }
 }
+// Aurora (S23, opt-in STRATA_GDN_PP=1): gdn_rec_quad_kernel with the same arithmetic in the same order, two changes in
+// how it is compiled.  (1) The VGPR count: the 32 state-row addresses of the first loads were kept live across the
+// whole walk to be reused by the final stores (64 VGPRs, 196 in all = 7 waves a SIMD for the 192 blocks of 4 waves
+// that need 9.6): the stores' lane offset goes through an asm so the addresses are made again, 133 VGPRs, all blocks
+// resident.  (2) A full chunk's four tokens run with the state alternating between two register sets (the update
+// writes the other set), so the compiler emits no 32 register copies after the update.
+__global__ void __launch_bounds__(QTH) gdn_rec_quad_pp_kernel(float* __restrict__ state, const float* __restrict__ h,
+                                                           const float* __restrict__ gate, const float* __restrict__ beta,
+                                                           float* __restrict__ oc_out, int64_t T) {
+    __shared__ __align__(16) float sqk[2][HT][2][4 * QRS];   // [buffer][token][q | k][group][row (padded)]
+    __shared__ float sgb[2][2][HT];                         // [buffer][gate | beta][token]
+    __shared__ float sv[2][HT][QCB];                        // [buffer][token][column] v
+    const int head = blockIdx.x / (S / QCB), cb = blockIdx.x % (S / QCB);
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
+    const int g = lane >> 3, cl = wave * 8 + (lane & 7), col = cb * QCB + cl;   // row group, column in block / head
+    const int qh = head % HK;
+    float s[32];
+    {
+        const float* sb = state + (size_t) head * S;
+        const uint32_t voff = (uint32_t) ((g * 32) * HV * S + col);
+#pragma unroll
+        for (int r = 0; r < 32; ++r) s[r] = sb[(size_t) r * HV * S + voff];
+    }
+    float4 pf[QPF];
+    float pv[HT], pgb = 0.0f;
+    // chunk c's inputs into registers: q/k (float4 i of the chunk's [token][q|k][S/4] block), the column's v (lanes of
+    // group 0) and gate (threads 0..HT-1) / beta (HT..2HT-1) of token `tid % HT`
+    auto fetch = [&](int64_t c) {
+        const int64_t t0 = c * HT;
+#pragma unroll
+        for (int u = 0; u < QPF; ++u) {
+            const int i = tid + u * QTH;
+            const int tt = i / (2 * S / 4), rem = i % (2 * S / 4), part = rem / (S / 4), r4 = rem % (S / 4);
+            const int64_t t = t0 + tt;
+            pf[u] = t < T ? *reinterpret_cast<const float4*>(h + t * C + part * HK * S + qh * S + r4 * 4)
+                          : make_float4(0.f, 0.f, 0.f, 0.f);
+        }
+        if (g == 0) {
+#pragma unroll
+            for (int tt = 0; tt < HT; ++tt) {
+                const int64_t t = t0 + tt;
+                pv[tt] = t < T ? h[t * C + 2 * HK * S + head * S + col] : 0.0f;
+            }
+        }
+        if (tid < 2 * HT) {
+            const int64_t t = t0 + (tid % HT);
+            pgb = t < T ? (tid < HT ? gate : beta)[t * HV + head] : 0.0f;
+        }
+    };
+    const float rs_s = rsqrtf((float) S);
+    const int src0 = lane & 7;                       // lane of group 0 for this column; group j is src0 + 8 j
+    const int64_t nch = (T + HT - 1) / HT;
+    if (nch > 0) fetch(0);
+    for (int64_t c = 0; c < nch; ++c) {
+        const int b = (int) (c & 1);
+        if (g == 0) {
+#pragma unroll
+            for (int tt = 0; tt < HT; ++tt) sv[b][tt][cl] = pv[tt];
+        }
+#pragma unroll
+        for (int u = 0; u < QPF; ++u) {
+            const int i = tid + u * QTH;
+            const int tt = i / (2 * S / 4), rem = i % (2 * S / 4), part = rem / (S / 4), r4 = rem % (S / 4);
+            const int row = r4 * 4;
+            *reinterpret_cast<float4*>(&sqk[b][tt][part][(row >> 5) * QRS + (row & 31)]) = pf[u];
+        }
+        if (tid < 2 * HT) sgb[b][tid / HT][tid % HT] = pgb;
+        __syncthreads();                               // chunk c staged (buffer b was last read two chunks ago)
+        if (c + 1 < nch) fetch(c + 1);
+        const int64_t t0 = c * HT;
+        const int nt = (int) (T - t0 < HT ? T - t0 : HT);
+        auto token = [&](int tt, float (&sin)[32], float (&sout)[32]) {
+            float k[32], q[32];
+            {
+                const float4* k4 = reinterpret_cast<const float4*>(&sqk[b][tt][1][g * QRS]);
+                const float4* q4 = reinterpret_cast<const float4*>(&sqk[b][tt][0][g * QRS]);
+#pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    const float4 kk = k4[j], qq = q4[j];
+                    k[4 * j] = kk.x; k[4 * j + 1] = kk.y; k[4 * j + 2] = kk.z; k[4 * j + 3] = kk.w;
+                    q[4 * j] = qq.x; q[4 * j + 1] = qq.y; q[4 * j + 2] = qq.z; q[4 * j + 3] = qq.w;
+                }
+            }
+            const float g_exp = __expf(sgb[b][0][tt]);
+            float kv = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 32; ++r) kv = fmaf(sin[r], k[r], kv);
+            const float p0 = __shfl_sync(0xffffffffu, kv, src0), p1 = __shfl_sync(0xffffffffu, kv, src0 + 8),
+                        p2 = __shfl_sync(0xffffffffu, kv, src0 + 16), p3 = __shfl_sync(0xffffffffu, kv, src0 + 24);
+            const float kv_col = p0 + p1 + p2 + p3;
+            const float cvt = sv[b][tt][cl], cbt = sgb[b][1][tt];
+            const float delta = (cvt - g_exp * kv_col) * cbt;
+            float o = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 32; ++r) {
+                sout[r] = fmaf(g_exp, sin[r], k[r] * delta);
+                o = fmaf(sout[r], q[r], o);
+            }
+            const float o0 = __shfl_sync(0xffffffffu, o, src0), o1 = __shfl_sync(0xffffffffu, o, src0 + 8),
+                        o2 = __shfl_sync(0xffffffffu, o, src0 + 16), o3 = __shfl_sync(0xffffffffu, o, src0 + 24);
+            if (g == 0) oc_out[(t0 + tt) * HV * S + head * S + col] = (o0 + o1 + o2 + o3) * rs_s;
+        };
+        if (nt == HT) {   // the state alternates between two register sets: no copy after the update
+            float s2[32];
+            token(0, s, s2);
+            token(1, s2, s);
+            token(2, s, s2);
+            token(3, s2, s);
+        } else {
+            for (int tt = 0; tt < nt; ++tt) {
+                float s2[32];
+                token(tt, s, s2);
+#pragma unroll
+                for (int r = 0; r < 32; ++r) s[r] = s2[r];
+            }
+        }
+    }
+    {
+        float* sb = state + (size_t) head * S;
+        uint32_t voff = (uint32_t) ((g * 32) * HV * S + col);
+        asm volatile("" : "+v"(voff));   // (so the loads' 32 addresses are not kept alive across the whole loop)
+#pragma unroll
+        for (int r = 0; r < 32; ++r) sb[(size_t) r * HV * S + voff] = s[r];
+    }
+}
+
 // gdn_out_norm_kernel's body over a grid-stride walk of the (token, head) rows: the old kernel launched a 128-thread
 // block per row (T * 48 blocks; ~45 GB/s on the 8060S).  The same code per row (the same compiled arithmetic: a wave
 // per row with four values per lane rounded differently in its first xor step).
@@ -1123,7 +1249,11 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     }
     if (variant == 1) {
         if (T > 0) {
-            gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+            static const bool pp = [] { const char* v = std::getenv("STRATA_GDN_PP"); return v && std::atoi(v) != 0; }();
+            if (pp)
+                gdn_rec_quad_pp_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+            else
+                gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             static const bool noy = [] { const char* v = std::getenv("STRATA_GDN_NOY"); return v && std::atoi(v) != 0; }();
             if (noy)
                 gdn_out_norm_loop_kernel<false><<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
