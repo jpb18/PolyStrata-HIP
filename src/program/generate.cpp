@@ -4335,14 +4335,21 @@ int main(int argc, char** argv) {
     };
     auto plan_lend = [&](int64_t& chunk) -> int64_t {
         auto slots_for = lend_slots;
-        if (o.prefill_auto && !strata::prefill::Prefill::ring_bytes_enabled()) {   // STRATA_RING_BYTES=0: 0.1.39's list
+        // 0.1.39's list with its ring (also the size up to which a prompt keeps that ring under #583)
+        auto old_rule = [&]() -> int64_t {
+            strata::prefill::Prefill::set_ring_budget(0, 0);
             static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
             for (const int64_t c : kAutoChunks) {
                 // above 8192: only when asked for, and only when a prompt of the context can use it
                 if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;
                 const int64_t k = slots_for(c);
-                if (k + 128 <= xcache.slots() && k * 100 <= kAutoLendPct * xcache.slots()) { chunk = c; return k; }
+                if (k + 128 <= xcache.slots() && k * 100 <= kAutoLendPct * xcache.slots()) return c;
             }
+            return 0;
+        };
+        if (o.prefill_auto && !strata::prefill::Prefill::ring_bytes_enabled()) {   // STRATA_RING_BYTES=0: 0.1.39's list
+            const int64_t c = old_rule();
+            if (c > 0) { chunk = c; return slots_for(c); }
             return 0;
         }
         if (o.prefill_auto) {   // the default since 0.1.39b (#583)
@@ -4356,7 +4363,8 @@ int main(int argc, char** argv) {
             // one falls back to the old rule, which takes the largest chunk whose ring clears kRingMin (the
             // value at or below which ring_slots() returns STAGE and streaming is off).
             constexpr int64_t kRingMin = 16;
-            const int64_t ring_max = strata::prefill::Prefill::ring_max_slots();
+            const int64_t small = old_rule();   // 0.1.39's chunk (and its ring for the prompts that fit it)
+            const int64_t ring_max = strata::prefill::Prefill::ring_cap_for(small);
             const int64_t budget = std::min(xcache.slots() - 128, kAutoLendPct * xcache.slots() / 100);
             // The room is a BYTE budget.  A ring slot is max_blob bytes (`carve` lays out one whole blob each),
             // while these cache slots hold their own layer's blob, which is smaller than max_blob unless the cache
@@ -4376,7 +4384,7 @@ int main(int argc, char** argv) {
                 return biggest_chunk(auto_ceiling, [&](int64_t t) -> bool {
                     const int64_t room = room_of(t);
                     if (room < floor) return false;
-                    strata::prefill::Prefill::set_ring_override((int) room);
+                    strata::prefill::Prefill::set_ring_budget((int) room, 0);
                     // ring_slots() now returns `room` - unless STRATA_PREFILL_RING overrides it, in which case the
                     // chunk has to fit THAT ring, which is the pre-fix rule and the A/B arm
                     const int64_t k = slots_for(t);
@@ -4384,14 +4392,16 @@ int main(int argc, char** argv) {
                 });
             };
             int64_t c = scan(ring_max);
-            if (c == 0) c = scan(kRingMin);
-            if (c > 0) {
-                // the probe left the override on its last trial; put it back on the chunk that won
-                strata::prefill::Prefill::set_ring_override((int) room_of(c));
-                chunk = c;
-                return slots_for(c);
+            if (c == 0 && ring_max < strata::prefill::Prefill::ring_default_slots()) c = scan(kRingMin);
+            // a prompt that fits 0.1.39's chunk keeps 0.1.39's ring (one chunk: the smaller ring only slowed it)
+            if (small >= c) {   // the scan bought nothing: 0.1.39's choice
+                strata::prefill::Prefill::set_ring_budget(0, 0);
+                if (small > 0) { chunk = small; return slots_for(small); }
+                return 0;
             }
-            return 0;
+            strata::prefill::Prefill::set_ring_budget((int) room_of(c), small);
+            chunk = c;
+            return slots_for(c);
         }
         for (int64_t c = chunk; c >= 256; c /= 2) {
             const int64_t k = slots_for(c);
@@ -4581,8 +4591,8 @@ int main(int argc, char** argv) {
             // than it is, and a chunk whose ring only fitted after that discount was refused outright - the scan
             // stopped one step short while the chunk it did take had room to spare for the cap-sized ring.
             const int64_t kBlob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
-            auto ring_room = [&](int64_t c, const PfPart* only) -> int64_t {
-                int64_t room = strata::prefill::Prefill::ring_max_slots();
+            auto ring_room = [&](int64_t c, const PfPart* only, int64_t cap) -> int64_t {
+                int64_t room = cap;
                 for (const PfPart& p : pf_parts) {
                     if (only != nullptr && &p != only) continue;
                     // clamped at 0: a cache under 128 slots has a negative lend budget, and `slots - budget` is
@@ -4600,33 +4610,38 @@ int main(int argc, char** argv) {
             // ring still at its full byte budget (ring_room is capped at ring_max, so that is room == ring_max),
             // under the operator's ceiling (auto_ceiling keeps a bare `auto` at 8192, #282).  Failing that, the
             // largest chunk whose ring clears kRingMin.
+            // 0.1.39's list with its ring: the chunk it would pick, and the size up to which a prompt keeps that ring
+            auto old_pick = [&](const PfPart* only) -> int64_t {
+                strata::prefill::Prefill::set_ring_budget(0, 0);
+                static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
+                for (const int64_t c : kAutoChunks) {
+                    if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;   // #282, as plan_lend
+                    if (fits(c, true, only)) return c;
+                }
+                return 0;
+            };
             auto scan = [&](const PfPart* only) -> int64_t {
                 if (!o.prefill_auto) {   // an explicit --prefill is the operator's number, and a loan of it only has to fit
                     for (int64_t c = o.prefill_chunk; c >= 256; c /= 2)
                         if (fits(c, false, only)) return c;
                     return 0;
                 }
-                if (!strata::prefill::Prefill::ring_bytes_enabled()) {   // STRATA_RING_BYTES=0: 0.1.39's list
-                    static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
-                    for (const int64_t c : kAutoChunks) {
-                        if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;   // #282, as plan_lend
-                        if (fits(c, true, only)) return c;
-                    }
-                    return 0;
-                }
+                if (!strata::prefill::Prefill::ring_bytes_enabled()) return old_pick(only);   // STRATA_RING_BYTES=0
+                const int64_t small = old_pick(only);
+                const int64_t cap = strata::prefill::Prefill::ring_cap_for(small);
                 auto probe = [&](int64_t floor) -> int64_t {
                     return biggest_chunk(auto_ceiling, [&](int64_t t) -> bool {
-                        const int64_t room = ring_room(t, only);
+                        const int64_t room = ring_room(t, only, cap);
                         if (room < floor) return false;
-                        strata::prefill::Prefill::set_ring_override((int) room);
+                        strata::prefill::Prefill::set_ring_budget((int) room, 0);
                         // ring_slots() now returns `room` - unless STRATA_PREFILL_RING overrides it, in which
                         // case the chunk has to fit THAT ring, which is the pre-fix rule and the A/B arm
                         return fits(t, true, only);
                     });
                 };
-                int64_t c = probe(strata::prefill::Prefill::ring_max_slots());
-                if (c == 0) c = probe(kRingMin);
-                return c;
+                int64_t c = probe(cap);
+                if (c == 0 && cap < strata::prefill::Prefill::ring_default_slots()) c = probe(kRingMin);
+                return std::max(c, small);   // never a smaller chunk than 0.1.39's
             };
             const int64_t chunk = scan(nullptr);
             // #448: a small card in a layer split caps every stage's chunk (an RTX 3080's 512-slot cache held a
@@ -4635,8 +4650,14 @@ int main(int argc, char** argv) {
             const int64_t alone = pf_parts.size() > 1 ? scan(&pf_parts[0]) : chunk;
             // both scans left the ring override on their own last trial: put it back on the chunk that won, which
             // is what `init` lays out and what the INFO line reports
-            if (chunk > 0 && o.prefill_auto && strata::prefill::Prefill::ring_bytes_enabled())
-                strata::prefill::Prefill::set_ring_override((int) ring_room(chunk, nullptr));
+            if (chunk > 0 && o.prefill_auto && strata::prefill::Prefill::ring_bytes_enabled()) {
+                // a prompt that fits 0.1.39's chunk keeps 0.1.39's ring (one chunk: the smaller ring only slowed
+                // it); the byte-budget ring is for the chunks past it
+                const int64_t small = old_pick(nullptr);
+                strata::prefill::Prefill::set_ring_budget(
+                    small >= chunk ? 0 : (int) ring_room(chunk, nullptr, strata::prefill::Prefill::ring_cap_for(small)),
+                    small);
+            }
             if (chunk > 0 && alone > chunk) {
                 for (size_t i = 1; i < pf_parts.size(); ++i) {
                     const PfPart& p = pf_parts[i];
