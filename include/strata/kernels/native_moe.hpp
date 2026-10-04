@@ -22,4 +22,9 @@ void native_moe_combine_multi(const float* parts, const float* weights, const fl
 /// moe_hit_add (parts += hit) gave, without the zero fill and the add launch.
 void native_moe_combine_multi_hits(const float* hits, const float* weights, const float* shared, float* output,
                                    int64_t n_embd, int64_t k, int n_tok, void* stream);
+/// S26 STRATA_LFUSE: the same with `shared` unscaled and shared_gate[t] the shared expert's raw gate logit: the
+/// row is scaled by sigmoid(shared_gate[t]) here, bitwise what shared_expert_multi's sigmoid + scale gave.
+void native_moe_combine_multi_hits_gated(const float* hits, const float* weights, const float* shared,
+                                         const float* shared_gate, float* output, int64_t n_embd, int64_t k, int n_tok,
+                                         void* stream);
 }

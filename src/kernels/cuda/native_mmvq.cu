@@ -1009,14 +1009,21 @@ static bool s26_tsum_on() {
     return on;
 }
 
-template<typename F, int NCOLS, int NW, int ROWS, bool TS = false>
+// S26 STRATA_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
+// input in one launch; each output's code is the single matrix's)
+template<typename F, int NCOLS, int NW, int ROWS, bool TS = false, bool PAIR = false>
 __launch_bounds__(NW * WARP, 1)
 __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w,
                                          const Q81Block* __restrict__ x,
-                                         float* __restrict__ y, int n_in, int n_out) {
+                                         float* __restrict__ y, int n_in, int n_out,
+                                         const typename F::Block* __restrict__ w2 = nullptr, float* __restrict__ y2 = nullptr) {
     constexpr int BPI = F::BPI * NW / WARPS;           // blocks per iteration scale with the warp count
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    const int row0 = ROWS * int(blockIdx.x);
+    int bxi = int(blockIdx.x);
+    if constexpr (PAIR) {
+        if (bxi >= n_out / ROWS) { bxi -= n_out / ROWS; w = w2; y = y2; }
+    }
+    const int row0 = ROWS * bxi;
     const int blocks_per_row = n_in / F::DIV;
     const int x_stride = n_in / Q8K;                   // Q8_1 blocks per activation column
     float tmp[NCOLS][ROWS] = {};
@@ -1872,6 +1879,43 @@ void native_q5_0_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_q5_0_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream) {
     small_f32<Q50Block, 4>(weights, x, scratch_q8_1, y, n_in, n_out, ncols, stream);
+}
+
+template<int NCOLS>
+void q8_0_pair_launch(const Q80Block* w1, const Q80Block* w2, const Q81Block* x, float* y1, float* y2, int n_in, int n_out,
+                      cudaStream_t s) {
+    using F = SmallTraits<Q80Block, 8>;
+    const dim3 threads(WARP, WARPS);
+    if (s26_tsum_on())
+        native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true, true><<<unsigned(2 * n_out), threads, 0, s>>>(w1, x, y1, n_in, n_out, w2, y2);
+    else
+        native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, false, true><<<unsigned(2 * n_out), threads, 0, s>>>(w1, x, y1, n_in, n_out, w2, y2);
+}
+
+bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void* x_q8_1, float* y1, float* y2,
+                      int n_in, int n_out, int ncols, void* stream) {
+    using F = SmallTraits<Q80Block, 8>;
+    // only where both calls would run native_mmvq_multi_kernel<F, ncols, WARPS, 1> (exact layout, not packed)
+    if (ggml_type != 8 || !g_multi_exact || ncols < 2 || ncols > 8 || n_out <= 0 || n_in <= 0 || n_in % 32 != 0 ||
+        n_in / F::DIV < F::BPI || !w1 || !w2 || !x_q8_1 || !y1 || !y2 || !stream)
+        return false;
+    const auto& reg = q8_packed_registry();
+    if (reg.count(w1) || reg.count(w2)) return false;
+    const auto* a = static_cast<const Q80Block*>(w1);
+    const auto* b = static_cast<const Q80Block*>(w2);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        case 2: q8_0_pair_launch<2>(a, b, x, y1, y2, n_in, n_out, s); break;
+        case 3: q8_0_pair_launch<3>(a, b, x, y1, y2, n_in, n_out, s); break;
+        case 4: q8_0_pair_launch<4>(a, b, x, y1, y2, n_in, n_out, s); break;
+        case 5: q8_0_pair_launch<5>(a, b, x, y1, y2, n_in, n_out, s); break;
+        case 6: q8_0_pair_launch<6>(a, b, x, y1, y2, n_in, n_out, s); break;
+        case 7: q8_0_pair_launch<7>(a, b, x, y1, y2, n_in, n_out, s); break;
+        default: q8_0_pair_launch<8>(a, b, x, y1, y2, n_in, n_out, s); break;
+    }
+    launch_check();
+    return true;
 }
 
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
