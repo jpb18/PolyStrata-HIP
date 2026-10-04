@@ -3109,11 +3109,20 @@ class StopStrings(unittest.TestCase):
     across tokens (and across streamed chunks)."""
     ANSWER = "alpha END beta STOP gamma"
 
+
+class ConnectionClose(unittest.TestCase):
+    """The server is HTTP/1.0 and closes the connection after every response.  Without saying so, .NET's pooled
+    HttpClient put its next request on the closing socket and got "response ended prematurely" (2026-10-03)."""
+
     @classmethod
     def setUpClass(cls):
         tok = ByteTokenizer()
         cls.engine = CountingEngine(tok, "</think>\n\n" + cls.ANSWER, max_context=CTX)
         cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+
+
+        cls.svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
+                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -3316,6 +3325,21 @@ class AnswerBeforeTheBody(unittest.TestCase):
 
     def test_a_method_with_no_handler(self):
         self.assertEqual(self.status("PUT", "/v1/chat/completions"), "HTTP/1.0 501 Unsupported method ('PUT')")
+
+
+    def headers(self, stream):
+        body = {"model": "x", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}], "stream": stream}
+        req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+            return r.headers
+
+    def test_a_non_streamed_answer_says_the_connection_closes(self):
+        self.assertEqual(self.headers(stream=False).get("Connection"), "close")
+
+    def test_a_streamed_answer_says_the_connection_closes(self):
+        self.assertEqual(self.headers(stream=True).get("Connection"), "close")
 
 
 if __name__ == "__main__":
