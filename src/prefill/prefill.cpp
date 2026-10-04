@@ -559,6 +559,8 @@ constexpr size_t MMQ_TAIL = 4096;
 struct MmqPlan {
     bool any = false, fallback = true;
     std::vector<char> layer;                   // per layer: MMQ
+    std::vector<char> fo;                      // per layer: no MMQ here but the native fused kernels cover its formats
+                                               // (gfx11: UD-Q4_K_XL's Q4_K / Q5_K and Q5_1 / Q8_0 experts, STRATA_PF_FUSED=1)
     size_t gu_max = 0, d_max = 0;
 };
 const MmqPlan& mmq_plan() {
@@ -569,11 +571,17 @@ const MmqPlan& mmq_plan() {
         const bool on = mmq::built() && (env == nullptr || std::atoi(env) != 0);
         const int64_t layers = lay.native ? (int64_t) lay.fmt.size() : lay.n_layers;
         p.layer.assign((size_t) std::max<int64_t>(layers, 0), 0);
+        p.fo.assign(p.layer.size(), 0);
         p.fallback = !on || layers <= 0;
         for (int64_t l = 0; on && l < layers; ++l) {
             const int gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42, dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
             // #420: a tile on every GPU for these shapes (gate+up: 1280 rows, down: N rows), else the FP16 path
-            if (!mmq::fits(gt, 1280) || !mmq::fits(dt, N)) { p.fallback = true; continue; }
+            if (!mmq::fits(gt, 1280) || !mmq::fits(dt, N)) {
+                p.fallback = true;
+                // the fused path's buffers (Xq, H) exist for it; a chunk it does not take (a small one) keeps the FP16 path
+                if (on && lay.native && fused::native_supported(gt, dt)) { p.fo[(size_t) l] = 1; p.any = true; }
+                continue;
+            }
             p.layer[(size_t) l] = 1;
             p.any = true;
             p.gu_max = std::max(p.gu_max, mmq::matrix_bytes(gt, 1280, N));
@@ -1758,7 +1766,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     const bool use_mmq = mmq_plan().any && mmq_plan().layer[(size_t) l];
                     const int mmq_gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42;
                     const int mmq_dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
-                    const bool fused_nat = use_mmq && stream_all && lay.native && fused::native_supported(mmq_gt, mmq_dt);
+                    const bool fused_only = mmq_plan().any && mmq_plan().fo[(size_t) l];
+                    const bool fused_nat = (use_mmq || fused_only) && stream_all && lay.native && fused::native_supported(mmq_gt, mmq_dt);
                     const bool fused_l = (use_mmq && stream_all && !lay.native && fused::enabled()) || fused_nat;
                     size_t n_order = 0;                   // the routed experts (the debug report; unknown when fused)
                     if (fused_l) {

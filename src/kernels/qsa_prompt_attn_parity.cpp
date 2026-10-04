@@ -97,6 +97,17 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16
         std::sort(v.begin(), v.end());
         std::copy(v.begin(), v.end(), sel);
     }
+    // QA_SAME=1 (S23 probe): every query reads the same first-w cells - the best case of any K/V sharing between queries
+    // (all loads hit the caches); QA_SAME=2: query i reads a window of w cells at i / 4 * 64 (neighbours share ~90%)
+    if (const char* sm = std::getenv("QA_SAME")) {
+        const int mode = std::atoi(sm);
+        for (int64_t i = 0; i < nq; ++i) {
+            const int64_t w = steps[i * k::kStepCount + k::kStepWidth], nkv = ctx - nq + i + 1;
+            if (w == nkv) continue;
+            const int64_t base = mode == 1 ? 0 : std::min<int64_t>(i / 4 * 64, nkv - w);
+            for (int64_t c = 0; c < w; ++c) ids[i * cap + c] = (int32_t) (base + c);
+        }
+    }
     k::QsaAttnPools pl;
     if (fmt == 1) { pl.k_q = up(kq); pl.v_q = up(vq); pl.k_scale = up(ks); pl.v_scale = up(vs); }
     else { pl.k_pool = up(kh); pl.v_pool = up(vh); }
