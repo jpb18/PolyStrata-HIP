@@ -300,7 +300,8 @@ __device__ __forceinline__ h16 frag(const _Float16* p) {
 }
 template <int BN, int WN>
 __global__ void __launch_bounds__(256) kernel(const _Float16* __restrict__ X, const _Float16* __restrict__ W,
-                                              float* __restrict__ Y, int M, int N, int K, int ldy, int accumulate) {
+                                              float* __restrict__ Y, int M, int N, int K, int ldy, int accumulate,
+                                              int ldx, int ldw) {
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__)
     constexpr int TN = WN / 16, NB = BN / 64;
     __shared__ __align__(16) _Float16 sA[2][BM][LDK];
@@ -312,10 +313,10 @@ __global__ void __launch_bounds__(256) kernel(const _Float16* __restrict__ X, co
     const int m0 = (first_m + (b % (GM * num_n)) % gsize) * BM, n0 = ((b % (GM * num_n)) / gsize) * BN;
     const int sr = tid >> 2, sq = tid & 3;
     auto ldA = [&](int k0, int r) -> uint4 {
-        return *reinterpret_cast<const uint4*>(X + (size_t) min(m0 + r, M - 1) * K + k0 + 8 * sq);
+        return *reinterpret_cast<const uint4*>(X + (size_t) min(m0 + r, M - 1) * ldx + k0 + 8 * sq);
     };
     auto ldB = [&](int k0, int r) -> uint4 {
-        return *reinterpret_cast<const uint4*>(W + (size_t) min(n0 + r, N - 1) * K + k0 + 8 * sq);
+        return *reinterpret_cast<const uint4*>(W + (size_t) min(n0 + r, N - 1) * ldw + k0 + 8 * sq);
     };
     f8 acc[4][TN];
     for (int i = 0; i < 4; ++i) for (int j = 0; j < TN; ++j) acc[i][j] = f8{0, 0, 0, 0, 0, 0, 0, 0};
@@ -374,9 +375,15 @@ __global__ void __launch_bounds__(256) kernel(const _Float16* __restrict__ X, co
 
 bool strata_pf_gemm_f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K, int64_t ldy,
                         float beta, void* stream) {
+    return strata_pf_gemm_f16_ld(X, K, W, K, Y, T, N, K, ldy, beta, stream);
+}
+
+bool strata_pf_gemm_f16_ld(const uint16_t* X, int64_t ldx, const uint16_t* W, int64_t ldw, float* Y, int64_t T,
+                           int64_t N, int64_t K, int64_t ldy, float beta, void* stream) {
     if (!X || !W || !Y || T < 64 || N < 512 || K % pfg::BK != 0 || K < pfg::BK) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     if (ldy <= 0) ldy = N;
+    if (ldx < K || ldw < K || ldx % 8 != 0 || ldw % 8 != 0 || ldx > (1LL << 30) || ldw > (1LL << 30)) return false;
     if (ldy < N || T > (1LL << 30) || N > (1LL << 30) || K > (1LL << 30)) return false;
     static const bool gfx11 = [] {
         int dev = 0;
@@ -391,11 +398,11 @@ bool strata_pf_gemm_f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t 
     if (N >= 1024) {
         const unsigned grid = (unsigned) (mt * ((N + 255) / 256));
         pfg::kernel<256, 64><<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,
-                                                  (int) ldy, acc);
+                                                  (int) ldy, acc, (int) ldx, (int) ldw);
     } else {
         const unsigned grid = (unsigned) (mt * ((N + 127) / 128));
         pfg::kernel<128, 32><<<grid, 256, 0, s>>>((const _Float16*) X, (const _Float16*) W, Y, (int) T, (int) N, (int) K,
-                                                  (int) ldy, acc);
+                                                  (int) ldy, acc, (int) ldx, (int) ldw);
     }
     return hipGetLastError() == hipSuccess;
 }
@@ -403,6 +410,10 @@ bool strata_pf_gemm_f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t 
 #else
 // Non-HIP / Non-GFX11 compilation fallback
 bool strata_pf_gemm_f16(const uint16_t*, const uint16_t*, float*, int64_t, int64_t, int64_t, int64_t, float, void*) {
+    return false;
+}
+bool strata_pf_gemm_f16_ld(const uint16_t*, int64_t, const uint16_t*, int64_t, float*, int64_t, int64_t, int64_t,
+                           int64_t, float, void*) {
     return false;
 }
 bool strata_wmma_gemm_f16(const uint16_t*, const uint16_t*, float*,

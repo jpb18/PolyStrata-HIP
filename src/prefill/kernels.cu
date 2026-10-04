@@ -280,7 +280,8 @@ __global__ void __launch_bounds__(S * RG) gdn_rec_kernel(float* __restrict__ sta
                                                          const float* __restrict__ gate,
                                                          const float* __restrict__ beta, const float* __restrict__ z,
                                                          const float* __restrict__ gamma, float eps,
-                                                         float* __restrict__ y, uint16_t* __restrict__ y16, int64_t T) {
+                                                         float* __restrict__ y, uint16_t* __restrict__ y16, int64_t T,
+                                                         int64_t ld16) {
     __shared__ float sk[S], sq[S], red[RG][S], wsum[16];
     const int head = blockIdx.x, col = threadIdx.x, rg = threadIdx.y, tid = rg * S + col;
     const int qh = head % HK;
@@ -324,7 +325,7 @@ __global__ void __launch_bounds__(S * RG) gdn_rec_kernel(float* __restrict__ sta
             const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
             const float v = oc * rsqrtf(ss / (float) S + eps) * g_col * sigm(z[t * HV * S + head * S + col]);
             y[t * HV * S + head * S + col] = v;
-            y16[t * HV * S + head * S + col] = hf(v);
+            y16[t * ld16 + head * S + col] = hf(v);
         }
     }
 #pragma unroll
@@ -557,7 +558,7 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_kernel(float* __restrict__ s
 // per row with four values per lane rounded differently in its first xor step).
 __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
                                                               float eps, float* __restrict__ y, uint16_t* __restrict__ y16,
-                                                              int64_t rows) {
+                                                              int64_t rows, int64_t ld16) {
     __shared__ float wsum[4];
     const int col = threadIdx.x;
     for (int64_t row = blockIdx.x; row < rows; row += gridDim.x) {
@@ -570,11 +571,12 @@ __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __res
         const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
         const float v = oc * rsqrtf(ss / (float) S + eps) * gamma[col] * sigm(z[at]);
         y[at] = v;
-        y16[at] = hf(v);
+        y16[(size_t) (row / HV) * ld16 + (size_t) (row % HV) * S + col] = hf(v);
     }
 }
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
-                                                         float eps, float* __restrict__ y, uint16_t* __restrict__ y16) {
+                                                         float eps, float* __restrict__ y, uint16_t* __restrict__ y16,
+                                                         int64_t ld16) {
     __shared__ float wsum[4];
     const int64_t t = blockIdx.x;
     const int head = blockIdx.y, col = threadIdx.x;
@@ -586,7 +588,7 @@ __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict
     const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
     const float v = oc * rsqrtf(ss / (float) S + eps) * gamma[col] * sigm(z[t * HV * S + head * S + col]);
     y[at] = v;
-    y16[at] = hf(v);
+    y16[(size_t) t * ld16 + (size_t) head * S + col] = hf(v);
 }
 
 // ---------------------------------------------------------------- MoE
@@ -730,11 +732,11 @@ __global__ void split_q_kernel(const float* __restrict__ qf, float* __restrict__
     q[i] = qf[t * 24 * 512 + h * 512 + d];
 }
 __global__ void gate_attn_kernel(const float* __restrict__ a, const float* __restrict__ qf, uint16_t* __restrict__ o16,
-                                 int64_t T) {
+                                 int64_t T, int64_t ld16) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= T * 24 * 256) return;
     const int64_t t = i / (24 * 256), h = (i / 256) % 24, d = i % 256;
-    o16[i] = hf(a[i] * (1.0f / (1.0f + expf(-qf[t * 24 * 512 + h * 512 + 256 + d]))));
+    o16[t * ld16 + h * 256 + d] = hf(a[i] * (1.0f / (1.0f + expf(-qf[t * 24 * 512 + h * 512 + 256 + d]))));
 }
 
 // one block per (token, kv head, 64-value group); 64 threads. KV streaming: the pool page only if the block is
@@ -974,11 +976,12 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
 }
 void gdn_recurrence_variant(int variant, float* state, const float* h, const float* gate, const float* beta,
                             const float* z, const float* gamma, float eps, float* y, uint16_t* y16, int64_t T,
-                            void* stream) {
+                            void* stream, int64_t ld16) {
+    if (ld16 <= 0) ld16 = (int64_t) HV * S;
     if (variant == 3) {   // diagnostics: the quad recurrence + the old norm kernel
         if (T > 0) {
             gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
-            gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, (cudaStream_t) stream>>>(z, gamma, eps, y, y16);
+            gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, (cudaStream_t) stream>>>(z, gamma, eps, y, y16, ld16);
         }
         return;
     }
@@ -986,31 +989,31 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
         if (T > 0) {
             gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
             gdn_out_norm_loop_kernel<<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
-                z, gamma, eps, y, y16, T * HV);
+                z, gamma, eps, y, y16, T * HV, ld16);
         }
         check("gdn_recurrence (quad)");
         return;
     }
     static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;   // the one-block-per-head kernel (A/B)
     if (serial || T <= 0 || variant == 2) {
-        gdn_rec_kernel<<<HV, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, z, gamma, eps, y, y16, T);
+        gdn_rec_kernel<<<HV, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, z, gamma, eps, y, y16, T, ld16);
     } else {
         static const bool pipe = [] { const char* v = std::getenv("STRATA_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
         if (pipe)   // the software-pipelined loads (same bits)
             gdn_rec_cols_pipe_kernel<<<HV * NCB, dim3(CB, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
         else
             gdn_rec_cols_kernel<<<HV * NCB, dim3(CB, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
-        gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, (cudaStream_t) stream>>>(z, gamma, eps, y, y16);
+        gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, (cudaStream_t) stream>>>(z, gamma, eps, y, y16, ld16);
     }
     check("gdn_recurrence");
 }
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
-                    const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream) {
+                    const float* gamma, float eps, float* y, uint16_t* y16, int64_t T, void* stream, int64_t ld16) {
     // Aurora (S23): four lanes per column + the grid-stride norm, the same bits (tests/hip/gdn_rec_head.cpp);
     // STRATA_GDN_HEAD=0 (or STRATA_GDN_REC_HEADS) keeps the earlier kernels
     static const bool head = [] { const char* v = std::getenv("STRATA_GDN_HEAD"); return v == nullptr || std::atoi(v) != 0; }();
     static const bool serial = std::getenv("STRATA_GDN_REC_HEADS") != nullptr;
-    gdn_recurrence_variant(head && !serial ? 1 : 0, state, h, gate, beta, z, gamma, eps, y, y16, T, stream);
+    gdn_recurrence_variant(head && !serial ? 1 : 0, state, h, gate, beta, z, gamma, eps, y, y16, T, stream, ld16);
 }
 void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream) {
     if (n_expert == 512)
@@ -1090,8 +1093,9 @@ void split_q(const float* q_full, float* q, int64_t T, void* stream) {
     split_q_kernel<<<blocks_for(T * 24 * 256), 256, 0, (cudaStream_t) stream>>>(q_full, q, T);
     check("split_q");
 }
-void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t T, void* stream) {
-    gate_attn_kernel<<<blocks_for(T * 24 * 256), 256, 0, (cudaStream_t) stream>>>(attn, q_full, out16, T);
+void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t T, void* stream, int64_t ld16) {
+    gate_attn_kernel<<<blocks_for(T * 24 * 256), 256, 0, (cudaStream_t) stream>>>(attn, q_full, out16, T,
+                                                                                ld16 > 0 ? ld16 : 24 * 256);
     check("gate_attn");
 }
 
