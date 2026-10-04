@@ -7744,6 +7744,11 @@ int main(int argc, char** argv) {
             auto refill_wait = [&](PfPart& p, std::string& e) -> bool {
                 const strata::core::OnDevice on(p.dev);
                 if (!p.cache->sync_queued(e)) return false;
+#if defined(_WIN32)
+                // The copies have landed: the file pages touched by the loan need not stay in the working set.
+                for (const auto& [i, slot] : p.lent)
+                    srcp->release(i / g.n_expert, i % g.n_expert);
+#endif
                 p.lent.clear();
                 p.lent_chunk = 0;
                 return true;
@@ -9172,6 +9177,10 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: refilling the lent slots failed: %s\n", err.c_str());
                 return 1;
             }
+#if defined(_WIN32)
+            for (const auto& [i, slot] : lent)
+                srcp->release(i / g.n_expert, i % g.n_expert);
+#endif
             res_put(d_res);
             std::fprintf(stderr, "strata generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
                          std::chrono::duration<double, std::milli>(Clock::now() - tr).count());
