@@ -415,6 +415,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
   add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp src/core/remote_experts.cpp
+    src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -761,6 +762,13 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(qsa_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(qsa_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME qsa_parity COMMAND qsa_parity --selftest)
+
+  # the QSA top-k the engine dispatches against the original kernel: identical ids on both sides of the register
+  # kernel's reach, with tied and with equal scores (synthetic, no model)
+  add_executable(qsa_topk_parity src/kernels/qsa_topk_parity.cpp)
+  target_include_directories(qsa_topk_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(qsa_topk_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME qsa_topk_parity COMMAND qsa_topk_parity --selftest)
 
   # ---- P2.S4: the PLE n-gram hash, the IQ4_NL table read, and the PLE block ----
   # `ngram.cpp` is host-only but lives in `strata_kernels` because `ple.cu` shares its geometry constants, and
@@ -1181,6 +1189,15 @@ if(STRATA_ENABLE_CUDA AND STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_
 endif()
 
 if(STRATA_BUILD_TESTS)
+  if(WIN32)
+    add_executable(pool_affinity_test src/kernels/cpu/pool_affinity_test.cpp)
+    target_link_libraries(pool_affinity_test PRIVATE strata_kernels_cpu)
+    add_test(NAME pool_affinity_test COMMAND pool_affinity_test)
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(pool_affinity_test src/kernels/cpu/pool_affinity_linux_test.cpp)
+    target_link_libraries(pool_affinity_test PRIVATE strata_kernels_cpu)
+    add_test(NAME pool_affinity_test COMMAND pool_affinity_test)
+  endif()
   # Plan v0.3 P6: one expert applied to several tokens, bitwise vs the single-token kernel (synthetic, CPU only).
   # plan v0.3 P5: the device dequantizers vs the artifact's CPU dequantizers on the real shards (not a ctest: needs
   # the 38 GB model; run it by hand or from tools/gpu_session.py)

@@ -1031,7 +1031,19 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
   0.1.7) drafts up to 5 tokens from the earlier copy, but only where its measured acceptance and cost say it pays:
   code edits 6-11% faster, other text unchanged. The drafts are checked like the MTP's, so the output is the same.
 - **Prompts** are processed in chunks of up to 8,192 tokens (`--prefill auto`; 32,768 opt-in) with the experts
-  streamed to the GPU over PCIe.
+  streamed to the GPU over PCIe. Since engine 0.1.39b (#583) the streamed ring is sized in bytes for the pack (a
+  native pack with bigger blobs gets fewer ring slots and keeps more cache slots) and `--prefill auto` picks the
+  largest chunk that keeps that ring full. It only gives up ring slots where 0.1.39's rule held the chunk at 4,096
+  tokens or less; from 6,144 on it keeps 0.1.39's ring and only looks for a bigger chunk beside it (shrinking the
+  ring there measured slower: the Coder -12%), and a prompt that fits 0.1.39's chunk keeps 0.1.39's ring (one
+  chunk: a smaller ring only slowed it). RTX 5070, 32K prompts against `STRATA_RING_BYTES=0`, 2-3 interleaved
+  rounds: IQ3_XXS +18.5% at a 1,500-slot cache and +9% in another memory state, the Coder +3%, IQ3_S unchanged; 4K
+  prompts unchanged (-0.7% to +1.1%, bit-identical). Q2_0 (a fixed `--prefill 2048`) is not affected. It changes
+  the bits of a long prompt against 0.1.39 (the experts go through a different
+  mix of cached and streamed groups). Measured quality, teacher-forced over the next 2,001 tokens of a long document
+  against the FP16 prompt path (IQ3_XXS, `--prefill auto`): 8K prompt KL 0.042 (0.1.39: 0.054), top-1 agreement
+  93.5% (92.2%); 32K prompt KL 0.020 (0.019), top-1 95.3% (95.0%) - the same band as before. `STRATA_RING_BYTES=0`
+  restores 0.1.39's ring, loan and chunk choice.
 
 The full story, with measurements, bottlenecks and what comes next: **[docs/paper/Strata-Paper.pdf](paper/Strata-Paper.pdf)**.
 
