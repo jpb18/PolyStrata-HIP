@@ -12,7 +12,8 @@ It is opt-in and changes nothing when the options are absent (#465; the engine p
 ## Turning it on
 
 One GPU: add `"parallel": 2` to the model's config (`strata-<model>.json`) and restart, or run setup with
-`--parallel 2`. Setup says what it recommends for the card (below); a larger number is kept as asked, with a note.
+`--parallel 2`. Setup recommends it only where it does not cost speed (below); any number you ask for is kept as
+asked, with a note when it is more than setup would recommend.
 
 ```
 "parallel": 2
@@ -42,9 +43,14 @@ KV, more with a longer context unless the KV cache streams (`--kv-resident`: the
 stays in VRAM, and each slot's whole KV cache takes pinned RAM - 1.6 GB at 128K). On a card whose experts mostly run
 on the CPU, a batch also reads about as many distinct experts as the requests one by one (different conversations
 route to different experts), so the gain is in **latency** (nobody waits for a whole answer), and a request alone
-runs a little slower (the smaller expert cache) - see the measurements below. Setup recommends as many slots as take
-at most a fifth of the expert cache (~VRAM less 5 GB), up to 4: 2 on a 12 GB card, 3 on 16 GB, 4 from 24 GB; none
-below 12 GB.
+runs slower (the smaller expert cache): 11-24 % on a 12 GB card, see the measurements below.
+
+So setup recommends `"parallel"` **only where the experts mostly fit in VRAM**: the expert cache (each card's VRAM
+less ~5 GB, every card of a layer split counted) must still hold at least half of the model's experts beside the
+slots, and the slots may take at most a fifth of it, up to 4 slots. With Q2_0 at 32K that is 3 slots on a 24 GB
+card, 4 from 32 GB or on a split such as 2 x 16 GB; IQ3_S needs 32 GB or a split. Everywhere else (any 12 or 16 GB
+card alone) it stays at one at a time and setup says: "parallel N reduces waiting for several users but costs
+about 10-25% speed per request on this card". `--parallel N` is honoured as asked either way.
 
 ## How the server uses the slots
 
@@ -121,24 +127,25 @@ counter-based draw (Philox(seed, position)).
 One RTX 5070 (12 GB), Ryzen 5 7600, 64 GB DDR5, Q2_0, 32K context, through the HTTP server: C different requests
 sent at once (an 800-word essay each, 256 tokens per answer, greedy, thinking off), median of 3 rounds:
 
-| Concurrent | Setting | Total tok/s | Per request tok/s | First token: median / last of the round |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | one at a time (default) | 74.3 | 83.6 | 0.4 s / 0.4 s |
-| 1 | `"parallel": 2` | 67.3 | 74.8 | 0.4 s / 0.4 s |
-| 1 | `"parallel": 4` | 57.9 | 63.8 | 0.4 s / 0.4 s |
-| 2 | one at a time | 71.6 | 77.3 | 2.1 s / 4.1 s |
-| 2 | `"parallel": 2` | 61.0 | 32.6 | 0.5 s / 0.9 s |
-| 2 | `"parallel": 4` | 54.6 | 28.7 | 0.6 s / 0.7 s |
-| 4 | one at a time | 70.7 | 79.6 | 6.0 s / 11.2 s |
-| 4 | `"parallel": 2` | 61.2 | 32.2 | 4.5 s / 9.3 s |
-| 4 | `"parallel": 4` | 63.1 | 16.9 | 1.0 s / 1.8 s |
+| Concurrent | Setting | Total tok/s | vs one at a time | Per request tok/s | First token: median / last of the round |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | one at a time (default; what setup recommends on this card) | 74.3 | - | 83.6 | 0.4 s / 0.4 s |
+| 1 | `"parallel": 2` | 67.3 | -9 % | 74.8 | 0.4 s / 0.4 s |
+| 1 | `"parallel": 4` | 57.9 | -22 % | 63.8 | 0.4 s / 0.4 s |
+| 2 | one at a time | 71.6 | - | 77.3 | 2.1 s / 4.1 s |
+| 2 | `"parallel": 2` | 61.0 | -15 % | 32.6 | 0.5 s / 0.9 s |
+| 2 | `"parallel": 4` | 54.6 | -24 % | 28.7 | 0.6 s / 0.7 s |
+| 4 | one at a time | 70.7 | - | 79.6 | 6.0 s / 11.2 s |
+| 4 | `"parallel": 2` | 61.2 | -13 % | 32.2 | 4.5 s / 9.3 s |
+| 4 | `"parallel": 4` | 63.1 | -11 % | 16.9 | 1.0 s / 1.8 s |
 
 On this card the slots buy **waiting time, not speed**: the fourth of four requests starts after 1.8 s instead of
 11.2 s, but together they decode 11-24 % slower than one after the other, and a request alone loses 11 % (2 slots)
 or 24 % (4 slots), because the slots' sessions (0.56 GiB each) come out of the expert cache and most experts run
 on the CPU: a batch window over 4 conversations reads 24 CPU experts per layer against ~8 for one, so it costs about
 what the 4 tokens cost one after the other (`strata batch:` in the engine log: 54 ms per 4-row window, ~20 ms per
-1-row window). Cards that hold most experts in VRAM, and a layer split, are where the slots also add speed (below).
+1-row window). This is why setup leaves a 12 GB card at one at a time. Cards that hold most experts in VRAM, and a
+layer split, are where the slots also add speed (below).
 
 A 4-GPU layer split (4 x 16 GB, PCIe Gen3), IQ3_S, `--batch 8 --batch-groups 4 --trim-stage-weights`, through
 the HTTP server, 400 tokens per answer, temperature 0.7 (PR #559):
