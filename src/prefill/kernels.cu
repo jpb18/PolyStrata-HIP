@@ -315,6 +315,46 @@ __global__ void gdn_conv_tiled_kernel(const float* __restrict__ hist, const floa
         v0 = v1; v1 = v2; v2 = x;
     }
 }
+// Aurora (S23, opt-in STRATA_GDN_CONVL2=1): gdn_conv_tiled_kernel with gdn_l2_kernel folded in.  A block's 128 threads
+// are the 128 channels of one head, so for the q / k heads (block < 2 HK) the norm's sum of squares is the block's:
+// the same warp_sum, the same four partials added in the same order, the same v * rsqrtf(ss + eps) on the same
+// stored value - the same bits, without writing h and reading it back (16 tokens per round).
+__global__ void gdn_conv_l2_kernel(const float* __restrict__ hist, const float* __restrict__ qkv,
+                                   const float* __restrict__ w, float* __restrict__ h, int64_t T, float eps) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t t0 = (int64_t) blockIdx.y * CONV_TILE;
+    if (t0 >= T) return;
+    const int64_t t1 = t0 + CONV_TILE < T ? t0 + CONV_TILE : T;
+    auto input = [&](int64_t t) -> float { return t >= 0 ? qkv[t * C + c] : hist[c * 3 + (int) (t + 3)]; };
+    float v0 = input(t0 - 3), v1 = input(t0 - 2), v2 = input(t0 - 1);
+    const float w0 = w[c * 4], w1 = w[c * 4 + 1], w2 = w[c * 4 + 2], w3 = w[c * 4 + 3];
+    for (int64_t t = t0; t < t1; ++t) {   // gdn_conv_tiled_kernel's loop, verbatim
+        const float x = qkv[t * C + c];
+        const float s = v0 * w0 + v1 * w1 + v2 * w2 + x * w3;
+        h[t * C + c] = s / (1.0f + __expf(-s));
+        v0 = v1; v1 = v2; v2 = x;
+    }
+    if (blockIdx.x >= 2 * HK) return;   // v channels: no norm
+    __shared__ float part[16][4];
+    for (int64_t tb = t0; tb < t1; tb += 16) {
+        const int n = (int) (t1 - tb < 16 ? t1 - tb : 16);
+        for (int j = 0; j < n; ++j) {   // (each thread reads back its own stored value)
+            const float v = h[(tb + j) * C + c];
+            // gdn_l2_kernel as the compiler built it: the first xor step adds the partner's rounded square to an
+            // unrounded own one (an fma), the other steps are plain adds - spelled out so no contraction can differ
+            float sq = __fmaf_rn(v, v, __shfl_xor_sync(0xffffffffu, __fmul_rn(v, v), 16));
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) sq = __fadd_rn(sq, __shfl_xor_sync(0xffffffffu, sq, o));
+            if ((threadIdx.x & 31) == 0) part[j][threadIdx.x >> 5] = sq;
+        }
+        __syncthreads();
+        for (int j = 0; j < n; ++j) {
+            const float ss = part[j][0] + part[j][1] + part[j][2] + part[j][3];
+            h[(tb + j) * C + c] = h[(tb + j) * C + c] * rsqrtf(ss + eps);
+        }
+        __syncthreads();
+    }
+}
 // the history after the chunk: its last three inputs (the older history where the chunk is shorter than 3)
 __global__ void gdn_conv_hist_kernel(float* __restrict__ hist, const float* __restrict__ qkv, int64_t T) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -620,6 +660,7 @@ __global__ void __launch_bounds__(QTH) gdn_rec_quad_kernel(float* __restrict__ s
 // gdn_out_norm_kernel's body over a grid-stride walk of the (token, head) rows: the old kernel launched a 128-thread
 // block per row (T * 48 blocks; ~45 GB/s on the 8060S).  The same code per row (the same compiled arithmetic: a wave
 // per row with four values per lane rounded differently in its first xor step).
+template <bool WY>
 __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
                                                               float eps, float* __restrict__ y, uint16_t* __restrict__ y16,
                                                               int64_t rows, int64_t ld16) {
@@ -628,14 +669,28 @@ __global__ void __launch_bounds__(S) gdn_out_norm_loop_kernel(const float* __res
     for (int64_t row = blockIdx.x; row < rows; row += gridDim.x) {
         const size_t at = (size_t) row * S + col;
         const float oc = y[at];
-        float sp = warp_sum(oc * oc);
+        // (warp_sum as the compiler built it: the first xor step adds the partner's rounded square to an unrounded own
+        // one, an fma; spelled out so neither instance's contraction can differ)
+        float sp = __fmaf_rn(oc, oc, __shfl_xor_sync(0xffffffffu, __fmul_rn(oc, oc), 16));
+#pragma unroll
+        for (int o = 8; o > 0; o >>= 1) sp = __fadd_rn(sp, __shfl_xor_sync(0xffffffffu, sp, o));
         __syncthreads();                               // the previous row's sums are read
         if ((col & 31) == 0) wsum[col >> 5] = sp;
         __syncthreads();
         const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
-        const float v = oc * rsqrtf(ss / (float) S + eps) * gamma[col] * sigm(z[at]);
-        y[at] = v;
-        y16[(size_t) (row / HV) * ld16 + (size_t) (row % HV) * S + col] = hf(v);
+        const float bp = oc * rsqrtf(ss / (float) S + eps) * gamma[col], sg = sigm(z[at]);
+        const size_t o16 = (size_t) (row / HV) * ld16 + (size_t) (row % HV) * S + col;
+        if constexpr (WY) {
+            const float v = bp * sg;
+            y[at] = v;
+            y16[o16] = hf(v);
+        } else {
+            // STRATA_GDN_NOY=1: nothing reads the FP32 result (403 MB per 16K chunk).  The FP16 value is what the
+            // compiler makes of hf(v) next to the store: v_fma_mixlo_f16, the product rounded to FP16 once
+            unsigned r;
+            asm("v_fma_mixlo_f16 %0, %1, %2, 0" : "=v"(r) : "v"(sg), "v"(bp));
+            y16[o16] = (uint16_t) r;
+        }
     }
 }
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
@@ -1040,6 +1095,14 @@ void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, i
     if (serial || T <= CONV_TILE) {
         gdn_conv_kernel<<<C / 128, 128, 0, (cudaStream_t) stream>>>(history, qkv, conv_w, h, T);
     } else {
+        static const bool fused = [] { const char* v = std::getenv("STRATA_GDN_CONVL2"); return v && std::atoi(v) != 0; }();
+        if (fused) {
+            gdn_conv_l2_kernel<<<dim3(C / 128, (unsigned) ((T + CONV_TILE - 1) / CONV_TILE)), 128, 0,
+                                 (cudaStream_t) stream>>>(history, qkv, conv_w, h, T, eps);
+            gdn_conv_hist_kernel<<<C / 128, 128, 0, (cudaStream_t) stream>>>(history, qkv, T);
+            check("gdn_conv");
+            return;
+        }
         gdn_conv_tiled_kernel<<<dim3(C / 128, (unsigned) ((T + CONV_TILE - 1) / CONV_TILE)), 128, 0,
                                 (cudaStream_t) stream>>>(history, qkv, conv_w, h, T);
         gdn_conv_hist_kernel<<<C / 128, 128, 0, (cudaStream_t) stream>>>(history, qkv, T);
@@ -1061,8 +1124,13 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     if (variant == 1) {
         if (T > 0) {
             gdn_rec_quad_kernel<<<HV * (S / QCB), QTH, 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
-            gdn_out_norm_loop_kernel<<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
-                z, gamma, eps, y, y16, T * HV, ld16);
+            static const bool noy = [] { const char* v = std::getenv("STRATA_GDN_NOY"); return v && std::atoi(v) != 0; }();
+            if (noy)
+                gdn_out_norm_loop_kernel<false><<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
+                    z, gamma, eps, y, y16, T * HV, ld16);
+            else
+                gdn_out_norm_loop_kernel<true><<<(unsigned) std::min<int64_t>(T * HV, 4096), S, 0, (cudaStream_t) stream>>>(
+                    z, gamma, eps, y, y16, T * HV, ld16);
         }
         check("gdn_recurrence (quad)");
         return;
