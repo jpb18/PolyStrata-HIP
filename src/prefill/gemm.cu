@@ -454,6 +454,19 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
     }
 #endif
     if (ldx > 0 && ldx != K) {
+#ifdef STRATA_USE_HIP
+        // X arrived padded but the weight cannot be (an i-quant without a strided dequant, or the scratch is too
+        // small for N x (K + 64)): the weight unpadded, X read at its stride - the same products, the same bits
+        const int64_t rows = scratch_elems_ / K;
+        bool ok = rows > 0;
+        if (ldy <= 0) ldy = N;
+        for (int64_t r0 = 0; ok && r0 < N; r0 += rows) {
+            const int64_t n = (N - r0 < rows) ? N - r0 : rows;
+            strata::kernels::dequant_f16(ggml_type, W_blocks, r0, n, K, scratch_, stream_);
+            ok = strata_pf_gemm_f16_ld(X, ldx, scratch_, K, Y + r0, T, n, K, ldy, beta, stream_);
+        }
+        if (ok) return;
+#endif
         std::fprintf(stderr, "prefill gemm: a padded X (ldx %lld, K %lld) needs STRATA_PF_PAD's path\n",
                      (long long) ldx, (long long) K);
         std::exit(1);
