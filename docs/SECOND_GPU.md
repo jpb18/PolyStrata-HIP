@@ -86,8 +86,14 @@ until the generated tokens have been validated.
 
 ## Optional helper decode optimization
 
-`--remote-expert-opt` (default off, `--serve` only) optimizes the CUDA1-3
-helper caches above. The primary cache avoids admitting experts already held
+`--remote-expert-opt` (`--serve` only) optimizes the CUDA1-3 helper caches
+above. The engine's default is off; since 0.1.39b setup adds it to a config on
+two or more GPUs (`--gpus`, or "use both" at start). It acts only when a helper
+cache is configured; a layer split runs exactly as before. To leave it out:
+setup's `--no-remote-expert-opt`, or `"remote_expert_opt": false` in the
+model's `strata-*.json` (kept when setup runs again). Measured by the PR's
+author: dual RTX 4090 +63% mixed / +132% code decode over the plain helper
+path; RTX 5090 + 4090 +28% / +63%. The primary cache avoids admitting experts already held
 by a helper, and helpers replace cold experts with frequently routed CPU
 misses using their existing same-layer slots. Each helper reduces its expert
 outputs to a weighted partial sum on its GPU before returning one vector per

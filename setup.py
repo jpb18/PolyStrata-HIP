@@ -740,6 +740,29 @@ def split_budget(cfg: dict) -> bool:
     return True
 
 
+REMOTE_EXPERT_OPT = "--remote-expert-opt"
+
+
+def recommend_remote_expert_opt(cfg: dict, off: bool = False) -> None:
+    """0.1.39b (#578): a config on two or more GPUs gets --remote-expert-opt - the helper expert caches
+    (--expert-cache-device1..3) then stay complementary to the main GPU's, return their rows already weighted and skip
+    the CPU's activation quantization where no expert is left to it (dual RTX 4090: +63% mixed, +132% code over the
+    plain helper path).  The engine uses it only with a helper cache; a layer split runs as before.  A recommendation:
+    `off` (setup's --no-remote-expert-opt) or "remote_expert_opt": false in the config keeps it out, and a single-GPU
+    config is not touched."""
+    if not isinstance(cfg.get("gpu"), list) or len(cfg["gpu"]) < 2:
+        return
+    args = cfg.setdefault("args", [])
+    if off or cfg.get("remote_expert_opt") is False:
+        if REMOTE_EXPERT_OPT in args:
+            args.remove(REMOTE_EXPERT_OPT)
+        return
+    if REMOTE_EXPERT_OPT not in args:
+        args.append(REMOTE_EXPERT_OPT)
+        ok("multi-GPU: --remote-expert-opt (helper expert caches complementary to the main GPU's, #578; "
+           "--no-remote-expert-opt leaves it out)")
+
+
 def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
     """Starting a model set up for one card on a PC with two or more that can share it: asked once (the answer is
     saved in its config)."""
@@ -781,6 +804,7 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
         cfg["layer_split"] = cfg.get("layer_split") or "auto"
         split_mmap(cfg)
         split_budget(cfg)
+        recommend_remote_expert_opt(cfg)
         ok("from now on this model runs on " + " + ".join(gpu_name(g) for g in pair))
     else:
         ok("staying on one GPU (START-HERE.bat --gpus " + ",".join(str(g["index"]) for g in pair) + " switches)")
@@ -2931,6 +2955,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         cfg["gpu"], cfg["gpus_asked"] = gpu, True
         cfg["layer_split"] = layer_split or cfg.get("layer_split") or "auto"
         split_budget(cfg)                              # #498: before it is saved (it stops when the RAM is short)
+        recommend_remote_expert_opt(cfg)
         write_config(cfg_path, cfg)
         gpu = None
     elif gpu is not None:                              # --gpu N: this start only, on that card
@@ -3236,6 +3261,8 @@ def main() -> int:
     ap.add_argument("--layer-split", help="with --gpus: where each later GPU's layers start (\"18\", \"16,32\"), one "
                                           "rising number per GPU after the first - not layers per card; default "
                                           "auto, placed from each GPU's free VRAM")
+    ap.add_argument("--no-remote-expert-opt", action="store_true",
+                    help="with two or more GPUs: leave out --remote-expert-opt, which setup adds there (#578)")
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
     ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0)")
@@ -3966,6 +3993,7 @@ def main() -> int:
         cfg["gpu"] = multi
         cfg["layer_split"] = a.layer_split or "auto"
         ok(f"layer split across GPUs {multi} ({cfg['layer_split']})")
+        recommend_remote_expert_opt(cfg, off=a.no_remote_expert_opt)
     if a.host:
         cfg["host"] = a.host
     if a.api_key:
