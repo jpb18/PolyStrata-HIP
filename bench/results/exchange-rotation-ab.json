@@ -1,0 +1,65 @@
+{
+  "kind": "historical-native-same-binary-ab",
+  "date": "2026-10-03",
+  "qualification": "Original rotation build, not a new benchmark of the rebased patch.",
+  "source_commit": "1a50d913bf910a1f63fbc1a0788a7083e3ca5f8c",
+  "engine_sha256": "d14ed6b69a1814ce4b5c08932a47d6921a55fa0aa8dea50427ccf0782d1ad997",
+  "source_receipt_url": "https://github.com/CC-David-CC/Strata-a5500/blob/6beb57fd61ff7e15e48913e59f6a3558c87c8e63/bench/results/2026-10-03-q8-buffer-rotation/summary.json",
+  "source_receipt_sha256": "19ee56a37aa1c68ae2833da63af212e6f53f2a3ca156bceae94727b8e60d2ac9",
+  "hardware": "RTX PRO 6000 Blackwell Workstation Edition 96GB; Ryzen 9 7950X; 128GB installed RAM",
+  "weights": "Q8_0",
+  "kv": "fp16",
+  "task": "coding",
+  "mode": "target-only; MTP drafting and suffix drafting disabled",
+  "allocated_context": 73728,
+  "gpu_expert_slots": 16400,
+  "resident_complement_gib": 39.77,
+  "expert_blob_bytes": 5222400,
+  "adaptive_swaps": 96,
+  "wait_for_completion": true,
+  "output_tokens_identical": true,
+  "first_differing_output_index": null,
+  "token_evidence": "Original raw-ID comparison plus matching published token-count and serialized-token SHA-256 receipts; raw token arrays are not included in the published summary.",
+  "arms": [
+    {
+      "label": "serial-rotate0-r1",
+      "rotation": 0,
+      "prompt_sha256": "a8024ab0ba6b95ae36f2b9bd621723ed0f9b98e64ad82b94d389cdacb2232896",
+      "input_tokens": 65536,
+      "output_tokens": 1024,
+      "output_token_ids_sha256_json": "b1f0b9db418f250daa39ec15507b7e60afa8168c32bd23e7e7fdab178f95c25a",
+      "decode_tokens_per_second": 70.0741115848109,
+      "effective_output_tokens_per_second": 35.20482743535113,
+      "decode_milliseconds": 14613.1,
+      "resident_exchanges": 2377,
+      "rotated_blocks": 0,
+      "avoided_memcpy_payload_bytes": 0,
+      "diagnostics": [
+        "strata decode timing: 1024 windows, avg T 1.00, 1.00 tokens/window, 14.27 ms/window = verify 12.36 (GPU-reach wait 9.31 + per-layer host 2.53 [plan 0.03 actq 0.02 jobs 0.06 CPU 2.34] + stage 0.00) + commit/emit 0.02 + draft 0.00; per layer-window: CPU experts 0.34 (0.34 entries), VRAM hits 9.56, PCIe 0.11",
+        "strata serve: resident RAM: 39.77 GiB of experts in RAM, 2377 exchanged with the VRAM tier, 0 blob reads from the file",
+        "strata serve: expert tiers: GPU 469667 hits this request; since the start RAM 89645 blobs, files 0 blobs 85652.6 MB read (the GGUF in place)"
+      ]
+    },
+    {
+      "label": "serial-rotate1-r1",
+      "rotation": 1,
+      "prompt_sha256": "a8024ab0ba6b95ae36f2b9bd621723ed0f9b98e64ad82b94d389cdacb2232896",
+      "input_tokens": 65536,
+      "output_tokens": 1024,
+      "output_token_ids_sha256_json": "b1f0b9db418f250daa39ec15507b7e60afa8168c32bd23e7e7fdab178f95c25a",
+      "decode_tokens_per_second": 75.38724306496259,
+      "effective_output_tokens_per_second": 36.48173245764955,
+      "decode_milliseconds": 13583.2,
+      "resident_exchanges": 2377,
+      "rotated_blocks": 2377,
+      "avoided_memcpy_payload_bytes": 12413644800,
+      "diagnostics": [
+        "strata decode timing: 1024 windows, avg T 1.00, 1.00 tokens/window, 13.26 ms/window = verify 12.36 (GPU-reach wait 9.28 + per-layer host 2.56 [plan 0.04 actq 0.02 jobs 0.07 CPU 2.33] + stage 0.00) + commit/emit 0.02 + draft 0.00; per layer-window: CPU experts 0.34 (0.34 entries), VRAM hits 9.56, PCIe 0.11",
+        "strata serve: resident RAM: 39.77 GiB of experts in RAM, 2377 exchanged with the VRAM tier, 0 blob reads from the file",
+        "strata serve: exchange rotation: 2377 blocks, 12413644800 host memcpy bytes avoided (cumulative payload)",
+        "strata serve: expert tiers: GPU 469667 hits this request; since the start RAM 89645 blobs, files 0 blobs 85652.6 MB read (the GGUF in place)"
+      ]
+    }
+  ],
+  "limitation": "One pair on the original binary. No universal speedup, new-main throughput, or speculative-path token-parity claim."
+}
