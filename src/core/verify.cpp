@@ -56,6 +56,9 @@ constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
+const bool g_lfuse = [] { const char* v = std::getenv("STRATA_LFUSE"); return v != nullptr && v[0] == '1'; }();
+const bool g_lfuse_gate = [] { const char* v = std::getenv("STRATA_LFUSE_GATE"); return v == nullptr || v[0] != '0'; }();
+const bool g_lfuse_pair = [] { const char* v = std::getenv("STRATA_LFUSE_PAIR"); return v == nullptr || v[0] != '0'; }();
 const bool g_qdedup = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }();
 // S26 STRATA_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
 const bool g_qfuse = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }();
@@ -436,6 +439,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
     auto stamp = [&](int64_t l, int i, int grp) { if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs); };
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
+    // S26 STRATA_LFUSE=1: where the shared expert's gate / scale fusions apply (the paths they replace are the ones taken)
+    auto lfuse_on = [&](int n) {
+        return g_lfuse && resident_ && native_moe_combine_enabled() && dec_batch && n > 1 && n <= 8 &&
+               shared_expert_native_bf16();
+    };
+    bool sg_gated_[2] = {false, false};   // per group: the combine applies the shared gate
     groups_[T] = G;
 
     // ---- the window's inputs, from mapped staging
@@ -644,6 +653,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 }
                 stamp(l, 8, grp);
                 if (grp == 0) copy_from_mapped(tail_snap_ + (size_t) qi * TS, st.idx_tail, TS, cs);
+                const bool kv_multi = g_lfuse && !st.kv_hybrid && !st.kv_q4 && st.kv_int8 && n > 1;   // S26 STRATA_LFUSE
+                if (kv_multi)
+                    kv_append_q8_steps(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, step_ + tb * kStepCount,
+                                       (int) kStepCount, kcur_ + tb * NKV * HD, vcur_ + tb * NKV * HD, (int) (NKV * HD), n,
+                                       s, cs, &st.host);
+                else
                 for (int t = tb; t < te; ++t) {
                     const int32_t* step_t = step_ + t * kStepCount;
                     if (st.kv_hybrid) {   // K8V4: the unused half's lanes folded onto the used pool (layer.cpp)
@@ -734,8 +749,17 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         // the window's rows routed in 2 launches (one router GEMV reading the weight once, one
         // top-10) instead of 2 per token; every row's arithmetic is the single-token call's (STRATA_DEC_BATCH=0: old)
         const WeightRef* w_router = v.get("ffn_gate_inp.weight");
+        // S26 STRATA_LFUSE=1: the shared expert's gate row rides in the router GEMV launch, its sigmoid + row scale
+        // move into the combine, gate + up share one launch (all bitwise; resident combine path, 2-8 rows only)
+        const WeightRef* w_sgi = lfuse_on(n) && g_lfuse_gate ? v.get("ffn_gate_inp_shexp.weight") : nullptr;
+        bool sg_ready = false;
         if (dec_batch && n > 1 && w_router != nullptr && native_router_enabled() && NE == 512 && K == 10) {
             try {
+                if (w_sgi != nullptr)
+                    sg_ready = bf16_gemv_fp32_mmvf_multi_aux(mixed_ + tb * N, N, (const uint16_t*) w_router->data,
+                                                             logits_ + tb * NE, NE, N, NE, n,
+                                                             (const uint16_t*) w_sgi->data, sh_g_ + tb, 1, cs);
+                if (!sg_ready)
                 bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) w_router->data, logits_ + tb * NE, NE, N,
                                           NE, n, cs);
                 native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs);
@@ -779,7 +803,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             try {
                 shared_expert_multi(n, xm, sh_bf16_ + tb * N, nsw, (const uint16_t*) wgi->data, sh_gate_ + (size_t) tb * g.n_ff,
                                     sh_up_ + (size_t) tb * g.n_ff, sh_g_ + tb, shared_ + tb * N, N, g.n_ff, cs,
-                                    qdedup ? (const void*) (nat_xq_ + (size_t) tb * (N / 32) * 36) : nullptr);
+                                    qdedup ? (const void*) (nat_xq_ + (size_t) tb * (N / 32) * 36) : nullptr,
+                                    (sg_ready ? 1 : 0) | (lfuse_on(n) && g_lfuse_pair ? 2 : 0));
+                sg_gated_[grp] = sg_ready;
             } catch (const std::exception& e) {
                 err = std::string("verify shared expert: ") + e.what();
                 return false;
@@ -838,6 +864,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (resident_ && native_moe_combine_enabled()) {
             // every row is a hit: combine straight from hit_out as 0.0f + hit (= the zeroed row + moe_hit_add)
             try {
+                if (sg_gated_[grp])
+                    native_moe_combine_multi_hits_gated(hit_out, w_ + tb * K, shared_ + tb * N, sh_g_ + tb, bo_ + tb * N,
+                                                        N, K, n, cs);
+                else
                 native_moe_combine_multi_hits(hit_out, w_ + tb * K, shared_ + tb * N, bo_ + tb * N, N, K, n, cs);
             } catch (const std::exception& e) { err = "verify combine: " + std::string(e.what()); return false; }
         } else {
