@@ -289,6 +289,8 @@ class Main(Base):
         self.assertEqual(code, 0, out)
         for f in d.iterdir():                                                         # the first run "downloaded" them
             f.unlink()
+        import shutil
+        shutil.rmtree(self.t / "data" / "mtp", ignore_errors=True)       # #897: a draft layer already there needs less room
         (d / (list(setup.UNSLOTH_SHARDS)[0] + ".part")).write_bytes(b"x" * 1_500_000)
         with mock.patch.dict(setup.MODELS[M], {"download_gb": 0.003}):              # 1.5 MB still missing: no room
             code, out, cfg = self.main(["--context", "8192"], free=8.001)
