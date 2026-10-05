@@ -278,6 +278,8 @@ Verifier::~Verifier() {
     if (sh_cs_) cudaStreamSynchronize(sh_cs_);
     for (auto& e : exec_)
         if (e) cudaGraphExecDestroy(e);
+    for (auto& e : exec_nr_)
+        if (e) cudaGraphExecDestroy(e);
     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
     for (auto& kv : exec_bm_)
         if (kv.second) cudaGraphExecDestroy(kv.second);
@@ -293,7 +295,7 @@ Verifier::~Verifier() {
     if (ev_join_) cudaEventDestroy(ev_join_);
     if (arena_) cudaFree(arena_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
-                     h_flagA_, h_plan_, h_flagB_};
+                     h_flagA_, h_plan_, h_flagB_, h_plan_err_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
 }
@@ -376,6 +378,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(64, (void**) &h_flag_, (void**) &m_flag_) &&
               mapped(64, (void**) &h_flagA_, (void**) &m_flagA_) &&
               mapped(64, (void**) &h_flagB_, (void**) &m_flagB_) &&
+              mapped(64, (void**) &h_plan_err_, (void**) &m_plan_err_) &&
               mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_);
     if (!ok) { err = "verify: mapped staging allocation failed"; return false; }
     // the GPU plan: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) | ptr2(cap u64) | start2(cap+1)
@@ -492,6 +495,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // When true, every layer plans on device and writes directly into parts_ without any CPU doorbells,
     // wait_flag_ge spins, PCIe empty launches, or moe_hit_add copies.
     all_resident_ = false;
+    ar_off_ = false;
+    h_res_ = hits.h_res;
+    if (h_plan_err_ != nullptr) *(volatile uint32_t*) h_plan_err_ = 0;
     if (hits.h_res != nullptr && hits.d_res != nullptr && hits.cache_base != nullptr) {
         const char* v_ar = std::getenv("STRATA_VERIFY_ALL_RESIDENT");
         if (v_ar == nullptr || std::atoi(v_ar) != 0) {
@@ -635,7 +641,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         bool pending = l > 0 && !cvec().covers(l - 1);
         if (l == 1 && ple_on) {
             if (grp == 0) {
-                if (all_resident_) wait_flag_ge(m_flag_, 1, cs);
+                if (ar_on()) wait_flag_ge(m_flag_, 1, cs);
                 copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
             }
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
@@ -934,10 +940,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
             if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr)) return false;
         }
-        if (all_resident_) {
+        if (ar_on()) {
             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
-                          plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs);
+                          plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs, m_plan_err_);
         } else {
             if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
                 resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
@@ -1030,7 +1036,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                hit_xs_ + (size_t) tb * (N / 32), hit_scratch_, dst_buf, cs);
             }
         };
-        if (all_resident_) {
+        if (ar_on()) {
             stamp(l, 19, grp);
             grouped(p_ptr, p_start, p_counts, 0, parts_out);
             stamp(l, 20, grp);
@@ -1199,8 +1205,28 @@ std::string Verifier::profile_report() {
     return out;
 }
 
+// #871: is the zero-doorbell graph right for the next window?  Only while every expert of [lb_, le_) is in VRAM now
+// (the host table is the one the device copy was uploaded from; a loan, a VRAM shrink or a swap in flight has
+// marked some -1).  Not: the doorbell graph, which asks the pool for what the device does not hold.
+void Verifier::refresh_ar() {
+    if (!all_resident_ || h_res_ == nullptr || g_ == nullptr) return;
+    const int64_t ne = g_->n_expert;
+    const int32_t* r = h_res_ + lb_ * ne;
+    const int64_t n = (le_ < 0 ? g_->n_layers : le_) * ne - lb_ * ne;
+    int32_t lo = 0;
+    for (int64_t i = 0; i < n; ++i) lo = std::min(lo, r[i]);
+    const bool off = lo < 0;
+    if (off != ar_off_) {
+        ar_off_ = off;
+        std::fprintf(stderr, "strata verify: layers [%lld, %lld) %s\n", (long long) lb_, (long long) (le_ < 0 ? g_->n_layers : le_),
+                     off ? "have experts out of VRAM (a prompt loan, a shrink or a swap): the doorbell graph runs the windows"
+                         : "are 100% VRAM resident again: the zero-doorbell graph");
+    }
+}
+
 bool Verifier::capture(int T, std::string& err) {
-    if (exec_[T] != nullptr) return true;
+    cudaGraphExec_t& exec_t = ar_off_ ? exec_nr_[T] : exec_[T];
+    if (exec_t != nullptr) return true;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "verify: begin capture failed";
         return false;
@@ -1249,13 +1275,13 @@ bool Verifier::capture(int T, std::string& err) {
         std::fprintf(stderr, "\n");
     }
 #endif
-    const cudaError_t ie = cudaGraphInstantiate(&exec_[T], graph, 0);
+    const cudaError_t ie = cudaGraphInstantiate(&exec_t, graph, 0);
     cudaGraphDestroy(graph);
     if (ie != cudaSuccess) {
         err = std::string("verify: instantiate: ") + cudaGetErrorString(ie);
         return false;
     }
-    const cudaError_t ue = cudaGraphUpload(exec_[T], cs_);
+    const cudaError_t ue = cudaGraphUpload(exec_t, cs_);
     const cudaError_t us = cudaStreamSynchronize(cs_);
     std::fprintf(stderr, "strata verify: captured the %d-token window (upload %s, sync %s)\n", T,
                  cudaGetErrorString(ue), cudaGetErrorString(us));
@@ -1397,6 +1423,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
     if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
+    refresh_ar();
     if (!capture(T, err) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
     const Clock::time_point t0 = Clock::now();
@@ -1418,7 +1445,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     trace_ev("WINDOW", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
     VDBG("staged; launching\n");
-    const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
+    if (ar_on() && h_plan_err_ != nullptr) *(volatile uint32_t*) h_plan_err_ = 0;
+    const cudaError_t le = cudaGraphLaunch(ar_off_ ? exec_nr_[T] : exec_[T], cs_);
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
@@ -1429,7 +1457,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
     const int64_t steps = (le_ - lb_) * G;
     const bool test_stall = g_test_stall > 0 && windows + 1 == g_test_stall;   // #267 test hook (off: false)
-    if (all_resident_ && !test_stall) {
+    if (ar_on() && !test_stall) {
         if (do_ple) {
             const Clock::time_point tp = Clock::now();
             if (!ss.ple.table->gather_batch(ple_rows, (size_t) T, h_ple_, err)) return false;
@@ -1532,6 +1560,11 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const cudaError_t se = cudaStreamSynchronize(cs_);
     trace_ev("SYNCED", -1, -1, (int64_t) se);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
+    if (ar_on() && h_plan_err_ != nullptr && *(volatile uint32_t*) h_plan_err_ != 0) {   // #871: refresh_ar saw the table whole
+        *(volatile uint32_t*) h_plan_err_ = 0;
+        err = "verify: the all-resident plan met an expert that is not in VRAM (the residency table changed during the window)";
+        return false;
+    }
     commit_pending_ = false;
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     if (copy_used_) {
@@ -1778,7 +1811,7 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
 }
 
 bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {
-    cudaGraphExec_t& ex = exec_bm_[batch_key(rows, S, hbase)];
+    cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];
     if (ex != nullptr) return true;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "verify: begin batch capture failed";
@@ -1904,6 +1937,7 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
             err = "verify: slot " + std::to_string(rows[t]) + " runs past its context";
             return false;
         }
+    refresh_ar();
     if (!capture_batch(rows, S, hbase, err) || !capture_commit_batch(rows, S, hbase, err)) return false;
     const Clock::time_point t0 = Clock::now();
     const QsaShapes s = shapes_of(g);
@@ -1961,7 +1995,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     const OnDevice on_device(device_);
     const ModelGeometry& g = *g_;
     if (!stage_batch(rows, S, 0, tokens, pos, err)) return false;
-    const cudaError_t le = cudaGraphLaunch(exec_bm_[batch_key(rows, S, 0)], cs_);
+    const cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, 0)], cs_);
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
     volatile uint32_t* const seq = h_seq_;
@@ -2068,7 +2102,7 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
     int rows[8] = {};
     for (int t = 0; t < S && t < 8; ++t) rows[t] = base + t;
     if (!stage_batch(rows, S, base, tokens, pos, err)) return false;
-    cudaError_t le = cudaGraphLaunch(exec_bm_[batch_key(rows, S, base)], cs_);
+    cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, base)], cs_);
     if (le == cudaSuccess) le = cudaGraphLaunch(commit_bm_[batch_key(rows, S, base)], cs_);   // right behind it: every row is kept
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
