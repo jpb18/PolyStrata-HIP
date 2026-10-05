@@ -2134,6 +2134,13 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(b["usage"]["completion_tokens"], 20 + len(extra) + len(ThinkingEngine.ANSWER) + 1)
         self.assertEqual(b["usage"]["prompt_tokens"], len(first))
 
+    def test_a_stop_string_is_found_in_the_answer_after_the_wrap_up(self):
+        """#454: the continuation after the thinking budget is cut at a stop string too."""
+        code, b = self.openai(reasoning_budget_tokens=20, stop=["answer is"])
+        self.assertEqual(code, 200, b)
+        msg = b["choices"][0]["message"]
+        self.assertEqual((msg["content"], b["choices"][0]["finish_reason"]), ("The ", "stop"))
+
     def test_anthropic_stream(self):
         from serve.server import REASONING_WRAP_UP
         code, raw = self.post("/v1/messages", {"model": "m", "max_tokens": 400, "stream": True,
