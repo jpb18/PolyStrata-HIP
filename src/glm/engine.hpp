@@ -35,6 +35,8 @@ struct Options {
                                   ///< what a layer of Q2_K experts leaves out of the cache
     int stage_ahead = 256;        ///< from this many tokens, a call routes to most of a layer's experts, and the
                                   ///< ones that are not cached start their copy before the layer has routed; 0: never
+    int expert_swaps = 16;        ///< experts on their way into the cache at a time while an answer is written, each
+                                  ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
@@ -70,12 +72,14 @@ struct Layer {
     size_t gu_bytes = 0, d_bytes = 0;  ///< one expert's gate (or up), and its down
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
+    int trade = -1;                    ///< layers with the same number can take each other's slots: same size
 };
 
 /// A routed expert is run from the VRAM cache or on the CPU when tokens come a few at a time, as an answer's do
 /// (gpu_experts, cpu_experts), and in a prompt batch from the cache or the staging buffer (batch_*).
 struct Stats {
     int64_t tokens = 0, gpu_experts = 0, cpu_experts = 0, batch_cached = 0, batch_staged = 0;
+    int64_t swapped_experts = 0;   ///< experts that took a cached one's slot (follow())
     double cpu_ms = 0, route_wait_ms = 0;
 };
 
@@ -136,7 +140,7 @@ private:
     void alloc_state();
     void assign_scratch();
     void fill_expert_cache();
-    void plan_staging();
+    void plan_ahead(Layer& L, int il);
     void kda(Layer& L, int n);
     void dsa(Layer& L, int n);
     void dsa_select(Layer& L, int first, int n);
@@ -144,6 +148,8 @@ private:
     void moe(Layer& L, int il, int n);
     void moe_rows(Layer& L, int il, int n);
     void stage(const Layer& L, const int32_t* experts, int m, void* stream);
+    void follow(int written);
+    void follow_loop();
     void route(const Layer& L, const float* logits, int* ids, float* w);
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
@@ -223,6 +229,28 @@ private:
     int stage_turn_ = 0;
     std::vector<int32_t> ids_, count_, first_, group_, round_;
     std::vector<uint8_t> sent_;
+
+    // The cache follows what is written (follow()).  It is filled for the average answer; while one is written,
+    // the experts it keeps routing to and the cache lacks are copied over the cached ones it uses least, by a
+    // thread and a stream of their own.
+    struct Swap;
+    struct Pick {
+        int il = -1, e = 0;
+        float recent = 0;
+        int64_t prior = 0;
+    };
+    std::unique_ptr<Swap[]> swap_;   ///< the experts on their way, opt_.expert_swaps at most
+    int n_swap_ = 0, n_trade_ = 0;
+    size_t slot_max_ = 0;            ///< the largest expert of the cache
+    void* swap_st_ = nullptr;        ///< the stream of their uploads
+    std::thread follower_;
+    std::mutex swap_m_;
+    std::condition_variable swap_cv_;
+    bool swap_quit_ = false;
+    std::string swap_error_;         ///< why the thread stopped; follow() throws it
+    std::vector<float> recent_;      ///< per (layer, expert): its uses by written tokens, halved every kSwapHalf
+    std::vector<uint8_t> coming_;    ///< per (layer, expert): on its way into the cache
+    std::vector<Pick> in_, out_;     ///< per trade number: the expert to bring in, and the one to give up
 
     int64_t pos_ = 0;
     std::vector<float> probs_, pick_;

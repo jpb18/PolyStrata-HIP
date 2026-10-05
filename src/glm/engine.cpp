@@ -36,6 +36,11 @@ constexpr int kAttnRows = 32;       // tokens one pass of the sparse attention t
 constexpr int kStageRows = 32;
 constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
+// follow(): an expert's recent use is the count of its uses, halved every kSwapHalf tokens.  An expert takes a
+// cached one's slot when it was used twice lately and more than twice as much as that one.  Counts this small are
+// noisy, and an upload gets in the way of the work: a slot goes to an expert that will clearly be used more.
+constexpr float kSwapMin = 2.f;
+constexpr int kSwapHalf = 128;
 
 using Clock = std::chrono::steady_clock;
 
@@ -219,9 +224,29 @@ private:
     std::unordered_map<std::string, Where> where_;
 };
 
+// One expert on its way into the cache.  The engine's thread asks, the follower copies and sends, and the engine's
+// thread gives it the slot once the upload has arrived.
+struct Engine::Swap {
+    enum { kFree, kAsked, kSent };
+    std::atomic<int> at{kFree};
+    int il = 0, e = 0;
+    uint8_t* slot = nullptr;       // where it goes in VRAM: the slot of the expert it replaces
+    uint8_t* pinned = nullptr;
+    cudaEvent_t done = nullptr;    // marks its upload
+};
+
 Engine::Engine() = default;
 
 Engine::~Engine() {
+    if (follower_.joinable()) {
+        {
+            std::lock_guard<std::mutex> l(swap_m_);
+            swap_quit_ = true;
+        }
+        swap_cv_.notify_all();
+        follower_.join();
+    }
+    if (swap_st_) cudaStreamSynchronize(cs(swap_st_));
     if (up_) cudaStreamSynchronize(cs(up_));
     if (st_) cudaStreamSynchronize(cs(st_));
     workers_.reset();
@@ -230,7 +255,10 @@ Engine::~Engine() {
     for (void* p : host_allocs_) cudaFreeHost(p);
     for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_})
         if (e) cudaEventDestroy((cudaEvent_t) e);
+    for (int j = 0; j < n_swap_; ++j)
+        if (swap_[(size_t) j].done) cudaEventDestroy(swap_[(size_t) j].done);
     blas_destroy(blas_);
+    if (swap_st_) cudaStreamDestroy(cs(swap_st_));
     if (up_) cudaStreamDestroy(cs(up_));
     if (st_) cudaStreamDestroy(cs(st_));
 }
@@ -673,13 +701,17 @@ void Engine::fill_expert_cache() {
         double value;
     };
     std::vector<Cand> cands;
+    std::vector<size_t> sizes;   // the slot sizes there are; a layer's place among them is its trade number
     size_t all = 0;
     for (int il = 0; il < n_layer_; ++il) {
-        const Layer& L = layers_[(size_t) il];
+        Layer& L = layers_[(size_t) il];
         if (!L.moe || !kernels::native_mmvq_supported((int) L.gu_type) ||
             !kernels::native_mmvq_supported((int) L.d_type))
             continue;
         const size_t bytes = pad(2 * L.gu_bytes + L.d_bytes);
+        if (std::find(sizes.begin(), sizes.end(), bytes) == sizes.end()) sizes.push_back(bytes);
+        L.trade = (int) (std::find(sizes.begin(), sizes.end(), bytes) - sizes.begin());
+        slot_max_ = std::max(slot_max_, bytes);
         for (int e = 0; e < n_expert_; ++e) {
             const double used = prior_.empty() ? 0.0 : (double) prior_[(size_t) il * n_expert_ + e];
             cands.push_back({il, e, bytes, used / (double) bytes});
@@ -689,6 +721,7 @@ void Engine::fill_expert_cache() {
     std::stable_sort(cands.begin(), cands.end(),
                      [](const Cand& a, const Cand& b) { return a.value != b.value ? a.value > b.value : a.e < b.e; });
 
+    n_trade_ = (int) sizes.size();
     const size_t arena = std::min(all, free_b - reserve);
     if (arena == 0) return;
     exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
@@ -708,20 +741,125 @@ void Engine::fill_expert_cache() {
     }
 }
 
-// What a layer copies to the staging buffer ahead of its routing: the experts the cache left out, the most used
-// first, as many as the buffer holds.
-void Engine::plan_staging() {
-    if (!mmq_) return;
-    for (int il = 0; il < n_layer_; ++il) {
-        Layer& L = layers_[(size_t) il];
-        if (!L.moe) continue;
-        for (int e = 0; e < n_expert_; ++e)
-            if (!L.slot[(size_t) e]) L.ahead.push_back(e);
-        if (!prior_.empty()) {
-            const int64_t* used = prior_.data() + (size_t) il * n_expert_;
-            std::stable_sort(L.ahead.begin(), L.ahead.end(), [used](int32_t a, int32_t b) { return used[a] > used[b]; });
+// What a layer copies to the staging buffer ahead of its routing: the experts outside the cache, the most used
+// first, as many as the buffer holds.  Worked out when the layer runs: the cache changes (follow()).
+void Engine::plan_ahead(Layer& L, int il) {
+    L.ahead.clear();
+    for (int e = 0; e < n_expert_; ++e)
+        if (!L.slot[(size_t) e]) L.ahead.push_back(e);
+    if (!prior_.empty()) {
+        const int64_t* used = prior_.data() + (size_t) il * n_expert_;
+        std::stable_sort(L.ahead.begin(), L.ahead.end(), [used](int32_t a, int32_t b) { return used[a] > used[b]; });
+    }
+    L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (2 * L.gu_bytes + L.d_bytes)));
+}
+
+// The follower: an asked-for expert goes from the mapped file to its pinned buffer, and from there to its slot.
+// The file may have to be read for it, which is why this is not the engine's thread.
+void Engine::follow_loop() {
+    std::unique_lock<std::mutex> lk(swap_m_);
+    for (;;) {
+        Swap* s = nullptr;
+        swap_cv_.wait(lk, [&] {
+            for (int j = 0; j < n_swap_ && !s; ++j)
+                if (swap_[(size_t) j].at.load() == Swap::kAsked) s = &swap_[(size_t) j];
+            return swap_quit_ || s;
+        });
+        if (swap_quit_) return;
+        lk.unlock();
+        const Layer& L = layers_[(size_t) s->il];
+        const size_t e = (size_t) s->e, gu = L.gu_bytes;
+        std::memcpy(s->pinned, L.exp_gate + e * gu, gu);
+        std::memcpy(s->pinned + gu, L.exp_up + e * gu, gu);
+        std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+        cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, cs(swap_st_));
+        if (err == cudaSuccess) err = cudaEventRecord(s->done, cs(swap_st_));
+        lk.lock();
+        if (err != cudaSuccess) {
+            swap_error_ = cudaGetErrorString(err);
+            return;
         }
-        L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (2 * L.gu_bytes + L.d_bytes)));
+        s->at.store(Swap::kSent);
+    }
+}
+
+// The cache follows what is written.  Called at the start of an eval, where nothing queued reads the cache, with
+// the number of tokens the eval writes (0 for a prompt batch).  The experts whose upload has arrived get their
+// slots.  Then, for written tokens, the experts used lately that the cache lacks start on their way, each to the
+// slot of the cached expert of its size that was used least (among equals, the one the profile ranks last).
+//
+// A prompt batch neither counts nor moves anything.  What a prompt routes to says no more about the answer than
+// the profile does, and moving the cache while the prompt was read cost 3% of the reading speed (measured).
+void Engine::follow(int written) {
+    {
+        std::lock_guard<std::mutex> l(swap_m_);
+        if (!swap_error_.empty()) throw std::runtime_error("expert upload: " + swap_error_);
+    }
+    const size_t ne = (size_t) n_expert_;
+    int n_free = 0;
+    for (int j = 0; j < n_swap_; ++j) {
+        Swap& s = swap_[(size_t) j];
+        if (s.at.load() == Swap::kSent) {
+            const cudaError_t arrived = cudaEventQuery(s.done);
+            if (arrived == cudaErrorNotReady) continue;
+            ck(arrived, "expert upload");
+            layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
+            coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
+            s.at.store(Swap::kFree);
+            ++stats_.swapped_experts;
+        }
+        n_free += s.at.load() == Swap::kFree;
+    }
+    if (written <= 0) return;
+    const float keep = std::exp2(-(float) written / (float) kSwapHalf);
+    for (float& r : recent_) r *= keep;
+
+    bool asked = false;
+    for (; n_free > 0; --n_free) {
+        in_.assign((size_t) n_trade_, Pick{});
+        out_.assign((size_t) n_trade_, Pick{});
+        for (int il = 0; il < n_layer_; ++il) {
+            const Layer& L = layers_[(size_t) il];
+            if (L.trade < 0) continue;
+            Pick& in = in_[(size_t) L.trade];
+            Pick& out = out_[(size_t) L.trade];
+            for (int e = 0; e < n_expert_; ++e) {
+                const size_t i = (size_t) il * ne + (size_t) e;
+                const float r = recent_[i];
+                const int64_t p = prior_.empty() ? 0 : prior_[i];
+                if (L.slot[(size_t) e]) {
+                    if (out.il < 0 || r < out.recent || (r == out.recent && p < out.prior)) out = {il, e, r, p};
+                } else if (r >= kSwapMin && !coming_[i] &&
+                           (in.il < 0 || r > in.recent || (r == in.recent && p > in.prior))) {
+                    in = {il, e, r, p};
+                }
+            }
+        }
+        int best = -1;
+        for (int c = 0; c < n_trade_; ++c) {
+            const Pick& in = in_[(size_t) c];
+            const Pick& out = out_[(size_t) c];
+            if (in.il < 0 || out.il < 0 || in.recent < 2.f * out.recent + kSwapMin) continue;
+            if (best < 0 || in.recent - out.recent > in_[(size_t) best].recent - out_[(size_t) best].recent) best = c;
+        }
+        if (best < 0) break;
+
+        const Pick in = in_[(size_t) best], out = out_[(size_t) best];
+        Swap* s = nullptr;
+        for (int j = 0; j < n_swap_ && !s; ++j)
+            if (swap_[(size_t) j].at.load() == Swap::kFree) s = &swap_[(size_t) j];
+        uint8_t*& given = layers_[(size_t) out.il].slot[(size_t) out.e];
+        s->il = in.il;
+        s->e = in.e;
+        s->slot = given;
+        given = nullptr;
+        coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
+        s->at.store(Swap::kAsked);
+        asked = true;
+    }
+    if (asked) {
+        { std::lock_guard<std::mutex> l(swap_m_); }
+        swap_cv_.notify_one();
     }
 }
 
@@ -732,6 +870,8 @@ void Engine::load(const Options& o) {
         throw std::runtime_error("a prompt batch is 1 to 4096 tokens");
     if (opt_.stage_mib < 1) throw std::runtime_error("the staging buffer must be at least 1 MiB");
     if (opt_.stage_ahead < 0) throw std::runtime_error("the batch size to stage ahead from cannot be negative");
+    if (opt_.expert_swaps < 0 || opt_.expert_swaps > 64)
+        throw std::runtime_error("0 to 64 experts can be on their way into the cache at a time");
     gg_ = std::make_unique<Shards>(opt_.model);
     load_geometry();
 
@@ -773,8 +913,21 @@ void Engine::load(const Options& o) {
     alloc_state();
     if (!opt_.profile.empty()) read_profile(opt_.profile, n_layer_, n_expert_, prior_);
     fill_expert_cache();
-    plan_staging();
     workers_ =std::make_unique<Workers>(opt_.threads > 0 ? opt_.threads : usable_cpus());
+    if (cached_ > 0 && opt_.expert_swaps > 0) {
+        swap_ = std::make_unique<Swap[]>((size_t) opt_.expert_swaps);
+        cudaStream_t up = nullptr;
+        ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
+        swap_st_ = up;
+        for (; n_swap_ < opt_.expert_swaps; ++n_swap_) {
+            Swap& s = swap_[(size_t) n_swap_];
+            s.pinned = (uint8_t*) hmalloc(slot_max_, "pinned memory");
+            ck(cudaEventCreateWithFlags(&s.done, cudaEventDisableTiming), "cudaEventCreate");
+        }
+        recent_.assign(use_.size(), 0.f);
+        coming_.assign(use_.size(), 0);
+        follower_ = std::thread([this] { follow_loop(); });
+    }
     reset();
 }
 
@@ -1028,6 +1181,7 @@ void Engine::moe(Layer& L, int il, int n) {
         for (int k = 0; k < n_used_; ++k) {
             const size_t e = (size_t) ids[k];
             ++use_[(size_t) il * n_expert_ + e];
+            if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
             if (const uint8_t* s = L.slot[e]) {
                 kernels::native_mmvq((int) L.gu_type, s, xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
                 swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
@@ -1103,7 +1257,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     swiglu_clamp(g_, u_, h_, n * n_ff_exp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
 
-    const int n_ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead ? (int) L.ahead.size() : 0;
+    const bool ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead;
+    if (ahead) plan_ahead(L, il);
+    const int n_ahead = ahead ? (int) L.ahead.size() : 0;
     if (n_ahead > 0) {
         // the buffer is free once the layer before has read it
         ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
@@ -1226,6 +1382,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
 
     // h_r_ and h_cpu_ may still be the source of the previous call's copies
     ck(cudaStreamSynchronize(cs(st_)), "eval");
+    if (n_swap_ > 0) follow(n < kStageRows ? n : 0);
     const size_t e_row = (size_t) n_embd_, r_row = kHc * e_row;
     for (int t = 0; t < n; ++t) {
         float* r = h_r_ + (size_t) t * r_row;

@@ -419,11 +419,11 @@ int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const 
     const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
     std::fprintf(stderr,
                  "prompt %lld tokens %.1f tok/s, generated %lld tokens %.2f tok/s (%s); experts from VRAM %.1f%%, "
-                 "CPU experts %.1f ms/token, router wait %.1f ms/token\n",
+                 "CPU experts %.1f ms/token, router wait %.1f ms/token, %lld experts swapped into VRAM\n",
                  (long long) r.read, r.prompt_ms > 0 ? 1000.0 * (double) r.read / r.prompt_ms : 0.0,
                  (long long) r.produced, r.decode_ms > 0 ? 1000.0 * (double) (r.produced - 1) / r.decode_ms : 0.0,
                  r.finish, 100.0 * (double) st.gpu_experts / experts, st.cpu_ms / (double) std::max<int64_t>(st.tokens, 1),
-                 st.route_wait_ms / (double) std::max<int64_t>(st.tokens, 1));
+                 st.route_wait_ms / (double) std::max<int64_t>(st.tokens, 1), (long long) st.swapped_experts);
     return 0;
 }
 
@@ -435,6 +435,9 @@ void usage() {
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default 1024)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, updated on exit\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
+                 "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
+                 "                         into VRAM, in place of cached ones it uses less (default 16, 0 = the cache\n"
+                 "                         stays as it was loaded)\n"
                  "  --prompt-batch N       prompt tokens read at a time (default 1024); about 1.4 MiB of VRAM each\n"
                  "  --stage-mib N          VRAM the experts outside the cache pass through in a prompt batch (default\n"
                  "                         2048); with less, more of them are copied after the layer has routed\n"
@@ -482,6 +485,7 @@ int main(int argc, char** argv) {
         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
+        else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());

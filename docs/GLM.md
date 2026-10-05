@@ -130,6 +130,15 @@ of the file. The rest of the weights are always in VRAM.
   at a 32K context. `--expert-profile FILE` is where the engine keeps count of which ones are used. It reads the
   file at the start to choose, and writes it back when it stops. Without a profile it has no counts yet and keeps
   the same number of experts from every layer, so the second start is the one to measure.
+- **The cache follows the answer.** The choice at the start fits the average answer, and some answers badly: of
+  the expert uses of a 400-token answer with code in it, 20% found their expert in VRAM. So while an answer is
+  written, the engine counts which experts the last few hundred tokens used. The ones they keep choosing are copied
+  into VRAM, each over a cached expert they chose less than half as often, up to 16 on their way at a time. For
+  that answer the share went to 50% and the speed from 26.4 to 30.7 tokens/s. The cache stays as the last answer
+  left it, so the next one starts from there. A prompt does not move it. `--expert-swaps 0` leaves the cache as it
+  was loaded. The same prompt then also gets the same answer every time: an expert's result differs in its last
+  digits between the CPU and the card, and with swaps an expert can run on one in one run and on the other in
+  the next.
 - **Writing an answer.** An expert that is not in VRAM runs on the CPU while the card runs its share.
 - **Reading a prompt.** The prompt goes in up to 1,024 tokens at a time. For each layer the experts outside the
   cache are copied through a buffer in VRAM and run there. A larger batch reads faster and leaves less VRAM for the
@@ -171,6 +180,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--vram-reserve-mib N` | 1024 | VRAM left free beside the expert cache |
 | `--expert-profile FILE` | | expert use counts, read at the start and written back at the end |
 | `--no-gpu-experts` | | keep every routed expert on the CPU |
+| `--expert-swaps N` | 16 | while an answer is written, experts on their way into VRAM at a time, each in place of a cached one the answer uses less; 0 = the cache stays as it was loaded |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
 | `--stage-ahead N` | 256 | from N tokens, a batch copies those experts before the layer has chosen; 0 = never |
