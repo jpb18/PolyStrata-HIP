@@ -4118,8 +4118,9 @@ def main() -> int:
                      "copy of the most-used ones: it needs 32 GB of RAM or more (48 GB for the full model); --model "
                      "NAME --yes installs one anyway")
         warn(f"going on with {ram:.0f} GB of RAM, as you chose")
-    ok(f"RAM: {ram:.0f} GB" if ram >= need - 4 else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)"
-       + ("; the GPU's VRAM makes up for it (the low-RAM mode)" if ram < need - 4 and low_ok else ""))
+    ram_msg = (f"RAM: {ram:.0f} GB" if ram >= need - 4 else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)"
+               + ("; the GPU's VRAM makes up for it (the low-RAM mode)" if ram < need - 4 and low_ok else ""))
+    (ok if ram >= need - 4 or low_ok else warn)(ram_msg)       # #977: a RAM below every model's floor is not [ok]
     pf = page_file_gb()
     if pf is not None and pf < 4:
         warn(f"Windows' page file is {pf:.1f} GB: the graphics card's memory needs room there too (issue #60), so "
@@ -4143,6 +4144,7 @@ def main() -> int:
         a.build = True
     if a.check:
         say()
+        any_fits = False
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
             if d.get("budget"):
@@ -4155,7 +4157,14 @@ def main() -> int:
                 verdict = (f"fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, gpu['vram_gb']):.0f}% "
                            "of its experts, " + ("the rest stays in RAM)" if low_ram_resident(m, ram, gpu["vram_gb"])
                                                  else "the rest is read from the SSD as needed)"))
+            any_fits = any_fits or not verdict.startswith("does not fit")
             say(f"  {m:8s} needs ~{d['ram_gb']} GB RAM: {verdict}")
+        if not any_fits:
+            # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts). It only
+            # reports: --model NAME --yes still installs one anyway.
+            say(f"\nThis PC cannot run Strata yet: no model size fits {ram:.0f} GB of RAM (the smallest needs about "
+                f"{need} GB). --model NAME --yes installs one anyway, slowly.")
+            return 1
         say("\nThis PC can run Strata. Run it again without --check to install.")
         return 0
 

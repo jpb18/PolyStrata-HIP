@@ -490,6 +490,15 @@ class IQ4XS(Base):
         self.assertNotIn("EXPERIMENTAL", line)
         self.assertIn("EXPERIMENTAL", next(ln for ln in out.splitlines() if ln.strip().startswith(M)))
 
+    def test_check_below_every_floor(self):
+        # #977: 16 GB fits no size; the RAM line is not [ok] and the verdict says so
+        code, out, _ = self.main(["--check"], ram=16.0, m=X)
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("[ok] RAM", out)
+        self.assertIn("[!]  RAM: 16 GB (less than", out)
+        self.assertIn("This PC cannot run Strata yet", out)
+        self.assertNotIn("This PC can run Strata", out)
+
     def test_engine_0138(self):
         code, out, cfg = self.main(["--context", "8192"], version="0.1.37", m=X)
         self.assertEqual(code, 1)
