@@ -802,6 +802,34 @@ __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m);
 static bool gr_fast();
 namespace {
 #endif
+// STRATA_GR_DOWN_MAX4: launches of up to 4 tokens hold 4 tokens' sums per thread instead of kFusedGrMaxT (the same bits).
+// Set, it decides (0 = off, anything else on); unset, it is on for the card generations where it was measured to win
+// (sm_120: +2.8-3.5% decode, bench #832, re-measured for 0.1.40) and off elsewhere.
+bool gr_down_max4() {
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_GR_DOWN_MAX4");
+        return (v != nullptr && v[0] != '\0') ? (std::atoi(v) != 0 ? 1 : 0) : -1;
+    }();
+    if (env >= 0) return env == 1;
+#if defined(__HIPCC__)
+    return false;
+#else
+    static std::atomic<int> by_dev[64];   // 0 = not asked yet, 1 = off, 2 = on
+    int dev = 0;
+    cudaGetDevice(&dev);
+    if (dev < 0 || dev >= 64) return false;
+    int v = by_dev[dev].load();
+    if (v == 0) {
+        int major = 0, minor = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+        v = (major == 12 && minor == 0) ? 2 : 1;
+        by_dev[dev].store(v);
+    }
+    return v == 2;
+#endif
+}
+
 void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
     const int n_tok = m.T;
 #if defined(STRATA_HIP_GFX906)
@@ -831,11 +859,10 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             for (int k = 0; k < ct; ++k) c.a[k] = m.a[c0 + k];
         }
         const size_t smem = (size_t) ct * per_tok;
-        // #443, opt-in STRATA_GR_DOWN_MAX4=1: launches of up to 4 tokens hold 4 tokens' sums per thread instead of
+        // #443, STRATA_GR_DOWN_MAX4: launches of up to 4 tokens hold 4 tokens' sums per thread instead of
         // kFusedGrMaxT - the same tile, block size, accumulation order and plain/split/staged path, so the same bits
-        // (read once: this runs per layer when decode is not captured)
-        static const bool max4_on = [] { const char* v = std::getenv("STRATA_GR_DOWN_MAX4"); return v && std::atoi(v) != 0; }();
-        const bool max4 = max4_on && ct <= 4;
+        // (decided once per device: this runs per layer when decode is not captured)
+        const bool max4 = ct <= 4 && gr_down_max4();
         if (staged) {
             if (max4) gr_down_staged_kernel<4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
             else gr_down_staged_kernel<><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
