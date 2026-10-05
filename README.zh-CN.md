@@ -62,15 +62,15 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 
 ### GLM 5.3 Flash
 
-由 PolyStrata 在一台工作站上测得，上下文 32K。
+由 PolyStrata 在一台工作站上测得，提示长 29K token。
 
 <table>
 <tr><th>NVIDIA：RTX 5090（32 GB）、Xeon Platinum 8470Q、120 GB 内存</th></tr>
 <tr><td>
 
-| 规格 | 写回答 | 读 3K 提示 | 读 12K 提示 | 读 29K 提示 |
-| --- | ---: | ---: | ---: | ---: |
-| **3.0BIT** | 27 tokens/s | 373 tokens/s | 334 tokens/s | 312 tokens/s |
+| 规格 | 写回答 | 读提示 |
+| --- | ---: | ---: |
+| **3.0BIT** | 27 tokens/s | 312 tokens/s |
 
 </td></tr>
 </table>

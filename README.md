@@ -62,15 +62,15 @@ about 100-140 tokens per second. Long chats and other cards: [speed of each size
 
 ### GLM 5.3 Flash
 
-Measured for PolyStrata on one workstation, at a 32K context.
+Measured for PolyStrata on one workstation, with a 29K-token prompt.
 
 <table>
 <tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q, 120 GB RAM</th></tr>
 <tr><td>
 
-| Size | Writes answers | Reads a 3K prompt | Reads a 12K prompt | Reads a 29K prompt |
-| --- | ---: | ---: | ---: | ---: |
-| **3.0BIT** | 27 tokens/s | 373 tokens/s | 334 tokens/s | 312 tokens/s |
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **3.0BIT** | 27 tokens/s | 312 tokens/s |
 
 </td></tr>
 </table>
