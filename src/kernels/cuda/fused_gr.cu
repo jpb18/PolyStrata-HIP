@@ -836,32 +836,15 @@ __global__ void __launch_bounds__(THREADS) gr_up_fast_kernel(GrMulti m);
 static bool gr_fast();
 namespace {
 #endif
-// STRATA_GR_DOWN_MAX4: launches of up to 4 tokens hold 4 tokens' sums per thread instead of kFusedGrMaxT (the same bits).
-// Set, it decides (0 = off, anything else on); unset, it is on for the card generations where it was measured to win
-// (sm_120: +2.8-3.5% decode, bench #832, re-measured for 0.1.40) and off elsewhere.
+// STRATA_GR_DOWN_MAX4=1 (opt-in): launches of up to 4 tokens hold 4 tokens' sums per thread instead of kFusedGrMaxT (the
+// same bits; checked bitwise on the 5070 for 0.1.40). Default off: a 10-pair interleaved decode A/B on the RTX 5070 (Q2_0,
+// default config) did not show the +2.8-3.5% of bench #832 (medians 0.97-0.99 of the off arm).
 bool gr_down_max4() {
-    static const int env = [] {
+    static const bool on = [] {
         const char* v = std::getenv("STRATA_GR_DOWN_MAX4");
-        return (v != nullptr && v[0] != '\0') ? (std::atoi(v) != 0 ? 1 : 0) : -1;
+        return v != nullptr && std::atoi(v) != 0;
     }();
-    if (env >= 0) return env == 1;
-#if defined(__HIPCC__)
-    return false;
-#else
-    static std::atomic<int> by_dev[64];   // 0 = not asked yet, 1 = off, 2 = on
-    int dev = 0;
-    cudaGetDevice(&dev);
-    if (dev < 0 || dev >= 64) return false;
-    int v = by_dev[dev].load();
-    if (v == 0) {
-        int major = 0, minor = 0;
-        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        v = (major == 12 && minor == 0) ? 2 : 1;
-        by_dev[dev].store(v);
-    }
-    return v == 2;
-#endif
+    return on;
 }
 
 void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
