@@ -8,6 +8,8 @@
 #include "conversations.hpp"
 #include "engine.hpp"
 #include "strata/core/conversation_memory.hpp"
+#include "strata/spec/draft_policy.hpp"
+#include "strata/spec/suffix_drafter.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -189,9 +191,17 @@ struct Session {
     Sampler sampler;
     std::mt19937_64 rng{std::random_device{}()};
     long long asked = 0, reused = 0;   // prompt tokens of every request, and those of them not read again
+    // Guesses at the tokens to come, checked a window at a time (Engine::window).  When the last tokens repeat an
+    // earlier stretch of the conversation, what followed there is the guess; the policy learns from the windows
+    // so far, their hits and their time, whether one pays.  Both are the other engine's (strata/spec).
+    int most;                             // the tokens of a window at most; 1: no guesses
+    strata::spec::SuffixDrafter repeats;
+    strata::spec::DraftPolicy policy;
 
-    Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f)
-        : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)) {}
+    Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
+        : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
+          most(lookup > 0 ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
+          repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most) {}
 
     static CacheOptions with_floor(const CacheFlags& f) {
         CacheOptions o = f.o;
@@ -206,6 +216,7 @@ struct Session {
 
     struct Result {
         int64_t produced = 0, resume = 0, read = 0;
+        int64_t guessed = 0, guessed_right = 0;
         double prompt_ms = 0, decode_ms = 0;
         const char* finish = "length";
     };
@@ -248,22 +259,56 @@ struct Session {
 
         t0 = Clock::now();
         std::vector<int32_t> history = kept.seq();
-        while (r.produced < max_new) {
-            const int32_t t = (int32_t) sampler.pick(engine.logits(), engine.n_vocab(), s, history, rng);
+        if (most > 1) {
+            repeats.reset();
+            repeats.append(history.data(), history.size());
+        }
+        const auto pick = [&](const float* logits) {
+            return (int32_t) sampler.pick(logits, engine.n_vocab(), s, history, rng);
+        };
+        // Shows a token.  False when the answer ends with it.
+        const auto show = [&](int32_t t) {
             on_token(t);
             ++r.produced;
             history.push_back(t);
-            if (is_eos(t)) {
-                r.finish = "stop";
-                break;
+            if (most > 1) repeats.append(t);
+            if (is_eos(t)) r.finish = "stop";
+            else if (stop.load()) r.finish = "cancel";
+            else return r.produced < max_new;
+            return false;
+        };
+        if (max_new > 0) {
+            int32_t w[strata::spec::DraftPolicy::kMaxT];
+            int32_t t = pick(engine.logits());   // picked, and not shown yet
+            while (show(t)) {
+                // t goes into the model now, and with it guesses at what follows when there are any that pay
+                const Clock::time_point round = Clock::now();
+                const bool room = engine.pos() + most <= engine.max_context();
+                const int k = most > 1 && room ? repeats.propose(most - 1, w + 1) : 0;
+                const int match = repeats.last_match();
+                const strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
+                if (!use.lookup) {
+                    engine.eval(&t, 1, true);
+                    kept.read(&t, 1);
+                    t = pick(engine.logits());
+                    policy.observe(false, 1, 0, 0, ms_since(round));
+                    continue;
+                }
+                w[0] = t;
+                engine.window(w, use.t);
+                // logits_of(i) is what follows w[i].  A guess that is what was picked has been through the model
+                // already; the token an answer ends with is shown and never fed, as without guesses.
+                int right = 0;
+                bool more = true;
+                t = pick(engine.logits_of(0));
+                while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) t = pick(engine.logits_of(++right));
+                engine.keep(right + 1);
+                kept.read(w, right + 1);
+                r.guessed += use.t - 1;
+                r.guessed_right += right + (more ? 0 : 1);
+                policy.observe(true, use.t, right, match, ms_since(round));
+                if (!more) break;
             }
-            if (stop.load()) {
-                r.finish = "cancel";
-                break;
-            }
-            if (r.produced == max_new) break;
-            engine.eval(&t, 1, true);
-            kept.read(&t, 1);
         }
         r.decode_ms = ms_since(t0);
         return r;
@@ -375,9 +420,9 @@ int serve(Session& ss) {
         // the cache's share of the experts looked up while answering: a prompt batch's go through VRAM either way
         const long long hits = now.gpu_experts - before.gpu_experts;
         const long long misses = now.cpu_experts - before.cpu_experts;
-        std::printf("DONE %lld %lld %.1f %.1f %s 0 0 %lld %lld %lld 0 0 0.0 %lld 0\n", (long long) r.produced, n,
-                    r.prompt_ms, r.decode_ms, r.finish, (long long) r.resume, hits, hits + misses,
-                    (long long) r.read);
+        std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld 0 0 0.0 %lld 0\n", (long long) r.produced, n,
+                    r.prompt_ms, r.decode_ms, r.finish, (long long) r.guessed_right, (long long) r.guessed,
+                    (long long) r.resume, hits, hits + misses, (long long) r.read);
         std::fflush(stdout);
     }
     std::fprintf(stderr, "strata-glm: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
@@ -419,11 +464,13 @@ int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const 
     const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
     std::fprintf(stderr,
                  "prompt %lld tokens %.1f tok/s, generated %lld tokens %.2f tok/s (%s); experts from VRAM %.1f%%, "
-                 "CPU experts %.1f ms/token, router wait %.1f ms/token, %lld experts swapped into VRAM\n",
+                 "CPU experts %.1f ms/token, router wait %.1f ms/token, %lld experts swapped into VRAM, "
+                 "%lld of %lld guessed tokens right\n",
                  (long long) r.read, r.prompt_ms > 0 ? 1000.0 * (double) r.read / r.prompt_ms : 0.0,
                  (long long) r.produced, r.decode_ms > 0 ? 1000.0 * (double) (r.produced - 1) / r.decode_ms : 0.0,
                  r.finish, 100.0 * (double) st.gpu_experts / experts, st.cpu_ms / (double) std::max<int64_t>(st.tokens, 1),
-                 st.route_wait_ms / (double) std::max<int64_t>(st.tokens, 1), (long long) st.swapped_experts);
+                 st.route_wait_ms / (double) std::max<int64_t>(st.tokens, 1), (long long) st.swapped_experts,
+                 (long long) r.guessed_right, (long long) r.guessed);
     return 0;
 }
 
@@ -437,6 +484,11 @@ void usage() {
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
                  "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"
                  "                         (default: on the node whose memory holds most of the experts)\n"
+                 "  --window N             the most tokens that go through the model at once while an answer is\n"
+                 "                         written: the one that is known and guesses at the ones after it, which\n"
+                 "                         count when they turn out right (default 4, 1 = no guesses)\n"
+                 "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
+                 "                         (default 3, 0 = never)\n"
                  "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
                  "                         as a CUDA graph and replayed)\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
@@ -471,7 +523,7 @@ int main(int argc, char** argv) {
     Sampling s;
     bool want_serve = false;
     long long max_new = 32;
-    int top_probs = 0;
+    int top_probs = 0, lookup = 3;
     std::vector<int32_t> ids, eos;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -491,6 +543,8 @@ int main(int argc, char** argv) {
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
         else if (a == "--any-node") o.stay_near = false;
         else if (a == "--no-graphs") o.graphs = false;
+        else if (a == "--window") o.window = std::atoi(val());
+        else if (a == "--lookup") lookup = std::atoi(val());
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
@@ -548,7 +602,7 @@ int main(int argc, char** argv) {
                 const int64_t id = engine.meta_u(key, -1);
                 if (id >= 0 && std::find(eos.begin(), eos.end(), (int32_t) id) == eos.end()) eos.push_back((int32_t) id);
             }
-        Session ss(engine, eos, cache);
+        Session ss(engine, eos, cache, lookup);
         int rc = 0;
         if (want_serve) {
             rc = serve(ss);
