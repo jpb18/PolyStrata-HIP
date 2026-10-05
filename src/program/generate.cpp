@@ -4800,6 +4800,10 @@ int main(int argc, char** argv) {
             // page-locked (an asynchronous copy instead of the driver's staged, synchronous one)
             if (o.adapt_async && !src.reserve_exchanges(2 * std::min<int64_t>(o.adapt_swaps, 96), err))
                 adapt_async_off(err.c_str());
+            // pageable buffers would make every copy of a round synchronous (the driver stages them): that is the
+            // blocking tier's cost, so the asynchronous tier is not worth running - said, and the blocking tier stays
+            if (o.adapt_async && !src.exchange_pinned())
+                adapt_async_off("the exchange buffers could not be page-locked");
             if (o.adapt_every > 0 && o.adapt_swaps > 0 &&
                 !src.reserve_exchanges(std::min<int64_t>(o.adapt_swaps, 96), err)) {
                 std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
@@ -5872,6 +5876,8 @@ int main(int argc, char** argv) {
         std::vector<float> a_usage;
         std::vector<int32_t> a_res;
         int64_t a_win = 0, a_last = 0, a_rounds = 0, a_swapped = 0;
+        double a_ms = 0;                  // wall time from a round's start to its flip, summed (the "ms/round" stat)
+        Clock::time_point a_t0;
         std::atomic<bool> a_err{false};
         std::vector<AHome> ahomes;   // [0] = CUDA0's cache, [k] = layer split stage k's
         std::unique_ptr<JobThread> ajob;
@@ -5991,6 +5997,7 @@ int main(int argc, char** argv) {
                     if (drain || a_win - a_last < (int64_t) o.adapt_every) return true;
                     a_last = a_win;
                     ++a_rounds;
+                    a_t0 = Clock::now();
                     a_usage = drive.d.usage;
                     a_res = host_res;
                     // #477: the routing counted, as adapt() counts it (--expert-profile-save; else `heat` is empty)
@@ -6040,6 +6047,7 @@ int main(int argc, char** argv) {
                     if (!a_ready(drain)) return true;
                     if (a_err.load()) return false;
                     src.commit_flip();
+                    a_ms += std::chrono::duration<double, std::milli>(Clock::now() - a_t0).count();
                     aswaps.clear();
                     astate = AState::Idle;
                     continue;   // a round due now starts at this same boundary
@@ -7993,8 +8001,9 @@ int main(int argc, char** argv) {
                              (double) src.resident_bytes() / 1073741824.0, (long long) src.exchanges(),
                              (long long) src.file_reads());
             if (ajob)   // --adapt-async, cumulative (a round may still be in flight: it lands before the next request)
-                std::fprintf(stderr, "strata serve: asynchronous adaptive tier: %lld rounds, %lld experts swapped in\n",
-                             (long long) a_rounds, (long long) a_swapped);
+                std::fprintf(stderr, "strata serve: asynchronous adaptive tier: %lld rounds, %lld experts swapped in, "
+                                     "%.1f ms per round (start to flip, between windows)\n",
+                             (long long) a_rounds, (long long) a_swapped, a_rounds > 0 ? a_ms / (double) a_rounds : 0.0);
             // CS-T: the tiers, cumulative - GPU cache hits (the decode lookups above), RAM copy, files (SSD / OS cache)
             if (srcp == &src)
                 std::fprintf(stderr, "strata serve: expert tiers: GPU %lld hits this request; since the start RAM %lld blobs, files %lld blobs "
