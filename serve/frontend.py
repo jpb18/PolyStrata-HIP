@@ -505,7 +505,12 @@ class OutputParser:
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
                  call_format: str = "function"):
         self.glm = call_format == "glm"   # GLM's <arg_key>/<arg_value> calls instead of <function=...>
-        self.state = "reasoning" if thinking else "content"
+        # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; the others' reasoning
+        # is opened by the prompt and ends with </think>
+        self.think_open, self.think_end = ("<|channel>thought\n", "<channel|>") if call_format == "gemma" \
+            else ("", THINK_END)
+        self.opening = thinking and bool(self.think_open)   # the reply may still start with think_open
+        self.state = "reasoning" if thinking and not self.think_open else "content"
         self.buf = ""
         self.lead = False
         self.schemas = {t.get("name"): t for t in tools or []}
@@ -641,18 +646,25 @@ class OutputParser:
         out: list[Event] = []
         while True:
             if self.state == "reasoning":
-                i = self.buf.find(THINK_END)
+                i = self.buf.find(self.think_end)
                 if i < 0:
-                    keep = self._hold(self.buf, (THINK_END,))
+                    keep = self._hold(self.buf, (self.think_end,))
                     if len(self.buf) > keep:
                         out.append(Event("reasoning", self.buf[:len(self.buf) - keep]))
                         self.buf = self.buf[len(self.buf) - keep:]
                     return out
                 if i:
                     out.append(Event("reasoning", self.buf[:i]))
-                self.buf = self.buf[i + len(THINK_END):]
+                self.buf = self.buf[i + len(self.think_end):]
                 self.state, self.lead = "content", True
             elif self.state == "content":
+                if self.opening:                                # the model's own opening of its reasoning
+                    if self.buf.startswith(self.think_open):
+                        self.buf, self.state, self.opening = self.buf[len(self.think_open):], "reasoning", False
+                        continue
+                    if self.think_open.startswith(self.buf):
+                        return out
+                    self.opening = False
                 if self.lead:                                   # newlines right after </think> or a call
                     stripped = self.buf.lstrip("\n")
                     if not stripped:

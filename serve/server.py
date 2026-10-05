@@ -1726,7 +1726,8 @@ class Service:
             self.stop_ids = {special[k] for k in ("tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",
                                                   "tokenizer.ggml.eom_token_id") if k in special}
         # how the model writes a tool call (serve/frontend.py's OutputParser)
-        self.call_format = "glm" if getattr(tokenizer, "pre", "") in ("glm4", "glm5") else "function"
+        pre = getattr(tokenizer, "pre", "")
+        self.call_format = "glm" if pre in ("glm4", "glm5") else "gemma" if pre == "gemma4" else "function"
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -4071,16 +4072,7 @@ def load_tokenizer(tpath: Path):
     if not (tpath / "vocab.json").exists():
         return None
     import strata_tokenizer as ST
-    vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
-    tokens = [None] * len(vocab)
-    for t, i in vocab.items():
-        tokens[i] = t
-    merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
-    types = json.loads((tpath / "token_type.json").read_text())
-    # the pre-tokenizer's name and the GGUF's special ids (a directory from before they mattered has neither)
-    meta = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8")) \
-        if (tpath / "tokenizer.json").exists() else {}
-    return ST.Tokenizer(tokens, merges, types, pre=meta.get("pre", "qwen35"), special_ids=meta.get("special_ids"))
+    return ST.Tokenizer.from_dir(tpath)
 
 
 def start_model(cfg: dict, tok, lazy: bool = False):
