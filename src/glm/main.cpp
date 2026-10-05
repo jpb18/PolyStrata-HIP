@@ -5,7 +5,9 @@
 //
 // The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, STOP and QUIT in, and RESUME,
 // PP, T, DONE and ERR out.
+#include "conversations.hpp"
 #include "engine.hpp"
+#include "strata/core/conversation_memory.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +33,8 @@
 
 namespace {
 
+using strata::glm::CacheOptions;
+using strata::glm::Conversations;
 using strata::glm::Engine;
 using strata::glm::Options;
 using Clock = std::chrono::steady_clock;
@@ -171,31 +175,34 @@ private:
     std::thread th_;
 };
 
+// What the conversation cache is told on the command line.
+struct CacheFlags {
+    CacheOptions o;
+    long long min_free_mib = 2560;   // parking leaves this much physical RAM free
+};
+
 struct Session {
     Engine& engine;
     std::vector<int32_t> eos;
-    std::vector<int32_t> seq;   // the tokens the engine has read, in order
+    CacheFlags flags;
+    Conversations<Engine> kept;   // the conversation in the engine, and the parked ones
     Sampler sampler;
     std::mt19937_64 rng{std::random_device{}()};
+    long long asked = 0, reused = 0;   // prompt tokens of every request, and those of them not read again
 
-    Session(Engine& e, std::vector<int32_t> eos_ids) : engine(e), eos(std::move(eos_ids)) {}
+    Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f)
+        : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)) {}
+
+    static CacheOptions with_floor(const CacheFlags& f) {
+        CacheOptions o = f.o;
+        o.log = stderr;
+        o.admit = [floor = (uint64_t) f.min_free_mib << 20](size_t bytes) {
+            return strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), bytes, floor);
+        };
+        return o;
+    }
 
     bool is_eos(int32_t t) const { return std::find(eos.begin(), eos.end(), t) != eos.end(); }
-
-    // Leaves the engine at the longest point of `ids` it can keep, and returns that position.
-    int64_t reuse(const std::vector<int32_t>& ids) {
-        size_t same = 0;
-        while (same < seq.size() && same < ids.size() && seq[same] == ids[same]) ++same;
-        if (same == seq.size() && ids.size() > same) return (int64_t) same;   // the conversation goes on
-        const int64_t ck = engine.checkpoint_pos();
-        if (ck >= 0 && (size_t) ck <= same && (size_t) ck < ids.size() && engine.restore()) {
-            seq.resize((size_t) ck);
-            return ck;
-        }
-        engine.reset();
-        seq.clear();
-        return 0;
-    }
 
     struct Result {
         int64_t produced = 0, resume = 0, read = 0;
@@ -209,23 +216,25 @@ struct Session {
                     OnToken on_token, OnProgress on_progress) {
         Result r;
         const int64_t n = (int64_t) ids.size();
-        r.resume = reuse(ids);
+        Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
+        r.resume = kept.resume(ids);
+        asked += n;
+        reused += r.resume;
         on_progress(r.resume, n, 0.0, true);
         if (s.seed != 0) rng.seed(s.seed);
 
-        // The checkpoint sits one token before the end, so coming back to it always leaves a token to read and
-        // the logits that come with it.  The tokens before it go in as many at a time as the engine takes.
-        Clock::time_point t0 = Clock::now(), shown = t0;
+        // The last token goes in alone, for the logits that come with it.  The tokens before it go in as many at
+        // a time as the engine takes, up to the next checkpoint.
         for (int64_t i = r.resume; i < n;) {
             if (stop.load()) {
                 r.finish = "cancel";
                 break;
             }
             const bool last = i == n - 1;
-            const int64_t m = last ? 1 : std::min<int64_t>(n - 1 - i, engine.max_rows());
-            if (last) engine.checkpoint();
+            const int64_t m = last ? 1 : kept.until_checkpoint(i, std::min<int64_t>(n - 1 - i, engine.max_rows()));
+            kept.before(i, last);
             engine.eval(ids.data() + i, (int) m, last);
-            seq.insert(seq.end(), ids.begin() + i, ids.begin() + i + m);
+            kept.read(ids.data() + i, m);
             i += m;
             r.read += m;
             if (ms_since(shown) >= 500.0 || last) {
@@ -233,11 +242,12 @@ struct Session {
                 shown = Clock::now();
             }
         }
+        kept.prompt_was(n);
         r.prompt_ms = ms_since(t0);
         if (std::strcmp(r.finish, "cancel") == 0) return r;
 
         t0 = Clock::now();
-        std::vector<int32_t> history = seq;
+        std::vector<int32_t> history = kept.seq();
         while (r.produced < max_new) {
             const int32_t t = (int32_t) sampler.pick(engine.logits(), engine.n_vocab(), s, history, rng);
             on_token(t);
@@ -253,7 +263,7 @@ struct Session {
             }
             if (r.produced == max_new) break;
             engine.eval(&t, 1, true);
-            seq.push_back(t);
+            kept.read(&t, 1);
         }
         r.decode_ms = ms_since(t0);
         return r;
@@ -292,9 +302,10 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, std::ve
 
 int serve(Session& ss) {
     Engine& engine = ss.engine;
-    std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d engine=" STRATA_VERSION "\n",
+    std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
+                "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
-                engine.threads());
+                engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib);
     std::printf("READY %d stop\n", engine.max_context());
     std::fflush(stdout);
 
@@ -351,8 +362,8 @@ int serve(Session& ss) {
                     std::fflush(stdout);
                 });
         } catch (const std::exception& e) {
-            // the engine's state is unknown now: the next request starts from nothing
-            ss.seq.clear();
+            // the engine's state is unknown now: the conversation it was reading is lost
+            ss.kept.drop();
             try { engine.reset(); } catch (const std::exception&) {}
             std::printf("ERR %s\n", e.what());
             std::fflush(stdout);
@@ -368,6 +379,10 @@ int serve(Session& ss) {
                     (long long) r.read);
         std::fflush(stdout);
     }
+    std::fprintf(stderr, "strata-glm: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
+                         "parked in %zu MiB, %zu pushed out\n",
+                 ss.reused, ss.asked, ss.asked > 0 ? 100.0 * (double) ss.reused / (double) ss.asked : 0.0,
+                 ss.kept.parked(), ss.kept.parked_bytes() >> 20, ss.kept.evictions());
     return 0;
 }
 
@@ -424,6 +439,16 @@ void usage() {
                  "                         2048); with less, more of them are copied after the layer has routed\n"
                  "  --stage-ahead N        from N tokens, a batch copies those experts before it routes (default 256,\n"
                  "                         0 = never)\n"
+                 "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
+                 "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
+                 "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
+                 "                         (default 2048, 0 = none)\n"
+                 "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
+                 "                         without being read again (default 0 = off)\n"
+                 "  --conversation-cache-slots N        parked conversations at most (default 4)\n"
+                 "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
+                 "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
+                 "                         2560)\n"
                  "  --eos-ids ID,ID,...    tokens that end a reply (default: the GGUF's eos, eot and eom)\n"
                  "  --temperature F --top-k N --top-p F --min-p F --seed N   sampling for --tokens (default greedy)\n"
                  "  --dump-layers          print a checksum of every layer's stages to stderr\n"
@@ -434,6 +459,7 @@ void usage() {
 
 int main(int argc, char** argv) {
     Options o;
+    CacheFlags cache;
     Sampling s;
     bool want_serve = false;
     long long max_new = 32;
@@ -458,6 +484,12 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
+        else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
+        else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
+        else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());
+        else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
+        else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
+        else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--top-probs") top_probs = std::atoi(val());
         else if (a == "--max-new") max_new = std::atoll(val());
@@ -481,6 +513,13 @@ int main(int argc, char** argv) {
         usage();
         return 2;
     }
+    const long long most = 1LL << 24;   // MiB: 16 TiB
+    if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
+        cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
+        cache.min_free_mib > most) {
+        std::fprintf(stderr, "strata-glm: a cache option is negative or too large\n");
+        return 2;
+    }
 
     Engine engine;
     try {
@@ -495,7 +534,7 @@ int main(int argc, char** argv) {
                 const int64_t id = engine.meta_u(key, -1);
                 if (id >= 0 && std::find(eos.begin(), eos.end(), (int32_t) id) == eos.end()) eos.push_back((int32_t) id);
             }
-        Session ss(engine, eos);
+        Session ss(engine, eos, cache);
         int rc = 0;
         if (want_serve) {
             rc = serve(ss);

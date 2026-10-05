@@ -1255,7 +1255,8 @@ if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NO
   endif()
   target_link_libraries(strata_glm_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
 
-  add_executable(strata-glm src/glm/main.cpp src/glm/engine.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu)
+  add_executable(strata-glm src/glm/main.cpp src/glm/engine.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu
+                            src/core/conversation_memory.cpp)
   target_include_directories(strata-glm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
   target_link_libraries(strata-glm PRIVATE strata_glm_mmq strata_kernels ggml-cpu ggml-base
                                            ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target} Threads::Threads)

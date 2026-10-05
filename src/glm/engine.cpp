@@ -414,7 +414,6 @@ void Engine::alloc_state() {
     const size_t conv_n = size_t(3) * d_inner_ * (kConv - 1), s_n = size_t(n_head_) * kda_dim_ * kda_dim_;
     state_n_ = size_t(n_kda_) * (conv_n + s_n);
     state_ = (float*) dmalloc(state_n_ * sizeof(float), "the recurrent state");
-    state_ck_ = (float*) dmalloc(state_n_ * sizeof(float), "the recurrent state's checkpoint");
 
     const size_t ctx = (size_t) opt_.max_context, lat_n = ctx * kv_rank_, idx_n = ctx * 3 * idx_dim_;
     uint16_t* lat = (uint16_t*) dmalloc(n_dsa_ * lat_n * sizeof(uint16_t), "the attention cache");
@@ -630,20 +629,6 @@ void Engine::save_profile() const {
 void Engine::reset() {
     ck(cudaMemsetAsync(state_, 0, state_n_ * sizeof(float), cs(st_)), "reset");
     pos_ = 0;
-    ck_pos_ = -1;
-}
-
-void Engine::checkpoint() {
-    ck(cudaMemcpyAsync(state_ck_, state_, state_n_ * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)),
-       "checkpoint");
-    ck_pos_ = pos_;
-}
-
-bool Engine::restore() {
-    if (ck_pos_ < 0) return false;
-    ck(cudaMemcpyAsync(state_, state_ck_, state_n_ * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)), "restore");
-    pos_ = ck_pos_;
-    return true;
 }
 
 size_t Engine::row_bytes() const {

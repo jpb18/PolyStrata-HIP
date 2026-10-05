@@ -102,12 +102,6 @@ public:
     void eval(const int32_t* tokens, int n, bool want_logits);
     const float* logits() const { return h_logits_; }
 
-    /// One saved point of the sequence to come back to.  The attention caches are indexed by position and only
-    /// ever written at the current one, so the recurrent state is all there is to save.
-    void checkpoint();
-    bool restore();
-    int64_t checkpoint_pos() const { return ck_pos_; }
-
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
     size_t state_bytes() const { return state_n_ * sizeof(float); }
@@ -183,7 +177,6 @@ private:
     float* scratch_ = nullptr;
     size_t scratch_at_ = 0;
     float* state_ = nullptr;     ///< every KDA layer's conv and delta-rule state
-    float* state_ck_ = nullptr;
     size_t state_n_ = 0;
     int cached_ = 0;
 
@@ -223,7 +216,7 @@ private:
     std::vector<int32_t> ids_, count_, first_, group_, round_;
     std::vector<uint8_t> sent_;
 
-    int64_t pos_ = 0, ck_pos_ = -1;
+    int64_t pos_ = 0;
     std::vector<float> probs_, pick_;
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     Stats stats_;
