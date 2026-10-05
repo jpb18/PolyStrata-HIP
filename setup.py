@@ -462,6 +462,58 @@ def recommend_pool_workers(args: list) -> list:
     return [*args, "--pool-workers", str(n)]
 
 
+def linux_sockets(sys_root: str = "/sys"):
+    """(sockets, physical cores per socket) from the kernel's topology files, or None when they do not say."""
+    cores = {}
+    for cpu in (Path(sys_root) / "devices" / "system" / "cpu").glob("cpu[0-9]*"):
+        pkg, core = cpu / "topology" / "physical_package_id", cpu / "topology" / "core_id"
+        try:
+            cores.setdefault(pkg.read_text(encoding="utf-8").strip(), set()).add(core.read_text(encoding="utf-8").strip())
+        except OSError:
+            return None
+    return (len(cores), min(len(c) for c in cores.values())) if cores else None
+
+
+def cpu_sockets():
+    """(sockets, physical cores per socket); None when unknown.  Windows: the packages and cores that
+    GetLogicalProcessorInformationEx lists (RelationProcessorPackage 3, RelationProcessorCore 0)."""
+    try:
+        if not WIN:
+            return linux_sockets()
+        k32 = ctypes.windll.kernel32
+        counts = {}
+        for rel in (0, 3):
+            n = ctypes.c_ulong(0)
+            k32.GetLogicalProcessorInformationEx(rel, None, ctypes.byref(n))
+            if not n.value:
+                return None
+            buf = ctypes.create_string_buffer(n.value)
+            if not k32.GetLogicalProcessorInformationEx(rel, buf, ctypes.byref(n)):
+                return None
+            raw, at, c = buf.raw[:n.value], 0, 0
+            while at + 8 <= len(raw):
+                size = struct.unpack_from("<II", raw, at)[1]
+                if size <= 0:
+                    break
+                c += 1
+                at += size
+            counts[rel] = c
+        return (counts[3], counts[0] // counts[3]) if counts[3] else None
+    except Exception:
+        return None
+
+
+def two_socket_note(sockets) -> list[str]:
+    """Bench #674 #707 (2-socket Xeons: 17-18 workers beat 35 by ~20%): a tip to keep the expert pool on one socket's
+    cores, one fewer for the host loop.  Nothing is written to the config."""
+    if not sockets or sockets[0] < 2 or sockets[1] < 3:
+        return []
+    n = sockets[1] - 1
+    return [f"tip: this PC has {sockets[0]} CPU sockets of {sockets[1]} cores. Expert workers on the other socket have "
+            f"been measured slower than fewer, local ones (35 vs 17-18 on 2-socket Xeons): try --pool-workers {n} in "
+            "the config's args (START-HERE --calibrate measures it on this PC)"]
+
+
 def cpu_info():
     """(name, avx2, avx512): avx512 means everything Strata's fast AVX-512 kernels use (F, BW, VL, VNNI, VBMI),
     the same test the engine makes (cpu_avx512_ok), not just AVX-512F."""
@@ -3537,6 +3589,51 @@ def parallel_note(asked: int | None, vram_gbs, arena_gb: float, ctx: int, kv: st
     return lines
 
 
+PREFILL_BIG_RAM_GB = 96        # bench #433 #440 #834 #669: --prefill auto:32768 +21-35% at 96 GB, ~3x slower at 32 GB
+PREFILL_RISK_RAM_GB = 64       # below this an explicit auto:32768 is warned about
+HEADROOM_RAM_GB = 48           # bench #834: STRATA_RESIDENT_HEADROOM_GIB=6 on a PC with this much RAM or less
+AGENT_CACHE_FREE_GB = 24       # bench #882 #440: RAM left beside the model for the conversation cache
+AGENT_CACHE_MIB = 8192
+SMALL_VISION_VRAM_GB = 12.5    # bench #469: the GPU image encoder shrinks the prompt chunks on cards up to 12 GB
+
+
+def arg_after(args, flag):
+    """The value after `flag` in an argument list, or None."""
+    return args[args.index(flag) + 1] if flag in args[:-1] else None
+
+
+def bench_tips(args, env, ram: float, model_ram_gb: float, vram_gb: float, vision: str, win: bool) -> list[str]:
+    """Recommendations from the community bench data (plan 0.1.40 item 14).  Text only: nothing here changes a
+    default, the config or the engine's arguments (recommend, never force).  `ram` is this PC's RAM, `model_ram_gb`
+    what the chosen model keeps in it."""
+    tips = []
+    cache = arg_after(args, "--expert-cache")
+    if win and cache is not None and cache != "auto":
+        tips.append(f"warning: --expert-cache {cache} is a fixed size. On Windows, a size that leaves almost no VRAM free "
+                    "has run up to 7x slower (#780 #781); a smaller number, or auto, leaves the driver room")
+    prefill = arg_after(args, "--prefill")
+    if prefill == "auto:32768" and ram < PREFILL_RISK_RAM_GB:
+        tips.append(f"warning: --prefill auto:32768 on {ram:.0f} GB of RAM: it ran ~3x slower than --prefill auto with "
+                    "32 GB (#834 #669); it paid off (+21-35%) with 96 GB")
+    elif prefill == "auto" and ram >= PREFILL_BIG_RAM_GB:
+        tips.append(f"tip: with {ram:.0f} GB of RAM, --prefill auto:32768 in the config's args read prompts 21-35% "
+                    "faster in community benchmarks (#433 #440 #834); not set, nothing changes")
+    resident = any(a in args for a in ("--resident-experts", "--resident-budget-gib"))
+    if resident and ram <= HEADROOM_RAM_GB and "STRATA_RESIDENT_HEADROOM_GIB" not in (env or {}):
+        tips.append(f"tip: on a PC with {ram:.0f} GB of RAM, \"env\": {{\"STRATA_RESIDENT_HEADROOM_GIB\": \"6\"}} in the "
+                    "config kept decode speed in a community benchmark and left the system 2 GiB more (#834); the "
+                    "default is 4")
+    if "--conversation-cache-mib" not in args and ram - model_ram_gb >= AGENT_CACHE_FREE_GB:
+        tips.append(f"tip: for several agents or clients at once, --conversation-cache-mib {AGENT_CACHE_MIB} in the "
+                    "config's args keeps each one's conversation; without it they were measured re-reading ~90% of "
+                    "their prompts (#882 #440; docs/DETAILS.md, Multiple conversations)")
+    if vision == "gpu" and 0 < vram_gb <= SMALL_VISION_VRAM_GB:
+        tips.append("tip: the image encoder on the GPU makes a prompt's chunks smaller on a card this size (243 vs 750 "
+                    "tok/s measured, #469); run setup again with --vision cpu to read prompts ~3x faster, at about "
+                    "2-3 s per picture")
+    return tips
+
+
 DISPLAY_RESERVE_MIB = 1500     # #779: the tip for an NVIDIA card that also drives a display
 DESKTOP_RESERVE_MIB = 3072     # #560 #516: what kept a KDE/Wayland desktop alive beside a full expert cache
 
@@ -4599,6 +4696,10 @@ def main() -> int:
         ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
     else:                                              # #642: measured counts (a calibration) win over the rule
         cfg["args"] = recommend_pool_workers(cfg["args"])
+        for line in two_socket_note(cpu_sockets()):    # bench tips: text only, the config is not touched
+            say("  " + line)
+    for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN):
+        say("  " + line)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
