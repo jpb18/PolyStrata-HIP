@@ -55,6 +55,7 @@ from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_mess
                             images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
+from serve import models as registry  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
@@ -143,6 +144,10 @@ class EngineSilent(EngineDied):
     """#481: the engine said nothing for too long during a request (or never acknowledged a STOP): the two sides lost
     step - the engine waiting for its next command, the server for this request's end - and the server ended it.  An
     EngineDied, so the request ends with an error and the next one starts the engine again."""
+
+
+class SwitchFailed(RuntimeError):
+    """The model asked for did not start.  The message says whether the earlier one runs again."""
 
 
 class EngineStuck(RuntimeError):
@@ -1706,6 +1711,13 @@ class Service:
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
+        self.models_root = ROOT                          # where the installation's run configs are (serve/models.py)
+        # "memory_debug": true in the config (or $STRATA_MEMORY_DEBUG): a switch prints the free VRAM around it
+        self.memory_debug = bool(os.environ.get("STRATA_MEMORY_DEBUG"))
+        self._read_tokenizer(tokenizer)
+
+    def _read_tokenizer(self, tokenizer) -> None:
+        """What the model's tokenizer says of the model: the tokens that end a reply, and how it writes a tool call."""
         im_end = tokenizer.encode(IM_END, parse_special=True)
         if len(im_end) == 1:
             self.stop_ids = set(im_end + tokenizer.encode("<|endoftext|>", parse_special=True))
@@ -1718,6 +1730,99 @@ class Service:
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
+
+    def models(self) -> list[dict]:
+        """GET /api/models: the installation's models (serve/models.py), the one this server answers with marked
+        "current" and its status "loaded" or "unloaded"."""
+        out = registry.discover(self.models_root)
+        mine = Path(self.config_path).resolve() if self.config_path else None
+        for e in out:
+            e["current"] = mine is not None and Path(e["config"]).resolve() == mine
+            if e["current"]:
+                e["status"] = "loaded" if self.loaded() else "unloaded"
+        return out
+
+    switch_wait_s = 120.0                                # how long a switch waits for a request that is running
+
+    def switch_model(self, name: str) -> dict:
+        """POST /api/models/load: answer with the model `name` from now on.  One model is in memory at a time: the
+        one that is loaded is stopped first (its process ends, which gives back its VRAM, its pinned memory and its
+        file mappings), then the new one is started.  A model that does not start leaves the earlier one loaded
+        again (SwitchFailed says so).  KeyError: no such model; ValueError: it cannot be used; ModelBusy: a
+        request is running."""
+        models = self.models()
+        target = registry.find(models, name)
+        if target is None:
+            raise KeyError(name)
+        if target["current"]:
+            self.load()
+            return {**target, "status": "loaded"}
+        if target["status"] == "unavailable":
+            raise ValueError(f"{target['id']} cannot be loaded: {target['problem']}")
+        cfg = json.loads(Path(target["config"]).read_text(encoding="utf-8-sig"))
+        tpath = Path(cfg.get("tokenizer") or "")
+        tok = load_tokenizer(tpath)
+        if tok is None:
+            raise ValueError(f"{target['id']} cannot be loaded: its tokenizer is missing ({tpath})")
+        tpl = tpath / "chat_template.jinja"
+        template = ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja")
+        if not self.fifo.acquire(timeout=self.switch_wait_s):
+            raise ModelBusy("a request is still running; switch when it has finished")
+        try:
+            with self.status_lock:
+                if self.status.get("busy") or self.status.get("queued") or self.live_reqs:
+                    raise ModelBusy("a request is still running; switch when it has finished")
+            old_engine, old_vision, old_name = self.engine, self.vision, self.model
+            debug = self.memory_debug or cfg.get("memory_debug") is True
+            before = self.free_vram_mib() if debug else None
+            print(f"[strata] switching the model: {old_name} -> {target['id']}", flush=True)
+            for old in (old_engine, old_vision):          # first: the two models do not fit in memory together
+                if old is not None and hasattr(old, "unload"):
+                    old.unload()
+            freed = self.free_vram_mib() if debug else None
+            try:
+                engine, vision, sampling_defaults, effort_end = start_model(cfg, tok)
+            except (Exception, SystemExit) as e:
+                print(f"[strata] {target['id']} did not start ({e}); starting {old_name} again ...", flush=True)
+                try:
+                    for old in (old_vision, old_engine):
+                        if old is not None and hasattr(old, "restart"):
+                            old.restart()
+                except Exception as again:
+                    raise SwitchFailed(f"{target['id']} did not start ({e}), and {old_name} did not start again "
+                                       f"({again}): no model is loaded") from None
+                raise SwitchFailed(f"{target['id']} did not start ({e}); {old_name} is loaded again") from None
+            for old in (old_engine, old_vision):          # the processes have ended; this closes their logs
+                if old is not None and hasattr(old, "close"):
+                    try:
+                        old.close()
+                    except (OSError, RuntimeError):
+                        pass
+            self.engine, self.tok, self.template, self.vision = engine, tok, template, vision
+            self.model = cfg.get("model_name", target["id"])
+            self.sampling_defaults = dict(sampling_defaults or {})
+            self.effort_end = bool(effort_end)
+            self._read_tokenizer(tok)
+            try:
+                self.set_aliases(cfg.get("aliases"))
+            except ValueError:
+                self.aliases = []
+            self.config_path = target["config"]
+            self.gpu_indices = gpu_list(cfg)
+            self.gpu_index = (self.gpu_indices or [0])[0]
+            self.backend = cfg.get("backend")
+            self.conv_log.reset()
+            with self.status_lock:
+                self.rate.clear()
+                self.last_timings = None
+            self.last_request_at = time.time()
+            if debug:
+                print(f"[strata] memory: {before} MiB of VRAM free with {old_name}, {freed} MiB after it stopped, "
+                      f"{self.free_vram_mib()} MiB with {self.model}", flush=True)
+            print(f"[strata] the model is now {self.model} (context {engine.max_context} tokens)", flush=True)
+        finally:
+            self.fifo.release()
+        return next((e for e in self.models() if e["current"]), {**target, "status": "loaded", "current": True})
 
     def set_aliases(self, aliases) -> None:
         """#297: the config's `aliases` - a list of names (or one comma-separated string), like llama-server's --alias.
@@ -3082,6 +3187,14 @@ def make_handler(svc: Service):
             elif path == "/v1/status":
                 if self._authorized():
                     self._json(200, svc.v1_status())
+            elif path in ("/api/models", "/api/models/current"):
+                if self._authorized():
+                    models = svc.models()
+                    current = next((e for e in models if e["current"]), None)
+                    if path == "/api/models":
+                        self._json(200, {"models": models, "current": current["id"] if current else None})
+                    else:
+                        self._json(200, {"model": current, "name": svc.model, "loaded": svc.loaded()})
             else:
                 self._json(404, {"error": {"message": "not found"}})
 
@@ -3096,6 +3209,9 @@ def make_handler(svc: Service):
                 return
             if path == "/config":
                 self._config_post()
+                return
+            if path in ("/api/models/load", "/api/models/unload"):
+                self._models_post(path)
                 return
             if path in ("/unload", "/load") and not self._control_body():
                 return
@@ -3249,6 +3365,50 @@ def make_handler(svc: Service):
             if not complete:
                 self._json(400, {"error": {"message": "incomplete control request body"}})
             return complete
+
+        def _models_post(self, path):
+            """POST /api/models/load {"model": name}: switch to that model (Service.switch_model).
+            POST /api/models/unload: stop the one that is loaded; the next request, or a load, starts it again."""
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = -1
+            if not 0 <= length <= 65536:
+                self._json(400, {"error": {"message": "send a JSON object of at most 64 KiB"}})
+                return
+            raw = self.rfile.read(length) if length else b""
+            if not self._own_page("the model can be switched"):
+                return
+            try:
+                req = json.loads(raw or b"{}")
+                if not isinstance(req, dict):
+                    raise ValueError
+            except ValueError:
+                self._json(400, {"error": {"message": "send a JSON object"}})
+                return
+            if path.endswith("/unload"):
+                try:
+                    r = svc.unload()
+                except EngineStuck as e:
+                    self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                    return
+                self._json(409 if r == "busy" else 200, {"status": r})
+                return
+            name = req.get("model")
+            if not isinstance(name, str) or not name.strip():
+                self._json(400, {"error": {"message": 'send {"model": "<name>"}; GET /api/models lists the names'}})
+                return
+            try:
+                self._json(200, {"status": "loaded", "model": svc.switch_model(name)})
+            except KeyError:
+                self._json(404, {"error": {"message": f"no model named {name!r}",
+                                           "models": [e["id"] for e in svc.models()]}})
+            except ModelBusy as e:
+                self._json(409, {"error": {"type": "busy", "message": str(e)}})
+            except ValueError as e:
+                self._json(422, {"error": {"type": "invalid_request_error", "message": str(e)}})
+            except (SwitchFailed, GpuBusy, EngineStuck, RuntimeError, OSError) as e:
+                self._json(503, {"error": {"type": "server_error", "message": str(e)}})
 
         def _own_page(self, what) -> bool:
             """Only JSON (a form or a "simple" cross-site request can't send it without a CORS preflight, which this
@@ -3905,6 +4065,74 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
     return out
 
 
+def load_tokenizer(tpath: Path):
+    """The tokenizer of a model's tokenizer directory (tools/strata_tokenizer.py wrote it), or None when the
+    directory has none."""
+    if not (tpath / "vocab.json").exists():
+        return None
+    import strata_tokenizer as ST
+    vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
+    tokens = [None] * len(vocab)
+    for t, i in vocab.items():
+        tokens[i] = t
+    merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
+    types = json.loads((tpath / "token_type.json").read_text())
+    # the pre-tokenizer's name and the GGUF's special ids (a directory from before they mattered has neither)
+    meta = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8")) \
+        if (tpath / "tokenizer.json").exists() else {}
+    return ST.Tokenizer(tokens, merges, types, pre=meta.get("pre", "qwen35"), special_ids=meta.get("special_ids"))
+
+
+def start_model(cfg: dict, tok, lazy: bool = False):
+    """A run config's engine, started (with `lazy`: left for the first request to start), and its vision encoder:
+    (engine, vision, sampling defaults, the engine's arguments for an effort at the end or None).  SystemExit for
+    a config that cannot be used, RuntimeError for an engine that does not start."""
+    vision = None
+    env = child_env(cfg)
+    sampling_defaults = sampling_defaults_from_config(cfg)
+    if sampling_defaults:
+        pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
+        print(f"[strata] sampling defaults from the config: {pretty}", flush=True)
+    if lazy and cfg.get("vision"):
+        raise SystemExit("[strata] lazy loading is text-only; disable vision in the config")
+    if cfg.get("vision"):
+        print("loading the vision encoder ...", flush=True)
+        # relative paths are the config's cwd's, as for the engine below
+        vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
+                    if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
+                for k, v in cfg["vision"].items()}
+        vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
+                        env=vision_env(cfg, env))
+    print("model unloaded; the first request loads it ..." if lazy else
+          "loading the model (the first start takes a minute or two) ...", flush=True)
+    if len(gpu_list(cfg)) > 1:
+        try:
+            split = layer_split_value(cfg)          # #644: before the (minutes-long) start
+        except ValueError as e:
+            raise SystemExit(f"[strata] config {e}")
+        print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
+    # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
+    # it is told about (WinError 2), so it is made absolute here
+    exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
+    try:
+        silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    try:
+        effort_end = effort_end_args(cfg, exe, tok)  # #458
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
+                          env=env, lazy=lazy)
+    engine.silence_s = silence                      # an attribute of its own: restart() keeps it
+    warn_tight_ram(engine.info.get("arena_mib"))
+    note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
+                             linux_desktop())
+    if note:                                        # #560 #516: before --open starts a browser on that card
+        print(note, flush=True)
+    return engine, vision, sampling_defaults, effort_end
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
@@ -3955,70 +4183,15 @@ def main() -> int:
                  f"Close it, or start this one with a different --port")
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
-    tok = ByteTokenizer()
     tpath = Path(a.tokenizer)
     if a.engine == "strata" and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
-    if (tpath / "vocab.json").exists():
-        import strata_tokenizer as ST
-        vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
-        tokens = [None] * len(vocab)
-        for t, i in vocab.items():
-            tokens[i] = t
-        merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
-        types = json.loads((tpath / "token_type.json").read_text())
-        # the pre-tokenizer's name and the GGUF's special ids (a directory from before they mattered has neither)
-        meta = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8")) \
-            if (tpath / "tokenizer.json").exists() else {}
-        tok = ST.Tokenizer(tokens, merges, types, pre=meta.get("pre", "qwen35"), special_ids=meta.get("special_ids"))
+    tok = load_tokenizer(tpath) or ByteTokenizer()
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not cfg:
             ap.error("--engine strata needs --config")
-        vision = None
-        env = child_env(cfg)
-        sampling_defaults = sampling_defaults_from_config(cfg)
-        if sampling_defaults:
-            pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
-            print(f"[strata] sampling defaults from the config: {pretty}", flush=True)
-        lazy = a.lazy or cfg.get("lazy_load") is True
-        if lazy and cfg.get("vision"):
-            ap.error("lazy loading is text-only; disable vision in the config")
-        if cfg.get("vision"):
-            print("loading the vision encoder ...", flush=True)
-            # relative paths are the config's cwd's, as for the engine below
-            vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
-                        if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
-                    for k, v in cfg["vision"].items()}
-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env))
-        print("model unloaded; the first request loads it ..." if lazy else
-              "loading the model (the first start takes a minute or two) ...", flush=True)
-        if len(gpu_list(cfg)) > 1:
-            try:
-                split = layer_split_value(cfg)          # #644: before the (minutes-long) start
-            except ValueError as e:
-                raise SystemExit(f"[strata] config {e}")
-            print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
-        # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
-        # it is told about (WinError 2), so it is made absolute here
-        exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
-        try:
-            silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
-        except ValueError as e:
-            raise SystemExit(f"[strata] config {e}")
-        try:
-            effort_end = effort_end_args(cfg, exe, tok)  # #458
-        except ValueError as e:
-            raise SystemExit(f"[strata] config {e}")
-        engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
-                              env=env, lazy=lazy)
-        engine.silence_s = silence                      # an attribute of its own: restart() keeps it
-        warn_tight_ram(engine.info.get("arena_mib"))
-        note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
-                                 linux_desktop())
-        if note:                                        # #560 #516: before --open starts a browser on that card
-            print(note, flush=True)
+        engine, vision, sampling_defaults, effort_end = start_model(cfg, tok, a.lazy or cfg.get("lazy_load") is True)
     else:
         effort_end = None
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
@@ -4087,6 +4260,8 @@ def main() -> int:
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
+        svc.models_root = Path(a.config).resolve().parent   # the other models' configs are beside this one
+    svc.memory_debug = svc.memory_debug or cfg.get("memory_debug") is True
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:
