@@ -4,6 +4,7 @@
 
 #include "glm5next.hpp"
 #include "mmq.hpp"
+#include "qwen35.hpp"
 #include "runtime.hpp"
 #include "strata/glm/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -340,6 +341,7 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const std::string name = arch ? arch->s : std::string();
     std::unique_ptr<Engine> engine;
     if (name == "glm5-next" || name == "glm5next") engine = std::make_unique<Glm5Next>();   // Unsloth: no hyphen
+    else if (name == "qwen35moe") engine = std::make_unique<Qwen35>();
     else throw std::runtime_error(o.model + " is a '" + name + "' model, which this engine does not run");
     engine->load(o);
     return engine;

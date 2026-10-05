@@ -4,9 +4,9 @@
 // routed experts goes to VRAM; as many routed experts as fit go there too, and the rest are computed on the CPU
 // from the mapped file while the GPU does its share.
 //
-// Engine is what every architecture shares.  An architecture is a class derived from it (glm5next.hpp) that reads
-// the model's shape, loads a layer's weights and composes a layer from the kernels; Engine::open() picks it by the
-// file's general.architecture.
+// Engine is what every architecture shares.  An architecture is a class derived from it (glm5next.hpp, qwen35.hpp)
+// that reads the model's shape, loads a layer's weights and composes a layer from the kernels; Engine::open() picks
+// it by the file's general.architecture.
 #pragma once
 
 #include "cpu_experts.hpp"
