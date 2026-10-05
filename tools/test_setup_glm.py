@@ -23,6 +23,8 @@ import setup  # noqa: E402
 M = "3.0BIT"
 FILE = "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"
 REV = "7feedfeb5ee924bfbe0064c63b124728b443ddc0"
+HALF = "REAP50-Q3_K_M"                                  # half the routed experts, from another repository
+HALF_FILE = "GLM-5.3-Flash-REAP50-Q3_K_M.gguf"
 
 
 def quiet(fn, *args):
@@ -42,12 +44,24 @@ class Pins(unittest.TestCase):
         fam = setup.FAMILIES["glm"]
         self.assertEqual(fam["hf"], f"https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF/"
                                     f"resolve/{REV}/")
-        self.assertEqual(list(fam["sha256"]), [FILE])
+        self.assertEqual(list(fam["sha256"]), [FILE, HALF_FILE])
         size, sha = fam["sha256"][FILE]
         self.assertEqual(size, 113585695168)
         self.assertRegex(sha, r"^[0-9a-f]{64}$")
         self.assertEqual(setup.model_file(fam, M, 1), FILE)
         self.assertEqual(setup.model_shards(fam, M), 1)
+
+    def test_a_size_from_another_repository(self):
+        fam, d = setup.FAMILIES["glm"], setup.MODELS[HALF]
+        self.assertRegex(d["hf"], r"^https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF/resolve/"
+                                  r"[0-9a-f]{40}/$")
+        self.assertEqual(setup.model_file(fam, HALF, 1), HALF_FILE)
+        size, sha = fam["sha256"][HALF_FILE]
+        self.assertEqual(size, 78776759712)
+        self.assertRegex(sha, r"^[0-9a-f]{64}$")
+        rows = [line.split() for line in (ROOT / "data" / d["profile"]).read_text().splitlines()]
+        self.assertEqual(sorted({int(r[0]) for r in rows}), list(range(3, 45)))
+        self.assertEqual(max(int(r[1]) for r in rows), 143)             # 144 experts a layer
 
     def test_not_in_the_other_families(self):
         for f in setup.FAMILIES:
@@ -66,6 +80,17 @@ class Estimates(unittest.TestCase):
         # an RTX 5090 lists 31.8 GiB; its cache held 19.9 GiB of experts at 32K
         self.assertAlmostEqual(setup.glm_held_gb(M, 31.84) / 1.073741824, 19.9, delta=0.2)
         self.assertAlmostEqual(setup.glm_ram_need(M, 31.84), 96, delta=1)
+
+    def test_the_half_expert_size(self):
+        # the same card held 20.8 GiB of its experts
+        self.assertAlmostEqual(setup.glm_held_gb(HALF, 31.84) / 1.073741824, 20.8, delta=0.2)
+        self.assertAlmostEqual(setup.glm_ram_need(HALF, 31.84), 60, delta=1)
+
+    def test_the_size_taken_when_none_is_named(self):
+        names = [M, HALF]
+        self.assertEqual(setup.glm_default(names, 128, 31.84), M)
+        self.assertEqual(setup.glm_default(names, 64, 31.84), HALF)      # the whole model wants 96 GB there
+        self.assertEqual(setup.glm_default(names, 32, 31.84), HALF)      # neither fits: the one that wants less
 
     def test_a_card_that_holds_none(self):
         self.assertEqual(setup.glm_held_gb(M, 8.0), 0.0)
@@ -106,6 +131,7 @@ class Main(unittest.TestCase):
         self.t = Path(self.tmp.name)
         (self.t / "data").mkdir()
         (self.t / "data" / "expert-profile-glm.txt").write_text("3 0 7\n")
+        (self.t / "data" / "expert-profile-glm-reap50.txt").write_text("3 1 5\n")
         self.downloads, self.runs, self.verified, self.built = [], [], [], []
 
     def tearDown(self):
@@ -170,8 +196,8 @@ class Main(unittest.TestCase):
             for p in patches:
                 st.enter_context(p)
             code, out = quiet(setup.main)
-        cfg = self.t / "strata-glm-3.0bit.json"
-        return code, out, (json.loads(cfg.read_text()) if cfg.exists() else None)
+        cfg = next(iter(sorted(self.t.glob("strata-glm-*.json"))), None)
+        return code, out, (json.loads(cfg.read_text()) if cfg else None)
 
     def test_install(self):
         code, out, cfg = self.main()
@@ -209,13 +235,15 @@ class Main(unittest.TestCase):
     def test_the_questions(self):
         code, out, cfg = self.main(answers={"Context": "3", "Keep several": "n"})
         self.assertEqual(code, 0, out)
-        self.assertEqual([q.split("?")[0] for q in self.asked], ["Context", "Keep several conversations in RAM"])
+        self.assertEqual([q.split("?")[0] for q in self.asked],
+                         ["Size", "Context", "Keep several conversations in RAM"])
+        self.assertEqual(cfg["model_name"], "glm-5.3-flash-3.0bit")      # Enter: the whole model, with 128 GB
         self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "65536")
         self.assertNotIn("--conversation-cache-mib", cfg["args"])
         # a second run does not ask for the cache again and keeps it off
         code, out, cfg = self.main(answers={})
         self.assertEqual(code, 0, out)
-        self.assertEqual([q.split("?")[0] for q in self.asked], ["Context"])
+        self.assertEqual([q.split("?")[0] for q in self.asked], ["Size", "Context"])
         self.assertNotIn("--conversation-cache-mib", cfg["args"])
 
     def test_the_cache_is_not_recommended_without_room(self):
@@ -223,10 +251,21 @@ class Main(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("--conversation-cache-mib", cfg["args"])
 
-    def test_too_little_ram(self):
+    def test_less_ram_gets_the_half_expert_size(self):
         code, out, cfg = self.main(ram=63.7)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["model_name"], "glm-5.3-flash-reap50-q3_k_m")
+        self.assertEqual(self.downloads, [setup.MODELS[HALF]["hf"] + HALF_FILE])
+        self.assertEqual(self.verified, [(HALF_FILE, *setup.FAMILIES["glm"]["sha256"][HALF_FILE])])
+        pack = self.t / "data" / "packs" / "glm-reap50-q3_k_m"
+        self.assertEqual((pack / "expert-profile.txt").read_text(), "3 1 5\n")     # its own profile
+        args = cfg["args"]
+        self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-REAP50-Q3_K_M" / HALF_FILE)
+
+    def test_too_little_ram(self):
+        code, out, cfg = self.main(ram=40.0)
         self.assertNotEqual(code, 0)
-        self.assertIn("wants about 96 GB of RAM; this PC has 64", out)
+        self.assertIn("wants about 60 GB of RAM; this PC has 40", out)
         self.assertIsNone(cfg)
         self.assertEqual(self.built, [])
         code, out, cfg = self.main(ram=63.7, model=True)               # --model with --yes is the consent

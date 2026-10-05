@@ -72,6 +72,7 @@ HF_REVISIONS = {
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": "5348543e0147355ac9cbcb031184a3546350988e",  # 2026-09-29
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF": "7feedfeb5ee924bfbe0064c63b124728b443ddc0",  # 2026-09-26
+    "patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF": "46cb1bb887721d919e978d2f3eb18da245fecd77",           # 2026-10-05
 }
 
 
@@ -155,12 +156,20 @@ MODELS = {
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38),
                   "vision": True},
-    # GLM 5.3 Flash (docs/GLM.md): one GGUF, read in place by its own engine (glm_setup).  107 GB of the file are
+    # GLM 5.3 Flash (docs/GLM.md): a GGUF read in place by its own engine (glm_setup).  "arena_gb" is the routed
     # experts; the ones the GPU does not hold come through the OS file cache.  "ram_gb" is glm_ram_need() for a
-    # 32 GB card, an estimate: it has run with 120 GB of RAM only
-    "3.0BIT": {"about": "3-bit GSQ-RCO experts with Q4_K attention, the one size there is", "download_gb": 113.6,
+    # 32 GB card, an estimate: it has run with 120 GB of RAM only.  A size may have its own repository ("hf"),
+    # expert profile and VRAM beside the experts ("vram_beside_gb", measured at 32K on that card).
+    "3.0BIT": {"about": "the whole model: 3-bit GSQ-RCO experts, Q4_K attention", "download_gb": 113.6,
                "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",), "shards": 1,
                "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"},
+    # REAP50 (patrickbdevaney): 144 of each layer's 288 routed experts kept, so its experts are 72 GB.  Expert
+    # numbers are its own: a profile of its own
+    "REAP50-Q3_K_M": {"about": "half the routed experts (REAP50), 3-bit K-quant: less RAM", "download_gb": 78.8,
+                      "ram_gb": 60, "arena_gb": 72.1, "families": ("glm",), "shards": 1,
+                      "file": "GLM-5.3-Flash-REAP50-Q3_K_M.gguf", "vram_beside_gb": 11,
+                      "hf": hf("patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF"),
+                      "profile": "expert-profile-glm-reap50.txt"},
 }
 # The experimental Unsloth file's four shards at the pinned revision: name -> (bytes, sha256), checked after the
 # download (setup trusts no other model file by name and size alone either: check_shards reads their directories).
@@ -228,14 +237,16 @@ FAMILIES = {
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
     # GLM 5.3 Flash: another architecture (llama.cpp's glm5-next), run by strata-glm from its one GGUF - no pack,
     # no draft layer, no image encoder.  "engine": its setup is glm_setup, not main()'s steps (docs/GLM.md)
-    "glm": {"title": "GLM 5.3 Flash", "by": "GSQ-RCO 3-bit file from neuralll",
-            "about": "another model, with its own engine: Linux, one NVIDIA card (run on 32 GB), ~128 GB of RAM",
+    "glm": {"title": "GLM 5.3 Flash", "by": "files from neuralll and patrickbdevaney",
+            "about": "another model, with its own engine: Linux, one NVIDIA card (run on 32 GB), 64-128 GB of RAM",
             "hf": hf("neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF"),
             "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf", "shards": 1, "tag": "glm-",
             "name": "glm-5.3-flash", "engine": "glm", "vision": False, "experimental": True,
             "profile": "expert-profile-glm.txt",
             "sha256": {"GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf":
-                       (113585695168, "5f03b74ffe7513479795ca60a0fd8c40cbb3101769672b2c91b3df01138d9f6d")}},
+                       (113585695168, "5f03b74ffe7513479795ca60a0fd8c40cbb3101769672b2c91b3df01138d9f6d"),
+                       "GLM-5.3-Flash-REAP50-Q3_K_M.gguf":
+                       (78776759712, "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -253,7 +264,8 @@ GEXE = "strata-glm.exe" if WIN else "strata-glm"
 ENGINE_GLM_DIR = "engine-glm"
 GLM_CONTEXTS = [8192, 32768, 65536, 131072]
 GLM_ROW_BYTES = 28160           # VRAM per context token: a row in each of the 11 sparse attention layers' caches
-GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve)
+GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve):
+                                # the 3.0BIT file's; a size with other dense weights has its own "vram_beside_gb"
 GLM_RAM_BESIDE_GB = 10          # RAM beside the experts in the file cache: the OS, the server, the engine's buffers
 GLM_CONV_CACHE_MIB = 8192       # --conversation-cache-mib when setup turns it on
 
@@ -3565,9 +3577,21 @@ def glm_config(cfg: dict) -> bool:
     return Path(str(cfg.get("exe", ""))).name == GEXE
 
 
+def glm_beside_gb(model) -> int:
+    """The GiB of VRAM the model takes before any expert, at a 32K context."""
+    return MODELS[model].get("vram_beside_gb", GLM_VRAM_BESIDE_GB)
+
+
 def glm_held_gb(model, vram_gb) -> float:
     """About the GB of the model's experts a card with this much VRAM (GiB) holds at a 32K context."""
-    return min(MODELS[model]["arena_gb"], max(0.0, vram_gb - GLM_VRAM_BESIDE_GB) * 1.073741824)
+    return min(MODELS[model]["arena_gb"], max(0.0, vram_gb - glm_beside_gb(model)) * 1.073741824)
+
+
+def glm_default(names, ram, vram_gb) -> str:
+    """The size setup takes when none is named: the first whose RAM estimate this PC meets, else the one that wants
+    the least."""
+    return next((m for m in names if ram >= glm_ram_need(m, vram_gb) - 4),
+                min(names, key=lambda m: glm_ram_need(m, vram_gb)))
 
 
 def glm_ram_need(model, vram_gb) -> float:
@@ -3580,8 +3604,8 @@ def glm_verdict(model, ram, vram_gb, hip) -> str:
     """--check's line for GLM 5.3 Flash."""
     if hip:
         return "does not run on AMD cards (its engine is a CUDA program)"
-    if vram_gb < GLM_VRAM_BESIDE_GB + 2:
-        return f"does not fit: it takes about {GLM_VRAM_BESIDE_GB} GB of VRAM before any expert"
+    if vram_gb < glm_beside_gb(model) + 2:
+        return f"does not fit: it takes about {glm_beside_gb(model)} GB of VRAM before any expert"
     need = glm_ram_need(model, vram_gb)
     return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN else "") + (
         f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)" if ram >= need - 4 else
@@ -3689,22 +3713,32 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     names = [m for m in MODELS if "glm" in MODELS[m].get("families", ())]
     if a.model and a.model not in names:
         fail(f"{title} has no {a.model} model file", "choose one of: " + ", ".join(names))
-    model = a.model or names[0]
-    d = MODELS[model]
     vram = gpu["vram_gb"]
+    model = a.model or glm_default(names, ram, vram)
+    if not a.model and len(names) > 1:
+        say()
+        say("  Which size?  The RAM is setup's estimate for this card: the experts it does not hold stay in RAM.")
+        for i, m in enumerate(names, 1):
+            say(f"  {i}) {m:14s} {MODELS[m]['about']}; download {MODELS[m]['download_gb']:.0f} GB, "
+                f"~{glm_ram_need(m, vram):.0f} GB of RAM")
+        model = names[int(ask("Size?", [str(i) for i in range(1, len(names) + 1)], str(names.index(model) + 1),
+                              a.yes)) - 1]
+    d = MODELS[model]
+    beside = glm_beside_gb(model)
     held, need_ram = glm_held_gb(model, vram), glm_ram_need(model, vram)
     say()
     say(f"  {model}: {d['about']}; download {d['download_gb']:.0f} GB. The file is read in place: about {held:.0f} of")
     say(f"  its {d['arena_gb']:.0f} GB of experts fit this card, the rest stay in RAM (the OS file cache).")
-    if vram < GLM_VRAM_BESIDE_GB + 2:
-        confirm_risk(f"{title} takes about {GLM_VRAM_BESIDE_GB} GB of VRAM before any expert (measured on a 32 GB "
+    if vram < beside + 2:
+        confirm_risk(f"{title} takes about {beside} GB of VRAM before any expert (measured on a 32 GB "
                      f"card at a 32K context); {gpu_name(gpu)} has less than it takes to start", bool(a.model), a.yes,
                      f"{title} needs more VRAM than {vram:.0f} GB",
                      f"--family glm --model {model} --yes installs it anyway")
         warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
     elif vram < 30:
         warn(f"{title} has run on a 32 GB card only. On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of its "
-             "experts fit in VRAM (20% there): more of every answer is computed on the CPU, so it is slower")
+             f"experts fit in VRAM ({100 * glm_held_gb(model, 31.84) / d['arena_gb']:.0f}% there): more of every "
+             "answer is computed on the CPU, so it is slower")
     if ram < need_ram - 4:
         confirm_risk(f"RAM: {ram:.0f} GB. {title} wants about {need_ram:.0f} GB on this card by setup's estimate: the "
                      f"{d['arena_gb'] - held:.0f} GB of experts the GPU does not hold are read through the OS file "
@@ -3746,7 +3780,7 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
 
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
-    gguf = models_dir / fam["file"]
+    gguf = models_dir / model_file(fam, model, 1)
     if a.gguf_dir and not gguf.exists():
         fail(f"{models_dir} has no {gguf.name}",
              "put the file there under that name, or leave out --gguf-dir and setup downloads it")
@@ -3785,7 +3819,7 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
             "<its folder>.")
         if hf_endpoint() != HF_DEFAULT:
             say(f"  Downloading from {hf_endpoint()} (HF_ENDPOINT)")
-        download(fam["hf"] + gguf.name, gguf)
+        download(d.get("hf", fam["hf"]) + gguf.name, gguf)
     check_shards([gguf])
     verify_sha256(gguf, *fam["sha256"][gguf.name])
     ok("model file present")
@@ -3800,7 +3834,7 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     profile = pack / "expert-profile.txt"
     if not profile.exists():
         pack.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / "data" / fam["profile"], profile)
+        shutil.copyfile(ROOT / "data" / d.get("profile", fam["profile"]), profile)
     ok(f"model prepared: {pack}")
 
     step(7, "writing the start script")

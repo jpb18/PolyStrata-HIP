@@ -40,13 +40,28 @@ such a tie.
   is 96 GB of RAM. It has run with 120 GB only.
 - 114 GB of disk for the model file.
 
+## Sizes
+
+| Size | What it is | Download | RAM beside a 32 GB card |
+| --- | --- | ---: | ---: |
+| `3.0BIT` | The whole model, 288 routed experts a layer: the 3-bit file from [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF). | 114 GB | 96 GB |
+| `REAP50-Q3_K_M` | [REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF) by patrickbdevaney: half of each layer's routed experts removed, the rest as 3-bit K-quants. Its card says what was removed and how it was checked. | 79 GB | 60 GB |
+
+The RAM is setup's estimate: the experts the card does not hold, and 10 GB beside them. Without `--model` setup
+takes the first size whose estimate the PC meets.
+
+REAP50-Q3_K_M on the machine above: 27.4 tokens/s, and prompts of 3,059, 11,673 and 29,069 tokens read at 493, 448
+and 384 tokens/s. The card held 20.8 GiB of its experts, 1,869 of 6,048. Against llama-server of the llama.cpp
+fork the file was made for, on a prompt of 1,678 tokens, the first 63 tokens were the same.
+
 ## Install
 
 ```
 ./setup.sh --family glm
 ```
 
-Setup checks the PC and asks two things: the context, and whether to keep several conversations in RAM. Then it
+Setup checks the PC and asks three things: the size, the context, and whether to keep several conversations in
+RAM. Then it
 compiles the engine, downloads the model, checks its SHA-256 and starts it. The web app is at
 `http://127.0.0.1:8080`. After that, `./setup.sh` starts the model again without asking.
 
@@ -171,11 +186,9 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 
 ## What is missing
 
-- Other files of the model. The engine reads one GGUF file in the layout of neurall's llama.cpp fork, with Q2_K,
-  Q3_K and Q4_K experts and a Q8_0 token table. By their headers pfeifferj's 3.0-bit and 3.5-bit files have that,
-  but only the file above has been run. The smaller files on Hugging Face (Unsloth's, antirez's, the REAP50 ones
-  with half the experts) name their tensors differently or use other weight formats, and ggml-org's are split in
-  two. None of them is read yet.
+- Other files of the model. The engine reads the layouts of four converters (neurall's llama.cpp fork,
+  patrickbdevaney's, antirez's and Unsloth's), a model in several files, and the weight types llama.cpp's kernels
+  have. Only the two sizes above have been run: setup offers no other.
 - Release builds of `strata-glm`: setup compiles it.
 - Windows. Nothing has been compiled there, and setup asks before it tries.
 - AMD and Intel cards, and more than one card.

@@ -66,8 +66,10 @@ FALLBACK_MODELS = {
                            "less than ~80 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "vision": True},
-    "3.0BIT": {"about": "3-bit GSQ-RCO experts with Q4_K attention, the one size there is", "download_gb": 113.6,
+    "3.0BIT": {"about": "the whole model: 3-bit GSQ-RCO experts, Q4_K attention", "download_gb": 113.6,
                "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",)},
+    "REAP50-Q3_K_M": {"about": "half the routed experts (REAP50), 3-bit K-quant: less RAM", "download_gb": 78.8,
+                      "ram_gb": 60, "arena_gb": 72.1, "families": ("glm",)},
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -80,7 +82,7 @@ FALLBACK_FAMILIES = {
                                                                   "(UD-Q4_K_XL, 111 GB: experimental)",
                 "tag": "unsloth-", "vision": False},
     "glm": {"title": "GLM 5.3 Flash", "about": "another model, with its own engine: Linux, one NVIDIA card (run on "
-                                               "32 GB), ~128 GB of RAM", "tag": "glm-", "engine": "glm",
+                                               "32 GB), 64-128 GB of RAM", "tag": "glm-", "engine": "glm",
             "vision": False, "experimental": True},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
@@ -972,8 +974,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "shorter), coder = the Coder (half the experts, ~32 GB RAM, for code), "
                                        "unsloth = Unsloth's ~4-bit (UD-IQ4_XS; UD-Q4_K_XL is "
                                        "experimental), part of the experts read from the SSD, glm = GLM 5.3 "
-                                       "Flash (another model: Linux, one NVIDIA card, ~128 GB of RAM, a 114 GB "
-                                       "download, no images)"},
+                                       "Flash (another model: Linux, one NVIDIA card, 64-128 GB of RAM, a 79 or "
+                                       "114 GB download, no images)"},
              "model": {"type": "string", "enum": list(models),
                        "description": "the size (quantization): see strata_models"},
              "context": {"type": "integer", "enum": contexts,
@@ -1233,6 +1235,10 @@ class Tools:
             sizes = s.sizes_of(models, family)
             model = rec["model"] if rec.get("family") == family else ("IQ3_XXS" if "IQ3_XXS" in sizes and
                                                                      hw.get("ram_gb", 0) >= 60 else sizes[0])
+            S = s.setup_module()
+            if families[family].get("engine") == "glm" and S and hw.get("ram_gb"):   # setup's own pick for this PC
+                cards = [g["vram_gb"] for g in hw.get("gpus", []) if g.get("usable")]
+                model = S.glm_default(sizes, hw["ram_gb"], max(cards, default=0.0))
         elif family is None:
             fams = [f for f in families if model in s.sizes_of(models, f)]
             family = "qwen" if "qwen" in fams else fams[0]
