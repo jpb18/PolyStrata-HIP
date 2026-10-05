@@ -2381,7 +2381,7 @@ class Service:
                                     break
                                 raw_ids.append(t)
                                 seg.append(t)
-                                thinking_n += parser.state == "reasoning"
+                                thinking_n += parser.state in ("reasoning", "rcall")
                                 run_len = run_len + 1 if t == run_tok else 1
                                 run_tok = t
                                 if self.repeat_stop_tokens and run_len >= self.repeat_stop_tokens:
@@ -2433,7 +2433,7 @@ class Service:
                         for t in extra:
                             n += 1
                             raw_ids.append(t)
-                            thinking_n += parser.state == "reasoning"
+                            thinking_n += parser.state in ("reasoning", "rcall")
                             evs = parser.feed(detok.push(t))
                             self._note(n, evs, st, rate)
                             for ev in evs:
@@ -2507,7 +2507,7 @@ class Service:
                                 hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
                             print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
                                   f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
-                            if finish == "length" and parser.state == "reasoning":   # #530
+                            if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
                                       "strata-<model>.json for every request) leaves room to answer", flush=True)

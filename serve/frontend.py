@@ -601,10 +601,42 @@ class OutputParser:
         self.buf += delta
         out: list[Event] = []
         while True:
-            if self.state == "reasoning":
+            if self.state == "rcall":
+                # #804: a `<tool_call>` inside the reasoning, with tools declared.  It is held whole (never streamed
+                # as a call) until it ends: a declared name is then a tool call, anything else stays reasoning text.
+                body = self.buf[len(CALL_START):]
+                end, think = call_end(body), body.find(THINK_END)
+                if end >= 0 and (think < 0 or think >= end):
+                    call = None
+                    try:
+                        name = body[:end].strip()[len("<function="):].split(">", 1)[0]
+                        if name in self.schemas:
+                            call = parse_tool_call(body[:end], self.schemas.get(name))
+                    except ValueError:
+                        pass
+                    if call is not None:
+                        out.append(Event("tool_call", call=call))
+                    else:
+                        out.append(Event("reasoning", self.buf[:len(CALL_START) + end + len(CALL_END)]))
+                    self.buf = body[end + len(CALL_END):]
+                    self.state = "reasoning"
+                elif think >= 0:                     # the thinking ended inside it: it never was a call
+                    out.append(Event("reasoning", self.buf[:len(CALL_START) + think]))
+                    self.buf = body[think:]
+                    self.state = "reasoning"
+                else:
+                    return out
+            elif self.state == "reasoning":
                 i = self.buf.find(THINK_END)
+                tool = self.buf.find(CALL_START) if self.schemas else -1
+                if tool >= 0 and (i < 0 or tool < i):
+                    if tool:
+                        out.append(Event("reasoning", self.buf[:tool]))
+                    self.buf = self.buf[tool:]
+                    self.state = "rcall"
+                    continue
                 if i < 0:
-                    keep = self._hold(self.buf, (THINK_END,))
+                    keep = self._hold(self.buf, (THINK_END, CALL_START) if self.schemas else (THINK_END,))
                     if len(self.buf) > keep:
                         out.append(Event("reasoning", self.buf[:len(self.buf) - keep]))
                         self.buf = self.buf[len(self.buf) - keep:]
@@ -669,7 +701,8 @@ class OutputParser:
             self._reset_scan()
             return out
         if self.buf:
-            kind = {"reasoning": "reasoning", "content": "content"}.get(self.state, "content")
+            # an unfinished call inside the reasoning (#804) is reasoning text, never a call
+            kind = {"reasoning": "reasoning", "rcall": "reasoning", "content": "content"}.get(self.state, "content")
             text = self.buf if self.state != "call" else CALL_START + self.buf
             out.append(Event(kind, text))
             self.buf = ""
