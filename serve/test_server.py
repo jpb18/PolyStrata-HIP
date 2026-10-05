@@ -2459,6 +2459,47 @@ class ModelAliases(unittest.TestCase):
             httpd.server_close()
 
 
+class ContainerLimits(unittest.TestCase):
+    """Inside a container the page shows what the container may use: a fake cgroup v2 folder with 25 CPUs and
+    120 GiB on a machine that reports more."""
+
+    def cgroup(self, d, cpu_max="2500000 100000", mem_max=str(120 << 30)):
+        for name, text in (("cpu.max", cpu_max), ("memory.max", mem_max), ("cpu.stat", "usage_usec 1000000\n"),
+                           ("memory.current", str(100 << 30)),
+                           ("memory.stat", f"anon {8 << 30}\ninactive_file {60 << 30}\nactive_file {30 << 30}\n")):
+            (Path(d) / name).write_text(text)
+        from serve import telemetry
+        return telemetry.Cgroup(d)
+
+    def test_quota_and_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.cgroup(d)
+            self.assertEqual((c.cpus, c.mem), (25.0, 120 << 30))
+            self.assertEqual(c.ram_used(), 10 << 30)        # without the file cache
+            (Path(d) / "cpu.stat").write_text("usage_usec 13500000\n")   # 12.5 CPU-seconds later
+            c.prev = (c.prev[0] - 1.0, c.prev[1])
+            self.assertAlmostEqual(c.cpu(), 50.0, delta=2.0)             # of the 25 CPUs, over about a second
+
+    def test_no_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.cgroup(d, cpu_max="max 100000", mem_max="max")
+            self.assertEqual((c.cpus, c.mem), (None, None))
+        from serve import telemetry
+        c = telemetry.Cgroup(os.path.join(tempfile.gettempdir(), "no-such-cgroup-folder"))
+        self.assertEqual((c.cpus, c.mem, c.cpu(), c.ram_used()), (None, None, None, None))
+
+    def test_the_page_gets_the_quota(self):
+        from serve import telemetry
+        with tempfile.TemporaryDirectory() as d:
+            c = self.cgroup(d)
+            with mock.patch.object(telemetry, "Cgroup", lambda: c), mock.patch("os.cpu_count", return_value=208):
+                t = telemetry.Telemetry()
+            self.assertEqual((t.static["threads"], t.static["cores"]), (25, None))
+            s = t.sample()
+            if s.get("ram_total"):                          # a machine with less RAM than the fake limit keeps its own
+                self.assertLessEqual(s["ram_total"], 120 << 30)
+
+
 class AmdTelemetry(unittest.TestCase):
     """#301: the AMD backend's readings from a fake amdgpu sysfs tree: KFD node -> render node, as setup numbers the
     cards (the CPU node skipped), and free_vram_mib on HIP."""

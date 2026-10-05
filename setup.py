@@ -343,12 +343,22 @@ def _memory_status():
     return m
 
 
+def container_ram_gb():
+    """A container's memory limit in GB, None without one (Linux cgroup v2)."""
+    try:
+        v = open("/sys/fs/cgroup/memory.max").read().strip()
+    except OSError:
+        return None
+    return int(v) / 2**30 if v.isdigit() else None
+
+
 def ram_gb():
     if WIN:
         return _memory_status().ullTotalPhys / 2**30
     for line in open("/proc/meminfo"):
         if line.startswith("MemTotal"):
-            return int(line.split()[1]) * 1024 / 2**30
+            # inside a container this is the host's RAM: a pod with 120 GB of a 1 TB machine reads 1 TB
+            return min(int(line.split()[1]) * 1024 / 2**30, container_ram_gb() or float("inf"))
     return 0.0
 
 

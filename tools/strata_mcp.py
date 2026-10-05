@@ -871,7 +871,12 @@ def own_ram_gb() -> float:
     try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemTotal"):
-                return int(line.split()[1]) * 1024 / 2**30
+                total = int(line.split()[1]) * 1024 / 2**30
+                try:                                    # a container's limit (cgroup v2), as setup's ram_gb()
+                    limit = open("/sys/fs/cgroup/memory.max").read().strip()
+                except OSError:
+                    limit = ""
+                return min(total, int(limit) / 2**30) if limit.isdigit() else total
     except OSError:
         pass
     return 0.0

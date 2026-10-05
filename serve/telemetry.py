@@ -262,6 +262,54 @@ class _CpuRamFallback:
             return None, None
 
 
+class Cgroup:
+    """What a container may use, where that is less than the machine has.  Inside a container /proc and psutil
+    describe the host: a pod with 25 CPUs and 120 GB of a 208-thread, 1 TB machine reads 208 and 1 TB, and the CPU
+    load it reads is every tenant's.  Linux cgroup v2 (cpu.max, memory.max); anywhere else nothing is limited."""
+
+    def __init__(self, root="/sys/fs/cgroup"):
+        self.root = root
+        f = self._read("cpu.max").split()               # "max 100000" when there is no quota
+        self.cpus = int(f[0]) / int(f[1]) if len(f) == 2 and f[0].isdigit() and f[1].isdigit() and int(f[1]) else None
+        m = self._read("memory.max").strip()
+        self.mem = int(m) if m.isdigit() else None
+        self.prev = self._usage()
+
+    def _read(self, name):
+        try:
+            with open(os.path.join(self.root, name), encoding="ascii", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def _usage(self):
+        for line in self._read("cpu.stat").splitlines():
+            k, _, v = line.partition(" ")
+            if k == "usage_usec" and v.isdigit():
+                return time.time(), int(v)
+        return None
+
+    def cpu(self):
+        """Percent of the quota used since the last call."""
+        cur = self._usage()
+        prev, self.prev = self.prev, cur
+        if not cur or not prev or not self.cpus or cur[0] <= prev[0]:
+            return None
+        return max(0.0, min(100.0, (cur[1] - prev[1]) / 1e4 / (cur[0] - prev[0]) / self.cpus))
+
+    def ram_used(self):
+        """Bytes in use without the file cache, which the kernel gives back: what psutil calls used."""
+        cur = self._read("memory.current").strip()
+        if not cur.isdigit():
+            return None
+        cache = 0
+        for line in self._read("memory.stat").splitlines():
+            k, _, v = line.partition(" ")
+            if k in ("inactive_file", "active_file") and v.isdigit():
+                cache += int(v)
+        return max(int(cur) - cache, 0)
+
+
 # ------------------------------------------------------------------------------------------------ the sampler
 class Telemetry:
     def __init__(self, extra=None, gpu_index=0, gpu_indices=None, amd=False):
@@ -284,12 +332,15 @@ class Telemetry:
         except ImportError:
             self.ps = None
         self.fallback = _CpuRamFallback()
+        self.cgroup = Cgroup()
+        n = os.cpu_count()
+        self.quota = bool(self.cgroup.cpus and n and self.cgroup.cpus < n)   # a container with fewer CPUs
         self.static = {
             "gpu_name": " + ".join(g.name() or "?" for _, g in self.gpus) if self.gpu.ok() else None,
             "gpu_count": len(self.gpus),
             "cpu_name": _cpu_name(),
-            "cores": (self.ps.cpu_count(logical=False) if self.ps else None) or None,
-            "threads": os.cpu_count(),
+            "cores": None if self.quota else (self.ps.cpu_count(logical=False) if self.ps else None) or None,
+            "threads": max(1, round(self.cgroup.cpus)) if self.quota else n,
             "psutil": self.ps is not None,
         }
         self._disk_prev = None
@@ -338,6 +389,12 @@ class Telemetry:
         else:
             s["cpu"] = self.fallback.cpu()
             s["ram_used"], s["ram_total"] = self.fallback.ram()
+        if self.quota:
+            s["cpu"] = self.cgroup.cpu()
+        if self.cgroup.mem and s.get("ram_total") and self.cgroup.mem < s["ram_total"]:
+            used = self.cgroup.ram_used()
+            if used is not None:
+                s["ram_used"], s["ram_total"] = used, self.cgroup.mem
         s["disk_read_mb"], s["disk_write_mb"] = self._disk()
         if self.extra:
             try:
