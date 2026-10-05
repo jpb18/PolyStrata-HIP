@@ -89,6 +89,7 @@ they change speed, not answers. Nothing here applies to CUDA or to another AMD a
 | `STRATA_Q8_PACKED`, `STRATA_Q6_PACKED`, `STRATA_MMVF_ROWS`, `STRATA_ATTN_LANECELL` | decode layouts and kernels (packed Q8_0 / Q6_K weights, 4-row BF16 GEMV, one-cell-per-thread attention scores) |
 | `STRATA_EXPERT_V2`, `STRATA_TSUM`, `STRATA_LFUSE` | the grouped decode experts (IQ3_S / IQ4_NL), single-butterfly warp sums, fewer launches around the shared expert and the KV append |
 | `STRATA_GDN_SPLIT`, `STRATA_QFUSE`, `STRATA_PLE_BATCH` | the GDN step over four blocks per head, activation images written by their producers, the PLE key / value projections of a verify window at once |
+| `STRATA_SH_STREAM=1` | the shared expert on a second stream beside the routed experts. It is off by default on other AMD cards (#816), but it pays on gfx1151: decode +1.8% (UD-IQ4_XS) and +6.7% (UD-Q4_K_XL) at 8K |
 
 ## 5. What is not on by default (it changes bits)
 
@@ -106,7 +107,6 @@ export STRATA_HIP_WMMA=1        # the prompt attention on matrix cores
 export STRATA_SELECT_WMMA=1     # the block scorer on matrix cores
 export STRATA_HC_Q8=1           # the hyper-connection read from the GGUF's own Q8_0 projections
 export STRATA_PF_SWITCH_MIN_T=4096
-export STRATA_SH_STREAM=1       # the shared expert on a second stream (off by default on HIP since #816; +2% to +7% output here, no bit change)
 ```
 
 Two engine flags help on long contexts and are not Strix-specific: `--mtp-window 8192` (the draft layer attends to the last 8,192
@@ -155,6 +155,6 @@ a8 / 4K / 64K.
 The prompt numbers at 8K swing by more than the differences (other jobs share this box), so read them as unchanged. The output
 column moved by a steady -1.2% to -1.5% (-4% on UD-Q4_K_XL at 8K, where the default arm also had slow runs): since 0.1.39 the
 shared-expert stream fork is off by default on HIP (#816). It overlaps the shared expert with the routed experts on a second
-stream and does help on gfx1151, so set `STRATA_SH_STREAM=1` here. It changes no bits (same ids). 4 interleaved pairs at 8K, merged
+stream and does help on gfx1151, so 0.1.40 turns it on there by default (section 4). It changes no bits (same ids). 4 interleaved pairs at 8K, merged
 code with the fork off -> on: UD-IQ4_XS output 53.1 -> 54.05 (+1.8%), UD-Q4_K_XL 49.5 -> 52.8 (+6.7%, the default arm ranged 46.0-52.1),
 prompt unchanged. With the fork on, the merged code's output is at or above the j build's (IQ4_XS 54.05 vs 53.94).
