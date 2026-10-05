@@ -106,6 +106,7 @@ export STRATA_HIP_WMMA=1        # the prompt attention on matrix cores
 export STRATA_SELECT_WMMA=1     # the block scorer on matrix cores
 export STRATA_HC_Q8=1           # the hyper-connection read from the GGUF's own Q8_0 projections
 export STRATA_PF_SWITCH_MIN_T=4096
+export STRATA_SH_STREAM=1       # the shared expert on a second stream (off by default on HIP since #816; +2% to +7% output here, no bit change)
 ```
 
 Two engine flags help on long contexts and are not Strix-specific: `--mtp-window 8192` (the draft layer attends to the last 8,192
@@ -132,3 +133,28 @@ Every pair printed the same token ids.
 
 UD-IQ4_XS at 4K / 32K / 64K (5-6 interleaved pairs): prompt +9.2% / +6.0% / +5.3%, output +5.0% / +3.9% / +4.6%.
 IQ3_XXS at 8K was measured again with 6 interleaved pairs (an earlier 3-run set had read 5% low while other jobs shared the GPU): prompt equal, output +5.6%. With the defaults off the same build's prompt is 8% lower (1,137), so the table helps there too.
+
+### Re-measured on the merged 0.1.40 code
+
+The same box and method, no environment switches at all (the arch defaults only), on the final merged tree. 4 interleaved pairs per cell,
+medians; "j" is the build of the table above (the Aurora port before the other 0.1.40 work was merged), "merged" is the release
+code. Every run printed the same token ids, and the ids also match `strata-int29` (the v4.2 config) on UD-IQ4_XS and UD-Q4_K_XL at
+a8 / 4K / 64K.
+
+| Model | Context | Prompt j -> merged | Output j -> merged |
+|---|---|---|---|
+| UD-IQ4_XS | 8K | 1,260 -> 1,159 (-8.0%, spread 1,070-1,320) | 53.94 -> 53.14 (-1.5%) |
+| UD-IQ4_XS | 128K | 1,317 -> 1,299 (-1.4%) | 51.38 -> 50.72 (-1.3%) |
+| UD-Q4_K_XL | 8K | 1,163 -> 1,104 (-5.0%, spread 890-1,240) | 52.66 -> 50.47 (-4.2%) |
+| UD-Q4_K_XL | 128K | 1,252 -> 1,211 (-3.3%) | 43.28 -> 42.64 (-1.5%) |
+| IQ3_S | 8K | 1,283 -> 1,265 (-1.4%) | 59.81 -> 59.10 (-1.2%) |
+| IQ3_S | 128K | 1,311 -> 1,310 (-0.1%) | 42.74 -> 42.09 (-1.5%) |
+| IQ3_XXS | 8K | 1,127 -> 1,212 (+7.6%) | 51.64 -> 50.95 (-1.3%) |
+| IQ3_XXS | 128K | 1,252 -> 1,250 (-0.1%) | 50.88 -> 50.22 (-1.3%) |
+
+The prompt numbers at 8K swing by more than the differences (other jobs share this box), so read them as unchanged. The output
+column moved by a steady -1.2% to -1.5% (-4% on UD-Q4_K_XL at 8K, where the default arm also had slow runs): since 0.1.39 the
+shared-expert stream fork is off by default on HIP (#816). It overlaps the shared expert with the routed experts on a second
+stream and does help on gfx1151, so set `STRATA_SH_STREAM=1` here. It changes no bits (same ids). 4 interleaved pairs at 8K, merged
+code with the fork off -> on: UD-IQ4_XS output 53.1 -> 54.05 (+1.8%), UD-Q4_K_XL 49.5 -> 52.8 (+6.7%, the default arm ranged 46.0-52.1),
+prompt unchanged. With the fork on, the merged code's output is at or above the j build's (IQ4_XS 54.05 vs 53.94).
