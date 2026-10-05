@@ -1,7 +1,8 @@
 // src/glm/engine.hpp - GLM 5.3 Flash (llama.cpp architecture "glm5-next").
 //
-// The engine reads the GGUF in place.  Everything but the routed experts goes to VRAM; as many routed experts as
-// fit go there too, and the rest are computed on the CPU from the mapped file while the GPU does its share.
+// The engine reads the GGUF in place, in one file or in the numbered files of a split one.  Everything but the
+// routed experts goes to VRAM; as many routed experts as fit go there too, and the rest are computed on the CPU
+// from the mapped file while the GPU does its share.
 #pragma once
 
 #include "cpu_experts.hpp"
@@ -12,10 +13,12 @@
 #include <vector>
 
 namespace strata {
-class GgufFile;
+struct TensorInfo;
 }
 
 namespace strata::glm {
+
+class Shards;
 
 struct Options {
     std::string model;
@@ -123,7 +126,9 @@ public:
 
 private:
     enum Want { kF32, kFloatMat, kAnyMat };
-    Dev upload(const std::string& name, int64_t n_in, int64_t n_out, Want want);
+    Dev upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
+               float (*fix)(float) = nullptr);
+    const TensorInfo* tensor(int il, const char* name) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void load_geometry();
     void load_layer(int il);
@@ -146,7 +151,7 @@ private:
     void* hmalloc(size_t bytes, const char* what);
 
     Options opt_;
-    std::unique_ptr<GgufFile> gg_;
+    std::unique_ptr<Shards> gg_;
     std::unique_ptr<Workers> workers_;
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     void* blas_ = nullptr; ///< cuBLAS on st_, for the sparse attention
@@ -168,7 +173,9 @@ private:
 
     std::vector<Layer> layers_;
     Dev out_norm_, output_;
-    const uint8_t* tok_embd_ = nullptr;
+    const uint8_t* tok_embd_ = nullptr;   ///< the token table in the mapped file, tok_row_ bytes a token
+    size_t tok_row_ = 0;
+    uint32_t tok_type_ = 0;
 
     uint8_t* dense_ = nullptr;   ///< the dense weights' arena
     size_t dense_bytes_ = 0, dense_at_ = 0;

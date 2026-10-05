@@ -4,8 +4,9 @@
 #include "mmq.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/glm/kernels.hpp"
-#include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/native_mmvq.hpp"
+
+#include "ggml.h"
 
 #include <cuda_runtime.h>
 
@@ -17,6 +18,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 #ifdef __linux__
 #include <sched.h>
@@ -25,7 +27,7 @@
 namespace strata::glm {
 namespace {
 
-constexpr uint32_t kTypeF32 = 0, kTypeQ8_0 = 8, kTypeBF16 = 30;
+constexpr uint32_t kTypeF32 = 0, kTypeBF16 = 30;
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
 constexpr int kMaxUsed = 32;
 constexpr int kAttnRows = 32;       // tokens one pass of the sparse attention takes; their keys are 4 MiB a token
@@ -45,11 +47,6 @@ void ck(cudaError_t e, const char* what) {
 
 size_t pad(size_t n) { return (n + 255) & ~size_t(255); }
 
-bool ends_with(const std::string& s, const char* tail) {
-    const size_t n = std::strlen(tail);
-    return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
-}
-
 std::string blk(int il, const char* name) { return "blk." + std::to_string(il) + "." + name; }
 
 const float* fp(const Dev& d) { return (const float*) d.p; }
@@ -61,34 +58,68 @@ std::string shape_of(const TensorInfo& t) {
     return s + "] " + t.type_name();
 }
 
-// A tensor's byte count, after checking that the file holds that much.
-size_t payload(const GgufFile& g, const TensorInfo& t) {
-    const uint64_t bytes = tensor_payload_bytes(t), room = g.file_size() - g.data_start();
-    if (bytes == 0 || t.offset > room || bytes > room - t.offset)
-        throw std::runtime_error("tensor " + t.name + " " + shape_of(t) + " does not fit its file");
-    return (size_t) bytes;
-}
+// The model's GGUFs come out of more than one converter.  `name` is what the layout of neurall's llama.cpp fork
+// calls a thing, and what this file calls it.  `other` is what the same thing is called in the files made for
+// patrickbdevaney's fork (the first, where it differs) and in antirez's (the second).
+struct Names {
+    const char* name;
+    const char* other[2];
+};
+constexpr Names kTensorNames[] = {
+    {"hc_attn_fn.weight", {"hc_attn_fn"}},
+    {"hc_attn_scale.weight", {"hc_attn_scale"}},
+    {"hc_attn_base.weight", {"hc_attn_base"}},
+    {"hc_ffn_fn.weight", {"hc_ffn_fn"}},
+    {"hc_ffn_scale.weight", {"hc_ffn_scale"}},
+    {"hc_ffn_base.weight", {"hc_ffn_base"}},
+    {"indexer_compressor_gate.weight", {"indexer.kpool_gate", "indexer.pool_gate.weight"}},
+    {"indexer_compressor_ape.weight", {"indexer.kpool_ape", "indexer.pool_ape.weight"}},
+    {"attn_q.weight", {nullptr, "kda_q.weight"}},
+    {"attn_k.weight", {nullptr, "kda_k.weight"}},
+    {"attn_v.weight", {nullptr, "kda_v.weight"}},
+    {"attn_output.weight", {nullptr, "kda_output.weight"}},
+    {"ssm_conv1d_q.weight", {nullptr, "kda_q_conv.weight"}},
+    {"ssm_conv1d_k.weight", {nullptr, "kda_k_conv.weight"}},
+    {"ssm_conv1d_v.weight", {nullptr, "kda_v_conv.weight"}},
+    {"ssm_f_a.weight", {nullptr, "kda_f_a.weight"}},
+    {"ssm_f_b.weight", {nullptr, "kda_f_b.weight"}},
+    {"ssm_g_a.weight", {nullptr, "kda_g_a.weight"}},
+    {"ssm_g_b.weight", {nullptr, "kda_g_b.weight"}},
+    {"ssm_dt.bias", {nullptr, "kda_dt_bias.weight"}},
+    {"ssm_beta.weight", {nullptr, "kda_beta.weight"}},
+    {"ssm_a", {nullptr, "kda_a_log.weight"}},
+    {"ssm_norm.weight", {nullptr, "kda_o_norm.weight"}},
+};
+constexpr Names kMetaNames[] = {
+    {"kda.gate_lower_bound", {"ssm.gate_lower_bound", "linear_attention.gate_lower_bound"}},
+    {"kda.head_dim", {nullptr, "linear_attention.head_dimension"}},
+    {"ssm.conv_kernel", {nullptr, "linear_attention.conv_kernel"}},
+    {"attention.key_length_mla", {nullptr, "attention.key_length"}},
+    {"attention.value_length_mla", {nullptr, "attention.value_length"}},
+    {"attention.indexer.kpool", {nullptr, "attention.indexer.pool_size"}},
+    {"hyper_connection.count", {"attention.hc.mult"}},
+    {"hyper_connection.sinkhorn_iterations", {"attention.hc.sinkhorn_iters"}},
+    {"hyper_connection.epsilon", {"attention.hc.eps"}},
+    {"swiglu_clamp_exp", {"swiglu_limit"}},   // one limit for every layer, and for the shared expert too
+    {"swiglu_clamp_shexp", {"swiglu_limit"}},
+};
 
-const MetaValue& meta(const GgufFile& g, const char* key) {
-    const MetaValue* v = g.get(std::string("glm5-next.") + key);
-    if (!v) throw std::runtime_error(std::string("the GGUF has no glm5-next.") + key);
-    return *v;
+// table's entry for `name`, or null
+template <size_t N> const Names* names_of(const Names (&table)[N], const char* name) {
+    for (const Names& n : table)
+        if (std::strcmp(n.name, name) == 0) return &n;
+    return nullptr;
 }
-
-int meta_i(const GgufFile& g, const char* key) { return (int) meta(g, key).u; }
-float meta_f(const GgufFile& g, const char* key) { return (float) meta(g, key).f; }
 
 // A SwiGLU clamp limit per layer, stored as one value or one per layer.  Absent or zero means no clamp.
-std::vector<float> clamp_limits(const GgufFile& g, const char* key, int n_layer) {
+std::vector<float> clamp_limits(const MetaValue* v, int n_layer) {
     std::vector<float> out((size_t) n_layer, INFINITY);
-    const MetaValue* v = g.get(std::string("glm5-next.") + key);
     if (!v) return out;
     for (int il = 0; il < n_layer; ++il) {
         double x = v->f;
         if (v->type == MetaType::ARRAY) {
             if ((size_t) il >= v->items.size())
-                throw std::runtime_error(std::string("glm5-next.") + key + " has no value for layer " +
-                                         std::to_string(il));
+                throw std::runtime_error("the GGUF's SwiGLU clamp has no value for layer " + std::to_string(il));
             x = v->items[(size_t) il].f;
         }
         if (x > 1e-6) out[(size_t) il] = (float) x;
@@ -132,6 +163,61 @@ void read_profile(const std::string& path, int n_layer, int n_expert, std::vecto
 }
 
 }  // namespace
+
+// The model's GGUF: one file, or the numbered files llama.cpp splits a large one into.  The first has the
+// metadata, and a tensor is in the file that lists it.
+class Shards {
+public:
+    explicit Shards(const std::string& path) {
+        files_.push_back(std::make_unique<GgufFile>(path));
+        const MetaValue* no = files_[0]->get("split.no");
+        const MetaValue* count = files_[0]->get("split.count");
+        if (no && no->is_num() && no->u != 0)
+            throw std::runtime_error(path + " is not the first file of its model: give the one whose name ends in "
+                                            "-00001-of-...");
+        const int n = count && count->is_num() ? (int) count->u : 1;
+        if (n > 1) {
+            char tail[40];
+            std::snprintf(tail, sizeof(tail), "-00001-of-%05d.gguf", n);
+            const size_t len = std::strlen(tail);
+            if (path.size() < len || path.compare(path.size() - len, len, tail) != 0)
+                throw std::runtime_error(path + " is the first of " + std::to_string(n) +
+                                         " files, and the others are found by its name: it must end in " + tail);
+            const std::string base = path.substr(0, path.size() - len);
+            for (int i = 2; i <= n; ++i) {
+                std::snprintf(tail, sizeof(tail), "-%05d-of-%05d.gguf", i, n);
+                files_.push_back(std::make_unique<GgufFile>(base + tail));
+            }
+        }
+        for (const auto& f : files_)
+            for (const TensorInfo& t : f->tensors())
+                if (!where_.emplace(t.name, Where{&t, f.get()}).second)
+                    throw std::runtime_error("tensor " + t.name + " is in two of the model's files");
+    }
+
+    const MetaValue* get(const std::string& key) const { return files_[0]->get(key); }
+    const TensorInfo* find(const std::string& name) const {
+        const auto it = where_.find(name);
+        return it == where_.end() ? nullptr : it->second.t;
+    }
+    const uint8_t* data(const TensorInfo& t) const { return where_.at(t.name).file->tensor_data(t); }
+    /// A tensor's byte count, after checking that its file holds that much.
+    size_t payload(const TensorInfo& t) const {
+        const GgufFile& g = *where_.at(t.name).file;
+        const uint64_t bytes = tensor_payload_bytes(t), room = g.file_size() - g.data_start();
+        if (bytes == 0 || t.offset > room || bytes > room - t.offset)
+            throw std::runtime_error("tensor " + t.name + " " + shape_of(t) + " does not fit its file");
+        return (size_t) bytes;
+    }
+
+private:
+    struct Where {
+        const TensorInfo* t;
+        const GgufFile* file;
+    };
+    std::vector<std::unique_ptr<GgufFile>> files_;
+    std::unordered_map<std::string, Where> where_;
+};
 
 Engine::Engine() = default;
 
@@ -177,80 +263,142 @@ int64_t Engine::meta_u(const char* key, int64_t fallback) const {
     return v && v->is_num() ? (int64_t) v->u : fallback;
 }
 
+// A layer's tensor, under any of its names.
+const TensorInfo* Engine::tensor(int il, const char* name) const {
+    if (const TensorInfo* t = gg_->find(blk(il, name))) return t;
+    if (const Names* n = names_of(kTensorNames, name))
+        for (const char* other : n->other)
+            if (const TensorInfo* t = other ? gg_->find(blk(il, other)) : nullptr) return t;
+    return nullptr;
+}
+
 void Engine::load_geometry() {
-    const GgufFile& g = *gg_;
+    const Shards& g = *gg_;
     const MetaValue* arch = g.get("general.architecture");
-    if (!arch || arch->s != "glm5-next")
+    // Unsloth's converter writes the name without its hyphen
+    if (!arch || (arch->s != "glm5-next" && arch->s != "glm5next"))
         throw std::runtime_error("general.architecture is '" + (arch ? arch->s : std::string()) +
                                  "', this engine runs 'glm5-next'");
-    n_layer_ = meta_i(g, "block_count");
-    n_embd_ = meta_i(g, "embedding_length");
-    n_ff_dense_ = meta_i(g, "feed_forward_length");
-    n_head_ = meta_i(g, "attention.head_count");
-    n_vocab_ = meta_i(g, "vocab_size");
-    rms_eps_ = meta_f(g, "attention.layer_norm_rms_epsilon");
-    norm_eps_ = meta_f(g, "attention.layer_norm_epsilon");
-    n_expert_ = meta_i(g, "expert_count");
-    n_used_ = meta_i(g, "expert_used_count");
-    n_ff_exp_ = meta_i(g, "expert_feed_forward_length");
-    w_scale_ = meta_f(g, "expert_weights_scale");
-    w_norm_ = meta(g, "expert_weights_norm").u != 0;
-    kda_dim_ = meta_i(g, "kda.head_dim");
-    kda_lb_ = meta_f(g, "kda.gate_lower_bound");
-    q_rank_ = meta_i(g, "attention.q_lora_rank");
-    kv_rank_ = meta_i(g, "attention.kv_lora_rank");
-    mla_k_ = meta_i(g, "attention.key_length_mla");
-    mla_v_ = meta_i(g, "attention.value_length_mla");
-    idx_heads_ = meta_i(g, "attention.indexer.head_count");
-    idx_dim_ = meta_i(g, "attention.indexer.key_length");
-    idx_top_k_ = meta_i(g, "attention.indexer.top_k");
-    kpool_ = meta_i(g, "attention.indexer.kpool");
-    sinkhorn_ = meta_i(g, "hyper_connection.sinkhorn_iterations");
-    hc_eps_ = meta_f(g, "hyper_connection.epsilon");
+    const std::string pre = arch->s + ".";
+    auto find = [&](const char* key) -> const MetaValue* {
+        if (const MetaValue* v = g.get(pre + key)) return v;
+        if (const Names* n = names_of(kMetaNames, key))
+            for (const char* other : n->other)
+                if (const MetaValue* v = other ? g.get(pre + other) : nullptr) return v;
+        return nullptr;
+    };
+    auto meta = [&](const char* key) -> const MetaValue& {
+        const MetaValue* v = find(key);
+        if (!v) throw std::runtime_error("the GGUF has no " + pre + key);
+        return *v;
+    };
+    auto meta_i = [&](const char* key) { return (int) meta(key).u; };
+    auto meta_f = [&](const char* key) { return (float) meta(key).f; };
+
+    // a file can carry the block that predicts a second token after the model's own; it is not run here
+    const MetaValue* nextn = find("nextn_predict_layers");
+    n_layer_ = meta_i("block_count") - (nextn ? (int) nextn->u : 0);
+    n_embd_ = meta_i("embedding_length");
+    n_ff_dense_ = meta_i("feed_forward_length");
+    n_head_ = meta_i("attention.head_count");
+    n_vocab_ = meta_i("vocab_size");
+    rms_eps_ = meta_f("attention.layer_norm_rms_epsilon");
+    // the indexer's LayerNorm; a converter that leaves the key out means the model's own 1e-6
+    const MetaValue* norm_eps = find("attention.layer_norm_epsilon");
+    norm_eps_ = norm_eps ? (float) norm_eps->f : 1e-6f;
+    n_expert_ = meta_i("expert_count");
+    n_used_ = meta_i("expert_used_count");
+    n_ff_exp_ = meta_i("expert_feed_forward_length");
+    w_scale_ = meta_f("expert_weights_scale");
+    w_norm_ = meta("expert_weights_norm").u != 0;
+    kda_dim_ = meta_i("kda.head_dim");
+    kda_lb_ = meta_f("kda.gate_lower_bound");
+    q_rank_ = meta_i("attention.q_lora_rank");
+    kv_rank_ = meta_i("attention.kv_lora_rank");
+    mla_k_ = meta_i("attention.key_length_mla");
+    mla_v_ = meta_i("attention.value_length_mla");
+    idx_heads_ = meta_i("attention.indexer.head_count");
+    idx_dim_ = meta_i("attention.indexer.key_length");
+    idx_top_k_ = meta_i("attention.indexer.top_k");
+    // tokens to a pool: a key, or else the second axis of a layer's pooling table
+    if (const MetaValue* kpool = find("attention.indexer.kpool")) kpool_ = (int) kpool->u;
+    for (int il = 0; il < n_layer_ && kpool_ == 0; ++il)
+        if (const TensorInfo* ape = tensor(il, "indexer_compressor_ape.weight"))
+            kpool_ = ape->shape.size() == 2 ? (int) ape->shape[1] : 0;
+    sinkhorn_ = meta_i("hyper_connection.sinkhorn_iterations");
+    hc_eps_ = meta_f("hyper_connection.epsilon");
     d_inner_ = n_head_ * kda_dim_;
 
     auto need = [](bool ok, const char* what) {
         if (!ok) throw std::runtime_error(std::string("unsupported model: ") + what);
     };
-    need(meta_i(g, "hyper_connection.count") == kHc, "hyper_connection.count is not 4");
-    need(meta_i(g, "ssm.conv_kernel") == kConv, "ssm.conv_kernel is not 4");
-    need(meta_i(g, "expert_gating_func") == 2, "the expert gate is not a sigmoid");
-    need(meta_i(g, "expert_shared_count") == 1, "expert_shared_count is not 1");
+    need(meta_i("hyper_connection.count") == kHc, "hyper_connection.count is not 4");
+    need(meta_i("ssm.conv_kernel") == kConv, "ssm.conv_kernel is not 4");
+    const MetaValue* gating = find("expert_gating_func");   // left out by one converter: the model's sigmoid
+    need(!gating || gating->u == 2, "the expert gate is not a sigmoid");
+    need(meta_i("expert_shared_count") == 1, "expert_shared_count is not 1");
     need(n_layer_ > 0 && n_embd_ > 0 && n_embd_ % 32 == 0 && n_vocab_ > 0, "bad block_count or embedding_length");
     need(kda_dim_ > 0 && kda_dim_ % 32 == 0 && kda_dim_ <= 256, "kda.head_dim is not a multiple of 32 up to 256");
     need(idx_dim_ > 0 && idx_dim_ <= 256, "the indexer key is longer than 256");
     need(n_used_ >= 1 && n_used_ <= kMaxUsed && n_used_ <= n_expert_, "bad expert_used_count");
     need(kpool_ > 1 && idx_top_k_ > 0 && idx_top_k_ % kpool_ == 0, "indexer.top_k is not whole pools");
 
-    clamp_exp_ = clamp_limits(g, "swiglu_clamp_exp", n_layer_);
-    clamp_shexp_ = g.get("glm5-next.swiglu_clamp_shexp") ? clamp_limits(g, "swiglu_clamp_shexp", n_layer_) : clamp_exp_;
+    clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_layer_);
+    clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_layer_) : clamp_exp_;
 }
 
-Dev Engine::upload(const std::string& name, int64_t n_in, int64_t n_out, Want want) {
-    const TensorInfo* t = gg_->find(name);
+// A tensor to VRAM.  It goes as the file has it when the kernels compute with that type.  Otherwise it is
+// converted on the way: to F32 where a kernel reads floats, to BF16 for a matrix.  `fix` is applied to every
+// value, which also takes the float path.  While dense_ is null the call only adds up the arena (load() runs the
+// model's tensors through twice).
+Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
+                   float (*fix)(float)) {
     if (!t) throw std::runtime_error("the GGUF has no tensor " + name);
     const uint64_t rest = t->elements() / std::max<uint64_t>(t->shape[0], 1);
-    const bool type_ok = t->type == kTypeF32 || (want != kF32 && t->type == kTypeBF16) ||
-                         (want == kAnyMat && kernels::native_mmvq_supported((int) t->type));
-    if ((int64_t) t->shape[0] != n_in || (int64_t) rest != n_out || !type_ok)
-        throw std::runtime_error(name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
-                                 std::to_string(n_out) + "]" + (type_ok ? "" : " in a type this engine computes"));
-    const size_t bytes = payload(*gg_, *t);
-    if (dense_at_ + pad(bytes) > dense_bytes_) throw std::logic_error("the dense arena is too small for " + name);
-    uint8_t* p = dense_ + dense_at_;
-    dense_at_ += pad(bytes);
-    ck(cudaMemcpy(p, gg_->tensor_data(*t), bytes, cudaMemcpyHostToDevice), "weight upload");
-    return Dev{p, t->type, (int) n_in, (int) n_out};
+    if ((int64_t) t->shape[0] != n_in || (int64_t) rest != n_out)
+        throw std::runtime_error(t->name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
+                                 std::to_string(n_out) + "]");
+    const size_t bytes = gg_->payload(*t), count = (size_t) t->elements();
+    const bool as_is = !fix && (t->type == kTypeF32 || (want != kF32 && t->type == kTypeBF16) ||
+                                (want == kAnyMat && kernels::native_mmvq_supported((int) t->type)));
+    const uint32_t type = as_is ? t->type : want == kF32 ? kTypeF32 : kTypeBF16;
+    const size_t out = as_is ? bytes : count * (type == kTypeF32 ? sizeof(float) : sizeof(uint16_t));
+    const Dev d{dense_ ? dense_ + dense_at_ : nullptr, type, (int) n_in, (int) n_out};
+    dense_at_ += pad(out);
+    if (!dense_) return d;
+    if (dense_at_ > dense_bytes_) throw std::logic_error("the dense arena is too small for " + t->name);
+    if (as_is) {
+        ck(cudaMemcpy(d.p, gg_->data(*t), bytes, cudaMemcpyHostToDevice), "weight upload");
+        return d;
+    }
+
+    std::vector<float> f(count);
+    const ggml_type_traits* traits = ggml_get_type_traits((ggml_type) t->type);
+    if (t->type == kTypeF32) std::memcpy(f.data(), gg_->data(*t), bytes);
+    else if (traits && traits->to_float) traits->to_float(gg_->data(*t), f.data(), (int64_t) count);
+    else throw std::runtime_error(t->name + " is " + shape_of(*t) + ", a type this engine cannot read");
+    if (fix)
+        for (float& v : f) v = fix(v);
+    if (type == kTypeF32) {
+        ck(cudaMemcpy(d.p, f.data(), out, cudaMemcpyHostToDevice), "weight upload");
+        return d;
+    }
+    std::vector<ggml_bf16_t> h(count);
+    ggml_fp32_to_bf16_row(f.data(), h.data(), (int64_t) count);
+    ck(cudaMemcpy(d.p, h.data(), out, cudaMemcpyHostToDevice), "weight upload");
+    return d;
 }
 
 void Engine::load_layer(int il) {
     Layer& L = layers_[(size_t) il];
-    auto f32 = [&](const char* n, int64_t a, int64_t b = 1) { return upload(blk(il, n), a, b, kF32); };
-    auto mat = [&](const char* n, int64_t a, int64_t b, Want w = kAnyMat) { return upload(blk(il, n), a, b, w); };
-    auto has = [&](const char* n) { return gg_->find(blk(il, n)) != nullptr; };
+    auto f32 = [&](const char* n, int64_t a, int64_t b = 1) { return upload(tensor(il, n), blk(il, n), a, b, kF32); };
+    auto mat = [&](const char* n, int64_t a, int64_t b, Want w = kAnyMat) {
+        return upload(tensor(il, n), blk(il, n), a, b, w);
+    };
+    auto has = [&](const char* n) { return tensor(il, n) != nullptr; };
     // the low rank of a gate's two-matrix projection is the first matrix's row count
     auto rank = [&](const char* n) {
-        const TensorInfo* t = gg_->find(blk(il, n));
+        const TensorInfo* t = tensor(il, n);
         if (!t || t->shape.size() < 2) throw std::runtime_error("the GGUF has no matrix " + blk(il, n));
         return (int64_t) t->shape[1];
     };
@@ -297,7 +445,16 @@ void Engine::load_layer(int il) {
         L.f_b = mat("ssm_f_b.weight", fr, d_inner_);
         L.dt_b = f32("ssm_dt.bias", d_inner_);
         L.beta = mat("ssm_beta.weight", n_embd_, n_head_);
-        L.a = f32("ssm_a", n_head_);
+        // kda_step() takes -exp(A_log), which is what one converter stores.  Another stores exp(A_log), and the
+        // sign tells those two apart.  The third stores A_log, under a name that says so.
+        const TensorInfo* a = tensor(il, "ssm_a");
+        float first = -1.f;
+        if (a && a->type == kTypeF32 && gg_->payload(*a) >= sizeof(first))
+            std::memcpy(&first, gg_->data(*a), sizeof(first));
+        float (*fix)(float) = nullptr;
+        if (a && a->name.find("a_log") != std::string::npos) fix = [](float v) { return -std::exp(v); };
+        else if (first > 0.f) fix = [](float v) { return -v; };
+        L.a = upload(a, blk(il, "ssm_a"), n_head_, 1, kF32, fix);
         L.g_a = mat("ssm_g_a.weight", n_embd_, gr);
         L.g_b = mat("ssm_g_b.weight", gr, d_inner_);
         L.o_norm = f32("ssm_norm.weight", kda_dim_);
@@ -317,17 +474,17 @@ void Engine::load_layer(int il) {
     L.sh_down = mat("ffn_down_shexp.weight", n_ff_exp_, n_embd_);
 
     L.probs_b.assign((size_t) n_expert_, 0.f);
-    if (const TensorInfo* b = gg_->find(blk(il, "exp_probs_b.bias"))) {
+    if (const TensorInfo* b = tensor(il, "exp_probs_b.bias")) {
         if (b->type != kTypeF32 || (int64_t) b->elements() != n_expert_)
             throw std::runtime_error(b->name + " is " + shape_of(*b) + ", expected F32 [" +
                                      std::to_string(n_expert_) + "]");
-        payload(*gg_, *b);
-        std::memcpy(L.probs_b.data(), gg_->tensor_data(*b), (size_t) n_expert_ * sizeof(float));
+        gg_->payload(*b);
+        std::memcpy(L.probs_b.data(), gg_->data(*b), (size_t) n_expert_ * sizeof(float));
     }
 
     // the routed experts stay in the file; fill_expert_cache() copies the ones VRAM has room for
     auto exps = [&](const char* n, int64_t n_in, int64_t rows) -> const TensorInfo& {
-        const TensorInfo* t = gg_->find(blk(il, n));
+        const TensorInfo* t = tensor(il, n);
         if (!t) throw std::runtime_error("the GGUF has no tensor " + blk(il, n));
         if (t->shape.size() != 3 || (int64_t) t->shape[0] != n_in || (int64_t) t->shape[1] != rows ||
             (int64_t) t->shape[2] != n_expert_)
@@ -342,12 +499,12 @@ void Engine::load_layer(int il) {
         throw std::runtime_error(tg.name + " and " + tu.name + " have different types, which this engine does not run");
     L.gu_type = tg.type;
     L.d_type = td.type;
-    L.gu_bytes = payload(*gg_, tg) / (size_t) n_expert_;
-    L.d_bytes = payload(*gg_, td) / (size_t) n_expert_;
-    payload(*gg_, tu);
-    L.exp_gate = gg_->tensor_data(tg);
-    L.exp_up = gg_->tensor_data(tu);
-    L.exp_down = gg_->tensor_data(td);
+    L.gu_bytes = gg_->payload(tg) / (size_t) n_expert_;
+    L.d_bytes = gg_->payload(td) / (size_t) n_expert_;
+    gg_->payload(tu);
+    L.exp_gate = gg_->data(tg);
+    L.exp_up = gg_->data(tu);
+    L.exp_down = gg_->data(td);
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
         throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
@@ -575,7 +732,7 @@ void Engine::load(const Options& o) {
         throw std::runtime_error("a prompt batch is 1 to 4096 tokens");
     if (opt_.stage_mib < 1) throw std::runtime_error("the staging buffer must be at least 1 MiB");
     if (opt_.stage_ahead < 0) throw std::runtime_error("the batch size to stage ahead from cannot be negative");
-    gg_ = std::make_unique<GgufFile>(opt_.model);
+    gg_ = std::make_unique<Shards>(opt_.model);
     load_geometry();
 
     cudaStream_t st = nullptr;
@@ -586,23 +743,32 @@ void Engine::load(const Options& o) {
     ev_ = ev;
     blas_ = blas_create(st_);
 
-    for (const TensorInfo& t : gg_->tensors())
-        if (!ends_with(t.name, "_exps.weight") && t.name != "token_embd.weight")
-            dense_bytes_ += pad(payload(*gg_, t));
-    dense_ = (uint8_t*) dmalloc(dense_bytes_ + 256, "the dense weights");
-
+    // the token table stays in the file, a row a token, and embed() reads a row in whatever type it has
     const TensorInfo* te = gg_->find("token_embd.weight");
-    if (!te || te->type != kTypeQ8_0 || te->shape.size() != 2 || (int64_t) te->shape[0] != n_embd_ ||
-        (int64_t) te->shape[1] != n_vocab_)
-        throw std::runtime_error("token_embd.weight must be Q8_0 [" + std::to_string(n_embd_) + ", " +
-                                 std::to_string(n_vocab_) + "], it is " + (te ? shape_of(*te) : "missing"));
-    payload(*gg_, *te);
-    tok_embd_ = gg_->tensor_data(*te);
+    const ggml_type_traits* tt = te ? ggml_get_type_traits((ggml_type) te->type) : nullptr;
+    if (!te || te->shape.size() != 2 || (int64_t) te->shape[0] != n_embd_ || (int64_t) te->shape[1] != n_vocab_ ||
+        !tt || tt->blck_size <= 0 || n_embd_ % tt->blck_size != 0 || (te->type != kTypeF32 && !tt->to_float))
+        throw std::runtime_error("token_embd.weight must be [" + std::to_string(n_embd_) + ", " +
+                                 std::to_string(n_vocab_) + "] in a type ggml converts to floats, it is " +
+                                 (te ? shape_of(*te) : "missing"));
+    tok_row_ = gg_->payload(*te) / (size_t) n_vocab_;
+    tok_type_ = te->type;
+    tok_embd_ = gg_->data(*te);
 
-    layers_.resize((size_t) n_layer_);
-    for (int il = 0; il < n_layer_; ++il) load_layer(il);
-    out_norm_ = upload("output_norm.weight", n_embd_, 1, kF32);
-    output_ = upload("output.weight", n_embd_, n_vocab_, kAnyMat);
+    // twice: the first pass adds up the arena, the second fills it
+    for (int pass = 0; pass < 2; ++pass) {
+        layers_.assign((size_t) n_layer_, Layer{});
+        n_dsa_ = n_kda_ = n_moe_ = 0;
+        gate_rank_ = 0;
+        dense_at_ = 0;
+        for (int il = 0; il < n_layer_; ++il) load_layer(il);
+        out_norm_ = upload(gg_->find("output_norm.weight"), "output_norm.weight", n_embd_, 1, kF32);
+        output_ = upload(gg_->find("output.weight"), "output.weight", n_embd_, n_vocab_, kAnyMat);
+        if (pass == 0) {
+            dense_bytes_ = dense_at_;
+            dense_ = (uint8_t*) dmalloc(dense_bytes_ + 256, "the dense weights");
+        }
+    }
 
     alloc_state();
     if (!opt_.profile.empty()) read_profile(opt_.profile, n_layer_, n_expert_, prior_);
@@ -678,15 +844,10 @@ void Engine::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t 
     }
 }
 
-// A Q8_0 row: per 32 values, an fp16 scale and 32 int8.
 void Engine::embed(int32_t token, float* dst) const {
-    const uint8_t* b = tok_embd_ + (size_t) token * (size_t) (n_embd_ / 32) * 34;
-    for (int i = 0; i < n_embd_; i += 32, b += 34) {
-        uint16_t d;
-        std::memcpy(&d, b, sizeof(d));
-        const float scale = kernels::f32_from_f16(d);
-        for (int k = 0; k < 32; ++k) dst[i + k] = scale * (float) (int8_t) b[2 + k];
-    }
+    const uint8_t* row = tok_embd_ + (size_t) token * tok_row_;
+    if (tok_type_ == kTypeF32) std::memcpy(dst, row, (size_t) n_embd_ * sizeof(float));
+    else ggml_get_type_traits((ggml_type) tok_type_)->to_float(row, dst, n_embd_);
 }
 
 void Engine::dbg(const char* name, int il, const float* dev, int n) {
