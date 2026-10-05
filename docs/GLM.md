@@ -45,6 +45,7 @@ such a tie.
 | Size | What it is | Download | RAM beside a 32 GB card |
 | --- | --- | ---: | ---: |
 | `3.0BIT` | The whole model, 288 routed experts a layer: the 3-bit file from [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF). | 114 GB | 96 GB |
+| `UD-IQ2_XXS` | The whole model at about 2 bits: [Unsloth's](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) quantization, in four files. Its experts are i-quants, which pass through the card faster and through the CPU more slowly than K-quants: it reads a prompt faster than `3.0BIT` and writes more slowly. | 102 GB | 82 GB |
 | `REAP50-Q3_K_M` | [REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF) by patrickbdevaney: half of each layer's routed experts removed, the rest as 3-bit K-quants. Its card says what was removed and how it was checked. | 79 GB | 60 GB |
 
 The RAM is setup's estimate: the experts the card does not hold, and 10 GB beside them. Without `--model` setup

@@ -68,6 +68,8 @@ FALLBACK_MODELS = {
                   "vision": True},
     "3.0BIT": {"about": "the whole model: 3-bit GSQ-RCO experts, Q4_K attention", "download_gb": 113.6,
                "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",)},
+    "UD-IQ2_XXS": {"about": "the whole model at about 2 bits (Unsloth): less RAM, reads faster, writes slower",
+                   "download_gb": 101.8, "ram_gb": 82, "arena_gb": 92.5, "families": ("glm",)},
     "REAP50-Q3_K_M": {"about": "half the routed experts (REAP50), 3-bit K-quant: less RAM", "download_gb": 78.8,
                       "ram_gb": 60, "arena_gb": 72.1, "families": ("glm",)},
 }

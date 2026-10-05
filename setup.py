@@ -73,6 +73,7 @@ HF_REVISIONS = {
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF": "7feedfeb5ee924bfbe0064c63b124728b443ddc0",  # 2026-09-26
     "patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF": "46cb1bb887721d919e978d2f3eb18da245fecd77",           # 2026-10-05
+    "unsloth/GLM-5.3-Flash-GGUF": "621d456e93e926e4b52f85cff5f634358c1828f9",                          # 2026-10-05
 }
 
 
@@ -163,6 +164,13 @@ MODELS = {
     "3.0BIT": {"about": "the whole model: 3-bit GSQ-RCO experts, Q4_K attention", "download_gb": 113.6,
                "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",), "shards": 1,
                "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"},
+    # Unsloth's UD-IQ2_XXS: the whole model again, in the numbered files of a split GGUF.  Its experts are i-quants,
+    # which go through the card faster and through the CPU more slowly than 3.0BIT's K-quants: on the 32 GB card
+    # it read a 29K prompt at 347 tokens/s (3.0BIT: 288) and wrote 30 tokens/s (37)
+    "UD-IQ2_XXS": {"about": "the whole model at about 2 bits (Unsloth): less RAM, reads faster, writes slower",
+                   "download_gb": 101.8, "ram_gb": 82, "arena_gb": 92.5, "families": ("glm",), "shards": 4,
+                   "file": "GLM-5.3-Flash-UD-IQ2_XXS-0000{i}-of-00004.gguf", "vram_beside_gb": 12.5,
+                   "hf": hf("unsloth/GLM-5.3-Flash-GGUF") + "UD-IQ2_XXS/"},
     # REAP50 (patrickbdevaney): 144 of each layer's 288 routed experts kept, so its experts are 72 GB.  Expert
     # numbers are its own: a profile of its own
     "REAP50-Q3_K_M": {"about": "half the routed experts (REAP50), 3-bit K-quant: less RAM", "download_gb": 78.8,
@@ -237,7 +245,7 @@ FAMILIES = {
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
     # GLM 5.3 Flash: another architecture (llama.cpp's glm5-next), run by strata-glm from its one GGUF - no pack,
     # no draft layer, no image encoder.  "engine": its setup is glm_setup, not main()'s steps (docs/GLM.md)
-    "glm": {"title": "GLM 5.3 Flash", "by": "files from neuralll and patrickbdevaney",
+    "glm": {"title": "GLM 5.3 Flash", "by": "files from neuralll, Unsloth and patrickbdevaney",
             "about": "another model, with its own engine: Linux, one NVIDIA card (run on 32 GB), 64-128 GB of RAM",
             "hf": hf("neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF"),
             "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf", "shards": 1, "tag": "glm-",
@@ -246,7 +254,15 @@ FAMILIES = {
             "sha256": {"GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf":
                        (113585695168, "5f03b74ffe7513479795ca60a0fd8c40cbb3101769672b2c91b3df01138d9f6d"),
                        "GLM-5.3-Flash-REAP50-Q3_K_M.gguf":
-                       (78776759712, "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d")}},
+                       (78776759712, "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d"),
+                       "GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf":
+                       (9429888, "d9605eec5aa2c14fc9ccff1ba3341a1e9a1476b08714d41cd43d0e10a4db3f7a"),
+                       "GLM-5.3-Flash-UD-IQ2_XXS-00002-of-00004.gguf":
+                       (49896298080, "d51a3d9ca05022d53e71753df75ee64ed5fd4e47655650ae023e9717b3ec158d"),
+                       "GLM-5.3-Flash-UD-IQ2_XXS-00003-of-00004.gguf":
+                       (49248507840, "89180f13784dc1128586b98adf1ca876279881a20bc4f01747703ce352563372"),
+                       "GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf":
+                       (2690716000, "9e0ef47daa1fdffce3cf2ac1594ce4634d176ad018be6e692729757f38d5fbf6")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -3577,7 +3593,7 @@ def glm_config(cfg: dict) -> bool:
     return Path(str(cfg.get("exe", ""))).name == GEXE
 
 
-def glm_beside_gb(model) -> int:
+def glm_beside_gb(model) -> float:
     """The GiB of VRAM the model takes before any expert, at a 32K context."""
     return MODELS[model].get("vram_beside_gb", GLM_VRAM_BESIDE_GB)
 
@@ -3779,22 +3795,26 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
                                          a.yes) == "y" else 0
     ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
 
+    # one file, or the numbered files of a split GGUF: the engine is given the first and finds the others by name
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
-    gguf = models_dir / model_file(fam, model, 1)
-    if a.gguf_dir and not gguf.exists():
-        fail(f"{models_dir} has no {gguf.name}",
+    shards = [models_dir / model_file(fam, model, i) for i in range(1, model_shards(fam, model) + 1)]
+    absent = [s.name for s in shards if not s.exists()]
+    if a.gguf_dir and absent:
+        fail(f"{models_dir} has no {absent[0]}",
              "put the file there under that name, or leave out --gguf-dir and setup downloads it")
-    if not a.gguf_dir and not (gguf.exists() and done(gguf)):
+    if not a.gguf_dir and not all(s.exists() and done(s) for s in shards):
         for r in elsewhere:                            # already downloaded in a PolyStrata folder on another drive
-            cand = r / "models" / tag / gguf.name
-            if cand.exists() and done(cand):
-                models_dir, gguf = cand.parent, cand
+            cand = [r / "models" / tag / s.name for s in shards]
+            if all(c.exists() and done(c) for c in cand):
+                models_dir, shards = cand[0].parent, cand
                 ok(f"model file found in {models_dir}")
                 break
-    if gguf.exists() and not done(gguf) and whole_shard(gguf):   # #173: a whole file copied in by hand
-        mark(gguf, "whole (checked against its own tensor directory)")
-    have_model = gguf.exists() and (done(gguf) or bool(a.gguf_dir))
-    on_disk = sum(f.stat().st_size for f in (gguf, gguf.with_name(gguf.name + ".part")) if f.is_file()) / 1e9
+    for s in shards:                                   # #173: a whole file copied in by hand
+        if s.exists() and not done(s) and whole_shard(s):
+            mark(s, "whole (checked against its own tensor directory)")
+    gguf = shards[0]
+    have_model = all(s.exists() and (done(s) or bool(a.gguf_dir)) for s in shards)
+    on_disk = sum(f.stat().st_size for s in shards for f in (s, s.with_name(s.name + ".part")) if f.is_file()) / 1e9
     need = (0 if have_model else max(d["download_gb"] - on_disk, 0)) + 2
     if free_gb(models_dir) < need:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
@@ -3815,13 +3835,18 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     step(5, f"downloading {title} {model}")
     if not have_model:
         say(f"  The model file goes in {models_dir}")
-        say(f"  A file you already have: put it there with its original name ({gguf.name}), or use --gguf-dir "
-            "<its folder>.")
+        say(f"  A file you already have: put it there with its original name ({', '.join(s.name for s in shards)}), "
+            "or use --gguf-dir <its folder>.")
         if hf_endpoint() != HF_DEFAULT:
             say(f"  Downloading from {hf_endpoint()} (HF_ENDPOINT)")
-        download(d.get("hf", fam["hf"]) + gguf.name, gguf)
-    check_shards([gguf])
-    verify_sha256(gguf, *fam["sha256"][gguf.name])
+        for s in shards:
+            if s.exists() and done(s):
+                ok(f"{s.name} already downloaded")
+                continue
+            download(d.get("hf", fam["hf"]) + s.name, s)
+    check_shards(shards)
+    for s in shards:
+        verify_sha256(s, *fam["sha256"][s.name])
     ok("model file present")
 
     step(6, "preparing the model for PolyStrata")

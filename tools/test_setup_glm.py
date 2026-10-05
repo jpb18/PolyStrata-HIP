@@ -25,6 +25,8 @@ FILE = "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"
 REV = "7feedfeb5ee924bfbe0064c63b124728b443ddc0"
 HALF = "REAP50-Q3_K_M"                                  # half the routed experts, from another repository
 HALF_FILE = "GLM-5.3-Flash-REAP50-Q3_K_M.gguf"
+SPLIT = "UD-IQ2_XXS"                                    # the numbered files of a split GGUF, in a folder of a third
+SPLIT_FILES = [f"GLM-5.3-Flash-UD-IQ2_XXS-0000{i}-of-00004.gguf" for i in range(1, 5)]
 
 
 def quiet(fn, *args):
@@ -44,7 +46,7 @@ class Pins(unittest.TestCase):
         fam = setup.FAMILIES["glm"]
         self.assertEqual(fam["hf"], f"https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF/"
                                     f"resolve/{REV}/")
-        self.assertEqual(list(fam["sha256"]), [FILE, HALF_FILE])
+        self.assertEqual(list(fam["sha256"]), [FILE, HALF_FILE, *SPLIT_FILES])
         size, sha = fam["sha256"][FILE]
         self.assertEqual(size, 113585695168)
         self.assertRegex(sha, r"^[0-9a-f]{64}$")
@@ -87,10 +89,22 @@ class Estimates(unittest.TestCase):
         self.assertAlmostEqual(setup.glm_ram_need(HALF, 31.84), 60, delta=1)
 
     def test_the_size_taken_when_none_is_named(self):
-        names = [M, HALF]
+        names = [m for m in setup.MODELS if "glm" in setup.MODELS[m].get("families", ())]
+        self.assertEqual(names, [M, SPLIT, HALF])                        # the whole model before the half of it
         self.assertEqual(setup.glm_default(names, 128, 31.84), M)
-        self.assertEqual(setup.glm_default(names, 64, 31.84), HALF)      # the whole model wants 96 GB there
-        self.assertEqual(setup.glm_default(names, 32, 31.84), HALF)      # neither fits: the one that wants less
+        self.assertEqual(setup.glm_default(names, 88, 31.84), SPLIT)     # 3.0BIT wants 96 GB there
+        self.assertEqual(setup.glm_default(names, 64, 31.84), HALF)
+        self.assertEqual(setup.glm_default(names, 32, 31.84), HALF)      # none fits: the one that wants least
+
+    def test_the_split_size(self):
+        fam, d = setup.FAMILIES["glm"], setup.MODELS[SPLIT]
+        self.assertEqual([setup.model_file(fam, SPLIT, i) for i in range(1, 5)], SPLIT_FILES)
+        self.assertEqual(setup.model_shards(fam, SPLIT), 4)
+        self.assertRegex(d["hf"], r"^https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF/resolve/[0-9a-f]{40}/UD-IQ2_XXS/$")
+        self.assertAlmostEqual(sum(fam["sha256"][f][0] for f in SPLIT_FILES) / 1e9, d["download_gb"], delta=0.1)
+        # the same card held 19.3 GiB of its experts
+        self.assertAlmostEqual(setup.glm_held_gb(SPLIT, 31.84) / 1.073741824, 19.3, delta=0.1)
+        self.assertAlmostEqual(setup.glm_ram_need(SPLIT, 31.84), d["ram_gb"], delta=1)
 
     def test_a_card_that_holds_none(self):
         self.assertEqual(setup.glm_held_gb(M, 8.0), 0.0)
@@ -261,6 +275,17 @@ class Main(unittest.TestCase):
         self.assertEqual((pack / "expert-profile.txt").read_text(), "3 1 5\n")     # its own profile
         args = cfg["args"]
         self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-REAP50-Q3_K_M" / HALF_FILE)
+
+    def test_a_size_in_several_files(self):
+        code, out, cfg = self.main(ram=88.0)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["model_name"], "glm-5.3-flash-ud-iq2_xxs")
+        self.assertEqual(self.downloads, [setup.MODELS[SPLIT]["hf"] + f for f in SPLIT_FILES])
+        self.assertEqual(self.verified, [(f, *setup.FAMILIES["glm"]["sha256"][f]) for f in SPLIT_FILES])
+        args = cfg["args"]                                               # the engine is given the first file
+        self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-UD-IQ2_XXS" / SPLIT_FILES[0])
+        pack = self.t / "data" / "packs" / "glm-ud-iq2_xxs"
+        self.assertEqual((pack / "expert-profile.txt").read_text(), "3 0 7\n")     # the whole model's profile
 
     def test_too_little_ram(self):
         code, out, cfg = self.main(ram=40.0)
