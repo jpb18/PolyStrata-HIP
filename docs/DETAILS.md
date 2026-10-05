@@ -920,9 +920,14 @@ and no minimum, because a larger minimum changes the image answers and costs enc
 
 **A Q8_0 encoder (#625):** `"mmproj"` in the `"vision"` section can point to another mmproj file of this model, for
 example a Q8_0 one (llama.cpp's `convert_hf_to_gguf.py --mmproj --outtype q8_0` makes one): the encoder's library
-reads quantized weights, the file is half the size, and on the CPU it can encode faster than BF16. Setup downloads
-the BF16 file, and a setup run again keeps a file of your own that still exists. We have not measured its accuracy
-against BF16 yet; numbers are welcome in #625.
+reads quantized weights, the file is smaller (590 MiB against 865 MiB for the BF16 one, from `llama-quantize
+mmproj-Qwen3.8-Flash-Next-BF16.gguf mmproj-Qwen3.8-Flash-Next-Q8_0.gguf Q8_0`), and on the CPU it uses less RAM
+(about 280 MiB less in the encoder) and can encode faster than BF16 at the default 300 tokens. Setup downloads the
+BF16 file, and a setup run again keeps a file of your own that still exists. **Recommended for `--vision cpu`.**
+Accuracy against BF16, per image token: the cosine of the embeddings is 0.997-0.999 on average (#625's report, with
+a community Q8_0 file, at 300, 768 and 1,024 tokens), and 0.9988 and 0.9987 on two pictures with the file made by
+the command above (300 tokens; the worst single token 0.94-0.96). Encode time above 768 tokens is the same as BF16's
+within about 3%. Numbers on more pictures (charts, small text) are welcome in #625.
 
 **A spare GPU for the encoder (0.1.33, #408):** with a card the engine doesn't use, add `"cuda_device": 2` (numbered
 like `nvidia-smi`) to the `"vision"` section of `strata-<model>.json`: the encoder then runs on that card alone. Lower
