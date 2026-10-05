@@ -31,6 +31,9 @@ void Gemma4::begin_pass() {
 }
 
 void Gemma4::load_geometry() {
+    // --draft-model is a model of its own here, not a file of this one with a block in it, which is what
+    // load_shape() would look for
+    std::unique_ptr<Shards> other = std::move(dg_);
     load_shape();
     auto find = [&](const char* key) { return meta_in(*gg_, key); };
     auto need = [](bool ok, const char* what) {
@@ -86,6 +89,95 @@ void Gemma4::load_geometry() {
     // GELU has no limits to clamp to
     clamp_exp_.assign((size_t) n_layer_, INFINITY);
     clamp_shexp_ = clamp_exp_;
+
+    if (other) {
+        dg_ = std::move(other);
+        load_draft_shape();
+        block_ = dg_.get();   // the file its tensors are read from (home())
+        draft_ = true;
+    }
+}
+
+// The draft model's shape, which must fit this model's: it takes the model's output and its token embeddings, its
+// queries have the model's heads, and each of its layers reads the rows of one of the model's.  llama.cpp gives a
+// window layer the model's layer before the last, and a full layer the last.
+void Gemma4::load_draft_shape() {
+    const Shards& g = *dg_;
+    const std::string file = opt_.draft_model;
+    auto need = [&](bool ok, const std::string& what) {
+        if (!ok) throw std::runtime_error(file + " is not a draft model for this model: " + what);
+    };
+    const MetaValue* arch = g.get("general.architecture");
+    need(arch && arch->s == "gemma4-assistant",
+         "its architecture is " + (arch ? "'" + arch->s + "'" : std::string("missing")) + ", not 'gemma4-assistant'");
+    auto must = [&](const char* key) -> const MetaValue& {
+        const MetaValue* v = meta_in(g, key);
+        need(v != nullptr, std::string("no gemma4-assistant.") + key);
+        return *v;
+    };
+    d_embd_ = (int) must("embedding_length").u;
+    d_ff_ = (int) must("feed_forward_length").u;
+    d_eps_ = (float) must("attention.layer_norm_rms_epsilon").f;
+    const int n = (int) must("block_count").u;
+    need((int64_t) must("embedding_length_out").u == n_embd_, "it is made for a model of another width");
+    need(d_embd_ > 0 && d_embd_ % 32 == 0 && d_embd_ <= n_embd_ && d_ff_ > 0 && d_ff_ % 32 == 0 && n > 0 && n <= 64,
+         "bad embedding_length, feed_forward_length or block_count");
+    need((int) must("attention.sliding_window").u == window_, "its window is not the model's");
+    const MetaValue& pattern = must("attention.sliding_window_pattern");
+    const MetaValue& heads = must("attention.head_count");
+    const MetaValue& kv = must("attention.head_count_kv");
+    const int dim_full = (int) must("attention.key_length").u, dim_swa = (int) must("attention.key_length_swa").u;
+    const MetaValue* rot = meta_in(g, "rope.dimension_count");
+    const MetaValue* rot_swa = meta_in(g, "rope.dimension_count_swa");
+    const float base_full = (float) must("rope.freq_base").f;
+    const MetaValue* base_swa = meta_in(g, "rope.freq_base_swa");
+    need(n_layer_ >= 2 && swa_[(size_t) n_layer_ - 2] && !swa_[(size_t) n_layer_ - 1],
+         "the model does not end on a window layer and a full layer");
+    guess_.assign((size_t) n, Guess{});
+    for (int il = 0; il < n; ++il) {
+        Guess& G = guess_[(size_t) il];
+        G.swa = of_layer(pattern, il) != 0;
+        G.of = G.swa ? n_layer_ - 2 : n_layer_ - 1;
+        G.dim = G.swa ? dim_swa : dim_full;
+        G.n_rot = G.swa ? (rot_swa ? (int) rot_swa->u : dim_swa) : (rot ? (int) rot->u : dim_full);
+        need(G.n_rot > 0 && G.n_rot % 2 == 0 && G.n_rot <= G.dim, "bad rope.dimension_count");
+        G.theta_scale = std::pow(G.swa && base_swa ? (float) base_swa->f : base_full, -2.f / (float) G.n_rot);
+        need(of_layer(heads, il) == n_head_ && G.dim == (G.swa ? dim_swa_ : dim_full_) &&
+                 of_layer(kv, il) == kv_[(size_t) G.of],
+             "layer " + std::to_string(il) + "'s heads are not those of the model's layer " + std::to_string(G.of));
+    }
+}
+
+// Twice, like the model's weights: the first time adds up the arena.
+void Gemma4::load_drafter() {
+    const Shards& g = *dg_;
+    auto up = [&](const std::string& name, int64_t a, int64_t b, Want w) { return upload(g.find(name), name, a, b, w); };
+    d_pre_ = up("nextn.pre_projection.weight", 2 * n_embd_, d_embd_, kAnyMat);
+    d_post_ = up("nextn.post_projection.weight", d_embd_, n_embd_, kAnyMat);
+    d_out_norm_ = up("output_norm.weight", d_embd_, 1, kF32);
+    d_table_ = up("token_embd.weight", d_embd_, n_vocab_, kAnyMat);
+    d_freq_ = Dev{};
+    for (int il = 0; il < (int) guess_.size(); ++il) {
+        Guess& G = guess_[(size_t) il];
+        auto f32 = [&](const char* n, int64_t a) { return up(blk(il, n), a, 1, kF32); };
+        auto mat = [&](const char* n, int64_t a, int64_t b) { return up(blk(il, n), a, b, kAnyMat); };
+        G.attn_norm = f32("attn_norm.weight", d_embd_);
+        G.wq = mat("attn_q.weight", d_embd_, (int64_t) n_head_ * G.dim);
+        G.wo = mat("attn_output.weight", (int64_t) n_head_ * G.dim, d_embd_);
+        G.q_norm = f32("attn_q_norm.weight", G.dim);
+        G.post_attn = f32("post_attention_norm.weight", d_embd_);
+        G.ffn_norm = f32("ffn_norm.weight", d_embd_);
+        G.ffn_gate = mat("ffn_gate.weight", d_embd_, d_ff_);
+        G.ffn_up = mat("ffn_up.weight", d_embd_, d_ff_);
+        G.ffn_down = mat("ffn_down.weight", d_ff_, d_embd_);
+        G.post_ffn = f32("post_ffw_norm.weight", d_embd_);
+        if (!G.swa && !d_freq_.p) d_freq_ = up("rope_freqs.weight", G.n_rot / 2, 1, kF32);
+        const TensorInfo* s = g.find(blk(il, "layer_output_scale.weight"));
+        if (!s) continue;
+        if (s->type != kTypeF32 || s->elements() != 1 || g.payload(*s) != sizeof(float))
+            throw std::runtime_error(s->name + " is " + shape_of(*s) + ", expected F32 [1]");
+        std::memcpy(&G.out_scale, g.data(*s), sizeof(float));
+    }
 }
 
 void Gemma4::load_layer(int il) {
@@ -143,7 +235,10 @@ void Gemma4::load_layer(int il) {
         if (has(other)) throw std::runtime_error(blk(il, other) + ": a scale this engine does not apply");
 }
 
-int Gemma4::widest() const { return n_head_ * std::max(dim_full_, dim_swa_); }
+// The draft model's inputs count: the model's output beside a token's embedding, and its MLPs' hidden values.
+int Gemma4::widest() const {
+    return std::max({n_head_ * std::max(dim_full_, dim_swa_), guess_.empty() ? 0 : 2 * n_embd_, d_ff_});
+}
 
 // The caches: a full layer keeps a row a position, a window layer a ring of the rows a call can read.
 void Gemma4::alloc_caches() {
@@ -178,6 +273,12 @@ void Gemma4::assign_scratch() {
     score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
     mlp_ = fbuf(n * n_embd_);
     rin_ = fbuf(n * n_embd_);
+    if (!guess_.empty()) {   // one token at a time
+        dxh_ = fbuf(2 * (size_t) n_embd_);
+        dg_gate_ = fbuf((size_t) d_ff_);
+        dg_up_ = fbuf((size_t) d_ff_);
+        dg_h_ = fbuf((size_t) d_ff_);
+    }
     if (rows_ >= kStageRows) {   // a prompt batch reads the rows it attends as floats
         size_t rows_f = 0;
         for (const Block& B : blocks_)
@@ -376,6 +477,50 @@ void Gemma4::output_rows(int first, int rows, float* h) {
 
 void Gemma4::finish_logits(float* logits, int rows) {
     if (softcap_ > 0.f) softcap(logits, (size_t) rows * n_vocab_, softcap_, st_);
+}
+
+// One guess of the draft model.  Its input is the token as the model embeds it and, beside it, the model's output
+// for the token before: the model's own for the first guess, and from then on the draft model's guess at it (its
+// second output).  Every guess asks from the position of the first, pos(), and reads the rows before it; the
+// guessed tokens leave no rows.  The model's scratch is free between its calls, and a guess is narrower than a
+// token of the model's.
+void Gemma4::draft_step(int32_t token, int i) {
+    if (pos_ < 1) throw std::logic_error("draft: the sequence has no token yet");
+    const int e = n_embd_, a = d_embd_;
+    const size_t e_bytes = (size_t) e * sizeof(float);
+    float* own = hn_ + e;
+    embed(token, h_r_);
+    const float scale = embed_scale();
+    for (int k = 0; k < e; ++k) h_r_[k] *= scale;
+    ck(cudaMemcpyAsync(dxh_, h_r_, e_bytes, cudaMemcpyHostToDevice, cs(st_)), "draft");
+    ck(cudaMemcpyAsync(dxh_ + e, i == 0 ? hn_ : own, e_bytes, cudaMemcpyDeviceToDevice, cs(st_)), "draft");
+    float* x = r_;
+    lin(d_pre_, dxh_, x, 1);
+    for (const Guess& G : guess_) {
+        const Block& B = blocks_[(size_t) G.of];
+        rms_norm(x, fp(G.attn_norm), xn_, a, 1, d_eps_, st_);
+        lin(G.wq, xn_, qraw_, 1);
+        head_norm_rope(qraw_, G.dim, fp(G.q_norm), q_, G.dim, n_head_, G.n_rot, G.theta_scale, pos_, 1, d_eps_, st_,
+                       G.swa ? nullptr : fp(d_freq_));
+        // a window layer's token attends itself and the window_ - 1 before it; the asking token has no row
+        attend(q_, B.keys, B.vals, pos_ - 1, 1, score_, chunk_, att_, G.dim, n_head_, B.n_kv, 1.f, st_,
+               G.swa ? window_ - 1 : 0, G.swa ? ring_ : 0);
+        lin(G.wo, att_, ao_, 1);
+        rms_norm(ao_, fp(G.post_attn), cur_, a, 1, d_eps_, st_);
+        axpy(cur_, 1.f, x, a, true, st_);
+
+        rms_norm(x, fp(G.ffn_norm), xn_, a, 1, d_eps_, st_);
+        lin(G.ffn_gate, xn_, dg_gate_, 1);
+        lin(G.ffn_up, xn_, dg_up_, 1);
+        geglu(dg_gate_, dg_up_, dg_h_, d_ff_, st_);
+        lin(G.ffn_down, dg_h_, cur_, 1);
+        rms_norm(cur_, fp(G.post_ffn), fo_, a, 1, d_eps_, st_);
+        axpy(fo_, 1.f, x, a, true, st_);
+        if (G.out_scale != 1.f) axpy(x, G.out_scale, x, a, false, st_);
+    }
+    rms_norm(x, fp(d_out_norm_), xn_, a, 1, d_eps_, st_);
+    lin(d_table_, xn_, logits_, 1);
+    lin(d_post_, xn_, own, 1);
 }
 
 float Gemma4::embed_scale() const { return std::sqrt((float) n_embd_); }

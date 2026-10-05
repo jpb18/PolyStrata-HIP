@@ -5,6 +5,10 @@
 // layer's FFN is a dense GELU MLP and routed GELU experts side by side, each normed before the two are added,
 // and the router reads the layer's residual, not the experts' input.  The output matrix is the token table, and
 // the logits are capped by a tanh.
+//
+// What guesses ahead for it is a model of its own in a file of its own (llama.cpp's "gemma4-assistant"): a few
+// narrow layers with queries only, which read the keys and values this model's last window layer and last full
+// layer have left.
 #pragma once
 
 #include "engine.hpp"
@@ -37,6 +41,8 @@ protected:
     size_t extra_bytes() const override;
     void save_extra(uint8_t* dst) override;
     void load_extra(const uint8_t* src, int64_t pos) override;
+    void load_drafter() override;
+    void draft_step(int32_t token, int i) override;
 
 private:
     /// A layer's weights beside the ones every architecture has (Layer), and its caches.
@@ -53,6 +59,15 @@ private:
         float out_scale = 1;
     };
 
+    /// A layer of the draft model.  It has no keys or values: its queries read the rows of the model's layer `of`.
+    struct Guess {
+        int of = 0, dim = 0, n_rot = 0;
+        bool swa = false;
+        float theta_scale = 0, out_scale = 1;
+        Dev attn_norm, wq, wo, q_norm, post_attn, ffn_norm, ffn_gate, ffn_up, ffn_down, post_ffn;
+    };
+
+    void load_draft_shape();
     void attn(Block& B, int64_t pos, int n);
     void store(const float* x, uint16_t* cache, const Block& B, int64_t pos, int n);
     template <class F>
@@ -76,6 +91,14 @@ private:
     float *akeys_ = nullptr, *avals_ = nullptr, *awork_ = nullptr;   ///< a prompt batch's attention (attend_batch)
 
     std::vector<float> probs_;   ///< route()'s scratch
+
+    // the draft model: its width and its MLPs', its layers, the projections in and out, its output norm and its
+    // token table, which is its output matrix
+    int d_embd_ = 0, d_ff_ = 0;
+    float d_eps_ = 0;
+    std::vector<Guess> guess_;
+    Dev d_pre_, d_post_, d_out_norm_, d_table_, d_freq_;
+    float *dxh_ = nullptr, *dg_gate_ = nullptr, *dg_up_ = nullptr, *dg_h_ = nullptr;   ///< its scratch
 };
 
 }  // namespace strata::glm

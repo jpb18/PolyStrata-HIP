@@ -46,7 +46,8 @@ struct Options {
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     int window = 4;               ///< the most tokens window() takes: the known one and guesses after it; 1: none
     bool draft = true;            ///< run the block that guesses ahead, when there is one and window is above 1
-    std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none
+    std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
+                                  ///< for an architecture that guesses with a model of its own, that model's file
 };
 
 /// A thing a model's file may call by other names than the engine does: converters differ.
@@ -137,7 +138,8 @@ public:
     /// draft(token, 0, &p) takes the token at pos(), picked and not fed yet, and returns the guess at the one after
     /// it; draft(guess, i, &p) for i = 1, 2, ... then guesses on from the i-th guess, with the block's own output
     /// in the model's place.  p is the probability the block gives what it returns.  pos() + i must be inside the
-    /// context.  logits() is left alone.
+    /// context.  logits() is left alone.  An architecture may guess with a small model of its own instead of a
+    /// block (draft_step()); the calls are the same.
     bool drafts() const { return draft_; }
     int32_t draft(int32_t token, int i, float* prob);
 
@@ -170,6 +172,12 @@ protected:
     virtual void begin_pass() {}
     /// Throws when the draft block is not one the architecture runs.
     virtual void check_draft_block() {}
+    /// The weights of what guesses ahead, to VRAM.  The engine's own: the draft block's parts beside its layer.
+    virtual void load_drafter();
+    /// One guess (draft()): the token through what guesses ahead, its scores into logits_.  hn_'s first row is the
+    /// model's output for the token before pos(); the second is this step's to leave and the next step's to read.
+    /// The engine's own runs the draft block.
+    virtual void draft_step(int32_t token, int i);
     /// The floats of every recurrent layer's state together.  They are state_'s first.
     virtual size_t recurrent_floats() const = 0;
     /// The layers' places in state_, and the attention's caches: a row a position.
@@ -270,6 +278,7 @@ protected:
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block
     Dev out_norm_, output_;
     bool draft_ = false;
+    bool block_layer_ = false;    ///< what guesses ahead is a block after the model's layers (layers_' last)
     Dev d_proj_, d_enorm_, d_hnorm_, d_head_;   ///< the draft block's input projection and norms, and its output norm
     const uint8_t* tok_embd_ = nullptr;   ///< the token table in the mapped file, tok_row_ bytes a token
     size_t tok_row_ = 0;

@@ -266,6 +266,7 @@ void Engine::load_shape() {
     draft_ = block_ && !tensor(n_layer_, "nextn.embed_tokens.weight") &&
              !tensor(n_layer_, "nextn.shared_head_head.weight");
     if (!draft_) block_ = nullptr;
+    block_layer_ = draft_;
     n_embd_ = shape_i("embedding_length");
     // a file without the key has as many tokens as its token table
     const MetaValue* vocab = meta_in(*gg_, "vocab_size");
@@ -624,7 +625,7 @@ void Engine::load(const Options& o) {
 
     // twice: the first pass adds up the arena, the second fills it
     for (int pass = 0; pass < 2; ++pass) {
-        const int n_all = n_layer_ + (draft_ ? 1 : 0);
+        const int n_all = n_layer_ + (block_layer_ ? 1 : 0);
         layers_.assign((size_t) n_all, Layer{});
         n_moe_ = 0;
         dense_at_ = 0;
@@ -634,19 +635,7 @@ void Engine::load(const Options& o) {
         // a file without an output matrix ties the output to the token table
         const TensorInfo* head = gg_->find("output.weight");
         output_ = upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, n_vocab_, kAnyMat);
-        if (draft_) {
-            check_draft_block();
-            auto part = [&](const char* n, int64_t a, int64_t b, Want w) {
-                return upload(tensor(n_layer_, n), blk(n_layer_, n), a, b, w);
-            };
-            d_proj_ = part("nextn.eh_proj.weight", 2 * n_embd_, n_embd_, kAnyMat);
-            d_enorm_ = part("nextn.enorm.weight", n_embd_, 1, kF32);
-            d_hnorm_ = part("nextn.hnorm.weight", n_embd_, 1, kF32);
-            // without a norm of its own, the block's output goes through the model's
-            d_head_ = tensor(n_layer_, "nextn.shared_head_norm.weight")
-                          ? part("nextn.shared_head_norm.weight", n_embd_, 1, kF32)
-                          : out_norm_;
-        }
+        if (draft_) load_drafter();
         if (pass == 0) {
             dense_bytes_ = dense_at_;
             dense_ = (uint8_t*) dmalloc(dense_bytes_ + 256, "the dense weights");
@@ -686,6 +675,20 @@ void Engine::load(const Options& o) {
         follower_ = std::thread([this] { follow_loop(); });
     }
     reset();
+}
+
+void Engine::load_drafter() {
+    check_draft_block();
+    auto part = [&](const char* n, int64_t a, int64_t b, Want w) {
+        return upload(tensor(n_layer_, n), blk(n_layer_, n), a, b, w);
+    };
+    d_proj_ = part("nextn.eh_proj.weight", 2 * n_embd_, n_embd_, kAnyMat);
+    d_enorm_ = part("nextn.enorm.weight", n_embd_, 1, kF32);
+    d_hnorm_ = part("nextn.hnorm.weight", n_embd_, 1, kF32);
+    // without a norm of its own, the block's output goes through the model's
+    d_head_ = tensor(n_layer_, "nextn.shared_head_norm.weight")
+                  ? part("nextn.shared_head_norm.weight", n_embd_, 1, kF32)
+                  : out_norm_;
 }
 
 // Per-token buffers hold rows_ tokens, row after row.
@@ -1276,7 +1279,7 @@ float* Engine::draft_input(const int32_t* tokens, const float* h, int n) {
 // the rest of the block is not computed for it.  Then the call's last output is the one the next token pairs with.
 void Engine::draft_rows(const int32_t* tokens, int first, int n) {
     const size_t e = (size_t) n_embd_;
-    if (first < n) {
+    if (block_layer_ && first < n) {
         draft_input(tokens + first, hn_ + (size_t) first * e, n - first);
         block_rows(pos_ + first, n - first);
     }
@@ -1287,11 +1290,7 @@ void Engine::draft_rows(const int32_t* tokens, int first, int n) {
 // One token through the draft block, at pos() + i.  The first token's row is then what draft_rows() would leave
 // for it, and eval() and keep() skip it; the rows of the guesses after it are written again when the positions get
 // their real tokens.
-int32_t Engine::draft(int32_t token, int i, float* prob) {
-    if (!draft_) throw std::logic_error("draft: this model has no block that guesses ahead");
-    if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
-    if (i < 0 || pos_ + i >= opt_.max_context) throw std::logic_error("draft: the position is outside the context");
-    ck(cudaStreamSynchronize(cs(st_)), "draft");
+void Engine::draft_step(int32_t token, int i) {
     Layer& L = layers_[(size_t) n_layer_];
     float* own = hn_ + n_embd_;   // the block's output, which stands in for the model's from the second guess on
     float* x = draft_input(&token, i == 0 ? hn_ : own, 1);
@@ -1307,6 +1306,14 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
     rms_norm(x, fp(d_head_), own, n_embd_, 1, rms_eps_, st_);
     lin(output_, own, logits_, 1);
     finish_logits(logits_, 1);
+}
+
+int32_t Engine::draft(int32_t token, int i, float* prob) {
+    if (!draft_) throw std::logic_error("draft: this model has no block that guesses ahead");
+    if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
+    if (i < 0 || pos_ + i >= opt_.max_context) throw std::logic_error("draft: the position is outside the context");
+    ck(cudaStreamSynchronize(cs(st_)), "draft");
+    draft_step(token, i);
     ck(cudaMemcpyAsync(h_dlogits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "draft");
     ck(cudaStreamSynchronize(cs(st_)), "draft");
