@@ -1,8 +1,8 @@
 // include/strata/glm/kernels.hpp - the float kernels of the forward passes.
 //
 // Every call enqueues on the given CUDA stream and returns; nothing here but blas_create allocates or waits.
-// Pointers are device pointers.  The math follows llama.cpp's graphs (src/models/glm5-next.cpp and qwen35moe.cpp)
-// and the ggml ops they build, which are the reference the engine is checked against.
+// Pointers are device pointers.  The math follows llama.cpp's graphs (src/models/glm5-next.cpp, qwen35moe.cpp and
+// gemma4.cpp) and the ggml ops they build, which are the reference the engine is checked against.
 //
 // A call works on `rows` tokens at consecutive positions.  A buffer of per-token values holds them row after row,
 // each row as long as the one-token case describes.
@@ -96,21 +96,25 @@ void axpy(const float* x, float a, float* acc, int n, bool add, void* stream);
 /// acc[row] += b for each of the rows of n values.
 void add_bias(const float* b, float* acc, int n, int rows, void* stream);
 
-// ---- attention over a key and value cache, and the gated delta net with one decay a head (qwen35moe)
+// ---- attention over a key and value cache (qwen35moe, gemma4), and the gated delta net with one decay a head
 
 /// For `rows` tokens of `heads` heads each: a head's RMS norm with the weights w (dim values, the same for every
-/// head), then ggml's rotary embedding on its first n_rot values in the NeoX pairing: value i goes with value
-/// i + n_rot / 2, and the pair turns by position * theta_scale^i.  A head's input starts x_stride floats after
-/// the one before it; y has dim values a head.
+/// head; null: none), then ggml's rotary embedding on its first n_rot values in the NeoX pairing: value i goes
+/// with value i + n_rot / 2, and the pair turns by position * theta_scale^i, divided by freq[i] when freq is
+/// given.  A head's input starts x_stride floats after the one before it; y has dim values a head.
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
-                    float theta_scale, int64_t pos, int rows, float eps, void* stream);
-/// Causal attention for the tokens from position `pos`: token t attends the cache rows 0 to pos + t.  q: n_head *
-/// dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the heads read a row's keys and values in turn,
-/// n_head / kv_heads heads each.  out: n_head * dim a token.  It takes `chunk` tokens at a time, and score is
-/// scratch of chunk * n_head * (pos + rows) floats.  A token comes out the same whatever tokens the call has
-/// beside it.
+                    float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq = nullptr);
+/// Causal attention for the tokens from position `pos`: token t attends the rows 0 to pos + t, or with `window`
+/// only the last `window` of them.  q: n_head * dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the
+/// heads read a row's keys and values in turn, n_head / kv_heads heads each.  With `ring`, the sequence's row p
+/// is cache row p % ring.  out: n_head * dim a token.  It takes `chunk` tokens at a time, and score is scratch
+/// of chunk * n_head floats for each row a token can attend: pos + rows, or `window` if that is less.  A token
+/// comes out the same whatever tokens the call has beside it.
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
-            int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream);
+            int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
+            int ring = 0);
+/// x = cap * tanh(x / cap).
+void softcap(float* x, size_t n, float cap, void* stream);
 /// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.
 /// With one_gate a group has one gate for all its values.
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream);

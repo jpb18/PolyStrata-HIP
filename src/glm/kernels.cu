@@ -438,7 +438,7 @@ __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__
 // One block per head and token.  The pairs of the rotation are i and i + n_rot / 2 for i below n_rot / 2.
 __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride, const float* __restrict__ w,
                                       float* __restrict__ y, int dim, int heads, int n_rot, float theta_scale,
-                                      long long pos, float eps) {
+                                      const float* __restrict__ freq, long long pos, float eps) {
     __shared__ float part[8];
     const float* xr = x + size_t(blockIdx.x) * x_stride;
     float* yr = y + size_t(blockIdx.x) * dim;
@@ -450,35 +450,46 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
     const int half = n_rot / 2;
     for (int i = threadIdx.x; i < dim; i += blockDim.x) {
         if (i >= n_rot) {
-            yr[i] = xr[i] * scale * w[i];
+            yr[i] = w ? xr[i] * scale * w[i] : xr[i] * scale;
             continue;
         }
         const int j = i < half ? i : i - half;
-        const float theta = p * powf(theta_scale, float(j));
-        const float x0 = xr[j] * scale * w[j], x1 = xr[j + half] * scale * w[j + half];
+        const float turn = p * powf(theta_scale, float(j));
+        const float theta = freq ? turn / freq[j] : turn;
+        const float x0 = w ? xr[j] * scale * w[j] : xr[j] * scale;
+        const float x1 = w ? xr[j + half] * scale * w[j + half] : xr[j + half] * scale;
         yr[i] = i < half ? x0 * cosf(theta) - x1 * sinf(theta) : x0 * sinf(theta) + x1 * cosf(theta);
     }
 }
 
-// score[head][key] = scale * (q[head] . the key of the head's group in cache row `key`), for the rows up to the
-// token's own.  A block has the token first + blockIdx.y and blockDim.x / n_head rows; a thread is a row and a head.
+// The rows the token at position p attends: how many, and the first of them.
+__device__ __forceinline__ int attn_rows(long long p, int window, long long* lo) {
+    *lo = window > 0 && p >= window ? p - window + 1 : 0;
+    return int(p - *lo) + 1;
+}
+
+// score[head][i] = scale * (q[head] . the key of the head's group in the i-th row the token attends).  A block
+// has the token first + blockIdx.y and blockDim.x / n_head rows; a thread is a row and a head.
 __global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
                                   float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, float scale) {
+                                  long long pos, int first, float scale, int window, int ring) {
     const int tok = first + blockIdx.y;
     const int key = blockIdx.x * (blockDim.x / n_head) + threadIdx.x / n_head, h = threadIdx.x % n_head;
-    if (key > pos + tok) return;
+    long long lo;
+    if (key >= attn_rows(pos + tok, window, &lo)) return;
+    const long long row = ring > 0 ? (lo + key) % ring : lo + key;
     const float* qh = q + (size_t(tok) * n_head + h) * dim;
-    const half* k = kcache + (size_t(key) * kv_heads + h / (n_head / kv_heads)) * dim;
+    const half* k = kcache + (size_t(row) * kv_heads + h / (n_head / kv_heads)) * dim;
     float acc = 0.0f;
     for (int d = 0; d < dim; ++d) acc += qh[d] * __half2float(k[d]);
     score[(size_t(blockIdx.y) * n_head + h) * n_keys + key] = acc * scale;
 }
 
-// Softmax in place over a head's scores of the rows up to its token's own.  One block per head and token.
-__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first) {
+// Softmax in place over a head's scores of the rows its token attends.  One block per head and token.
+__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int window) {
     __shared__ float part[8];
-    const int n = int(pos) + first + blockIdx.y + 1;
+    long long lo;
+    const int n = attn_rows(pos + first + blockIdx.y, window, &lo);
     float* row = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
     float mx = -INFINITY;
     for (int j = threadIdx.x; j < n; j += blockDim.x) mx = fmaxf(mx, row[j]);
@@ -496,17 +507,27 @@ __global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int
 // a value dimension of a head and walks the rows; blockIdx.x counts the heads, `per` blocks each.
 __global__ void attn_value_kernel(const float* __restrict__ score, const half* __restrict__ vcache,
                                   float* __restrict__ out, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, int per) {
+                                  long long pos, int first, int per, int window, int ring) {
     const int tok = first + blockIdx.y, h = blockIdx.x / per;
     const int d = (blockIdx.x % per) * blockDim.x + threadIdx.x;
     if (d >= dim) return;
-    const int n = int(pos) + tok + 1;
+    long long lo;
+    const int n = attn_rows(pos + tok, window, &lo);
     const float* p = score + (size_t(blockIdx.y) * n_head + h) * n_keys;
     const half* v = vcache + size_t(h / (n_head / kv_heads)) * dim + d;
-    const size_t row = size_t(kv_heads) * dim;
+    const size_t width = size_t(kv_heads) * dim;
+    long long row = ring > 0 ? lo % ring : lo;
     float acc = 0.0f;
-    for (int j = 0; j < n; ++j) acc += p[j] * __half2float(v[size_t(j) * row]);
+    for (int j = 0; j < n; ++j) {
+        acc += p[j] * __half2float(v[size_t(row) * width]);
+        if (++row == ring) row = 0;
+    }
     out[(size_t(tok) * n_head + h) * dim + d] = acc;
+}
+
+__global__ void softcap_kernel(float* x, size_t n, float cap) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) x[i] = tanhf(x[i] * (1.0f / cap)) * cap;
 }
 
 __global__ void mul_sigmoid_kernel(float* __restrict__ acc, const float* __restrict__ g, int n, int g_stride,
@@ -739,22 +760,30 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream) {
 }
 
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
-                    float theta_scale, int64_t pos, int rows, float eps, void* stream) {
+                    float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq) {
     head_norm_rope_kernel<<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
-        x, x_stride, w, y, dim, heads, n_rot, theta_scale, (long long) pos, eps);
+        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps);
 }
 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
-            int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream) {
-    const int n_keys = int(pos) + rows, key_block = std::max(1, 256 / n_head), per = grid(dim, 256);
+            int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window,
+            int ring) {
+    const auto most = [&](long long n) { return int(window > 0 && n > window ? window : n); };
+    const int n_keys = most(pos + rows), key_block = std::max(1, 256 / n_head), per = grid(dim, 256);
     for (int first = 0; first < rows; first += chunk) {
-        const int c = std::min(chunk, rows - first), keys = int(pos) + first + c;   // the chunk's last token's
+        const int c = std::min(chunk, rows - first), keys = most(pos + first + c);   // the chunk's last token's
         attn_score_kernel<<<dim3(grid(keys, key_block), c), key_block * n_head, 0, cs(stream)>>>(
-            q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale);
-        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first);
+            q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale, window,
+            ring);
+        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window);
         attn_value_kernel<<<dim3(n_head * per, c), std::min(dim, 256), 0, cs(stream)>>>(
-            score, (const half*) vcache, out, n_keys, dim, n_head, kv_heads, (long long) pos, first, per);
+            score, (const half*) vcache, out, n_keys, dim, n_head, kv_heads, (long long) pos, first, per, window,
+            ring);
     }
+}
+
+void softcap(float* x, size_t n, float cap, void* stream) {
+    softcap_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(x, n, cap);
 }
 
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream) {
