@@ -239,7 +239,29 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     const uintptr_t end = aligned + bytes, raw_end = start + padded;
     if (raw_end > end) munmap((void*) end, raw_end - end);
     void* p = (void*) aligned;
-    if (std::getenv("STRATA_NO_LARGEPAGES") == nullptr && madvise(p, bytes, MADV_HUGEPAGE) == 0) {
+    // #771: with THP "always" the kernel already backs this mapping with huge pages where it can; the extra
+    // MADV_HUGEPAGE only adds direct reclaim and compaction on every fault (defrag=madvise), which on a fragmented
+    // machine stretched a 25 s start to 432 s.  So it is not asked for there.  STRATA_NO_ARENA_THP=1 skips it
+    // anywhere (the request alone; STRATA_NO_LARGEPAGES also skips the hugetlb try).
+    std::string thp_mode;
+    if (std::FILE* f = std::fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r")) {
+        char line[128] = {0};
+        if (std::fgets(line, sizeof line, f) != nullptr) {
+            const char* open = std::strchr(line, '[');
+            const char* close = open ? std::strchr(open, ']') : nullptr;
+            if (open && close) thp_mode.assign(open + 1, close);
+        }
+        std::fclose(f);
+    }
+    const bool skip_thp_request = std::getenv("STRATA_NO_ARENA_THP") != nullptr || thp_mode == "always";
+    if (std::getenv("STRATA_NO_LARGEPAGES") == nullptr && skip_thp_request) {
+        const std::string four_k = "; using 4 KB pages";
+        if (note.size() >= four_k.size() && note.compare(note.size() - four_k.size(), four_k.size(), four_k) == 0)
+            note.resize(note.size() - four_k.size());
+        note += std::getenv("STRATA_NO_ARENA_THP") != nullptr
+                    ? "; transparent huge pages skipped (STRATA_NO_ARENA_THP)"
+                    : "; transparent huge pages are on for every mapping (THP always): MADV_HUGEPAGE not requested";
+    } else if (std::getenv("STRATA_NO_LARGEPAGES") == nullptr && madvise(p, bytes, MADV_HUGEPAGE) == 0) {
         const std::string four_k = "; using 4 KB pages";
         if (note.size() >= four_k.size() && note.compare(note.size() - four_k.size(), four_k.size(), four_k) == 0)
             note.resize(note.size() - four_k.size());
@@ -390,7 +412,9 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                    " GiB); " + note;
             if (registered_bytes < bytes) {
                 const char* env = std::getenv("STRATA_ARENA_LOCK");
-                if (env == nullptr || std::string(env) != "0") {
+                if (backing == PageBacking::LargePages) {   // #779: large pages cannot be paged out: nothing to lock
+                    note = "large pages are resident without a lock; " + note;
+                } else if (env == nullptr || std::string(env) != "0") {
                     const strata::platform::LockResult lr =
                         strata::platform::lock_resident((uint8_t*) base + registered_bytes, bytes - registered_bytes);
                     locked_bytes = lr.locked_bytes;
@@ -416,7 +440,9 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             // and the CPU pool's rate then depends on the OS; locking it through the working set needs no
             // special privilege. STRATA_ARENA_LOCK=0 is the A/B arm.
             const char* env = std::getenv("STRATA_ARENA_LOCK");
-            if (env == nullptr || std::string(env) != "0") {
+            if (backing == PageBacking::LargePages) {       // #779: large pages cannot be paged out: nothing to lock
+                note = "large pages are resident without a lock; " + note;
+            } else if (env == nullptr || std::string(env) != "0") {
                 const strata::platform::LockResult lr = strata::platform::lock_resident(base, bytes);
                 locked_bytes = lr.locked_bytes;
                 note = lr.note + "; " + note;
@@ -457,7 +483,9 @@ void PinnedArena::register_slices(std::atomic<int>& ready) {
            std::to_string(n) + " slices pinned; " + note;
     if (i < n && base != nullptr) {   // the rest stays resident through the working-set lock, as the sliced fallback does
         const char* env = std::getenv("STRATA_ARENA_LOCK");
-        if (env == nullptr || std::string(env) != "0") {
+        if (backing == PageBacking::LargePages) {           // #779: large pages cannot be paged out: nothing to lock
+            note = "large pages are resident without a lock; " + note;
+        } else if (env == nullptr || std::string(env) != "0") {
             const strata::platform::LockResult lr =
                 strata::platform::lock_resident((uint8_t*) base + registered_bytes, capacity - registered_bytes);
             locked_bytes = lr.locked_bytes;
