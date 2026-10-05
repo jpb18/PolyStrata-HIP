@@ -3656,7 +3656,8 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
         fail(f"{title} runs on NVIDIA cards only: its engine is a CUDA program",
              "choose another model for the AMD card")
     if cuda_tk == 12:
-        fail(f"{title}'s engine is built with CUDA 13: there is none for Pascal / Volta cards or --cuda 12",
+        fail(f"{title}'s engine is built for RTX 20 cards and newer: there is none for Pascal / Volta cards or "
+             "--cuda 12",
              "use an RTX 20 card or newer, without --cuda 12")
     if WIN:
         confirm_risk(f"{title}'s engine has been compiled and run on Linux only: on Windows the compile may fail",

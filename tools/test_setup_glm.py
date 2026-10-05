@@ -263,7 +263,7 @@ class Main(unittest.TestCase):
     def test_cuda_12_stops(self):
         code, out, cfg = self.main(["--cuda", "12"])
         self.assertNotEqual(code, 0)
-        self.assertIn("built with CUDA 13", out)
+        self.assertIn("built for RTX 20 cards and newer", out)
 
 
 if __name__ == "__main__":
