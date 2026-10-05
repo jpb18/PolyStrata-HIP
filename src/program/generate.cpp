@@ -15,6 +15,7 @@
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
 #include "strata/core/arch_defaults.hpp"
+#include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/expert_cache.hpp"
@@ -6752,6 +6753,11 @@ int main(int argc, char** argv) {
                 adapt_fence();
             }
             bool main_live = false;
+            // STRATA_DMA_BATCH (F12): the main device's copies as one cudaMemcpyBatchAsync (mode 0: one each)
+            const int dma_mode = multi_gpu ? 0 : strata::core::dma_batch_mode();
+            std::vector<void*> cp_dst;
+            std::vector<const void*> cp_src;
+            std::vector<size_t> cp_bytes;
             for (size_t si = 0; si < swaps.size(); ++si) {
                 const Swap& s = swaps[si];
                 const size_t in = (size_t) s.layer * g.n_expert + s.in, out = (size_t) s.layer * g.n_expert + s.out;
@@ -6760,6 +6766,16 @@ int main(int argc, char** argv) {
                 const int stn = multi_gpu ? stage_of(s.layer) : 0;   // the swap stays in the layer's own cache
                 GpuStage* gs = stn > 0 ? stages[(size_t) stn - 1].get() : nullptr;
                 const strata::core::OnDevice on(gs ? gs->dev : -1);
+                if (dma_mode != 0 && slot >= 0 && b != nullptr) {
+                    cp_dst.push_back(xcache.device_slot(slot));
+                    cp_src.push_back(b);
+                    cp_bytes.push_back((size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer));
+                    main_live = true;
+                    host_res[out] = strata::core::kNotResident;
+                    srcp->prefetch(s.layer, s.out);
+                    pending.emplace_back((int32_t) in, slot);
+                    continue;
+                }
                 if (slot < 0 || b == nullptr ||
                     adapt_copy_h2d(gs ? gs->cache.device_slot(slot) : xcache.device_slot(slot), b,
                                    (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
@@ -6773,6 +6789,12 @@ int main(int argc, char** argv) {
                 host_res[out] = strata::core::kNotResident;   // evicted now: the CPU computes it meanwhile
                 srcp->prefetch(s.layer, s.out);   // a file-backed arena released its pages: read them back ahead
                 pending.emplace_back((int32_t) in, slot);      // resident once the copy has landed
+            }
+            if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
+                                                            adapt_stream, dma_mode) != cudaSuccess) {
+                std::fprintf(stderr, "strata serve: adaptive swap copy failed (batched): %s\n",
+                             cudaGetErrorString(cudaGetLastError()));
+                return false;
             }
             if (!swaps.empty()) cudaEventRecord(adapt_ev, adapt_stream);
             (void) main_live;
@@ -10550,20 +10572,37 @@ int main(int argc, char** argv) {
                                            (uintptr_t) b + strata::kernels::cpu::expert_layout().blob_bytes(s.layer));
                 pin_blobs(std::move(spans), pin_live);
             }
+            // STRATA_DMA_BATCH (F12): the round's copies as one cudaMemcpyBatchAsync; mode 0 is the loop of one copy each
+            const int dma_mode = strata::core::dma_batch_mode();
+            std::vector<void*> cp_dst;
+            std::vector<const void*> cp_src;
+            std::vector<size_t> cp_bytes;
             for (const Swap& s : swaps) {
                 const size_t in = (size_t) s.layer * g.n_expert + s.in, out = (size_t) s.layer * g.n_expert + s.out;
                 const int32_t slot = host_res[out];
                 const uint8_t* b = srcp->blob(s.layer, s.in);
+                const size_t blob_n = (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer);
                 // asynchronous: the copies run while the MTP drafts; the next window waits for them
-                if (slot < 0 || b == nullptr ||
-                    adapt_copy_h2d(xcache.device_slot(slot), b, (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
-                                   adapt_stream) != cudaSuccess) {
+                if (slot < 0 || b == nullptr) {
+                    std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
+                    return false;
+                }
+                if (dma_mode != 0) {
+                    cp_dst.push_back(xcache.device_slot(slot));
+                    cp_src.push_back(b);
+                    cp_bytes.push_back(blob_n);
+                } else if (adapt_copy_h2d(xcache.device_slot(slot), b, blob_n, adapt_stream) != cudaSuccess) {
                     std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
                     return false;
                 }
                 host_res[out] = strata::core::kNotResident;   // evicted now: the CPU computes it meanwhile
                 srcp->prefetch(s.layer, s.out);   // a file-backed arena released its pages: read them back ahead
                 pending.emplace_back((int32_t) in, slot);      // resident once the copy has landed
+            }
+            if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
+                                                            adapt_stream, dma_mode) != cudaSuccess) {
+                std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
+                return false;
             }
             if (!swaps.empty()) cudaEventRecord(adapt_ev, adapt_stream);
             if (trace_adapt)
