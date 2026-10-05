@@ -409,6 +409,8 @@ struct Options {
     int pool_workers = 0;         ///< R2.2: 0 = "all physical cores minus the host's"; >0 overrides
     /// #272: the pool's core layout; `all` (the default) is the layout it always had, auto / p-cores are opt-in
     strata::kernels::cpu::PoolAffinity pool_affinity = strata::kernels::cpu::PoolAffinity::All;
+    /// --host-core first|last (STRATA_HOST_CORE): the host thread's core (see HostCore in pool.hpp)
+    std::string host_core;
     /// R2.2's first half, as an A/B arm.  **ON by default**, because the measurement that justifies it is the
     /// pool's own drain: 33.7 GB/s against 5/6 x 44.14 = 36.8 for five workers, on a machine whose sixth core
     /// is reserved for a host thread that has nothing to do while the drain runs.
@@ -828,6 +830,11 @@ void usage() {
                  "                       except the one the host loop spins on (with --pool-affinity auto or\n"
                  "                       p-cores on a hybrid CPU: P-cores minus 1).  A sweep is how the pool's\n"
                  "                       deviation from `cpu_s2` is attributed.\n"
+                 "  --host-core WHERE    The host thread's core: first (the default: the first physical core, as always) or\n"
+                 "                       last (the last physical core, the workers on the others).  Windows sends a GPU's\n"
+                 "                       interrupts to one logical processor, usually the first, and every copy that lands\n"
+                 "                       raises one: a spinning host there waits for them.  Moves threads only, never a\n"
+                 "                       result.  Not on hybrid CPUs (STRATA_HOST_CORE sets it too).\n"
                  "  --pool-affinity MODE Worker CPU affinity: all (default: one worker per physical core, as\n"
                  "                       always), auto (hybrid CPUs: P-cores first, then their SMT siblings,\n"
                  "                       then E-cores) or p-cores (P-cores and their siblings only).\n"
@@ -1614,6 +1621,13 @@ int main(int argc, char** argv) {
         else if (a == "--graph-only") o.graph_only = true;
         else if (a == "--gpu-only-full") o.gpu_only_full = true;
         else if (a == "--pool-workers") o.pool_workers = std::atoi(next("--pool-workers"));
+        else if (a == "--host-core") {
+            o.host_core = next("--host-core");
+            if (o.host_core != "first" && o.host_core != "last") {
+                std::fprintf(stderr, "strata generate: unknown --host-core value '%s' (expected first or last)\n", o.host_core.c_str());
+                return 2;
+            }
+        }
         else if (a == "--pool-affinity") {
             const std::string v = next("--pool-affinity");
             if (v == "auto") o.pool_affinity = strata::kernels::cpu::PoolAffinity::Auto;
@@ -1835,6 +1849,12 @@ int main(int argc, char** argv) {
     }
 #endif
     strata::core::set_coupled_draft(o.coupled_draft);
+    {   // --host-core / STRATA_HOST_CORE, before the pool and the session pin any thread
+        std::string hc = o.host_core;
+        if (hc.empty())
+            if (const char* e = std::getenv("STRATA_HOST_CORE")) hc = e;
+        if (hc == "last") strata::kernels::cpu::set_host_core(strata::kernels::cpu::HostCore::Last);
+    }
     strata::core::set_peer_portable(o.peer_device >= 1);   // multi-GPU: the Portable flag on mapped host buffers only with a peer device (before any allocation)
     if (o.serve && o.conversation_cache_mib > 0 && (o.prompt_cache == 0 || o.conversation_cache_slots == 0))
         std::fprintf(stderr, "strata serve: warning: conversation caching is disabled by %s\n",
@@ -3759,6 +3779,16 @@ int main(int argc, char** argv) {
                               pool.affinity() == strata::kernels::cpu::PoolAffinity::All ? "all" : "auto";
         std::fprintf(stderr, "strata generate: hybrid CPU detected (%d P-cores / %d threads, %d E-cores), pool workers: %d, affinity: %s\n",
                      pool.p_cores(), pool.p_threads(), pool.e_cores(), pool.workers(), aff_str);
+    }
+    {   // where the threads run (--host-core)
+        const strata::kernels::cpu::CpuTopology ht = strata::kernels::cpu::detect_cpu_topology(true, o.pool_affinity);
+        std::string on;
+        for (int i = 0; i < pool.workers() && i < (int) ht.worker_cores.size(); ++i)
+            on += (i > 0 ? "," : "") + std::to_string(ht.worker_cores[(size_t) i]);
+        std::fprintf(stderr, "strata generate: %d pool workers on logical processors %s, the host thread on %d%s "
+                             "(--host-core %s)\n", pool.workers(), on.c_str(), ht.host_core,
+                     pool.host_works() ? " (draining too)" : "",
+                     strata::kernels::cpu::host_core_setting() == strata::kernels::cpu::HostCore::Last ? "last" : "first");
     }
     if (o.no_ple_prefetch) strata::kernels::ple_prefetch_enable(false);
     // ---- R4's slot storage.  Allocated AFTER the weights and the session, so `cudaMemGetInfo` inside `open`
