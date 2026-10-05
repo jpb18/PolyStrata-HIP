@@ -46,20 +46,25 @@ private:
     std::condition_variable cv_;
 };
 
-/// One routed expert of a layer: its three matrices in the GGUF, and its router weight.
+/// One routed expert of a token: its three matrices in the GGUF, its router weight, and which of the call's tokens
+/// it is for.
 struct CpuExpert {
     const uint8_t* gate;
     const uint8_t* up;
     const uint8_t* down;
     float weight;
+    int row = 0;
 };
 
 /// Checks that ggml-cpu has a dot product for both types.  Call once per layer format at load.
 bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err);
 
-/// out[n_embd] = sum over the experts of weight * down(silu(min(gate x, limit)) * clamp(up x, -limit, limit)).
+/// For each of `rows` tokens, with n_embd values of x and of out each:
+/// out = sum over the token's experts of weight * down(silu(min(gate x, limit)) * clamp(up x, -limit, limit)).
+/// The n experts come token after token, a token's together.  An expert that several of the tokens use is read
+/// once for all of them: reading it is most of the work.  A token's result is the one it has in a call of its own.
 /// `meanwhile`, when given, is run once by one of the threads, beside the first products.  It must not throw.
-void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int gu_type, int d_type, int n_embd, int n_ff,
-                 const float* x, float limit, float* out, const std::function<void()>* meanwhile = nullptr);
+void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
+                 int n_ff, const float* x, float limit, float* out, const std::function<void()>* meanwhile = nullptr);
 
 }  // namespace strata::glm

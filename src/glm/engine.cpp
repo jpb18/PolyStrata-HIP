@@ -31,6 +31,7 @@ namespace {
 constexpr uint32_t kTypeF32 = 0, kTypeBF16 = 30;
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
 constexpr int kMaxUsed = 32;
+constexpr int kCpuRows = 8;         // tokens whose CPU experts one call computes; a window has no more
 constexpr int kAttnRows = 32;       // tokens one pass of the sparse attention takes; their keys are 4 MiB a token
 // From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
@@ -1280,54 +1281,59 @@ void Engine::moe(Layer& L, int il, int n) {
     const float limit = clamp_exp_[(size_t) il];
     const size_t xq_row = kernels::native_q8_1_bytes(n_embd_);
     bool any_host = false;
-    for (int t = 0; t < n; ++t) {
-        int ids[kMaxUsed];
-        float w[kMaxUsed];
-        route(L, h_rl_ + (size_t) t * n_expert_, ids, w);
-
-        CpuExpert host[kMaxUsed];
-        const uint8_t* slot[kMaxUsed];
-        float slot_w[kMaxUsed];
-        int n_host = 0, n_slot = 0;
-        const void* xq = (const uint8_t*) xq_ + (size_t) t * xq_row;
-        float* out = fo_ + (size_t) t * e_row;
-        for (int k = 0; k < n_used_; ++k) {
-            const size_t e = (size_t) ids[k];
-            ++use_[(size_t) il * n_expert_ + e];
-            if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
-            if (const uint8_t* s = L.slot[e]) {
-                slot[n_slot] = s;
-                slot_w[n_slot++] = w[k];
-            } else {
-                host[n_host++] = {L.exp_gate + e * L.gu_bytes, L.exp_up + e * L.gu_bytes,
-                                  L.exp_down + e * L.d_bytes, w[k]};
+    // A window's tokens together: the CPU reads an expert that several of them chose once.
+    for (int at = 0; at < n; at += kCpuRows) {
+        const int m = std::min(kCpuRows, n - at);
+        struct Cached {
+            const uint8_t* slot;
+            float w;
+            int row;
+        };
+        CpuExpert host[kCpuRows * kMaxUsed];
+        Cached cached[kCpuRows * kMaxUsed];
+        int n_host = 0, n_cached = 0;
+        for (int t = 0; t < m; ++t) {
+            int ids[kMaxUsed];
+            float w[kMaxUsed];
+            route(L, h_rl_ + (size_t) (at + t) * n_expert_, ids, w);
+            for (int k = 0; k < n_used_; ++k) {
+                const size_t e = (size_t) ids[k];
+                ++use_[(size_t) il * n_expert_ + e];
+                if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
+                if (const uint8_t* s = L.slot[e])
+                    cached[n_cached++] = {s, w[k], at + t};
+                else
+                    host[n_host++] = {L.exp_gate + e * L.gu_bytes, L.exp_up + e * L.gu_bytes,
+                                      L.exp_down + e * L.d_bytes, w[k], t};
             }
         }
-        stats_.gpu_experts += n_slot;
+        stats_.gpu_experts += n_cached;
         stats_.cpu_experts += n_host;
         // Five launches a cached expert.  Nothing else goes to the stream until the CPU experts are done, so one
         // of their threads hands these to the card meanwhile: on this thread they held the CPU experts up.
-        const std::function<void()> cached = [&] {
-            for (int i = 0; i < n_slot; ++i) {
-                kernels::native_mmvq((int) L.gu_type, slot[i], xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
+        const std::function<void()> launch = [&] {
+            for (int i = 0; i < n_cached; ++i) {
+                const Cached& c = cached[i];
+                const void* xq = (const uint8_t*) xq_ + (size_t) c.row * xq_row;
+                kernels::native_mmvq((int) L.gu_type, c.slot, xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
                 swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
                 kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
-                kernels::native_mmvq((int) L.d_type, slot[i] + 2 * L.gu_bytes, q8_, d_, n_ff_exp_, n_embd_, 1, st_);
-                axpy(d_, slot_w[i], out, n_embd_, true, st_);
+                kernels::native_mmvq((int) L.d_type, c.slot + 2 * L.gu_bytes, q8_, d_, n_ff_exp_, n_embd_, 1, st_);
+                axpy(d_, c.w, fo_ + (size_t) c.row * e_row, n_embd_, true, st_);
             }
         };
 
         // The next layer's router wait is what makes h_cpu_ free to write again.
-        float* cpu = h_cpu_ + (size_t) t * e_row;
+        float* cpu = h_cpu_ + (size_t) at * e_row;
         if (n_host == 0) {
-            cached();
-            std::fill(cpu, cpu + e_row, 0.f);
+            launch();
+            std::fill(cpu, cpu + (size_t) m * e_row, 0.f);
             continue;
         }
         any_host = true;
         t0 = Clock::now();
-        cpu_experts(*workers_, host, n_host, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
-                    h_x_ + (size_t) t * e_row, limit, cpu, n_slot > 0 ? &cached : nullptr);
+        cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
+                    h_x_ + (size_t) at * e_row, limit, cpu, n_cached > 0 ? &launch : nullptr);
         stats_.cpu_ms += ms_since(t0);
     }
     if (!any_host) return;

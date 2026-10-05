@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
+#include <numeric>
 
 namespace strata::glm {
 namespace {
@@ -108,56 +109,86 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
     return true;
 }
 
-void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int gu_type, int d_type, int n_embd, int n_ff,
-                 const float* x, float limit, float* out, const std::function<void()>* meanwhile) {
+void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
+                 int n_ff, const float* x, float limit, float* out, const std::function<void()>* meanwhile) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
     const ggml_type_traits_cpu* td = traits(d_type);
     const size_t gu_row = ggml_row_size((ggml_type) gu_type, n_embd);
     const size_t d_row = ggml_row_size((ggml_type) d_type, n_ff);
+    const size_t a_bytes = ggml_row_size(tg->vec_dot_type, n_embd);
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
 
+    // The workers get these through the pointers below: a thread_local named in their code would be their own.
     static thread_local std::vector<uint8_t> act, hq;
     static thread_local std::vector<float> h;
-    act.resize(ggml_row_size(tg->vec_dot_type, n_embd));
+    static thread_local std::vector<int> by, run;
+    act.resize((size_t) rows * a_bytes);
     hq.resize((size_t) n * h_bytes);
     h.resize((size_t) n * n_ff);
-    traits(tg->vec_dot_type)->from_float(x, act.data(), n_embd);
+    for (int t = 0; t < rows; ++t)
+        traits(tg->vec_dot_type)->from_float(x + (size_t) t * n_embd, act.data() + (size_t) t * a_bytes, n_embd);
+
+    // The uses of one expert next to each other (by), and where each expert's run of them starts (run).
+    by.resize((size_t) n);
+    std::iota(by.begin(), by.end(), 0);
+    std::stable_sort(by.begin(), by.end(), [&](int a, int b) { return experts[a].gate < experts[b].gate; });
+    run.clear();
+    for (int i = 0; i < n; ++i)
+        if (i == 0 || experts[by[(size_t) i]].gate != experts[by[(size_t) i - 1]].gate) run.push_back(i);
+    const int n_run = (int) run.size();
+    run.push_back(n);
 
     const uint8_t* actp = act.data();
     float* hp = h.data();
+    const int* byp = by.data();
+    const int* runp = run.data();
     const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
     const int first = meanwhile ? 1 : 0;   // task 0, so it is taken at once
-    workers.run(first + n * gu_tasks, [&](int t) {
+    workers.run(first + n_run * gu_tasks, [&](int t) {
         if (t < first) return (*meanwhile)();
         t -= first;
-        const CpuExpert& e = experts[t / gu_tasks];
-        float* he = hp + (size_t) (t / gu_tasks) * n_ff;
+        const int i0 = runp[t / gu_tasks], i1 = runp[t / gu_tasks + 1];
+        const CpuExpert& e = experts[byp[i0]];
         const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);
         for (int r = r0; r < r1; ++r) {
-            float g = 0.f, u = 0.f;
-            tg->vec_dot(n_embd, &g, 0, e.gate + (size_t) r * gu_row, 0, actp, 0, 1);
-            tg->vec_dot(n_embd, &u, 0, e.up + (size_t) r * gu_row, 0, actp, 0, 1);
-            g = std::min(g, limit);
-            u = std::clamp(u, -limit, limit);
-            he[r] = g / (1.f + std::exp(-g)) * u;
+            const uint8_t* gate = e.gate + (size_t) r * gu_row;
+            const uint8_t* up = e.up + (size_t) r * gu_row;
+            for (int i = i0; i < i1; ++i) {
+                const int j = byp[i];
+                const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
+                float g = 0.f, u = 0.f;
+                tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
+                tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
+                g = std::min(g, limit);
+                u = std::clamp(u, -limit, limit);
+                hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;
+            }
         }
     });
-    for (int e = 0; e < n; ++e)
-        traits(td->vec_dot_type)->from_float(hp + (size_t) e * n_ff, hq.data() + (size_t) e * h_bytes, n_ff);
+    for (int j = 0; j < n; ++j)
+        traits(td->vec_dot_type)->from_float(hp + (size_t) j * n_ff, hq.data() + (size_t) j * h_bytes, n_ff);
 
     const uint8_t* hqp = hq.data();
     const int d_tasks = (n_embd + kRowsPerTask - 1) / kRowsPerTask;
     workers.run(d_tasks, [&](int t) {
+        static thread_local std::vector<float> one;   // an output value of every use
+        one.resize((size_t) n);
+        float* s = one.data();
         const int r0 = t * kRowsPerTask, r1 = std::min(n_embd, r0 + kRowsPerTask);
         for (int r = r0; r < r1; ++r) {
-            float acc = 0.f;
-            for (int e = 0; e < n; ++e) {
-                float s = 0.f;
-                td->vec_dot(n_ff, &s, 0, experts[e].down + (size_t) r * d_row, 0, hqp + (size_t) e * h_bytes, 0, 1);
-                acc += experts[e].weight * s;
+            for (int u = 0; u < n_run; ++u) {
+                const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
+                for (int i = runp[u]; i < runp[u + 1]; ++i)
+                    td->vec_dot(n_ff, s + byp[i], 0, down, 0, hqp + (size_t) byp[i] * h_bytes, 0, 1);
             }
-            out[r] = acc;
+            // a token's sum in the order its experts were given: the order it has in a call of its own
+            int j = 0;
+            for (int row = 0; row < rows; ++row) {
+                float acc = 0.f;
+                for (; j < n && experts[j].row == row; ++j) acc += experts[j].weight * s[j];
+                out[(size_t) row * n_embd + r] = acc;
+            }
         }
     });
 }

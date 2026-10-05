@@ -142,7 +142,8 @@ int main(int argc, char** argv) {
 
                 std::vector<float> cpu((size_t) n_embd), dev((size_t) n_embd);
                 const glm::CpuExpert ce{gate, up, down, 1.f};
-                glm::cpu_experts(workers, &ce, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit, cpu.data());
+                glm::cpu_experts(workers, &ce, 1, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit,
+                                 cpu.data());
                 const double e_cpu = rel_error(cpu.data(), want);
                 double e_gpu = 0.0;
                 if (gpu) {
