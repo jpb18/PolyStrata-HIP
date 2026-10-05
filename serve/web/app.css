@@ -182,3 +182,7 @@ main { flex: 1; min-height: 0; display: flex; }
   .facts { grid-template-columns: 1fr; gap: 2px; }
   .facts dd { margin-bottom: var(--st-s-2); }
 }
+
+/* the header's model list (more than one model installed) */
+.model-select{height:30px;max-width:280px;padding:0 var(--st-s-2);border-radius:var(--st-r-md);border:1px solid var(--st-line);background:var(--st-surface-2);color:var(--st-ink);font:inherit;font-size:var(--st-fs-sm)}
+.model-select:disabled{opacity:.6}

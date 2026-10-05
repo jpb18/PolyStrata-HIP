@@ -108,6 +108,42 @@ async function loadHealth() {
   }
 }
 
+// The installed models (GET api/models).  The list is shown when there is more than one to choose from; choosing
+// one switches the server to it, which stops the model in memory first and starts a new chat.
+async function loadModels() {
+  const sel = $("model-select");
+  let models = [];
+  try {
+    const r = await fetch("api/models", {headers: headers()});
+    if (r.ok) models = (await r.json()).models || [];
+  } catch (e) { return; }
+  sel.innerHTML = models.map((m) =>
+    `<option value="${esc(m.id)}"${m.current ? " selected" : ""}${m.status === "unavailable" ? " disabled" : ""}>` +
+    `${esc(m.display_name && m.display_name !== m.id ? `${m.display_name} (${m.id})` : m.id)}` +
+    `${m.status === "unavailable" ? " - unavailable" : ""}</option>`).join("");
+  sel.hidden = models.length < 2;
+  sel.dataset.current = (models.find((m) => m.current) || {}).id || "";
+}
+$("model-select").onchange = async () => {
+  const sel = $("model-select"), name = sel.value, before = sel.dataset.current;
+  if (busy) { toast("warn", "Still writing", "Stop the answer first."); sel.value = before; return; }
+  sel.disabled = true;
+  toast("info", `Switching to ${name}`, "The model in memory is stopped first, then this one is loaded.", 8000);
+  let message = "";
+  try {
+    const r = await fetch("api/models/load", {method: "POST", headers: headers(true), body: JSON.stringify({model: name})});
+    if (!r.ok) message = ((await r.json()).error || {}).message || `the server answered ${r.status}`;
+  } catch (e) { message = String(e); }
+  sel.disabled = false;
+  await loadHealth();
+  await loadModels();
+  if (message) { toast("error", "The model was not switched", message, 10000); return; }
+  messages = [];
+  saveChat();
+  renderChat();
+  toast("success", `${name} is loaded`, "A new chat was started.");
+};
+
 // ------------------------------------------------------------------ Monitor
 const METRICS = [
   {key: "speed", label: "Speed", icon: "gauge", unit: "t/s", series: "tok_s"},
@@ -1068,6 +1104,7 @@ setBusy(false);
 renderChat();
 const startQuestion = new URLSearchParams(location.search).get("q");   // /?q=... starts a chat (a shortcut)
 if (startQuestion) history.replaceState(null, "", location.pathname + location.hash);
+loadModels();
 loadHealth().then(loadMcp).then(() => { if (startQuestion) { $("input").value = startQuestion; send(); } });
 showTab(location.hash.slice(1) || "chat");
 poll();
