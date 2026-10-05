@@ -88,6 +88,12 @@ class Registry(unittest.TestCase):
         g = registry.find(registry.discover(self.root), "gemma")
         self.assertEqual((g["backend"], g["mtp"]), ("gemma4", False))
 
+    def test_the_name_setup_gave_comes_before_the_files(self):
+        cfg = self.root / "strata-gemma.json"
+        cfg.write_text(json.dumps({**json.loads(cfg.read_text()), "display_name": "Gemma 4 26B-A4B UD-Q3_K_M"}))
+        g = registry.find(registry.discover(self.root), "gemma")
+        self.assertEqual(g["display_name"], "Gemma 4 26B-A4B UD-Q3_K_M")
+
     def test_what_cannot_run_says_why(self):
         install(self.root, "other", "llama", "other.gguf")
         cfg = install(self.root, "gone", "gemma4", "gone.gguf")

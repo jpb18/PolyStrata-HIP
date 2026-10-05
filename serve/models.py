@@ -138,7 +138,8 @@ def describe(config: Path) -> dict | None:
                                     "all": round((g["dense_bytes"] + g["expert_bytes"]) / 1e9 + 1.0, 1)}
                 if not g["runnable"]:
                     e["status"], e["problem"] = "unavailable", f"no engine here runs a '{g['backend']}' model"
-    e["display_name"] = e["display_name"] or e["id"]
+    # the name setup gave it, else the file's own (a file's can be a converter's leftover), else the id
+    e["display_name"] = cfg.get("display_name") or e["display_name"] or e["id"]
     return e
 
 
