@@ -1846,6 +1846,7 @@ int64_t FileExpertSource::commit_exchanges() {
 }
 
 void FileExpertSource::commit_copies() {
+    if (exchange_storage_.active()) return;   // STRATA_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_.empty() ? nullptr : override_[x.out];
         const uint64_t at = complement_offsets_[x.in];
@@ -1859,6 +1860,15 @@ int64_t FileExpertSource::commit_flip() {
     int64_t n = 0;
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_[x.out];
+        if (exchange_storage_.active()) {   // STRATA_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
+            if (!exchange_storage_.commit(x.in, x.out, (size_t) x.q, src, (size_t) x.bytes)) {
+                std::fprintf(stderr, "FileExpertSource: invalid exchange rotation commit; refusing corrupt residency\n");
+                std::abort();
+            }
+            ++n;
+            override_[x.out] = nullptr;
+            continue;
+        }
         const uint64_t at = complement_offsets_[x.in];
         // the same test as commit_copies: an exchange whose bytes were copied is the one that flips
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
@@ -1875,8 +1885,8 @@ const uint8_t* FileExpertSource::resident_blob(int64_t layer, int64_t expert) co
     if (!complement_ready_ || complement_host_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ ||
         expert >= n_expert_) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
-    if (index >= complement_offsets_.size() || complement_offsets_[index] == kNoComplement) return nullptr;
-    return complement_host_ + (size_t) complement_offsets_[index];
+    if (index >= complement_offsets_.size()) return nullptr;
+    return resident_blob(index);   // through the rotation's ownership table when STRATA_EXCHANGE_ROTATE is on
 }
 
 const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
