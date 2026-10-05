@@ -71,7 +71,7 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
     }
 }
 
-// ================================ the "bit-plane" row dot (default) ================================
+// ================================ the "bit-plane" row dot (opt-in: STRATA_Q2_BITPLANE=1) ================================
 //
 // The kernel above spends, per 32-value chunk and token, a maddubs, a madd, a convert, a scalar d*scale product
 // broadcast into an FMA, and a scalar correction FMA; plus a 14-op interleave to unpack 64 codes.  Here:
@@ -90,7 +90,8 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
 //
 // The integer part is exact; only the float summation order differs from the kernel above (last bits).  Every
 // token's operations are the same whatever the group width, so a token's rows are bitwise the same alone or in a
-// verify window.  STRATA_Q2_LEGACY=1 selects the kernel above (A/B).
+// verify window.  It changes the last bits of a Q2_0 expert on AVX2-only CPUs, so it is OFF by default
+// (STRATA_Q2_BITPLANE=1 turns it on; unset: the kernel above, exactly as before).
 template <int NT>
 inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m256* acc) {
     for (int t = 0; t < NT; ++t) acc[t] = _mm256_setzero_ps();
@@ -151,9 +152,14 @@ void rows_bp(const uint8_t* w, size_t row_bytes, int npairs, const ActQ* const* 
     }
 }
 
-const bool kLegacy = std::getenv("STRATA_Q2_LEGACY") != nullptr;
+const bool kBitplane = [] {
+    const char* e = std::getenv("STRATA_Q2_BITPLANE");
+    return e != nullptr && e[0] == '1';
+}();
 
 }  // namespace
+
+bool q2_bitplane_enabled() { return kBitplane; }
 
 void q2_0_gguf_rows_multi_avx2_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                                       float* const* out, int r0, int r1) {
@@ -172,7 +178,7 @@ void q2_0_gguf_rows_multi_avx2_legacy(const uint8_t* w, size_t row_bytes, int nb
 
 void q2_0_gguf_rows_multi_avx2(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                                float* const* out, int r0, int r1) {
-    bool bp = !kLegacy && nblocks % 2 == 0;
+    bool bp = kBitplane && nblocks % 2 == 0;
     for (int t = 0; t < nt && bp; ++t) bp = a[t]->bp_pairs == nblocks / 2;
     if (!bp) {
         q2_0_gguf_rows_multi_avx2_legacy(w, row_bytes, nblocks, a, nt, out, r0, r1);
@@ -265,7 +271,8 @@ void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) {
         a.sum[k] = total;
         a.hx[k] = s * (float) total;
     }
-    bitplane_image(a);
+    if (kBitplane) bitplane_image(a);   // the image costs a pass per token: only when its kernel will read it
+    else a.bp_pairs = 0;
 }
 
 }  // namespace strata::kernels::cpu
