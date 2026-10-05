@@ -628,7 +628,9 @@ void Engine::load(const Options& o) {
         begin_pass();
         for (int il = 0; il < n_all; ++il) load_layer(il);
         out_norm_ = upload(gg_->find("output_norm.weight"), "output_norm.weight", n_embd_, 1, kF32);
-        output_ = upload(gg_->find("output.weight"), "output.weight", n_embd_, n_vocab_, kAnyMat);
+        // a file without an output matrix ties the output to the token table
+        const TensorInfo* head = gg_->find("output.weight");
+        output_ = upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, n_vocab_, kAnyMat);
         if (draft_) {
             check_draft_block();
             auto part = [&](const char* n, int64_t a, int64_t b, Want w) {
@@ -809,13 +811,15 @@ void Engine::reset() {
 
 void Engine::save_state(uint8_t* dst) {
     ck(cudaStreamSynchronize(cs(st_)), "save state");
-    ck(cudaMemcpy(dst, state_, state_bytes(), cudaMemcpyDeviceToHost), "save state");
+    ck(cudaMemcpy(dst, state_, state_n_ * sizeof(float), cudaMemcpyDeviceToHost), "save state");
+    save_extra(dst + state_n_ * sizeof(float));
 }
 
 void Engine::load_state(const uint8_t* src, int64_t pos) {
     if (pos < 0 || pos > opt_.max_context) throw std::logic_error("load_state: the position is outside the context");
     ck(cudaStreamSynchronize(cs(st_)), "load state");
-    ck(cudaMemcpy(state_, src, state_bytes(), cudaMemcpyHostToDevice), "load state");
+    ck(cudaMemcpy(state_, src, state_n_ * sizeof(float), cudaMemcpyHostToDevice), "load state");
+    load_extra(src + state_n_ * sizeof(float), pos);
     pos_ = pos;
     ahead_pos_ = -1;
 }
@@ -864,10 +868,12 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
                              y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
 }
 
-// The router's scores, and the copies of them and of the layer's input to the host.
+void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n, xq_); }
+
+// The router's scores, and the copies of them and of the experts' input to the host.
 void Engine::moe_router(const Layer& L, int n) {
     const size_t rows = (size_t) n;
-    lin(L.gate_inp, xn_, rl_, n, xq_);
+    router_scores(L, n);
     ck(cudaMemcpyAsync(h_rl_, rl_, rows * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
     ck(cudaMemcpyAsync(h_x_, xn_, rows * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
 }
@@ -977,7 +983,7 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream) 
 void Engine::moe_rows(Layer& L, int il, int n) {
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
-    lin(L.gate_inp, xn_, rl_, n, xq_);
+    router_scores(L, n);
     ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "router");
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
@@ -1134,9 +1140,12 @@ void Engine::run(const int32_t* tokens, int n) {
     ck(cudaStreamSynchronize(cs(st_)), "eval");
     if (n_swap_ > 0) follow(n < kStageRows ? n : 0);
     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row;
+    const float scale = embed_scale();
     for (int t = 0; t < n; ++t) {
         float* r = h_r_ + (size_t) t * r_row;
         embed(tokens[t], r);
+        if (scale != 1.f)
+            for (size_t i = 0; i < e_row; ++i) r[i] *= scale;
         for (int h = 1; h < streams(); ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
     }
     ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
@@ -1183,6 +1192,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
             dbg("out_norm", n_layer_, h, n_embd_);
             if (!want_logits) return;
             lin(output_, h + (size_t) (m - 1) * n_embd_, logits_, 1);
+            finish_logits(logits_, 1);
             ck(cudaMemcpyAsync(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost,
                                cs(st_)),
                "logits");
@@ -1217,6 +1227,7 @@ void Engine::window(const int32_t* tokens, int t) {
     float* h = draft_ ? hn_ + n_embd_ : xn_;
     output_rows(0, t, h);
     lin(output_, h, wlogits_, t);
+    finish_logits(wlogits_, t);
     ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "logits");
     ck(cudaStreamSynchronize(cs(st_)), "window");
@@ -1290,6 +1301,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
     axpy(fo_, 1.f, x, n_embd_, true, st_);
     rms_norm(x, fp(d_head_), own, n_embd_, 1, rms_eps_, st_);
     lin(output_, own, logits_, 1);
+    finish_logits(logits_, 1);
     ck(cudaMemcpyAsync(h_dlogits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "draft");
     ck(cudaStreamSynchronize(cs(st_)), "draft");

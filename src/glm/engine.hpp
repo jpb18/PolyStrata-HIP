@@ -143,7 +143,7 @@ public:
 
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
-    size_t state_bytes() const { return state_n_ * sizeof(float); }
+    size_t state_bytes() const { return state_n_ * sizeof(float) + extra_bytes(); }
     virtual size_t row_bytes() const = 0;
     /// The recurrent state at pos(), state_bytes() long.
     void save_state(uint8_t* dst);
@@ -190,6 +190,18 @@ protected:
     virtual void route(int il, const float* logits, int* ids, float* w) = 0;
     /// The shared expert, into fo_.  It runs on the GPU while the host routes.
     virtual void moe_shared(const Layer& L, int il, int n) = 0;
+    /// The scores of a layer's router for n tokens, into rl_.  The engine's own: the router's matrix times the
+    /// experts' input (xn_).
+    virtual void router_scores(const Layer& L, int n);
+    /// What is done to `rows` rows of logits on the card before they are copied out.
+    virtual void finish_logits(float* logits, int rows) { (void) logits, (void) rows; }
+    /// What a token's embedding is multiplied by on its way in.
+    virtual float embed_scale() const { return 1.f; }
+    /// What a sequence has beside its recurrent state and its rows, in bytes: it is saved and brought back with
+    /// the state (save_state(), load_state()).  load_extra() gets the position the state is for.
+    virtual size_t extra_bytes() const { return 0; }
+    virtual void save_extra(uint8_t* dst) { (void) dst; }
+    virtual void load_extra(const uint8_t* src, int64_t pos) { (void) src, (void) pos; }
     /// The draft block's attention for n tokens from position `pos`.  xn_ and xq_ hold its normed input; ao_ gets
     /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
     virtual void block_attend(int64_t pos, int n) { (void) pos, (void) n; }
