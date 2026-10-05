@@ -79,3 +79,16 @@ class EmptyAssistantHistory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyTurnsSwitch(unittest.TestCase):
+    def test_keep_empty_turns_restores_the_old_prompt(self):
+        import os
+        from unittest import mock
+        template = ChatTemplate(Path(__file__).with_name("chat_template.jinja"))
+        msgs = [{"role": "user", "content": "a"}, {"role": "assistant", "content": ""},
+                {"role": "user", "content": "b"}]
+        clean = template.render([msgs[0], msgs[2]])
+        self.assertEqual(template.render(msgs), clean)
+        with mock.patch.dict(os.environ, {"STRATA_KEEP_EMPTY_TURNS": "1"}):
+            self.assertNotEqual(template.render(msgs), clean)

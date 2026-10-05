@@ -16,6 +16,7 @@ and the formats change often; the engine boundary is token ids in, text deltas o
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -50,8 +51,9 @@ class ChatTemplate:
     def render(self, messages: list[dict], tools: list[dict] | None = None, add_generation_prompt: bool = True,
                **kwargs) -> str:
         # Do not use completed empty assistant turns as examples for the next reply. Keep the final message.
+        # (#843.  STRATA_KEEP_EMPTY_TURNS=1 renders them as before.)
         messages = [m for i, m in enumerate(messages)
-                    if i == len(messages) - 1 or not (isinstance(m, dict) and m.get("role") == "assistant"
+                    if i == len(messages) - 1 or os.environ.get("STRATA_KEEP_EMPTY_TURNS") == "1" or not (isinstance(m, dict) and m.get("role") == "assistant"
                                                       and not _text_of(m.get("content")).strip()
                                                       and not _has_image(m.get("content")) and not m.get("tool_calls"))]
         return self.template.render(messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
