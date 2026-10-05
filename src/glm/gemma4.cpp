@@ -178,6 +178,15 @@ void Gemma4::assign_scratch() {
     score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
     mlp_ = fbuf(n * n_embd_);
     rin_ = fbuf(n * n_embd_);
+    if (rows_ >= kStageRows) {   // a prompt batch reads the rows it attends as floats
+        size_t rows_f = 0;
+        for (const Block& B : blocks_)
+            rows_f = std::max(rows_f, (size_t) (B.swa ? std::min(ring_, window_ + chunk_) : opt_.max_context) *
+                                          B.n_kv * B.dim);
+        akeys_ = fbuf(rows_f);
+        avals_ = fbuf(rows_f);
+        awork_ = fbuf(2 * (size_t) chunk_ * widest());
+    }
 }
 
 // A sequence's rows are the full layers': a window layer's are part of its state (save_extra()).
@@ -294,8 +303,13 @@ void Gemma4::attn(Block& B, int64_t pos, int n) {
     head_norm_rope(values, B.dim, nullptr, v_, B.dim, B.n_kv, 0, 1.f, pos, n, rms_eps_, st_);
     store(k_, B.keys, B, pos, n);
     store(v_, B.vals, B, pos, n);
-    attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, B.dim, n_head_, B.n_kv, 1.f, st_, B.swa ? window_ : 0,
-           B.swa ? ring_ : 0);
+    const int window = B.swa ? window_ : 0, ring = B.swa ? ring_ : 0;
+    // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
+    if (n >= kStageRows)
+        attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_, awork_, chunk_, att_, B.dim, n_head_,
+                     B.n_kv, 1.f, st_, window, ring);
+    else
+        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, B.dim, n_head_, B.n_kv, 1.f, st_, window, ring);
     lin(B.wo, att_, ao_, n);
 }
 

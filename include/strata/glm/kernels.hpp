@@ -113,6 +113,14 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
             int ring = 0);
+/// attend() for a prompt batch: the same attention with cuBLAS products, a few times faster on many tokens.  A
+/// token's result depends on the tokens beside it in the last bits, so the windows of guessed tokens use attend().
+/// keys and vals: scratch for the rows a chunk reads as floats, kv_heads * dim each: pos + rows of them, or
+/// window + chunk if that is less.  work: 2 * chunk * n_head * dim floats.  score as in attend().  Throws
+/// std::runtime_error.
+void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
+                  float* keys, float* vals, float* score, float* work, int chunk, float* out, int dim, int n_head,
+                  int kv_heads, float scale, void* stream, int window = 0, int ring = 0);
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
 /// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.

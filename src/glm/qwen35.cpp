@@ -156,6 +156,11 @@ void Qwen35::assign_scratch() {
     att_ = fbuf(heads);
     score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
     sg_ = fbuf(n);
+    if (rows_ >= kStageRows) {   // a prompt batch reads the cache's rows as floats
+        akeys_ = fbuf((size_t) opt_.max_context * n_kv_ * head_dim_);
+        avals_ = fbuf((size_t) opt_.max_context * n_kv_ * head_dim_);
+        awork_ = fbuf(2 * (size_t) chunk_ * n_head_ * head_dim_);
+    }
 }
 
 size_t Qwen35::row_bytes() const { return (size_t) n_attn_ * 2 * n_kv_ * head_dim_ * sizeof(uint16_t); }
@@ -218,8 +223,13 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
     head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, pos, n, rms_eps_,
                    st_);
     attn_store(B, pos, n);
-    attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_,
-           1.f / std::sqrt((float) head_dim_), st_);
+    const float scale = 1.f / std::sqrt((float) head_dim_);
+    // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
+    if (n >= kStageRows)
+        attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_, awork_, chunk_, att_, head_dim_,
+                     n_head_, n_kv_, scale, st_);
+    else
+        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_);
     mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
     lin(B.wo, att_, ao_, n);
 }

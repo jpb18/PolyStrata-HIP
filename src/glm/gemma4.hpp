@@ -73,6 +73,7 @@ private:
     // device scratch
     float *qraw_ = nullptr, *q_ = nullptr, *kraw_ = nullptr, *k_ = nullptr, *vraw_ = nullptr, *v_ = nullptr,
           *att_ = nullptr, *score_ = nullptr, *mlp_ = nullptr, *rin_ = nullptr;
+    float *akeys_ = nullptr, *avals_ = nullptr, *awork_ = nullptr;   ///< a prompt batch's attention (attend_batch)
 
     std::vector<float> probs_;   ///< route()'s scratch
 };
