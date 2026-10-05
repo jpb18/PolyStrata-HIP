@@ -257,6 +257,27 @@ def _tool_list(value, wrapper: str | None) -> list[dict]:
     return tools
 
 
+def _answers_in_call_order(messages: list[dict]) -> list[dict]:
+    """Tool answers put in the order of the calls they answer.  A model reads them by position (Gemma's and Qwen's
+    templates write no id), so answers sent in another order would be read as each other's.  A run of answers stays
+    as it is unless each names a call of the assistant message before it, and each a different one."""
+    out, i = [], 0
+    while i < len(messages):
+        out.append(messages[i])
+        ids = [c.get("id") for c in messages[i].get("tool_calls") or []]
+        i += 1
+        end = i
+        while end < len(messages) and messages[end].get("role") == "tool":
+            end += 1
+        run = messages[i:end]
+        named = [t.get("tool_call_id") for t in run]
+        if len(run) > 1 and all(ids) and len(set(named)) == len(named) and set(named) <= set(ids):
+            run = sorted(run, key=lambda t: ids.index(t["tool_call_id"]))
+        out += run
+        i = end
+    return out
+
+
 def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     """OpenAI Chat Completions -> (template messages, template tools, template kwargs)."""
     messages = []
@@ -267,6 +288,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
         out = {"role": role, "content": _parts_of(m.get("content")) if role in ("user", "tool", "assistant") else _text_of(m.get("content"))}
         if m.get("reasoning_content"):
             out["reasoning_content"] = m["reasoning_content"]
+        if role == "tool" and m.get("tool_call_id"):    # which call it answers: a template may name the tool by it
+            out["tool_call_id"] = m["tool_call_id"]
         if m.get("tool_calls"):
             calls = []
             for c in _object_list(m["tool_calls"], "tool_calls"):
@@ -276,7 +299,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
                 args = fn.get("arguments")
                 if isinstance(args, str):               # the template requires a mapping, not a JSON string
                     args = json.loads(args) if args.strip() else {}
-                calls.append({"function": {"name": fn.get("name"), "arguments": args or {}}})
+                calls.append({"function": {"name": fn.get("name"), "arguments": args or {}},
+                              **({"id": c["id"]} if c.get("id") else {})})
             out["tool_calls"] = calls
         messages.append(out)
     tools = [t.get("function", t) if t.get("type") == "function" else t
@@ -291,7 +315,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
-    return _late_system_to_user(messages), tools, kwargs
+    return _answers_in_call_order(_late_system_to_user(messages)), tools, kwargs
 
 
 def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[dict], list[dict] | None, dict]:
@@ -319,9 +343,11 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "thinking":
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
-                calls.append({"function": {"name": block.get("name"), "arguments": block.get("input") or {}}})
+                calls.append({"function": {"name": block.get("name"), "arguments": block.get("input") or {}},
+                              **({"id": block["id"]} if block.get("id") else {})})
             elif kind == "tool_result":
-                messages.append({"role": "tool", "content": _text_of(block.get("content"))})
+                messages.append({"role": "tool", "content": _text_of(block.get("content")),
+                                 **({"tool_call_id": block["tool_use_id"]} if block.get("tool_use_id") else {})})
         if text or calls or reasoning:
             out = {"role": m["role"], "content": "".join(text)}
             if reasoning:
@@ -350,7 +376,7 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
         # A config's reasoning_effort still applies: Service.with_shared sets output_config before this runs.  A
         # request that gives its own reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
         kwargs["enable_thinking"] = False
-    return _late_system_to_user(messages), tools, kwargs
+    return _answers_in_call_order(_late_system_to_user(messages)), tools, kwargs
 
 
 # ------------------------------------------------------------------------------------------------ output parser

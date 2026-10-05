@@ -740,6 +740,28 @@ class ClientShapes(unittest.TestCase):
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
 
+    def test_tool_answers_keep_their_ids_and_go_in_call_order(self):
+        # a template may name a tool's answer by its call's id, and a model reads answers by position
+        from serve.frontend import anthropic_to_messages, openai_to_messages
+        calls = [{"id": i, "type": "function", "function": {"name": "f", "arguments": "{}"}} for i in ("a", "b")]
+        answers = [{"role": "tool", "tool_call_id": i, "content": i.upper()} for i in ("b", "a")]
+        asked = [{"role": "user", "content": "u"}, {"role": "assistant", "content": "", "tool_calls": calls}]
+        got = openai_to_messages({"messages": asked + answers})[0]
+        self.assertEqual([c["id"] for c in got[1]["tool_calls"]], ["a", "b"])
+        self.assertEqual([(m["tool_call_id"], m["content"]) for m in got[2:]], [("a", "A"), ("b", "B")])
+        # an answer that names no call of the message before it, or two that name one call: left as they were sent
+        for loose in ([dict(answers[0], tool_call_id="x"), answers[1]], [answers[0], answers[0]],
+                      [{"role": "tool", "content": "B"}, answers[1]]):
+            got = openai_to_messages({"messages": asked + loose})[0]
+            self.assertEqual([m["content"] for m in got[2:]], [m["content"] for m in loose])
+        got = anthropic_to_messages({"messages": [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": i, "name": "f", "input": {}}
+                                              for i in ("a", "b")]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": i, "content": i.upper()}
+                                         for i in ("b", "a")]}]})[0]
+        self.assertEqual([(m["tool_call_id"], m["content"]) for m in got[2:]], [("a", "A"), ("b", "B")])
+
     def test_messages_sent_as_a_json_string(self):
         # #460: a client that double-encodes "messages" (and "tool_calls") as a JSON string gets them decoded; what is
         # still not a list of objects is a ValueError (the server's 400), not an AttributeError on m.get
@@ -748,7 +770,7 @@ class ClientShapes(unittest.TestCase):
         listed = [{"role": "user", "content": "u"}, {"role": "assistant", "content": "", "tool_calls": call}]
         encoded = [listed[0], dict(listed[1], tool_calls=json.dumps(call))]
         want = openai_to_messages({"messages": listed})[0]
-        self.assertEqual(want[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"x": 1}}}])
+        self.assertEqual(want[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"x": 1}}, "id": "c1"}])
         self.assertEqual(openai_to_messages({"messages": json.dumps(listed)})[0], want)
         self.assertEqual(openai_to_messages({"messages": json.dumps(encoded)})[0], want)
         anth = [{"role": "user", "content": "u"}]
