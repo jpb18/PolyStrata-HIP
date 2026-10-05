@@ -234,6 +234,18 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(self.engine.batch, 2)
         self.assertEqual(self.get("/v1/status")["concurrency"]["serving"], 2)
 
+    def test_stop_strings_in_a_batch_slot(self):
+        """#454: a stop string cuts the answer in --batch mode too, and the slot is freed for the next request."""
+        self.start(2)
+        body = {"messages": [{"role": "user", "content": "hi LONGREPLY"}], "max_tokens": 64, "reasoning_effort": "none",
+                "stop": ["la la"]}
+        req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            c = json.loads(r.read().decode())["choices"][0]
+        self.assertEqual((c["message"]["content"], c["finish_reason"]), ("ok, ", "stop"))
+        self.assertEqual(self.chat("again")["choices"][0]["message"]["content"], "ok, done.")
+
     def test_engine_turns_batching_off(self):
         self.start(4, fit=0)
         self.assertEqual(self.engine.batch, 0)

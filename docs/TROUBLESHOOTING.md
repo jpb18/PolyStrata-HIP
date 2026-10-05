@@ -56,7 +56,7 @@ its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half.
 
 **Pictures are refused, or slow.**
 "this server was started without the vision encoder": the model was set up for text only - run setup again with
-`--vision gpu` (or `--vision cpu`). Pictures that take 10-30 s are read by the encoder on the CPU; `--vision gpu`
+`--vision gpu` (or `--vision cpu`). Pictures that take several seconds (about 3 s at 300 image tokens on 8 cores, more with more tokens) are read by the encoder on the CPU; `--vision gpu`
 (NVIDIA, ~1.4 GB of VRAM) makes it 0.1-0.5 s.
 
 ## AMD cards
