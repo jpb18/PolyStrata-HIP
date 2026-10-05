@@ -6,6 +6,11 @@ same model the other packs use:
 Build it for engine 0.1.38 or newer (earlier engines read `per_layer_token_embd.weight` in IQ4_NL, Q5_0 or FP8 only,
 below). UD-Q4_K_XL's manual workflow asks nothing of setup, and neither does this one.
 
+> **0.1.40 status.** The Q6_K gate/up kernels are an opt-in build (`-DSTRATA_Q6K_EXPERTS=ON`, plus `-DSTRATA_MMQ_KQUANTS=ON`
+> for the prompt kernels): every grouped-kernel instance is loaded at start and would cost other models expert slots. The
+> Q8_0 PLE table reader is not in this release (it comes with the PLE format series, PR #651); until then this file does
+> not load. The parity programs below have not been run on a GPU yet.
+
 ## What is in the file
 
 Six shards, 169,165,382,688 bytes (169.2 GB) together ([sizes and SHA-256 from the HF tree API](https://huggingface.co/api/models/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q6_K_XL);

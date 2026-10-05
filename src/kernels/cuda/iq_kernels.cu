@@ -611,7 +611,12 @@ template<> struct Fmt<8> { static constexpr int qk = 32, ipb = QI8_0 / VDR_Q8_0,
 #define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(2) X(3) X(8)
 #define STRATA_MMVQ_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(7) X(6) X(2) X(3) X(8)
 
+
+#ifdef STRATA_Q6K_EXPERTS   // opt-in build (-DSTRATA_Q6K_EXPERTS=ON): one more instance per kernel, loaded at start
 #define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(14) X(6) X(8)
+#else
+#define STRATA_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(6) X(8)
+#endif
 #define STRATA_D_FMTS(X) X(20) X(23) X(42) X(7) X(6) X(8)
 #define STRATA_MMVQ_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(7) X(6) X(8)
 
@@ -1794,7 +1799,9 @@ __device__ __forceinline__ void dq_dispatch(int ty, const void* vx, int64_t ibs,
         case 42: dq_q2_0(vx, ibs, y, tid); break;
         case 12: dq_q4_k(vx, ibs, y, tid); break;
         case 13: dq_q5_k(vx, ibs, y, tid); break;
+#ifdef STRATA_Q6K_EXPERTS
         case 14: dq_q6_k(vx, ibs, y, tid); break;
+#endif
         case 7: dq_q5_1(vx, ibs, y, tid); break;
         case 6: dq_q5_0(vx, ibs, y, tid); break;
         case 2: dq_q4_0(vx, ibs, y, tid); break;
@@ -1826,6 +1833,12 @@ bool is_iq(int t) {
            t == 12 || t == 13 || t == 7 || t == 6 || t == 2 || t == 3 || t == 8;
 
            t == 12 || t == 13 || t == 14 || t == 7 || t == 6 || t == 8;
+
+           t == 12 || t == 13 ||
+#ifdef STRATA_Q6K_EXPERTS
+           t == 14 ||
+#endif
+           t == 7 || t == 6 || t == 8;
 }
 // values per block of the types the grouped expert kernels take (0 = none)
 int gu_qk(int t) {
