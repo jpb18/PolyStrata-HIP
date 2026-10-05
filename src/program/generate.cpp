@@ -7523,10 +7523,8 @@ int main(int argc, char** argv) {
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
-            if (yielded_at >= 0) std::printf("YIELDED %d %lld
-", yielded_slot, (long long) yielded_at);
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s
-",
+            if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
+            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s\n",
                         (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
