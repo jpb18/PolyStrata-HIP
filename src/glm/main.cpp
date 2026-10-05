@@ -367,11 +367,32 @@ int serve(Session& ss) {
     return 0;
 }
 
-int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const Sampling& s) {
+// The n most likely next tokens with their probabilities, to hold against another engine's on the same prompt.
+void print_top(const float* logits, int n_vocab, int n) {
+    std::vector<int> order((size_t) n_vocab);
+    for (int i = 0; i < n_vocab; ++i) order[(size_t) i] = i;
+    n = std::min(n, n_vocab);
+    std::partial_sort(order.begin(), order.begin() + n, order.end(),
+                      [logits](int a, int b) { return logits[a] > logits[b]; });
+    const float top = logits[order[0]];
+    double sum = 0.0;
+    for (int i = 0; i < n_vocab; ++i) sum += std::exp((double) (logits[i] - top));
+    std::fprintf(stderr, "top");
+    for (int i = 0; i < n; ++i)
+        std::fprintf(stderr, " %d:%.4f", order[(size_t) i], std::exp((double) (logits[order[(size_t) i]] - top)) / sum);
+    std::fprintf(stderr, "\n");
+}
+
+int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const Sampling& s, int top_probs) {
     std::atomic<bool> stop{false};
     std::string out;
     const Session::Result r = ss.generate(
-        ids, max_new, s, stop, [&](int32_t t) { out += (out.empty() ? "" : ",") + std::to_string(t); },
+        ids, max_new, s, stop,
+        [&](int32_t t) {
+            // the logits the token was picked from are still the engine's
+            if (top_probs > 0) print_top(ss.engine.logits(), ss.engine.n_vocab(), top_probs);
+            out += (out.empty() ? "" : ",") + std::to_string(t);
+        },
         [](int64_t, int64_t, double, bool) {});
     std::printf("%s\n", out.c_str());
     const strata::glm::Stats& st = ss.engine.stats();
@@ -396,7 +417,8 @@ void usage() {
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
                  "  --eos-ids ID,ID,...    tokens that end a reply (default: the GGUF's eos, eot and eom)\n"
                  "  --temperature F --top-k N --top-p F --min-p F --seed N   sampling for --tokens (default greedy)\n"
-                 "  --dump-layers          print a checksum of every layer's stages to stderr\n");
+                 "  --dump-layers          print a checksum of every layer's stages to stderr\n"
+                 "  --top-probs N          with --tokens: print the N most likely ids of every step to stderr\n");
 }
 
 }  // namespace
@@ -406,6 +428,7 @@ int main(int argc, char** argv) {
     Sampling s;
     bool want_serve = false;
     long long max_new = 32;
+    int top_probs = 0;
     std::vector<int32_t> ids, eos;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -424,6 +447,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
         else if (a == "--dump-layers") o.dump = true;
+        else if (a == "--top-probs") top_probs = std::atoi(val());
         else if (a == "--max-new") max_new = std::atoll(val());
         else if (a == "--temperature") s.temperature = std::strtof(val(), nullptr);
         else if (a == "--top-k") s.top_k = std::atoi(val());
@@ -466,7 +490,7 @@ int main(int argc, char** argv) {
         } else if ((long long) ids.size() + max_new > engine.max_context()) {
             throw std::runtime_error("the prompt and --max-new together exceed --max-context");
         } else {
-            rc = once(ss, ids, max_new, s);
+            rc = once(ss, ids, max_new, s, top_probs);
         }
         engine.save_profile();
         return rc;
