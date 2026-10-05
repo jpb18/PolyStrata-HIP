@@ -90,6 +90,9 @@ public:
 
     /// The same without the streamed ring: what the chunk's own buffers cost.  The auto chunk scan sizes the chunk
     /// first and hands the ring what the chunk leaves over, so it needs the chunk priced on its own.
+    /// What `init` allocates when the prompt path OWNS its buffers: each cudaMalloc rounded up to a 2 MiB page and the
+    /// ring as one allocation (the startup sizing of a cache without a loan).
+    static uint64_t bytes_needed_owned(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk);
     static uint64_t bytes_needed_no_ring(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk);
 
     /// The streamed ring's byte budget as a slot count for this pack (the measured slot count x Q2_0's blob, over
@@ -160,6 +163,8 @@ public:
     bool set_stage_helper(Prefill* helper, std::string& err);
 
 private:
+    static uint64_t bytes_needed_impl(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
+                                      bool owned_pages);
     // Stage-1 pipeline: intermediate stages return after handing their chunk to
     // the direct successor. The public run() drains the chain once at prompt end.
     bool run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err);
