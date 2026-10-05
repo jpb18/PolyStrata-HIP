@@ -103,8 +103,11 @@ class Structured(unittest.TestCase):
     def test_object_mode_strict_json_and_truncation(self):
         fmt = {"type": "json_object"}
         self.assertEqual(self.chat('{"answer":4}', response_format=fmt)[0], 200)
-        for script in ('[]', '{"x":NaN}', '{"x":1,"x":2}', '{"x":1e999}', '```json\n{}\n```'):
+        for script in ('[]', '{"x":NaN}', '{"x":1,"x":2}', '{"x":1e999}', 'no json at all', '{"x":'):
             self.assertEqual(self.chat(script, response_format=fmt)[0], 502)
+        # #762: the JSON object is taken out of a code fence or the prose around it (the object itself stays strict)
+        for script in ('```json\n{}\n```', 'Here it is: {"answer":4} - done'):
+            self.assertEqual(self.chat(script, response_format=fmt)[0], 200, script)
         self.assertEqual(self.chat('{"answer":4}', response_format=fmt, max_tokens=5)[0], 502)
         # Plain text callers retain normal streaming, without a JSON validation gate.
         self.assertEqual(self.chat("Prose.", response_format={"type": "text"})[0], 200)
