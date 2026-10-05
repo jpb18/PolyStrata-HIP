@@ -4294,10 +4294,10 @@ int main(int argc, char** argv) {
     std::vector<int32_t> host_res;
     // The residency table is read by kernels on non-blocking streams, which do not wait for the legacy stream a plain
     // cudaMemcpy runs on, and a pageable copy can return before its DMA has landed: each upload waits for its own copy
-    // (the current device's legacy stream - nothing else).
+    // (the current device's legacy stream, stream 0 - nothing else; HIP has no cudaStreamLegacy name, #550).
     auto res_put = [&host_res](int32_t* dst) -> cudaError_t {
         const cudaError_t e = cudaMemcpy(dst, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
-        return e != cudaSuccess ? e : cudaStreamSynchronize(cudaStreamLegacy);
+        return e != cudaSuccess ? e : cudaStreamSynchronize(nullptr);
     };
     int32_t* d_res = nullptr;
     int32_t* d_hit_count = nullptr;
