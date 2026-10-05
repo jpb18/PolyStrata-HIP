@@ -264,6 +264,22 @@ class OverHttp(Server):
         code, r = self.post({"model": "m", "input": "hi"}, headers={"Origin": "https://evil.example.com"})
         self.assertEqual(code, 403)
 
+    def test_a_foreign_page_cannot_name_a_file_as_an_image(self):
+        """#553: the chat routes refuse a file image from another origin; so does /v1/responses."""
+        def body(src):
+            return {"model": "m", "input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "what is it?"}, {"type": "input_image", "image_url": src}]}]}
+        self.svc.cors_origins = ["*"]                  # a page cors_origins lets in may send JSON, not name a file
+        for src in (r"\\host\share\x.png", "/etc/passwd", "file:///C:/x.png"):
+            with self.subTest(src=src):
+                code, r = self.post(body(src), headers={"Origin": "https://evil.example.com"})
+                self.assertEqual(code, 400, r)
+                self.assertIn("another origin", r["error"]["message"])
+        # data: and http(s) are the page's own to send: not refused by this check (no vision here, so a 400 of another kind)
+        for src in ("data:image/png;base64,iVBORw0KGgo=", "https://example.com/x.png"):
+            code, r = self.post(body(src), headers={"Origin": "https://evil.example.com"})
+            self.assertNotIn("another origin", json.dumps(r))
+
     def test_json_schema_text_format(self):
         self.engine.scripts = [self.tok.encode("</think>\n\n{\"n\": 3}<|im_end|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]

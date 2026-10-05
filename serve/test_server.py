@@ -2713,6 +2713,18 @@ class ImageSources(unittest.TestCase):
                 with self.subTest(src=src):
                     self.assertEqual(Vision.load(src), b"\x89PNG\r\n\x1a\n")
 
+    def test_unreadable_sources_are_a_value_error(self):
+        """From #582: a bad data: URL or an unreadable file is a 400, not a dropped connection."""
+        from serve.server import Vision
+        for src in ("data:image/png", "data:image/png;base64,abcde"):
+            with self.subTest(src=src), self.assertRaisesRegex(ValueError, "data: URL could not be read"):
+                Vision.load(src)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "x.png"
+            f.write_bytes(b"x")
+            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")),                     self.assertRaisesRegex(ValueError, "could not be read from"):
+                Vision.load(str(f))
+
     def test_a_url_is_read_up_to_the_cap(self):
         import http.server
         import serve.server as server

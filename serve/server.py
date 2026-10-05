@@ -1325,7 +1325,10 @@ class Vision:
     @staticmethod
     def load(source: str) -> bytes:
         if source.startswith("data:"):
-            return base64.b64decode(source.split(",", 1)[1])
+            try:
+                return base64.b64decode(source.split(",", 1)[1])
+            except (IndexError, ValueError) as e:                # no comma, or not base64
+                raise ValueError(f"the image's data: URL could not be read ({e})") from None
         if source.startswith(("http://", "https://")):
             return Vision.download(source)
         path = source[7:] if source.startswith("file://") else source
@@ -1336,7 +1339,10 @@ class Vision:
             raise ValueError("an image file must be on this computer: network paths (\\\\host\\share, //host/share, "
                              "file://host/...) are not read")
         if path and os.path.isfile(path):
-            return Path(path).read_bytes()
+            try:
+                return Path(path).read_bytes()
+            except OSError as e:
+                raise ValueError(f"the image could not be read from {path} ({e})") from None
         raise ValueError("an image must be a data: URL, an http(s) URL or a local file path")
 
     @staticmethod
@@ -3559,6 +3565,10 @@ def make_handler(svc: Service):
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
             kw = responses_api.template_kwargs(req, svc.shared)
+            try:
+                self._no_local_images(messages)              # as on the chat route: no file read for a foreign page
+            except ValueError as e:
+                raise ResponsesError(str(e), "input") from None
             try:
                 messages, validator = prepare_format(responses_api.text_format(req), messages)
             except ValueError as e:
