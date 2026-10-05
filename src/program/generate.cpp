@@ -5185,7 +5185,7 @@ int main(int argc, char** argv) {
             (size_t) o.conversation_cache_slots);
         // Save only on a switch/rewind, not on each continuing request. No graph
         // addresses change: all parked images live in ordinary host vectors.
-        auto park_current = [&](size_t held) -> bool {
+        auto park_current_body = [&](size_t held) -> bool {
             if (!conversations.enabled() || !live_ok || live.empty()) return true;
             // #342: before make_room evicts oldest-first, the copies of this conversation a turn back go (they hold
             // nothing the outgoing chain does not, apart from the tail this conversation rewrote)
@@ -5201,12 +5201,7 @@ int main(int argc, char** argv) {
             const strata::core::QsaState* draft0 = n_st > 0 ? nullptr : &mtp.kv_state();
             auto draft_of = [&](size_t k) -> const strata::core::QsaState* { return k + 1 == n_st ? &mtp.kv_state() : nullptr; };
             strata::core::ConversationCheckpointSplit cs;
-            try {
-                if (n_st > 0) cs = strata::core::conversation_checkpoints_split(std::move(checks), n_st);
-            } catch (const std::bad_alloc&) {
-                std::fprintf(stderr, "strata serve: conversation cache: checkpoint split allocation failed; skip parking\n");
-                return true; // split preserves every checkpoint on allocation failure
-            }
+            if (n_st > 0) cs = strata::core::conversation_checkpoints_split(std::move(checks), n_st);   // #752: two-phase; a bad_alloc leaves `checks` whole
             struct MergeBack {
                 strata::core::ConversationCheckpointSplit& cs; std::vector<ConvCheckpoint>& checks; bool on;
                 ~MergeBack() { if (on && !strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear(); }
@@ -5309,6 +5304,15 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: conversation cache: allocation failed; skip parking\n");
             }
             return true;
+        };
+        // #752: the whole park (the checkpoint split included) is under one try, so a host OOM skips parking instead of
+        // ending the server
+        auto park_current = [&](size_t held) -> bool {
+            try { return park_current_body(held); }
+            catch (const std::bad_alloc&) {
+                std::fprintf(stderr, "strata serve: conversation cache: allocation failed; skip parking\n");
+                return true;
+            }
         };
         int64_t pp_total = 0, pp_from = 0, pp_next_check = 0;
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
