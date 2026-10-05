@@ -27,7 +27,7 @@ struct Options {
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
     // A prompt batch.  More tokens a call and a larger staging buffer read a prompt faster, and both take VRAM
     // that the expert cache, and so decoding, does without.
-    int prompt_batch = 512;       ///< prompt tokens one eval() takes; the scratch is about 1 MiB of VRAM a token
+    int prompt_batch = 1024;      ///< prompt tokens one eval() takes; the scratch is about 1.4 MiB of VRAM a token
     int stage_mib = 2048;         ///< the buffer the experts that are not cached pass through: by default about
                                   ///< what a layer of Q2_K experts leaves out of the cache
     int stage_ahead = 256;        ///< from this many tokens, a call routes to most of a layer's experts, and the

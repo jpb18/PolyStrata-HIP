@@ -419,7 +419,7 @@ void usage() {
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default 1024)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, updated on exit\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
-                 "  --prompt-batch N       prompt tokens read at a time (default 512); about 1 MiB of VRAM each\n"
+                 "  --prompt-batch N       prompt tokens read at a time (default 1024); about 1.4 MiB of VRAM each\n"
                  "  --stage-mib N          VRAM the experts outside the cache pass through in a prompt batch (default\n"
                  "                         2048); with less, more of them are copied after the layer has routed\n"
                  "  --stage-ahead N        from N tokens, a batch copies those experts before it routes (default 256,\n"
