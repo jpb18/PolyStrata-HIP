@@ -135,6 +135,7 @@ private:
     std::unique_ptr<GgufFile> gg_;
     std::unique_ptr<Workers> workers_;
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
+    void* blas_ = nullptr; ///< cuBLAS on st_, for the sparse attention
     void* ev_ = nullptr;   ///< marks the router's copy to the host
     std::vector<void*> dev_allocs_, host_allocs_;
 
@@ -173,7 +174,7 @@ private:
           *beta_ = nullptr, *gated_ = nullptr;
     float *t1_ = nullptr, *qr_ = nullptr, *q_ = nullptr, *t2_ = nullptr, *kv_ = nullptr, *qabs_ = nullptr,
           *kqv_ = nullptr, *vout_ = nullptr, *ikr_ = nullptr, *ik_ = nullptr, *ig_ = nullptr, *iq_ = nullptr,
-          *iw_ = nullptr, *score_ = nullptr;
+          *iw_ = nullptr, *score_ = nullptr, *akeys_ = nullptr, *ascore_ = nullptr;
     float *g_ = nullptr, *u_ = nullptr, *h_ = nullptr, *d_ = nullptr, *cpu_ = nullptr, *rl_ = nullptr,
           *logits_ = nullptr;
     void *xq_ = nullptr, *q8_ = nullptr;

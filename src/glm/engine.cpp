@@ -29,6 +29,7 @@ constexpr uint32_t kTypeF32 = 0, kTypeQ8_0 = 8, kTypeBF16 = 30;
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
 constexpr int kMaxUsed = 32;
 constexpr int kRows = 512;          // prompt tokens one eval() takes; the scratch is about 1 MiB of VRAM a token
+constexpr int kAttnRows = 32;       // tokens one pass of the sparse attention takes; their keys are 4 MiB a token
 // From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
 constexpr int kStageRows = 32;
@@ -149,6 +150,7 @@ Engine::~Engine() {
     for (void* p : host_allocs_) cudaFreeHost(p);
     for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_})
         if (e) cudaEventDestroy((cudaEvent_t) e);
+    blas_destroy(blas_);
     if (up_) cudaStreamDestroy(cs(up_));
     if (st_) cudaStreamDestroy(cs(st_));
 }
@@ -394,6 +396,9 @@ void Engine::assign_scratch() {
     iq_ = fbuf(n * idx_heads_ * idx_dim_);
     iw_ = fbuf(n * idx_heads_);
     score_ = fbuf(n * score_stride_);
+    const size_t keys = (size_t) std::min(opt_.max_context, idx_top_k_ + kpool_ - 1);
+    akeys_ = fbuf(std::min(n, (size_t) kAttnRows) * keys * kv_rank_);
+    ascore_ = fbuf(std::min(n, (size_t) kAttnRows) * keys * n_head_);
 
     g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
     u_ = fbuf(ff);
@@ -581,6 +586,7 @@ void Engine::load(const Options& o) {
     cudaEvent_t ev = nullptr;
     ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
     ev_ = ev;
+    blas_ = blas_create(st_);
 
     for (const TensorInfo& t : gg_->tensors())
         if (!ends_with(t.name, "_exps.weight") && t.name != "token_embd.weight")
@@ -762,8 +768,8 @@ void Engine::dsa(Layer& L, int n) {
     const int64_t last_dense = (int64_t) idx_top_k_ + kpool_ - 2;
     const int dense = (int) std::clamp<int64_t>(last_dense - pos_ + 1, 0, n);
     if (dense < n) dsa_select(L, dense, n - dense);
-    dsa_attend(qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos_, n, dense, kqv_, kv_rank_, n_head_,
-               1.f / std::sqrt((float) mla_k_), st_);
+    dsa_attend(blas_, qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos_, n, dense, akeys_, ascore_,
+               std::min(rows_, kAttnRows), kqv_, kv_rank_, n_head_, 1.f / std::sqrt((float) mla_k_), st_);
     lin(L.v_b, kqv_, vout_, n, nullptr, mla_v_);
     lin(L.wo, vout_, ao_, n);
 }

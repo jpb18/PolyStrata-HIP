@@ -2,17 +2,22 @@
 // ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
 #include "strata/glm/kernels.hpp"
 
+#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
+#include <string>
 
 namespace strata::glm {
 namespace {
 
 constexpr int WARP = 32;
 constexpr int HC = 4;   // hyper-connection streams; the model's hc_mult, checked at load
+constexpr int KEY_BLOCK = 16;   // cache rows one block of dsa_keys_kernel copies
 
 __device__ __forceinline__ float warp_sum(float x) {
 #pragma unroll
@@ -271,42 +276,47 @@ __global__ void store_f16_kernel(const float* __restrict__ x, half* __restrict__
     if (i < n) dst[i] = __float2half(x[i]);
 }
 
-// One block per head and token.  Shared: max_sel scores, then 8 partials.
-__global__ void dsa_attend_kernel(const float* __restrict__ q, const half* __restrict__ cache,
-                                  const int32_t* __restrict__ sel_all, int sel_stride, int top_rows, int kpool,
-                                  long long pos, int dense_rows, int max_sel, float* __restrict__ out, int rank,
-                                  float scale) {
-    extern __shared__ float sm[];
-    float* sc = sm;
-    float* part = sm + max_sel;
-    const int tok = blockIdx.y;
-    const long long n = pos + tok + 1;   // cache rows up to this token's own
-    const bool sparse = tok >= dense_rows;
-    const int n_sel = sparse ? top_rows + int(n % kpool) : int(n);
-    const int32_t* sel = sparse ? sel_all + size_t(tok - dense_rows) * sel_stride : nullptr;
-    const size_t head = size_t(tok) * gridDim.x + blockIdx.x;
-    const float* qh = q + head * rank;
-    float mx = -INFINITY;
-    for (int t = threadIdx.x; t < n_sel; t += blockDim.x) {
-        const half* row = cache + size_t(sel ? sel[t] : t) * rank;
-        float acc = 0.0f;
-        for (int r = 0; r < rank; ++r) acc += __half2float(row[r]) * qh[r];
-        sc[t] = acc * scale;
-        mx = fmaxf(mx, sc[t]);
+// How many cache rows token `tok` of a call from position pos attends to: every row up to its own while it is
+// dense, then its list.
+__host__ __device__ inline int dsa_keys(int tok, long long pos, int dense_rows, int top_rows, int kpool) {
+    const long long n = pos + tok + 1;
+    return tok >= dense_rows ? top_rows + int(n % kpool) : int(n);
+}
+
+// The keys of token first + blockIdx.y as float rows, n_keys of them; the rows past its last key are zero.  A
+// block copies KEY_BLOCK rows.
+__global__ void dsa_keys_kernel(const half* __restrict__ cache, const int32_t* __restrict__ sel_all, int sel_stride,
+                                int top_rows, int kpool, long long pos, int first, int dense_rows,
+                                float* __restrict__ keys, int rank, int n_keys) {
+    const int tok = first + blockIdx.y;
+    const int n_sel = dsa_keys(tok, pos, dense_rows, top_rows, kpool);
+    const int32_t* sel = tok >= dense_rows ? sel_all + size_t(tok - dense_rows) * sel_stride : nullptr;
+    float* dst = keys + size_t(blockIdx.y) * n_keys * rank;
+    const int j0 = blockIdx.x * KEY_BLOCK;
+    for (int i = threadIdx.x; i < KEY_BLOCK * rank; i += blockDim.x) {
+        const int j = j0 + i / rank, r = i % rank;
+        if (j >= n_keys) return;
+        dst[size_t(j) * rank + r] = j < n_sel ? __half2float(cache[size_t(sel ? sel[j] : j) * rank + r]) : 0.0f;
     }
+}
+
+// Softmax in place over a head's scores of its token's keys; the entries past the last key become zero.  One
+// block per head and token.
+__global__ void dsa_softmax_kernel(float* score, int n_keys, int top_rows, int kpool, long long pos, int first,
+                                   int dense_rows) {
+    __shared__ float part[8];
+    const int n_sel = dsa_keys(first + blockIdx.y, pos, dense_rows, top_rows, kpool);
+    float* row = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
+    float mx = -INFINITY;
+    for (int j = threadIdx.x; j < n_sel; j += blockDim.x) mx = fmaxf(mx, row[j]);
     mx = block_max(mx, part);
     float sum = 0.0f;
-    for (int t = threadIdx.x; t < n_sel; t += blockDim.x) {
-        sc[t] = expf(sc[t] - mx);
-        sum += sc[t];
+    for (int j = threadIdx.x; j < n_sel; j += blockDim.x) {
+        row[j] = expf(row[j] - mx);
+        sum += row[j];
     }
     const float inv = 1.0f / block_sum(sum, part);
-    float* oh = out + head * rank;
-    for (int r = threadIdx.x; r < rank; r += blockDim.x) {
-        float acc = 0.0f;
-        for (int t = 0; t < n_sel; ++t) acc += sc[t] * __half2float(cache[size_t(sel ? sel[t] : t) * rank + r]);
-        oh[r] = acc * inv;
-    }
+    for (int j = threadIdx.x; j < n_keys; j += blockDim.x) row[j] = j < n_sel ? row[j] * inv : 0.0f;
 }
 
 // One block per token; `first` is the first token's cache row.
@@ -400,7 +410,26 @@ __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
 inline int grid(size_t n, int block) { return int((n + block - 1) / block); }
 
+void blas_ck(cublasStatus_t s, const char* what) {
+    if (s != CUBLAS_STATUS_SUCCESS)
+        throw std::runtime_error(std::string(what) + ": cuBLAS status " + std::to_string((int) s));
+}
+
 }  // namespace
+
+void* blas_create(void* stream) {
+    cublasHandle_t h = nullptr;
+    blas_ck(cublasCreate(&h), "cublasCreate");
+    if (const cublasStatus_t s = cublasSetStream(h, cs(stream)); s != CUBLAS_STATUS_SUCCESS) {
+        cublasDestroy(h);
+        blas_ck(s, "cublasSetStream");
+    }
+    return h;
+}
+
+void blas_destroy(void* blas) {
+    if (blas) cublasDestroy((cublasHandle_t) blas);
+}
 
 void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows, void* stream) {
     gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
@@ -452,13 +481,33 @@ void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, vo
     store_f16_kernel<<<grid(all, 256), 256, 0, cs(stream)>>>(x, (half*) cache + size_t(pos) * n, int(all));
 }
 
-void dsa_attend(const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows, int kpool,
-                int64_t pos, int rows, int dense_rows, float* out, int rank, int n_head, float scale, void* stream) {
-    // the longest list of the call: a sparse token's, or the last dense token's
-    const int max_sel = dense_rows < rows ? top_rows + kpool - 1 : int(pos) + rows;
-    dsa_attend_kernel<<<dim3(n_head, rows), 256, (size_t(max_sel) + 8) * sizeof(float), cs(stream)>>>(
-        q, (const half*) cache, sel, sel_stride, top_rows, kpool, (long long) pos, dense_rows, max_sel, out, rank,
-        scale);
+void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows,
+                int kpool, int64_t pos, int rows, int dense_rows, float* keys, float* score, int chunk, float* out,
+                int rank, int n_head, float scale, void* stream) {
+    const cublasHandle_t h = (cublasHandle_t) blas;
+    const float one = 1.0f, zero = 0.0f;
+    const long long head = (long long) n_head * rank;
+    for (int first = 0; first < rows; first += chunk) {
+        const int c = std::min(chunk, rows - first);
+        int n_keys = 0;
+        for (int t = first; t < first + c; ++t)
+            n_keys = std::max(n_keys, dsa_keys(t, (long long) pos, dense_rows, top_rows, kpool));
+        const long long key_n = (long long) n_keys * rank, score_n = (long long) n_head * n_keys;
+        dsa_keys_kernel<<<dim3(grid(n_keys, KEY_BLOCK), c), 256, 0, cs(stream)>>>(
+            (const half*) cache, sel, sel_stride, top_rows, kpool, (long long) pos, first, dense_rows, keys, rank,
+            n_keys);
+        // score[head][key] = scale * (q[head] . keys[key]).  cuBLAS reads a buffer of rows as the transpose.
+        blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, n_keys, n_head, rank, &scale, keys, rank,
+                                          key_n, q + size_t(first) * head, rank, head, &zero, score, n_keys,
+                                          score_n, c),
+                "attention scores");
+        dsa_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, top_rows, kpool, (long long) pos,
+                                                                   first, dense_rows);
+        // out[head] = sum over the keys of score[head][key] * keys[key]
+        blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_N, CUBLAS_OP_N, rank, n_head, n_keys, &one, keys, rank, key_n,
+                                          score, n_keys, score_n, &zero, out + size_t(first) * head, rank, head, c),
+                "attention values");
+    }
 }
 
 void idx_store(const float* key, const float* gate, float* cache, int dim, int64_t pos, int rows, void* stream) {

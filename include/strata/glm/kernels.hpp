@@ -1,7 +1,7 @@
 // include/strata/glm/kernels.hpp - the float kernels of the GLM 5.3 Flash forward pass.
 //
-// Every call enqueues on the given CUDA stream and returns; nothing here allocates or waits.  Pointers are device
-// pointers.  The math follows llama.cpp's glm5-next graph (src/models/glm5-next.cpp), which is the reference the
+// Every call enqueues on the given CUDA stream and returns; nothing here but blas_create allocates or waits.
+// Pointers are device pointers.  The math follows llama.cpp's glm5-next graph (src/models/glm5-next.cpp), which is the reference the
 // engine is checked against.
 //
 // A call works on `rows` tokens at consecutive positions.  A buffer of per-token values holds them row after row,
@@ -53,8 +53,16 @@ void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, vo
 /// The first dense_rows tokens attend to every cache row up to their own.  The others each have a list in sel
 /// (sel_stride apart): top_rows cache rows, then the rows of the pool their own position is still filling.
 /// out: n_head * rank a token, the attention-weighted latents per head.
-void dsa_attend(const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows, int kpool,
-                int64_t pos, int rows, int dense_rows, float* out, int rank, int n_head, float scale, void* stream);
+/// It takes `chunk` tokens at a time: their keys are copied to `keys` as floats (rank a key), and two cuBLAS
+/// products per chunk do the rest, with `score` (n_head a key) between them.  Both buffers hold a chunk of tokens
+/// with the most keys a token has: top_rows + kpool - 1, or the context if that is less.  Throws
+/// std::runtime_error.
+void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows,
+                int kpool, int64_t pos, int rows, int dense_rows, float* keys, float* score, int chunk, float* out,
+                int rank, int n_head, float scale, void* stream);
+/// A cuBLAS handle that enqueues on `stream`, for dsa_attend.  Throws std::runtime_error.
+void* blas_create(void* stream);
+void blas_destroy(void* blas);
 
 /// Indexer cache row: key (dim) | gate (dim) | pooled (dim), fp32.  Stores the tokens' keys and gates from row
 /// `pos`.
