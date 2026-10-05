@@ -1,0 +1,249 @@
+// src/glm/conversations_test.cpp - Conversations against an engine whose state can be checked: after every
+// request the engine must hold exactly what reading the prompt from its first token gives.
+//
+//   g++ -std=c++20 src/glm/conversations_test.cpp -o conversations_test && ./conversations_test
+#include "conversations.hpp"
+
+#include <cstdlib>
+#include <cstring>
+#include <random>
+
+using strata::glm::CacheOptions;
+using strata::glm::Conversations;
+
+namespace {
+
+int checks = 0;
+void check(bool ok, const char* what) {
+    ++checks;
+    if (!ok) {
+        std::fprintf(stderr, "FAIL: %s\n", what);
+        std::exit(1);
+    }
+}
+
+uint64_t mix(uint64_t h, int32_t t) { return (h ^ (uint64_t) (uint32_t) t) * 0x9E3779B97F4A7C15ull + 0x7F4A7C15ull; }
+
+// The recurrent state is a hash of the tokens read.  A token leaves two rows, as the real engine's layers do: the
+// hash after it, and the token.
+struct Fake {
+    static constexpr int64_t ctx = 1 << 16;
+    uint64_t h = 1;
+    int64_t at = 0, read = 0;
+    size_t state = 8;   // bytes a checkpoint takes; the hash is the first 8
+    std::vector<uint64_t> a = std::vector<uint64_t>(ctx), b = std::vector<uint64_t>(ctx);
+
+    void reset() { h = 1, at = 0; }
+    void eval(const int32_t* t, int64_t n) {
+        for (int64_t i = 0; i < n; ++i, ++at, ++read) {
+            a[(size_t) at] = h = mix(h, t[i]);
+            b[(size_t) at] = (uint64_t) t[i];
+        }
+    }
+    size_t state_bytes() const { return state; }
+    void save_state(uint8_t* dst) const { std::memcpy(dst, &h, 8); }
+    void load_state(const uint8_t* src, int64_t pos) { std::memcpy(&h, src, 8), at = pos; }
+    size_t row_bytes() const { return 16; }
+    void save_rows(int64_t first, int64_t n, uint8_t* dst) const {
+        std::memcpy(dst, &a[(size_t) first], (size_t) n * 8);
+        std::memcpy(dst + n * 8, &b[(size_t) first], (size_t) n * 8);
+    }
+    void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
+        std::memcpy(&a[(size_t) first], src + (first - from) * 8, (size_t) n * 8);
+        std::memcpy(&b[(size_t) first], src + count * 8 + (first - from) * 8, (size_t) n * 8);
+    }
+
+    bool holds(const std::vector<int32_t>& ids) const {
+        uint64_t x = 1;
+        for (size_t i = 0; i < ids.size(); ++i)
+            if (a[i] != (x = mix(x, ids[i])) || b[i] != (uint64_t) ids[i]) return false;
+        return at == (int64_t) ids.size() && h == x;
+    }
+};
+
+struct Chat {
+    Fake e;
+    Conversations<Fake> kept;
+    std::mt19937 rng{7};
+    explicit Chat(const CacheOptions& o) : kept(e, o) {}
+
+    // A request as the server makes it: the prompt, then `reply` generated tokens.  Returns where the prompt was
+    // taken up, and leaves the tokens the engine then holds in `ids`.
+    int64_t ask(std::vector<int32_t>& ids, int reply = 3) {
+        const int64_t n = (int64_t) ids.size(), from = kept.resume(ids);
+        check(from >= 0 && from < n && e.at == from, "a prompt is taken up before its last token");
+        for (int64_t i = from; i < n;) {
+            const bool last = i == n - 1;
+            const int64_t m = last ? 1 : kept.until_checkpoint(i, std::min<int64_t>(n - 1 - i, 100));
+            kept.before(i, last);
+            e.eval(ids.data() + i, m);
+            kept.read(ids.data() + i, m);
+            i += m;
+        }
+        kept.prompt_was(n);
+        for (int k = 0; k < reply; ++k) {
+            const int32_t t = 1000000 + (int32_t) (rng() % 1000);
+            e.eval(&t, 1);
+            kept.read(&t, 1);
+            ids.push_back(t);
+        }
+        check(e.holds(ids) && kept.seq() == ids, "the engine holds the prompt and the reply");
+        return from;
+    }
+};
+
+std::vector<int32_t> text(int seed, int n) {
+    std::vector<int32_t> v((size_t) n);
+    std::mt19937 r((unsigned) seed);
+    for (int32_t& t : v) t = (int32_t) (r() % 50000);
+    return v;
+}
+
+std::vector<int32_t> operator+(std::vector<int32_t> a, const std::vector<int32_t>& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+}
+
+CacheOptions options(int64_t park_mib, int slots = 4) {
+    CacheOptions o;
+    o.every = 2048;
+    o.park_mib = park_mib;
+    o.park_slots = slots;
+    return o;
+}
+
+void one_conversation() {
+    Chat c(options(0));
+    std::vector<int32_t> a = text(1, 5000);
+    check(c.ask(a) == 0, "a first prompt is read from its start");
+    const std::vector<int32_t> turn1 = a;
+    a = a + text(2, 300);
+    check(c.ask(a) == (int64_t) turn1.size(), "a prompt that goes on from the reply goes on from the engine");
+
+    // the client sends the reply back in other tokens: back to the checkpoint before the first prompt's last token
+    std::vector<int32_t> b(turn1.begin(), turn1.begin() + 5000);
+    b = b + text(3, 400);
+    check(c.ask(b) == 4999, "a rewritten reply costs the reply");
+
+    // an edit far back: the last checkpoint before it
+    std::vector<int32_t> d(b.begin(), b.begin() + 3000);
+    d = d + text(4, 100);
+    check(c.ask(d) == 2048, "an edit goes back to the checkpoint before it");
+    check(c.kept.parked() == 0, "nothing is parked without a budget");
+
+    std::vector<int32_t> other = text(5, 4000);
+    check(c.ask(other) == 0, "another conversation starts from nothing");
+    check(c.ask(d) == 0, "and without a budget the first one is gone");
+}
+
+void two_conversations() {
+    Chat c(options(64));
+    std::vector<int32_t> a = text(1, 9000), b = text(2, 3000);
+    c.ask(a);
+    c.ask(b);
+    check(c.kept.parked() == 1, "the first conversation is parked");
+    a = a + text(3, 200);
+    const int64_t before = c.e.read;
+    check(c.ask(a) == 8999, "it comes back at the end of its prompt");
+    check(c.e.read - before == 3 + 200 + 1 + 3, "and only the reply and the new turn are read");
+    b = b + text(4, 100);
+    check(c.ask(b) == 2999, "so does the second");
+
+    // a side request too short to be worth a slot
+    std::vector<int32_t> title = text(6, 300);
+    c.ask(title);
+    a = a + text(7, 50);
+    check(c.ask(a) > 9000, "a short request between two turns costs nothing");
+    check(c.kept.parked() == 1, "and is not kept");
+}
+
+void shared_start() {
+    Chat c(options(64));
+    const std::vector<int32_t> sys = text(1, 5000);
+    std::vector<int32_t> a = sys + text(2, 6000), sub = sys + text(3, 2500);
+    c.ask(a);
+    check(c.ask(sub) == 4096, "a prompt with the same start takes it from the checkpoint inside");
+    check(c.kept.parked() == 1, "and the first conversation is kept whole");
+    sub = sub + text(4, 100);
+    check(c.ask(sub) == 7503, "the second goes on from where the engine is");
+    a = a + text(5, 100);
+    check(c.ask(a) == 10999, "and so does the first");
+    std::vector<int32_t> sub2 = sys + text(6, 2500);
+    check(c.ask(sub2) == 4096, "a third shares the start again");
+    check(c.kept.parked() == 2, "with both others parked");
+}
+
+void limits() {
+    // two slots: a third conversation pushes out the one not used for longest
+    Chat c(options(64, 2));
+    std::vector<int32_t> v[4] = {text(1, 3000), text(2, 3000), text(3, 3000), text(4, 3000)};
+    for (auto& x : v) c.ask(x);
+    check(c.kept.parked() == 2 && c.kept.evictions() == 1, "the slots bound what is parked");
+    v[0] = v[0] + text(5, 10);
+    check(c.ask(v[0]) == 0, "the pushed-out conversation is read again");
+    v[2] = v[2] + text(6, 10);
+    check(c.ask(v[2]) == 2999, "a kept one is not");
+
+    // a budget of 1 MiB with checkpoints of 300 KiB: a parked conversation holds one checkpoint and its rows
+    Chat d(options(1, 8));
+    d.e.state = 300 << 10;
+    std::vector<int32_t> w[4] = {text(1, 1500), text(2, 1500), text(3, 1500), text(4, 1500)};
+    for (auto& x : w) d.ask(x);
+    check(d.kept.parked_bytes() <= (1u << 20) && d.kept.parked() == 3, "the budget bounds what is parked");
+    for (auto& x : w) d.ask(x = x + text(9, 5));
+
+    // the host says no
+    CacheOptions o = options(64);
+    o.admit = [](size_t) { return false; };
+    Chat e(o);
+    std::vector<int32_t> p = text(1, 3000), q = text(2, 3000);
+    e.ask(p);
+    e.ask(q);
+    check(e.kept.parked() == 0, "nothing is parked when the host has no memory to spare");
+}
+
+// Any order of prompts over conversations that share starts, under any options: the engine always ends up
+// holding the prompt.
+void any_order() {
+    std::mt19937 rng(11);
+    const int64_t every[] = {0, 64, 256, 1000}, budget[] = {0, 1, 64};
+    for (int round = 0; round < 60; ++round) {
+        CacheOptions o;
+        o.checkpoints = (int) (rng() % 5);
+        o.every = every[rng() % 4];
+        o.park_mib = budget[rng() % 3];
+        o.park_slots = (int) (rng() % 4);
+        o.park_min = rng() % 2 ? 200 : 0;
+        Chat c(o);
+        c.e.state = rng() % 2 ? 100 << 10 : 8;
+        c.rng.seed((unsigned) round);
+        std::vector<std::vector<int32_t>> chats;
+        for (int step = 0; step < 40; ++step) {
+            std::vector<int32_t> ids;
+            const unsigned what = rng() % 10;
+            if (chats.empty() || what == 0) {
+                ids = text((int) rng(), 1 + (int) (rng() % 1500));
+            } else {
+                ids = chats[rng() % chats.size()];
+                if (what < 4) ids.resize(1 + rng() % ids.size());   // goes on from somewhere inside
+                ids = ids + text((int) rng(), (int) (rng() % 400));
+            }
+            c.ask(ids, (int) (rng() % 5));
+            chats.push_back(ids);
+            check(c.kept.parked() <= (size_t) std::max(o.park_slots, 0), "no more parked than slots");
+            check(c.kept.parked_bytes() <= ((size_t) o.park_mib << 20), "no more parked than the budget");
+        }
+    }
+}
+
+}  // namespace
+
+int main() {
+    one_conversation();
+    two_conversations();
+    shared_start();
+    limits();
+    any_order();
+    std::printf("conversations_test: %d checks passed\n", checks);
+    return 0;
+}

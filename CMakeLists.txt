@@ -101,6 +101,8 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(conversation_memory_test src/core/conversation_memory_test.cpp src/core/conversation_memory.cpp)
   target_include_directories(conversation_memory_test PRIVATE include)
   add_test(NAME conversation_memory_test COMMAND conversation_memory_test)
+  add_executable(glm_conversations_test src/glm/conversations_test.cpp)
+  add_test(NAME glm_conversations_test COMMAND glm_conversations_test)
 endif()
 
 if(STRATA_HIP_GFX906)
