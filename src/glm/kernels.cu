@@ -1,5 +1,5 @@
-// src/glm/kernels.cu - see the header.  One token per call; the reference for every formula is llama.cpp's
-// glm5-next graph and the ggml ops it builds.
+// src/glm/kernels.cu - see the header.  The reference for every formula is llama.cpp's glm5-next graph and the
+// ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
 #include "strata/glm/kernels.hpp"
 
 #include <cuda_fp16.h>
@@ -49,21 +49,22 @@ __device__ __forceinline__ float ldw(const uint16_t* w, size_t i) { return __uin
 
 template<typename W>
 __global__ void gemv_kernel(const W* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in,
-                            int rows_per_x) {
+                            int n_out, int rows_per_x) {
     __shared__ float part[8];
     const int o = blockIdx.x;
+    const size_t tok = blockIdx.y;
     const W* wr = w + size_t(o) * n_in;
-    const float* xr = x + size_t(o / rows_per_x) * n_in;
+    const float* xr = x + (tok * size_t(n_out / rows_per_x) + size_t(o / rows_per_x)) * n_in;
     float acc = 0.0f;
     for (int i = threadIdx.x; i < n_in; i += blockDim.x) acc += ldw(wr, i) * xr[i];
     acc = block_sum(acc, part);
-    if (threadIdx.x == 0) y[o] = acc;
+    if (threadIdx.x == 0) y[tok * n_out + o] = acc;
 }
 
 template<typename W>
-void gemv(const W* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, void* stream) {
+void gemv(const W* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows, void* stream) {
     const int threads = n_in >= 1024 ? 256 : n_in >= 128 ? 128 : 32;
-    gemv_kernel<W><<<n_out, threads, 0, (cudaStream_t) stream>>>(w, x, y, n_in, rows_per_x);
+    gemv_kernel<W><<<dim3(n_out, rows), threads, 0, (cudaStream_t) stream>>>(w, x, y, n_in, n_out, rows_per_x);
 }
 
 __global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, float* y, int n,
@@ -81,16 +82,18 @@ __global__ void rms_norm_kernel(const float* __restrict__ x, const float* __rest
 __global__ void layer_norm_kernel(const float* __restrict__ x, const float* __restrict__ w,
                                   const float* __restrict__ b, float* y, int n, float eps) {
     __shared__ float part[8];
+    const float* xr = x + size_t(blockIdx.x) * n;
+    float* yr = y + size_t(blockIdx.x) * n;
     float s = 0.0f;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) s += x[i];
+    for (int i = threadIdx.x; i < n; i += blockDim.x) s += xr[i];
     const float mean = block_sum(s, part) / float(n);
     float v = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        const float d = x[i] - mean;
+        const float d = xr[i] - mean;
         v += d * d;
     }
     const float scale = 1.0f / sqrtf(block_sum(v, part) / float(n) + eps);
-    for (int i = threadIdx.x; i < n; i += blockDim.x) y[i] = (x[i] - mean) * scale * w[i] + b[i];
+    for (int i = threadIdx.x; i < n; i += blockDim.x) yr[i] = (xr[i] - mean) * scale * w[i] + b[i];
 }
 
 // mix[o] = fn row o . r for o < n_mix; mix[n_mix] = sum of r^2 (the flat RMS norm's input)
@@ -98,6 +101,8 @@ __global__ void hc_mix_kernel(const float* __restrict__ r, const float* __restri
                               int n, int n_mix) {
     __shared__ float part[8];
     const int o = blockIdx.x;
+    r += size_t(blockIdx.y) * n;
+    mix += size_t(blockIdx.y) * (n_mix + 1);
     float acc = 0.0f;
     if (o < n_mix) {
         const float* fr = fn + size_t(o) * n;
@@ -132,6 +137,10 @@ __global__ void hc_read_kernel(const float* __restrict__ r, const float* __restr
                                float* __restrict__ hcw, float* __restrict__ cur, int n_embd, float norm_eps,
                                float hc_eps, int iters) {
     __shared__ float pre[HC];
+    r += size_t(blockIdx.y) * HC * n_embd;
+    mix += size_t(blockIdx.y) * (HC * (2 + HC) + 1);
+    hcw += size_t(blockIdx.y) * (HC + HC * HC);
+    cur += size_t(blockIdx.y) * n_embd;
     if (threadIdx.x == 0) {
         const float rs = 1.0f / sqrtf(mix[HC * (2 + HC)] / float(HC * n_embd) + norm_eps);
         for (int h = 0; h < HC; ++h) pre[h] = sigmoid(mix[h] * rs * scale[0] + base[h]) + hc_eps;
@@ -173,6 +182,9 @@ __global__ void hc_read_kernel(const float* __restrict__ r, const float* __restr
 __global__ void hc_post_kernel(const float* __restrict__ x, const float* __restrict__ hcw, float* r, int n_embd) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_embd) return;
+    x += size_t(blockIdx.y) * n_embd;
+    hcw += size_t(blockIdx.y) * (HC + HC * HC);
+    r += size_t(blockIdx.y) * HC * n_embd;
     float in[HC], out[HC];
     for (int s = 0; s < HC; ++s) in[s] = r[size_t(s) * n_embd + i];
     const float xi = x[i];
@@ -192,52 +204,66 @@ __global__ void hc_mean_kernel(const float* __restrict__ r, float* __restrict__ 
     y[i] = acc * (1.0f / HC);
 }
 
-// d_conv is 4: three past inputs per channel, then the new one
+// d_conv is 4: three past inputs per channel, then the new one.  A thread is a channel and walks the tokens.
 __global__ void kda_conv_kernel(const float* __restrict__ proj, float* __restrict__ state,
                                 const float* __restrict__ wq, const float* __restrict__ wk,
-                                const float* __restrict__ wv, float* __restrict__ out, int d_inner) {
+                                const float* __restrict__ wv, float* __restrict__ out, int d_inner, int rows) {
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= 3 * d_inner) return;
     const int m = t / d_inner, c = t % d_inner;
     const float* w = (m == 0 ? wq : m == 1 ? wk : wv) + 4 * size_t(c);
     float* st = state + size_t(t) * 3;
-    const float x = proj[t];
-    const float y = st[0] * w[0] + st[1] * w[1] + st[2] * w[2] + x * w[3];
-    st[0] = st[1];
-    st[1] = st[2];
-    st[2] = x;
-    out[t] = y * sigmoid(y);
+    float s0 = st[0], s1 = st[1], s2 = st[2];
+    const size_t first = size_t(m) * rows * d_inner + c;
+    for (int row = 0; row < rows; ++row) {
+        const size_t at = first + size_t(row) * d_inner;
+        const float x = proj[at];
+        const float y = s0 * w[0] + s1 * w[1] + s2 * w[2] + x * w[3];
+        s0 = s1;
+        s1 = s2;
+        s2 = x;
+        out[at] = y * sigmoid(y);
+    }
+    st[0] = s0;
+    st[1] = s1;
+    st[2] = s2;
 }
 
-// One block per head, one thread per value dimension j.  s[i + hd * j] holds key dimension i of column j.
+// One block per head, one thread per value dimension j; the block walks the tokens.  s[i + hd * j] holds key
+// dimension i of column j.
 __global__ void kda_step_kernel(const float* __restrict__ qkv, const float* __restrict__ g1,
                                 const float* __restrict__ a, const float* __restrict__ beta, float* __restrict__ s,
                                 const float* __restrict__ g2, const float* __restrict__ o_norm,
-                                float* __restrict__ out, int hd, int n_head, float lower_bound, float norm_eps) {
+                                float* __restrict__ out, int hd, int n_head, int rows, float lower_bound,
+                                float norm_eps) {
     __shared__ float part[8];
     __shared__ float qn[256], kn[256], decay[256];
     const int h = blockIdx.x, j = threadIdx.x;
-    const size_t at = size_t(h) * hd + j, d_inner = size_t(hd) * n_head;
-    const float q = qkv[at], k = qkv[d_inner + at], v = qkv[2 * d_inner + at];
-    const float qs = block_sum(q * q, part);
-    const float ks = block_sum(k * k, part);
-    qn[j] = q / sqrtf(qs + 1e-6f) * (1.0f / sqrtf(float(hd)));
-    kn[j] = k / sqrtf(ks + 1e-6f);
-    // the decay gate of key dimension j: exp(lower_bound * sigmoid(-(g1 * a)))
-    decay[j] = expf(lower_bound / (1.0f + expf(g1[at] * a[h])));
-    __syncthreads();
-    float* col = s + at * hd;
-    float sk = 0.0f;
-    for (int i = 0; i < hd; ++i) sk += col[i] * decay[i] * kn[i];
-    const float d = (v - sk) * sigmoid(beta[h]);
-    float o = 0.0f;
-    for (int i = 0; i < hd; ++i) {
-        const float n = col[i] * decay[i] + kn[i] * d;
-        col[i] = n;
-        o += n * qn[i];
+    const size_t d_inner = size_t(hd) * n_head, plane = d_inner * rows;
+    float* col = s + (size_t(h) * hd + j) * hd;
+    for (int row = 0; row < rows; ++row) {
+        const size_t at = size_t(row) * d_inner + size_t(h) * hd + j;
+        const float q = qkv[at], k = qkv[plane + at], v = qkv[2 * plane + at];
+        const float qs = block_sum(q * q, part);
+        const float ks = block_sum(k * k, part);
+        qn[j] = q / sqrtf(qs + 1e-6f) * (1.0f / sqrtf(float(hd)));
+        kn[j] = k / sqrtf(ks + 1e-6f);
+        // the decay gate of key dimension j: exp(lower_bound * sigmoid(-(g1 * a)))
+        decay[j] = expf(lower_bound / (1.0f + expf(g1[at] * a[h])));
+        __syncthreads();
+        float sk = 0.0f;
+        for (int i = 0; i < hd; ++i) sk += col[i] * decay[i] * kn[i];
+        const float d = (v - sk) * sigmoid(beta[size_t(row) * n_head + h]);
+        float o = 0.0f;
+        for (int i = 0; i < hd; ++i) {
+            const float n = col[i] * decay[i] + kn[i] * d;
+            col[i] = n;
+            o += n * qn[i];
+        }
+        // the sum's last barrier also ends this token's reads of qn, kn and decay
+        const float os = block_sum(o * o, part);
+        out[at] = o / sqrtf(os / float(hd) + norm_eps) * o_norm[j] * sigmoid(g2[at]);
     }
-    const float os = block_sum(o * o, part);
-    out[at] = o / sqrtf(os / float(hd) + norm_eps) * o_norm[j] * sigmoid(g2[at]);
 }
 
 __global__ void store_f16_kernel(const float* __restrict__ x, half* __restrict__ dst, int n) {
@@ -245,14 +271,21 @@ __global__ void store_f16_kernel(const float* __restrict__ x, half* __restrict__
     if (i < n) dst[i] = __float2half(x[i]);
 }
 
-// One block per head.  Shared: n_sel scores, then 8 partials.
+// One block per head and token.  Shared: max_sel scores, then 8 partials.
 __global__ void dsa_attend_kernel(const float* __restrict__ q, const half* __restrict__ cache,
-                                  const int32_t* __restrict__ sel, int n_sel, float* __restrict__ out, int rank,
+                                  const int32_t* __restrict__ sel_all, int sel_stride, int top_rows, int kpool,
+                                  long long pos, int dense_rows, int max_sel, float* __restrict__ out, int rank,
                                   float scale) {
     extern __shared__ float sm[];
     float* sc = sm;
-    float* part = sm + n_sel;
-    const float* qh = q + size_t(blockIdx.x) * rank;
+    float* part = sm + max_sel;
+    const int tok = blockIdx.y;
+    const long long n = pos + tok + 1;   // cache rows up to this token's own
+    const bool sparse = tok >= dense_rows;
+    const int n_sel = sparse ? top_rows + int(n % kpool) : int(n);
+    const int32_t* sel = sparse ? sel_all + size_t(tok - dense_rows) * sel_stride : nullptr;
+    const size_t head = size_t(tok) * gridDim.x + blockIdx.x;
+    const float* qh = q + head * rank;
     float mx = -INFINITY;
     for (int t = threadIdx.x; t < n_sel; t += blockDim.x) {
         const half* row = cache + size_t(sel ? sel[t] : t) * rank;
@@ -268,7 +301,7 @@ __global__ void dsa_attend_kernel(const float* __restrict__ q, const half* __res
         sum += sc[t];
     }
     const float inv = 1.0f / block_sum(sum, part);
-    float* oh = out + size_t(blockIdx.x) * rank;
+    float* oh = out + head * rank;
     for (int r = threadIdx.x; r < rank; r += blockDim.x) {
         float acc = 0.0f;
         for (int t = 0; t < n_sel; ++t) acc += sc[t] * __half2float(cache[size_t(sel ? sel[t] : t) * rank + r]);
@@ -276,17 +309,21 @@ __global__ void dsa_attend_kernel(const float* __restrict__ q, const half* __res
     }
 }
 
+// One block per token; `first` is the first token's cache row.
 __global__ void idx_store_kernel(const float* __restrict__ key, const float* __restrict__ gate,
-                                 float* __restrict__ row, int dim) {
+                                 float* __restrict__ first, int dim) {
     const int d = threadIdx.x;
     if (d >= dim) return;
-    row[d] = key[d];
-    row[dim + d] = gate[d];
+    float* row = first + size_t(blockIdx.x) * 3 * dim;
+    row[d] = key[size_t(blockIdx.x) * dim + d];
+    row[dim + d] = gate[size_t(blockIdx.x) * dim + d];
 }
 
-__global__ void idx_pool_kernel(float* cache, const float* __restrict__ ape, int dim, int kpool, long long last) {
+// One block per token from position pos; the ones that do not end a pool have nothing to do.
+__global__ void idx_pool_kernel(float* cache, const float* __restrict__ ape, int dim, int kpool, long long pos) {
     const int d = threadIdx.x;
-    if (d >= dim) return;
+    const long long last = pos + blockIdx.x;
+    if (d >= dim || (last + 1) % kpool != 0) return;
     const float* first = cache + size_t(last - kpool + 1) * 3 * dim;
     float mx = -INFINITY;
     for (int k = 0; k < kpool; ++k) mx = fmaxf(mx, first[size_t(k) * 3 * dim + dim + d] + ape[d + dim * k]);
@@ -300,11 +337,15 @@ __global__ void idx_pool_kernel(float* cache, const float* __restrict__ ape, int
     cache[size_t(last) * 3 * dim + 2 * dim + d] = acc / sum;
 }
 
-// One block per pool, 32 threads over the indexer heads.
+// One block per pool and token, 32 threads over the indexer heads.
 __global__ void idx_score_kernel(const float* __restrict__ q, const float* __restrict__ w,
-                                 const float* __restrict__ cache, float* __restrict__ score, int dim, int n_head,
-                                 int kpool, float wscale) {
+                                 const float* __restrict__ cache, float* __restrict__ score, int score_stride,
+                                 int dim, int n_head, int kpool, long long pos, float wscale) {
+    const size_t tok = blockIdx.y;
+    if (blockIdx.x >= (pos + tok + 1) / kpool) return;   // not a whole pool at this token yet
     const float* key = cache + (size_t(blockIdx.x) * kpool + kpool - 1) * 3 * dim + 2 * dim;
+    q += tok * n_head * dim;
+    w += tok * n_head;
     float acc = 0.0f;
     for (int h = threadIdx.x; h < n_head; h += WARP) {
         const float* qh = q + size_t(h) * dim;
@@ -313,7 +354,7 @@ __global__ void idx_score_kernel(const float* __restrict__ q, const float* __res
         acc += fmaxf(dot, 0.0f) * (w[h] * wscale);
     }
     acc = warp_sum(acc);
-    if (threadIdx.x == 0) score[blockIdx.x] = acc;
+    if (threadIdx.x == 0) score[tok * score_stride + blockIdx.x] = acc;
 }
 
 __global__ void swiglu_clamp_kernel(const float* __restrict__ gate, const float* __restrict__ up,
@@ -331,37 +372,43 @@ __global__ void axpy_kernel(const float* __restrict__ x, float a, float* __restr
     acc[i] = add ? acc[i] + x[i] * a : x[i] * a;
 }
 
+__global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__ acc, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) acc[size_t(blockIdx.y) * n + i] += b[i];
+}
+
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
-inline int grid(int n, int block) { return (n + block - 1) / block; }
+inline int grid(size_t n, int block) { return int((n + block - 1) / block); }
 
 }  // namespace
 
-void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, void* stream) {
-    gemv(w, x, y, n_in, n_out, rows_per_x, stream);
+void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows, void* stream) {
+    gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
 }
 
-void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, void* stream) {
-    gemv(w, x, y, n_in, n_out, rows_per_x, stream);
+void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
+               void* stream) {
+    gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
 }
 
 void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream) {
     rms_norm_kernel<<<rows, n >= 1024 ? 256 : 128, 0, cs(stream)>>>(x, w, y, n, eps);
 }
 
-void layer_norm(const float* x, const float* w, const float* b, float* y, int n, float eps, void* stream) {
-    layer_norm_kernel<<<1, 128, 0, cs(stream)>>>(x, w, b, y, n, eps);
+void layer_norm(const float* x, const float* w, const float* b, float* y, int n, int rows, float eps, void* stream) {
+    layer_norm_kernel<<<rows, 128, 0, cs(stream)>>>(x, w, b, y, n, eps);
 }
 
 void hc_pre(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* hcw,
-            float* cur, int n_embd, float norm_eps, float hc_eps, int sinkhorn_iters, void* stream) {
+            float* cur, int n_embd, int rows, float norm_eps, float hc_eps, int sinkhorn_iters, void* stream) {
     const int n_mix = HC * (2 + HC);
-    hc_mix_kernel<<<n_mix + 1, 256, 0, cs(stream)>>>(r, fn, mix, HC * n_embd, n_mix);
-    hc_read_kernel<<<grid(n_embd, 256), 256, 0, cs(stream)>>>(r, mix, scale, base, hcw, cur, n_embd, norm_eps,
-                                                             hc_eps, sinkhorn_iters);
+    hc_mix_kernel<<<dim3(n_mix + 1, rows), 256, 0, cs(stream)>>>(r, fn, mix, HC * n_embd, n_mix);
+    hc_read_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, mix, scale, base, hcw, cur, n_embd,
+                                                                         norm_eps, hc_eps, sinkhorn_iters);
 }
 
-void hc_post(const float* x, const float* hcw, float* r, int n_embd, void* stream) {
-    hc_post_kernel<<<grid(n_embd, 256), 256, 0, cs(stream)>>>(x, hcw, r, n_embd);
+void hc_post(const float* x, const float* hcw, float* r, int n_embd, int rows, void* stream) {
+    hc_post_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(x, hcw, r, n_embd);
 }
 
 void hc_mean(const float* r, float* y, int n_embd, void* stream) {
@@ -369,39 +416,45 @@ void hc_mean(const float* r, float* y, int n_embd, void* stream) {
 }
 
 void kda_conv(const float* proj, float* state, const float* wq, const float* wk, const float* wv, float* out,
-              int d_inner, void* stream) {
-    kda_conv_kernel<<<grid(3 * d_inner, 256), 256, 0, cs(stream)>>>(proj, state, wq, wk, wv, out, d_inner);
+              int d_inner, int rows, void* stream) {
+    kda_conv_kernel<<<grid(3 * d_inner, 256), 256, 0, cs(stream)>>>(proj, state, wq, wk, wv, out, d_inner, rows);
 }
 
 void kda_step(const float* qkv, const float* g1, const float* a, const float* beta, float* s, const float* g2,
-              const float* o_norm, float* out, int head_dim, int n_head, float gate_lower_bound, float norm_eps,
-              void* stream) {
+              const float* o_norm, float* out, int head_dim, int n_head, int rows, float gate_lower_bound,
+              float norm_eps, void* stream) {
     kda_step_kernel<<<n_head, head_dim, 0, cs(stream)>>>(qkv, g1, a, beta, s, g2, o_norm, out, head_dim, n_head,
-                                                        gate_lower_bound, norm_eps);
+                                                        rows, gate_lower_bound, norm_eps);
 }
 
-void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, void* stream) {
-    store_f16_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(x, (half*) cache + size_t(pos) * n, n);
+void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream) {
+    const size_t all = size_t(n) * rows;
+    store_f16_kernel<<<grid(all, 256), 256, 0, cs(stream)>>>(x, (half*) cache + size_t(pos) * n, int(all));
 }
 
-void dsa_attend(const float* q, const uint16_t* cache, const int32_t* sel, int n_sel, float* out, int rank,
-                int n_head, float scale, void* stream) {
-    dsa_attend_kernel<<<n_head, 256, (size_t(n_sel) + 8) * sizeof(float), cs(stream)>>>(
-        q, (const half*) cache, sel, n_sel, out, rank, scale);
+void dsa_attend(const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows, int kpool,
+                int64_t pos, int rows, int dense_rows, float* out, int rank, int n_head, float scale, void* stream) {
+    // the longest list of the call: a sparse token's, or the last dense token's
+    const int max_sel = dense_rows < rows ? top_rows + kpool - 1 : int(pos) + rows;
+    dsa_attend_kernel<<<dim3(n_head, rows), 256, (size_t(max_sel) + 8) * sizeof(float), cs(stream)>>>(
+        q, (const half*) cache, sel, sel_stride, top_rows, kpool, (long long) pos, dense_rows, max_sel, out, rank,
+        scale);
 }
 
-void idx_store(const float* key, const float* gate, float* cache, int dim, int64_t pos, void* stream) {
-    idx_store_kernel<<<1, 256, 0, cs(stream)>>>(key, gate, cache + size_t(pos) * 3 * dim, dim);
+void idx_store(const float* key, const float* gate, float* cache, int dim, int64_t pos, int rows, void* stream) {
+    idx_store_kernel<<<rows, 256, 0, cs(stream)>>>(key, gate, cache + size_t(pos) * 3 * dim, dim);
 }
 
-void idx_pool(float* cache, const float* ape, int dim, int kpool, int64_t last, void* stream) {
-    idx_pool_kernel<<<1, 256, 0, cs(stream)>>>(cache, ape, dim, kpool, (long long) last);
+void idx_pool(float* cache, const float* ape, int dim, int kpool, int64_t pos, int rows, void* stream) {
+    idx_pool_kernel<<<rows, 256, 0, cs(stream)>>>(cache, ape, dim, kpool, (long long) pos);
 }
 
-void idx_score(const float* q, const float* w, const float* cache, float* score, int dim, int n_head, int kpool,
-               int n_pool, void* stream) {
-    idx_score_kernel<<<n_pool, WARP, 0, cs(stream)>>>(q, w, cache, score, dim, n_head, kpool,
-                                                      1.0f / std::sqrt(float(dim) * float(n_head)));
+void idx_score(const float* q, const float* w, const float* cache, float* score, int score_stride, int dim,
+               int n_head, int kpool, int64_t pos, int rows, void* stream) {
+    const int n_pool = int((pos + rows) / kpool);   // the last token sees the most
+    idx_score_kernel<<<dim3(n_pool, rows), WARP, 0, cs(stream)>>>(q, w, cache, score, score_stride, dim, n_head,
+                                                                 kpool, (long long) pos,
+                                                                 1.0f / std::sqrt(float(dim) * float(n_head)));
 }
 
 void swiglu_clamp(const float* gate, const float* up, float* out, int n, float limit, void* stream) {
@@ -410,6 +463,10 @@ void swiglu_clamp(const float* gate, const float* up, float* out, int n, float l
 
 void axpy(const float* x, float a, float* acc, int n, bool add, void* stream) {
     axpy_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(x, a, acc, n, add);
+}
+
+void add_bias(const float* b, float* acc, int n, int rows, void* stream) {
+    add_bias_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(b, acc, n);
 }
 
 }  // namespace strata::glm

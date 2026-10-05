@@ -27,6 +27,7 @@ namespace {
 constexpr uint32_t kTypeF32 = 0, kTypeQ8_0 = 8, kTypeBF16 = 30;
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
 constexpr int kMaxUsed = 32;
+constexpr int kRows = 512;          // prompt tokens one eval() takes; the scratch is about 1 MiB of VRAM a token
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 
 using Clock = std::chrono::steady_clock;
@@ -344,46 +345,48 @@ void Engine::load_layer(int il) {
     ++n_moe_;
 }
 
+// Per-token buffers hold rows_ tokens, row after row.
 void Engine::assign_scratch() {
-    const size_t e = (size_t) n_embd_, ff = (size_t) std::max(n_ff_dense_, 2 * n_ff_exp_);
+    const size_t n = (size_t) rows_, e = n * n_embd_, d = n * d_inner_;
+    const size_t ff = n * std::max(n_ff_dense_, 2 * n_ff_exp_);
     r_ = fbuf(kHc * e);
     cur_ = fbuf(e);
     xn_ = fbuf(e);
     ao_ = fbuf(e);
     fo_ = fbuf(e);
-    mix_ = fbuf(kHc * (2 + kHc) + 1);
-    hcw_ = fbuf(kHc + kHc * kHc);
+    mix_ = fbuf(n * (kHc * (2 + kHc) + 1));
+    hcw_ = fbuf(n * (kHc + kHc * kHc));
 
-    proj_ = fbuf(3 * (size_t) d_inner_);
-    qkv_ = fbuf(3 * (size_t) d_inner_);
-    fa_ = fbuf((size_t) gate_rank_);
-    ga_ = fbuf((size_t) gate_rank_);
-    g1_ = fbuf((size_t) d_inner_);
-    g2_ = fbuf((size_t) d_inner_);
-    beta_ = fbuf((size_t) n_head_);
-    gated_ = fbuf((size_t) d_inner_);
+    proj_ = fbuf(3 * d);
+    qkv_ = fbuf(3 * d);
+    fa_ = fbuf(n * gate_rank_);
+    ga_ = fbuf(n * gate_rank_);
+    g1_ = fbuf(d);
+    g2_ = fbuf(d);
+    beta_ = fbuf(n * n_head_);
+    gated_ = fbuf(d);
 
-    t1_ = fbuf((size_t) q_rank_);
-    qr_ = fbuf((size_t) q_rank_);
-    q_ = fbuf((size_t) n_head_ * mla_k_);
-    t2_ = fbuf((size_t) kv_rank_);
-    kv_ = fbuf((size_t) kv_rank_);
-    qabs_ = fbuf((size_t) n_head_ * kv_rank_);
-    kqv_ = fbuf((size_t) n_head_ * kv_rank_);
-    vout_ = fbuf((size_t) n_head_ * mla_v_);
-    ikr_ = fbuf((size_t) idx_dim_);
-    ik_ = fbuf((size_t) idx_dim_);
-    ig_ = fbuf((size_t) idx_dim_);
-    iq_ = fbuf((size_t) idx_heads_ * idx_dim_);
-    iw_ = fbuf((size_t) idx_heads_);
-    score_ = fbuf((size_t) opt_.max_context / kpool_ + 1);
+    t1_ = fbuf(n * q_rank_);
+    qr_ = fbuf(n * q_rank_);
+    q_ = fbuf(n * n_head_ * mla_k_);
+    t2_ = fbuf(n * kv_rank_);
+    kv_ = fbuf(n * kv_rank_);
+    qabs_ = fbuf(n * n_head_ * kv_rank_);
+    kqv_ = fbuf(n * n_head_ * kv_rank_);
+    vout_ = fbuf(n * n_head_ * mla_v_);
+    ikr_ = fbuf(n * idx_dim_);
+    ik_ = fbuf(n * idx_dim_);
+    ig_ = fbuf(n * idx_dim_);
+    iq_ = fbuf(n * idx_heads_ * idx_dim_);
+    iw_ = fbuf(n * idx_heads_);
+    score_ = fbuf(n * score_stride_);
 
     g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
     u_ = fbuf(ff);
     h_ = fbuf(ff);
-    d_ = fbuf(e);
+    d_ = fbuf((size_t) n_embd_);   // one routed expert of one token
     cpu_ = fbuf(e);
-    rl_ = fbuf((size_t) n_expert_);
+    rl_ = fbuf(n * n_expert_);
     logits_ = fbuf((size_t) n_vocab_);
 }
 
@@ -411,6 +414,12 @@ void Engine::alloc_state() {
         }
     }
 
+    // --dump-layers prints one token's stages
+    rows_ = opt_.dump ? 1 : std::min(kRows, opt_.max_context);
+    score_stride_ = opt_.max_context / kpool_ + 1;
+    sel_stride_ = idx_top_k_ + kpool_;
+    const size_t n = (size_t) rows_;
+
     assign_scratch();   // the first pass only counts
     scratch_ = (float*) dmalloc(scratch_at_ * sizeof(float), "scratch");
     scratch_at_ = 0;
@@ -418,18 +427,17 @@ void Engine::alloc_state() {
 
     const int q_max = std::max({n_embd_, d_inner_, n_head_ * mla_v_, n_head_ * mla_k_, q_rank_, kv_rank_,
                                 n_ff_dense_, n_ff_exp_, (int) gate_rank_, 256});
-    xq_ = dmalloc(kernels::native_q8_1_bytes(n_embd_), "scratch");
-    q8_ = dmalloc(kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
-    const size_t sel_n = (size_t) idx_top_k_ + kpool_;
-    sel_ = (int32_t*) dmalloc(sel_n * sizeof(int32_t), "scratch");
+    xq_ = dmalloc(n * kernels::native_q8_1_bytes(n_embd_), "scratch");
+    q8_ = dmalloc(n * kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
+    sel_ = (int32_t*) dmalloc(n * sel_stride_ * sizeof(int32_t), "scratch");
 
-    h_r_ = (float*) hmalloc(kHc * (size_t) n_embd_ * sizeof(float), "pinned memory");
-    h_rl_ = (float*) hmalloc((size_t) n_expert_ * sizeof(float), "pinned memory");
-    h_x_ = (float*) hmalloc((size_t) n_embd_ * sizeof(float), "pinned memory");
-    h_cpu_ = (float*) hmalloc((size_t) n_embd_ * sizeof(float), "pinned memory");
+    h_r_ = (float*) hmalloc(n * kHc * n_embd_ * sizeof(float), "pinned memory");
+    h_rl_ = (float*) hmalloc(n * n_expert_ * sizeof(float), "pinned memory");
+    h_x_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
+    h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
     h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
-    h_score_ = (float*) hmalloc((ctx / kpool_ + 1) * sizeof(float), "pinned memory");
-    h_sel_ = (int32_t*) hmalloc(sel_n * sizeof(int32_t), "pinned memory");
+    h_score_ = (float*) hmalloc(n * score_stride_ * sizeof(float), "pinned memory");
+    h_sel_ = (int32_t*) hmalloc(n * sel_stride_ * sizeof(int32_t), "pinned memory");
 
     probs_.resize((size_t) n_expert_);
     pick_.resize((size_t) n_expert_);
@@ -582,99 +590,114 @@ void Engine::dbg(const char* name, int il, const float* dev, int n) {
                  il, name, n, sum, abs, h[0], h[1], h[2]);
 }
 
-// y = w x.  xq is x already in Q8_1, when the caller has it.  rows_per_x below n_out gives each group of rows its
-// own input (see gemv_f32); only the float types take it.
-void Engine::lin(const Dev& w, const float* x, float* y, const void* xq, int rows_per_x) {
+// y = w x for n tokens.  xq is x already in Q8_1, when the caller has it.  rows_per_x below n_out gives each group
+// of rows its own input (see gemv_f32); only the float types take it.
+void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x) {
     if (w.type == kTypeF32)
-        return gemv_f32(fp(w), x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, st_);
+        return gemv_f32(fp(w), x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
     if (w.type == kTypeBF16)
-        return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, st_);
+        return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
     if (!xq) {
-        kernels::native_quantize_q8_1(x, q8_, w.n_in, 1, st_);
+        // the tokens' blocks are back to back, so they quantize as one long vector
+        kernels::native_quantize_q8_1(x, q8_, w.n_in * n, 1, st_);
         xq = q8_;
     }
-    kernels::native_mmvq((int) w.type, w.p, xq, y, w.n_in, w.n_out, 1, st_);
+    // a launch takes up to 8 tokens, and each comes out as it would alone
+    const size_t token = kernels::native_q8_1_bytes(w.n_in);
+    for (int at = 0; at < n; at += 8)
+        kernels::native_mmvq((int) w.type, w.p, (const uint8_t*) xq + (size_t) at * token,
+                             y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
 }
 
-void Engine::kda(Layer& L) {
-    lin(L.wq, xn_, proj_, xq_);
-    lin(L.wk, xn_, proj_ + d_inner_, xq_);
-    lin(L.wv, xn_, proj_ + 2 * d_inner_, xq_);
-    kda_conv(proj_, L.conv, fp(L.conv_q), fp(L.conv_k), fp(L.conv_v), qkv_, d_inner_, st_);
+void Engine::kda(Layer& L, int n) {
+    const size_t d = (size_t) n * d_inner_;
+    lin(L.wq, xn_, proj_, n, xq_);
+    lin(L.wk, xn_, proj_ + d, n, xq_);
+    lin(L.wv, xn_, proj_ + 2 * d, n, xq_);
+    kda_conv(proj_, L.conv, fp(L.conv_q), fp(L.conv_k), fp(L.conv_v), qkv_, d_inner_, n, st_);
 
-    lin(L.f_a, xn_, fa_, xq_);
-    lin(L.f_b, fa_, g1_);
-    axpy(fp(L.dt_b), 1.f, g1_, d_inner_, true, st_);
-    lin(L.beta, xn_, beta_, xq_);
-    lin(L.g_a, xn_, ga_, xq_);
-    lin(L.g_b, ga_, g2_);
-    kda_step(qkv_, g1_, fp(L.a), beta_, L.s, g2_, fp(L.o_norm), gated_, kda_dim_, n_head_, kda_lb_, rms_eps_, st_);
-    lin(L.wo, gated_, ao_);
+    lin(L.f_a, xn_, fa_, n, xq_);
+    lin(L.f_b, fa_, g1_, n);
+    add_bias(fp(L.dt_b), g1_, d_inner_, n, st_);
+    lin(L.beta, xn_, beta_, n, xq_);
+    lin(L.g_a, xn_, ga_, n, xq_);
+    lin(L.g_b, ga_, g2_, n);
+    kda_step(qkv_, g1_, fp(L.a), beta_, L.s, g2_, fp(L.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
+             st_);
+    lin(L.wo, gated_, ao_, n);
 }
 
-// The n_top pools with the highest indexer score, expanded to their rows, then the tail that is in no pool yet.
-// The scores come to the host for the selection, which costs a wait per layer; it only runs past top_k tokens.
-int Engine::dsa_select(Layer& L, int64_t n_pool, int n_top) {
-    lin(L.idx_q_b, qr_, iq_);
-    lin(L.idx_proj, xn_, iw_, xq_);
-    idx_score(iq_, iw_, L.idx, score_, idx_dim_, idx_heads_, kpool_, (int) n_pool, st_);
-    ck(cudaMemcpyAsync(h_score_, score_, (size_t) n_pool * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+// For the n tokens from row `first` of the call: the n_top pools with the highest indexer score, expanded to
+// their rows, then the tail that is in no pool yet.  The scores come to the host for the selection, which costs
+// a wait per layer; it only runs past top_k tokens.
+void Engine::dsa_select(Layer& L, int first, int n) {
+    const int64_t pos = pos_ + first;
+    const int n_top = idx_top_k_ / kpool_;
+    lin(L.idx_q_b, qr_ + (size_t) first * q_rank_, iq_, n);
+    lin(L.idx_proj, xn_ + (size_t) first * n_embd_, iw_, n,
+        (const uint8_t*) xq_ + (size_t) first * kernels::native_q8_1_bytes(n_embd_));
+    idx_score(iq_, iw_, L.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
+    ck(cudaMemcpyAsync(h_score_, score_, (size_t) n * score_stride_ * sizeof(float), cudaMemcpyDeviceToHost,
+                       cs(st_)),
        "indexer scores");
     ck(cudaStreamSynchronize(cs(st_)), "indexer scores");
 
-    order_.resize((size_t) n_pool);
-    std::iota(order_.begin(), order_.end(), 0);
-    const float* sc = h_score_;
-    std::partial_sort(order_.begin(), order_.begin() + n_top, order_.end(),
-                      [sc](int32_t a, int32_t b) { return sc[a] != sc[b] ? sc[a] > sc[b] : a < b; });
-    int n = 0;
-    for (int i = 0; i < n_top; ++i)
-        for (int k = 0; k < kpool_; ++k) h_sel_[n++] = order_[(size_t) i] * kpool_ + k;
-    for (int64_t p = n_pool * kpool_; p <= pos_; ++p) h_sel_[n++] = (int32_t) p;
-    ck(cudaMemcpyAsync(sel_, h_sel_, (size_t) n * sizeof(int32_t), cudaMemcpyHostToDevice, cs(st_)),
+    workers_->run(n, [&](int t) {
+        static thread_local std::vector<int32_t> order;
+        const int64_t at = pos + t, n_pool = (at + 1) / kpool_;
+        order.resize((size_t) n_pool);
+        std::iota(order.begin(), order.end(), 0);
+        const float* sc = h_score_ + (size_t) t * score_stride_;
+        std::partial_sort(order.begin(), order.begin() + n_top, order.end(),
+                          [sc](int32_t a, int32_t b) { return sc[a] != sc[b] ? sc[a] > sc[b] : a < b; });
+        int32_t* sel = h_sel_ + (size_t) t * sel_stride_;
+        for (int i = 0; i < n_top; ++i)
+            for (int k = 0; k < kpool_; ++k) *sel++ = order[(size_t) i] * kpool_ + k;
+        for (int64_t p = n_pool * kpool_; p <= at; ++p) *sel++ = (int32_t) p;
+    });
+    ck(cudaMemcpyAsync(sel_, h_sel_, (size_t) n * sel_stride_ * sizeof(int32_t), cudaMemcpyHostToDevice, cs(st_)),
        "indexer selection");
-    return n;
 }
 
-void Engine::dsa(Layer& L) {
-    lin(L.q_a, xn_, t1_, xq_);
-    rms_norm(t1_, fp(L.q_a_norm), qr_, q_rank_, 1, rms_eps_, st_);
-    lin(L.q_b, qr_, q_);
-    lin(L.k_b, q_, qabs_, nullptr, kv_rank_);   // the key projection, absorbed into the query: per head
+void Engine::dsa(Layer& L, int n) {
+    lin(L.q_a, xn_, t1_, n, xq_);
+    rms_norm(t1_, fp(L.q_a_norm), qr_, q_rank_, n, rms_eps_, st_);
+    lin(L.q_b, qr_, q_, n);
+    lin(L.k_b, q_, qabs_, n, nullptr, kv_rank_);   // the key projection, absorbed into the query: per head
 
-    lin(L.kv_a, xn_, t2_, xq_);
-    rms_norm(t2_, fp(L.kv_a_norm), kv_, kv_rank_, 1, rms_eps_, st_);
-    store_f16(kv_, L.lat, kv_rank_, pos_, st_);
+    lin(L.kv_a, xn_, t2_, n, xq_);
+    rms_norm(t2_, fp(L.kv_a_norm), kv_, kv_rank_, n, rms_eps_, st_);
+    store_f16(kv_, L.lat, kv_rank_, pos_, n, st_);
 
-    lin(L.idx_k, xn_, ikr_, xq_);
-    layer_norm(ikr_, fp(L.idx_k_norm), fp(L.idx_k_norm_b), ik_, idx_dim_, norm_eps_, st_);
-    lin(L.idx_gate, xn_, ig_, xq_);
-    idx_store(ik_, ig_, L.idx, idx_dim_, pos_, st_);
-    const int64_t n = pos_ + 1, n_pool = n / kpool_;
-    if (n % kpool_ == 0) idx_pool(L.idx, fp(L.idx_ape), idx_dim_, kpool_, pos_, st_);
+    lin(L.idx_k, xn_, ikr_, n, xq_);
+    layer_norm(ikr_, fp(L.idx_k_norm), fp(L.idx_k_norm_b), ik_, idx_dim_, n, norm_eps_, st_);
+    lin(L.idx_gate, xn_, ig_, n, xq_);
+    idx_store(ik_, ig_, L.idx, idx_dim_, pos_, n, st_);
+    idx_pool(L.idx, fp(L.idx_ape), idx_dim_, kpool_, pos_, n, st_);
 
-    // While every pool fits in top_k, all of them are selected and this is plain causal attention.
-    const int n_top = idx_top_k_ / kpool_;
-    const bool sparse = n_pool > n_top;
-    const int n_sel = sparse ? dsa_select(L, n_pool, n_top) : (int) n;
-    dsa_attend(qabs_, L.lat, sparse ? sel_ : nullptr, n_sel, kqv_, kv_rank_, n_head_,
+    // While a token's pools all fit in top_k, every one is selected and its attention is plain causal attention.
+    // That holds up to a position, so the tokens of a call are dense first and sparse after.
+    const int64_t last_dense = (int64_t) idx_top_k_ + kpool_ - 2;
+    const int dense = (int) std::clamp<int64_t>(last_dense - pos_ + 1, 0, n);
+    if (dense < n) dsa_select(L, dense, n - dense);
+    dsa_attend(qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos_, n, dense, kqv_, kv_rank_, n_head_,
                1.f / std::sqrt((float) mla_k_), st_);
-    lin(L.v_b, kqv_, vout_, nullptr, mla_v_);
-    lin(L.wo, vout_, ao_);
+    lin(L.v_b, kqv_, vout_, n, nullptr, mla_v_);
+    lin(L.wo, vout_, ao_, n);
 }
 
-void Engine::dense_ffn(Layer& L, int il) {
-    lin(L.ffn_gate, xn_, g_, xq_);
-    lin(L.ffn_up, xn_, u_, xq_);
-    swiglu_clamp(g_, u_, h_, n_ff_dense_, clamp_shexp_[(size_t) il], st_);
-    lin(L.ffn_down, h_, fo_);
+void Engine::dense_ffn(Layer& L, int il, int n) {
+    lin(L.ffn_gate, xn_, g_, n, xq_);
+    lin(L.ffn_up, xn_, u_, n, xq_);
+    swiglu_clamp(g_, u_, h_, n * n_ff_dense_, clamp_shexp_[(size_t) il], st_);
+    lin(L.ffn_down, h_, fo_, n);
 }
 
 // What ggml's MoE graph does for this model: sigmoid gates, the n_used largest of gate + bias, and weights from
 // the bare gates.
-void Engine::route(const Layer& L, int* ids, float* w) {
+void Engine::route(const Layer& L, const float* logits, int* ids, float* w) {
     for (int e = 0; e < n_expert_; ++e) {
-        probs_[(size_t) e] = 1.f / (1.f + std::exp(-h_rl_[e]));
+        probs_[(size_t) e] = 1.f / (1.f + std::exp(-logits[e]));
         pick_[(size_t) e] = probs_[(size_t) e] + L.probs_b[(size_t) e];
     }
     float sum = 0.f;
@@ -694,101 +717,121 @@ void Engine::route(const Layer& L, int* ids, float* w) {
     }
 }
 
-void Engine::moe(Layer& L, int il) {
-    lin(L.gate_inp, xn_, rl_, xq_);
-    ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
-    ck(cudaMemcpyAsync(h_x_, xn_, (size_t) n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
+void Engine::moe(Layer& L, int il, int n) {
+    const size_t e_row = (size_t) n_embd_, rows = (size_t) n;
+    lin(L.gate_inp, xn_, rl_, n, xq_);
+    ck(cudaMemcpyAsync(h_rl_, rl_, rows * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
+    ck(cudaMemcpyAsync(h_x_, xn_, rows * e_row * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
 
     // the shared expert runs on the GPU while the host routes
-    lin(L.sh_gate, xn_, g_, xq_);
-    lin(L.sh_up, xn_, u_, xq_);
-    swiglu_clamp(g_, u_, h_, n_ff_exp_, clamp_shexp_[(size_t) il], st_);
-    lin(L.sh_down, h_, fo_);
+    lin(L.sh_gate, xn_, g_, n, xq_);
+    lin(L.sh_up, xn_, u_, n, xq_);
+    swiglu_clamp(g_, u_, h_, n * n_ff_exp_, clamp_shexp_[(size_t) il], st_);
+    lin(L.sh_down, h_, fo_, n);
 
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
     stats_.route_wait_ms += ms_since(t0);
 
-    int ids[kMaxUsed];
-    float w[kMaxUsed];
-    route(L, ids, w);
-
     const float limit = clamp_exp_[(size_t) il];
-    CpuExpert host[kMaxUsed];
-    int n_host = 0;
-    for (int k = 0; k < n_used_; ++k) {
-        const size_t e = (size_t) ids[k];
-        ++use_[(size_t) il * n_expert_ + e];
-        if (const uint8_t* s = L.slot[e]) {
-            kernels::native_mmvq((int) L.gu_type, s, xq_, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
-            swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
-            kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
-            kernels::native_mmvq((int) L.d_type, s + 2 * L.gu_bytes, q8_, d_, n_ff_exp_, n_embd_, 1, st_);
-            axpy(d_, w[k], fo_, n_embd_, true, st_);
-        } else {
-            host[n_host++] = {L.exp_gate + e * L.gu_bytes, L.exp_up + e * L.gu_bytes, L.exp_down + e * L.d_bytes,
-                              w[k]};
-        }
-    }
-    stats_.gpu_experts += n_used_ - n_host;
-    stats_.cpu_experts += n_host;
-    if (n_host == 0) return;
+    const size_t xq_row = kernels::native_q8_1_bytes(n_embd_);
+    bool any_host = false;
+    for (int t = 0; t < n; ++t) {
+        int ids[kMaxUsed];
+        float w[kMaxUsed];
+        route(L, h_rl_ + (size_t) t * n_expert_, ids, w);
 
-    // The next layer's router wait is what makes h_cpu_ free to write again.
-    t0 = Clock::now();
-    cpu_experts(*workers_, host, n_host, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, h_x_, limit, h_cpu_);
-    stats_.cpu_ms += ms_since(t0);
-    ck(cudaMemcpyAsync(cpu_, h_cpu_, (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
+        CpuExpert host[kMaxUsed];
+        int n_host = 0;
+        const void* xq = (const uint8_t*) xq_ + (size_t) t * xq_row;
+        float* out = fo_ + (size_t) t * e_row;
+        for (int k = 0; k < n_used_; ++k) {
+            const size_t e = (size_t) ids[k];
+            ++use_[(size_t) il * n_expert_ + e];
+            if (const uint8_t* s = L.slot[e]) {
+                kernels::native_mmvq((int) L.gu_type, s, xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
+                swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
+                kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
+                kernels::native_mmvq((int) L.d_type, s + 2 * L.gu_bytes, q8_, d_, n_ff_exp_, n_embd_, 1, st_);
+                axpy(d_, w[k], out, n_embd_, true, st_);
+            } else {
+                host[n_host++] = {L.exp_gate + e * L.gu_bytes, L.exp_up + e * L.gu_bytes,
+                                  L.exp_down + e * L.d_bytes, w[k]};
+            }
+        }
+        stats_.gpu_experts += n_used_ - n_host;
+        stats_.cpu_experts += n_host;
+
+        // The next layer's router wait is what makes h_cpu_ free to write again.
+        float* cpu = h_cpu_ + (size_t) t * e_row;
+        if (n_host == 0) {
+            std::fill(cpu, cpu + e_row, 0.f);
+            continue;
+        }
+        any_host = true;
+        t0 = Clock::now();
+        cpu_experts(*workers_, host, n_host, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
+                    h_x_ + (size_t) t * e_row, limit, cpu);
+        stats_.cpu_ms += ms_since(t0);
+    }
+    if (!any_host) return;
+    ck(cudaMemcpyAsync(cpu_, h_cpu_, rows * e_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
        "host experts");
-    axpy(cpu_, 1.f, fo_, n_embd_, true, st_);
+    axpy(cpu_, 1.f, fo_, n * n_embd_, true, st_);
 }
 
-void Engine::eval(int32_t token, bool want_logits) {
-    if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
-    if (pos_ >= opt_.max_context)
+void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
+    if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
+    for (int t = 0; t < n; ++t)
+        if (tokens[t] < 0 || tokens[t] >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
+    if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
 
-    // h_r_ and h_cpu_ may still be the source of the previous token's copies
+    // h_r_ and h_cpu_ may still be the source of the previous call's copies
     ck(cudaStreamSynchronize(cs(st_)), "eval");
-    embed(token, h_r_);
-    for (int h = 1; h < kHc; ++h) std::memcpy(h_r_ + (size_t) h * n_embd_, h_r_, (size_t) n_embd_ * sizeof(float));
-    ck(cudaMemcpyAsync(r_, h_r_, kHc * (size_t) n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
+    const size_t e_row = (size_t) n_embd_, r_row = kHc * e_row;
+    for (int t = 0; t < n; ++t) {
+        float* r = h_r_ + (size_t) t * r_row;
+        embed(tokens[t], r);
+        for (int h = 1; h < kHc; ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
+    }
+    ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
 
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
-        hc_pre(r_, fp(L.hc_attn_fn), fp(L.hc_attn_scale), fp(L.hc_attn_base), mix_, hcw_, cur_, n_embd_, rms_eps_,
-               hc_eps_, sinkhorn_, st_);
-        rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, 1, rms_eps_, st_);
-        kernels::native_quantize_q8_1(xn_, xq_, n_embd_, 1, st_);
+        hc_pre(r_, fp(L.hc_attn_fn), fp(L.hc_attn_scale), fp(L.hc_attn_base), mix_, hcw_, cur_, n_embd_, n,
+               rms_eps_, hc_eps_, sinkhorn_, st_);
+        rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
+        kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
         dbg("attn_in", il, xn_, n_embd_);
-        if (L.dsa) dsa(L);
-        else kda(L);
+        if (L.dsa) dsa(L, n);
+        else kda(L, n);
         dbg("attn", il, ao_, n_embd_);
-        hc_post(ao_, hcw_, r_, n_embd_, st_);
+        hc_post(ao_, hcw_, r_, n_embd_, n, st_);
 
-        hc_pre(r_, fp(L.hc_ffn_fn), fp(L.hc_ffn_scale), fp(L.hc_ffn_base), mix_, hcw_, cur_, n_embd_, rms_eps_,
+        hc_pre(r_, fp(L.hc_ffn_fn), fp(L.hc_ffn_scale), fp(L.hc_ffn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
                hc_eps_, sinkhorn_, st_);
-        rms_norm(cur_, fp(L.ffn_norm), xn_, n_embd_, 1, rms_eps_, st_);
-        kernels::native_quantize_q8_1(xn_, xq_, n_embd_, 1, st_);
+        rms_norm(cur_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
+        kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
         dbg("ffn_in", il, xn_, n_embd_);
-        if (L.moe) moe(L, il);
-        else dense_ffn(L, il);
+        if (L.moe) moe(L, il, n);
+        else dense_ffn(L, il, n);
         dbg("ffn", il, fo_, n_embd_);
-        hc_post(fo_, hcw_, r_, n_embd_, st_);
+        hc_post(fo_, hcw_, r_, n_embd_, n, st_);
     }
 
     if (want_logits) {
-        hc_mean(r_, cur_, n_embd_, st_);
+        hc_mean(r_ + (size_t) (n - 1) * r_row, cur_, n_embd_, st_);
         rms_norm(cur_, fp(out_norm_), xn_, n_embd_, 1, rms_eps_, st_);
         dbg("out_norm", n_layer_, xn_, n_embd_);
-        lin(output_, xn_, logits_);
+        lin(output_, xn_, logits_, 1);
         ck(cudaMemcpyAsync(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
            "logits");
         ck(cudaStreamSynchronize(cs(st_)), "eval");
     }
-    ++pos_;
-    ++stats_.tokens;
+    pos_ += n;
+    stats_.tokens += n;
 }
 
 }  // namespace strata::glm

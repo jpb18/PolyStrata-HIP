@@ -213,20 +213,23 @@ struct Session {
         on_progress(r.resume, n, 0.0, true);
         if (s.seed != 0) rng.seed(s.seed);
 
+        // The checkpoint sits one token before the end, so coming back to it always leaves a token to read and
+        // the logits that come with it.  The tokens before it go in as many at a time as the engine takes.
         Clock::time_point t0 = Clock::now(), shown = t0;
-        for (int64_t i = r.resume; i < n; ++i) {
+        for (int64_t i = r.resume; i < n;) {
             if (stop.load()) {
                 r.finish = "cancel";
                 break;
             }
-            // The checkpoint sits one token before the end, so coming back to it always leaves a token to read
-            // and the logits that come with it.
-            if (i == n - 1) engine.checkpoint();
-            engine.eval(ids[(size_t) i], i == n - 1);
-            seq.push_back(ids[(size_t) i]);
-            ++r.read;
-            if (ms_since(shown) >= 500.0 || i == n - 1) {
-                on_progress(i + 1, n, ms_since(t0), false);
+            const bool last = i == n - 1;
+            const int64_t m = last ? 1 : std::min<int64_t>(n - 1 - i, engine.max_rows());
+            if (last) engine.checkpoint();
+            engine.eval(ids.data() + i, (int) m, last);
+            seq.insert(seq.end(), ids.begin() + i, ids.begin() + i + m);
+            i += m;
+            r.read += m;
+            if (ms_since(shown) >= 500.0 || last) {
+                on_progress(i, n, ms_since(t0), false);
                 shown = Clock::now();
             }
         }
@@ -249,7 +252,7 @@ struct Session {
                 break;
             }
             if (r.produced == max_new) break;
-            engine.eval(t, true);
+            engine.eval(&t, 1, true);
             seq.push_back(t);
         }
         r.decode_ms = ms_since(t0);

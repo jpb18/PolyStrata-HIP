@@ -1,4 +1,4 @@
-// src/glm/engine.hpp - GLM 5.3 Flash (llama.cpp architecture "glm5-next"), one token at a time.
+// src/glm/engine.hpp - GLM 5.3 Flash (llama.cpp architecture "glm5-next").
 //
 // The engine reads the GGUF in place.  Everything but the routed experts goes to VRAM; as many routed experts as
 // fit go there too, and the rest are computed on the CPU from the mapped file while the GPU does its share.
@@ -84,8 +84,11 @@ public:
 
     /// Forget the sequence.
     void reset();
-    /// Feed the token at position pos().  With want_logits, logits() then holds the scores of the token after it.
-    void eval(int32_t token, bool want_logits);
+    /// The most tokens one eval() takes.
+    int max_rows() const { return rows_; }
+    /// Feed n tokens from position pos().  With want_logits, logits() then holds the scores of the token after the
+    /// last one.
+    void eval(const int32_t* tokens, int n, bool want_logits);
     const float* logits() const { return h_logits_; }
 
     /// One saved point of the sequence to come back to.  The attention caches are indexed by position and only
@@ -103,18 +106,18 @@ public:
 private:
     enum Want { kF32, kFloatMat, kAnyMat };
     Dev upload(const std::string& name, int64_t n_in, int64_t n_out, Want want);
-    void lin(const Dev& w, const float* x, float* y, const void* xq = nullptr, int rows_per_x = 0);
+    void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void load_geometry();
     void load_layer(int il);
     void alloc_state();
     void assign_scratch();
     void fill_expert_cache();
-    void kda(Layer& L);
-    void dsa(Layer& L);
-    int dsa_select(Layer& L, int64_t n_pool, int n_top);
-    void dense_ffn(Layer& L, int il);
-    void moe(Layer& L, int il);
-    void route(const Layer& L, int* ids, float* w);
+    void kda(Layer& L, int n);
+    void dsa(Layer& L, int n);
+    void dsa_select(Layer& L, int first, int n);
+    void dense_ffn(Layer& L, int il, int n);
+    void moe(Layer& L, int il, int n);
+    void route(const Layer& L, const float* logits, int* ids, float* w);
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
@@ -134,6 +137,8 @@ private:
     int q_rank_ = 0, kv_rank_ = 0, mla_k_ = 0, mla_v_ = 0;
     int idx_heads_ = 0, idx_dim_ = 0, idx_top_k_ = 0, kpool_ = 0;
     int sinkhorn_ = 0;
+    int rows_ = 1;            ///< tokens the scratch is sized for
+    int score_stride_ = 0, sel_stride_ = 0;   ///< one token's indexer scores, and its selected cache rows
     int64_t gate_rank_ = 0;   ///< the widest low-rank gate projection of the KDA layers
     float hc_eps_ = 0, rms_eps_ = 0, norm_eps_ = 0, kda_lb_ = 0, w_scale_ = 1;
     bool w_norm_ = false;
@@ -174,7 +179,6 @@ private:
 
     int64_t pos_ = 0, ck_pos_ = -1;
     std::vector<float> probs_, pick_;
-    std::vector<int32_t> order_;
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     Stats stats_;
 };

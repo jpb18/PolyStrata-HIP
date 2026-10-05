@@ -69,6 +69,7 @@ void Workers::loop() {
 
 void Workers::run(int n, const std::function<void(int)>& fn) {
     if (n <= 0) return;
+    if (n == 1) return fn(0);   // nothing to share out
     Batch b;
     b.fn = &fn;
     b.n = n;
