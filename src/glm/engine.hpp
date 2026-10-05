@@ -160,17 +160,22 @@ public:
 
 protected:
     // ---- what an architecture supplies ----
-    /// The model's shape from its metadata, and whether it has a draft block (block_, draft_).
+    /// The model's shape from its metadata: load_shape() for what every architecture has, then its own.
     virtual void load_geometry() = 0;
-    /// A layer's weights, to VRAM (upload()) or as places in the mapped file (the routed experts).  load() runs
-    /// the layers through twice: begin_pass() is called before each.
+    /// A layer's weights, to VRAM (upload()) or as places in the mapped file (load_moe()).  load() runs the layers
+    /// through twice: begin_pass() is called before each.
     virtual void load_layer(int il) = 0;
     virtual void begin_pass() {}
     /// Throws when the draft block is not one the architecture runs.
     virtual void check_draft_block() {}
-    /// The sequence's state, the caches and every buffer, once the weights are known.
-    virtual void alloc_state() = 0;
+    /// The floats of every recurrent layer's state together.  They are state_'s first.
+    virtual size_t recurrent_floats() const = 0;
+    /// The layers' places in state_, and the attention's caches: a row a position.
+    virtual void alloc_caches() = 0;
+    /// The scratch of the architecture's own kernels, a fbuf() each.  Called twice: the first time only counts.
     virtual void assign_scratch() = 0;
+    /// The widest input lin() gets, beside the model's width and the FFNs'.
+    virtual int widest() const = 0;
     /// The copies of a token's embedding a layer's input starts from.
     virtual int streams() const = 0;
     /// A layer from its input to its router's copy (a layer without routed experts: to its end).
@@ -196,6 +201,13 @@ protected:
     const TensorInfo* tensor(int il, const char* name) const;
     const Shards& home(const TensorInfo& t) const;
     const MetaValue* meta_in(const Shards& g, const char* key) const;
+    /// A number of the model's shape, which its file must have.
+    int shape_i(const char* key) const;
+    float shape_f(const char* key) const;
+    void load_shape();
+    void load_moe(int il);
+    void alloc();
+    void shared_scratch();
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);
@@ -230,7 +242,8 @@ protected:
 
     // geometry
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
-    int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_moe_ = 0;
+    int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
+    int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
     float rms_eps_ = 0;
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
@@ -249,8 +262,8 @@ protected:
     size_t exp_at_ = 0;
     float* scratch_ = nullptr;
     size_t scratch_at_ = 0;
-    float* state_ = nullptr;     ///< every KDA layer's conv and delta-rule state; with a draft block, hn_'s first row
-    size_t state_n_ = 0, kda_n_ = 0;   ///< all of it, and the KDA layers' part
+    float* state_ = nullptr;     ///< every recurrent layer's state; with a draft block, hn_'s first row
+    size_t state_n_ = 0, rec_n_ = 0;   ///< all of it, and the recurrent layers' part
     // The draft block reads the model's output for the token before each of its tokens.  Row 0 is the output of
     // the last token of the sequence, and the outputs of the tokens of the call under way follow it.
     float* hn_ = nullptr;
@@ -258,7 +271,7 @@ protected:
     int32_t win_tok_[8] = {};           ///< the window's tokens, for keep()
     int64_t ahead_pos_ = -1;            ///< draft() has left the block's row of this position as its token leaves it,
     int32_t ahead_tok_ = 0;             ///< which is this one
-    float* snap_ = nullptr;      ///< window(): the KDA state after each token but the last, kda_n_ apart
+    float* snap_ = nullptr;      ///< window(): the recurrent state after each token but the last, rec_n_ apart
     int n_snap_ = 0;             ///< how many of those the eval under way leaves
     int win_ = 0;                ///< the tokens of the window that keep() has not settled yet
     float *wlogits_ = nullptr, *h_wlogits_ = nullptr;   ///< a window's logits, token after token: VRAM and pinned

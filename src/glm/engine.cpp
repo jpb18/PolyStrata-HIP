@@ -233,6 +233,106 @@ const MetaValue* Engine::meta_in(const Shards& g, const char* key) const {
     return nullptr;
 }
 
+int Engine::shape_i(const char* key) const {
+    const MetaValue* v = meta_in(*gg_, key);
+    if (!v) throw std::runtime_error("the GGUF has no " + gg_->get("general.architecture")->s + "." + key);
+    return (int) v->u;
+}
+
+float Engine::shape_f(const char* key) const {
+    const MetaValue* v = meta_in(*gg_, key);
+    if (!v) throw std::runtime_error("the GGUF has no " + gg_->get("general.architecture")->s + "." + key);
+    return (float) v->f;
+}
+
+// What every architecture's file says of the model: its layers, its width, its vocabulary and its experts.
+//
+// The block that guesses a second token after the model's own is one more block after the model's.  It is the
+// model's and not a file's: a file that leaves it out can take it from another file of the model (draft_model).
+// One converter gives the block a token table or an output matrix of its own, which this engine does not run.
+void Engine::load_shape() {
+    const MetaValue* nextn = meta_in(*gg_, "nextn_predict_layers");
+    n_layer_ = shape_i("block_count") - (nextn ? (int) nextn->u : 0);
+    if (opt_.draft && opt_.window > 1) {
+        const std::string probe = blk(n_layer_, "nextn.eh_proj.weight");
+        if (nextn && nextn->u == 1 && gg_->find(probe)) block_ = gg_.get();
+        else if (dg_ && dg_->find(probe)) block_ = dg_.get();
+        else if (dg_)
+            throw std::runtime_error(opt_.draft_model + " has no block that guesses ahead for this model: no tensor " +
+                                     probe);
+    }
+    draft_ = block_ && !tensor(n_layer_, "nextn.embed_tokens.weight") &&
+             !tensor(n_layer_, "nextn.shared_head_head.weight");
+    if (!draft_) block_ = nullptr;
+    n_embd_ = shape_i("embedding_length");
+    // a file without the key has as many tokens as its token table
+    const MetaValue* vocab = meta_in(*gg_, "vocab_size");
+    const TensorInfo* te = gg_->find("token_embd.weight");
+    n_vocab_ = vocab ? (int) vocab->u : te && te->shape.size() == 2 ? (int) te->shape[1] : 0;
+    rms_eps_ = shape_f("attention.layer_norm_rms_epsilon");
+    n_expert_ = shape_i("expert_count");
+    n_used_ = shape_i("expert_used_count");
+    n_ff_exp_ = shape_i("expert_feed_forward_length");
+    const MetaValue* shexp = meta_in(*gg_, "expert_shared_feed_forward_length");
+    n_ff_shexp_ = shexp ? (int) shexp->u : n_ff_exp_;
+
+    auto need = [](bool ok, const char* what) {
+        if (!ok) throw std::runtime_error(std::string("unsupported model: ") + what);
+    };
+    need(n_layer_ > 0 && n_embd_ > 0 && n_embd_ % 32 == 0 && n_vocab_ > 0, "bad block_count or embedding_length");
+    need(n_used_ >= 1 && n_used_ <= kMaxUsed && n_used_ <= n_expert_, "bad expert_used_count");
+
+    // a block from another file must be this model's: a pruned model's has fewer experts to choose among
+    if (block_ && block_ != gg_.get()) {
+        const TensorInfo* gate = tensor(n_layer_, "ffn_gate_inp.weight");
+        if (!gate || gate->shape.size() != 2 || (int64_t) gate->shape[0] != n_embd_ ||
+            (int64_t) gate->shape[1] != n_expert_)
+            throw std::runtime_error(opt_.draft_model + " is not a file of this model: its block's router is " +
+                                     (gate ? shape_of(*gate) : std::string("missing")) + ", the model's layers have [" +
+                                     std::to_string(n_embd_) + ", " + std::to_string(n_expert_) + "]");
+    }
+}
+
+// A MoE layer: its router and shared expert to VRAM, and its routed experts' places in the file, where they
+// stay; fill_expert_cache() copies the ones VRAM has room for.
+void Engine::load_moe(int il) {
+    Layer& L = layers_[(size_t) il];
+    auto mat = [&](const char* n, int64_t a, int64_t b) { return upload(tensor(il, n), blk(il, n), a, b, kAnyMat); };
+    L.moe = true;
+    L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, n_expert_);
+    L.sh_gate = mat("ffn_gate_shexp.weight", n_embd_, n_ff_shexp_);
+    L.sh_up = mat("ffn_up_shexp.weight", n_embd_, n_ff_shexp_);
+    L.sh_down = mat("ffn_down_shexp.weight", n_ff_shexp_, n_embd_);
+
+    auto exps = [&](const char* n, int64_t n_in, int64_t rows) -> const TensorInfo& {
+        const TensorInfo* t = tensor(il, n);
+        if (!t) throw std::runtime_error("the GGUF has no tensor " + blk(il, n));
+        if (t->shape.size() != 3 || (int64_t) t->shape[0] != n_in || (int64_t) t->shape[1] != rows ||
+            (int64_t) t->shape[2] != n_expert_)
+            throw std::runtime_error(t->name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
+                                     std::to_string(rows) + ", " + std::to_string(n_expert_) + "]");
+        return *t;
+    };
+    const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
+    const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
+    const TensorInfo& td = exps("ffn_down_exps.weight", n_ff_exp_, n_embd_);
+    if (tg.type != tu.type)
+        throw std::runtime_error(tg.name + " and " + tu.name + " have different types, which this engine does not run");
+    L.gu_type = tg.type;
+    L.d_type = td.type;
+    L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
+    L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
+    home(tu).payload(tu);
+    L.exp_gate = home(tg).data(tg);
+    L.exp_up = home(tu).data(tu);
+    L.exp_down = home(td).data(td);
+    std::string err;
+    if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
+        throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
+    L.slot.assign((size_t) n_expert_, nullptr);
+    ++n_moe_;
+}
+
 // The engine for a model file: its general.architecture says which.
 std::unique_ptr<Engine> Engine::open(const Options& o) {
     const Shards file(o.model);
@@ -537,7 +637,7 @@ void Engine::load(const Options& o) {
         }
     }
 
-    alloc_state();
+    alloc();
     if (!opt_.profile.empty()) read_profile(opt_.profile, (int) layers_.size(), n_expert_, prior_);
     fill_expert_cache();
     const int threads = opt_.threads > 0 ? opt_.threads : usable_cpus();
@@ -569,6 +669,110 @@ void Engine::load(const Options& o) {
         follower_ = std::thread([this] { follow_loop(); });
     }
     reset();
+}
+
+// Per-token buffers hold rows_ tokens, row after row.
+void Engine::shared_scratch() {
+    const size_t n = (size_t) rows_, e = n * n_embd_;
+    const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
+    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * e);   // the draft block works in it too (draft_input())
+    cur_ = fbuf(e);
+    xn_ = fbuf(e);
+    ao_ = fbuf(e);
+    fo_ = fbuf(e);
+    g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
+    u_ = fbuf(ff);
+    h_ = fbuf(ff);
+    d_ = fbuf((size_t) n_embd_);   // one routed expert of one token
+    cpu_ = fbuf(e);
+    rl_ = fbuf(n * n_expert_);
+    logits_ = fbuf((size_t) n_vocab_);
+    if (mmq_) {
+        const size_t rr = n * n_used_;
+        gu_ = fbuf(rr * 2 * n_ff_exp_);
+        hx_ = fbuf(rr * n_ff_exp_);
+        dx_ = fbuf(rr * n_embd_);
+    }
+}
+
+// The sequence's state, the caches and every buffer, once the weights are known.
+void Engine::alloc() {
+    // --dump-layers prints one token's stages
+    rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
+    rec_n_ = recurrent_floats();
+    state_n_ = rec_n_ + (draft_ ? (size_t) n_embd_ : 0);
+    state_ = (float*) dmalloc((state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0)) * sizeof(float),
+                              "the recurrent state");
+    if (draft_) {
+        hn_ = state_ + rec_n_;
+        h_dlogits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
+    }
+    // window(): the state after each of its tokens but the last, for keep(), and every token's logits
+    if (opt_.window > 1)
+        snap_ = (float*) dmalloc(size_t(opt_.window - 1) * rec_n_ * sizeof(float), "the recurrent state");
+    wlogits_ = (float*) dmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "scratch");
+    h_wlogits_ = (float*) hmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "pinned memory");
+    alloc_caches();
+
+    // A prompt batch runs its routed experts through MMQ when the card has a tile for each of their types.
+    // The model's layers: the draft block's experts never run a batch at a time.
+    const size_t n = (size_t) rows_;
+    bool tiles = opt_.gpu_experts && rows_ >= kStageRows && n_moe_ > 0;
+    size_t one_expert = 0;
+    for (int il = 0; il < n_layer_; ++il) {
+        const Layer& L = layers_[(size_t) il];
+        if (!L.moe) continue;
+        tiles = tiles && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
+                Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
+        one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
+    }
+    if (tiles) mmq_ = std::make_unique<Mmq>();
+
+    shared_scratch();   // the first pass only counts
+    assign_scratch();
+    scratch_ = (float*) dmalloc(scratch_at_ * sizeof(float), "scratch");
+    scratch_at_ = 0;
+    shared_scratch();
+    assign_scratch();
+
+    const int q_max = std::max({n_embd_, n_ff_, n_ff_exp_, n_ff_shexp_, widest(), 256});
+    xq_ = dmalloc(n * kernels::native_q8_1_bytes(n_embd_), "scratch");
+    q8_ = dmalloc(n * kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
+
+    h_r_ = (float*) hmalloc(n * streams() * n_embd_ * sizeof(float), "pinned memory");
+    h_rl_ = (float*) hmalloc(n * n_expert_ * sizeof(float), "pinned memory");
+    h_x_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
+    h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
+    h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
+
+    if (mmq_) {
+        const size_t rr = n * n_used_, tab = (3 * rr + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t);
+        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
+        mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
+        mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
+        tab_ = (int32_t*) dmalloc(tab, "scratch");
+        h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
+        iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
+        std::vector<int32_t> ramp(rr);
+        std::iota(ramp.begin(), ramp.end(), 0);
+        ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
+
+        stage_bytes_ = std::max((size_t) opt_.stage_mib << 20, one_expert);
+        chunk_bytes_ = std::max(kChunkBytes, one_expert);
+        stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256, "the expert staging buffer");
+        for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
+        for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
+            cudaEvent_t ev = nullptr;
+            ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+            *e = ev;
+        }
+        cudaStream_t up = nullptr;
+        ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
+        up_ = up;
+        ids_.resize(rr);
+        first_.resize((size_t) n_expert_);
+    }
+    use_.assign(layers_.size() * n_expert_, 0);
 }
 
 void Engine::save_profile() const {
@@ -1009,7 +1213,7 @@ void Engine::window(const int32_t* tokens, int t) {
 void Engine::keep(int n) {
     if (n < 1 || n > win_) throw std::logic_error("keep takes 1 to the window's tokens");
     if (n < win_)
-        ck(cudaMemcpyAsync(state_, snap_ + size_t(n - 1) * kda_n_, kda_n_ * sizeof(float), cudaMemcpyDeviceToDevice,
+        ck(cudaMemcpyAsync(state_, snap_ + size_t(n - 1) * rec_n_, rec_n_ * sizeof(float), cudaMemcpyDeviceToDevice,
                            cs(st_)),
            "keep");
     if (draft_) draft_rows(win_tok_, ahead_pos_ == pos_ && win_tok_[0] == ahead_tok_ ? 1 : 0, n);

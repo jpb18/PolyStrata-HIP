@@ -21,8 +21,10 @@ protected:
     void load_layer(int il) override;
     void begin_pass() override;
     void check_draft_block() override;
-    void alloc_state() override;
+    size_t recurrent_floats() const override;
+    void alloc_caches() override;
     void assign_scratch() override;
+    int widest() const override;
     int streams() const override;
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
@@ -62,7 +64,7 @@ private:
 
     std::vector<Block> blocks_;   ///< one a layer of layers_
 
-    int n_head_ = 0, kda_dim_ = 0, d_inner_ = 0, n_ff_dense_ = 0, n_kda_ = 0, n_dsa_ = 0;
+    int n_head_ = 0, kda_dim_ = 0, d_inner_ = 0, n_kda_ = 0, n_dsa_ = 0;
     int q_rank_ = 0, kv_rank_ = 0, mla_k_ = 0, mla_v_ = 0;
     int idx_heads_ = 0, idx_dim_ = 0, idx_top_k_ = 0, kpool_ = 0;
     int sinkhorn_ = 0;

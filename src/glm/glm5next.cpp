@@ -92,92 +92,46 @@ void Glm5Next::output_rows(int first, int rows, float* h) {
 }
 
 void Glm5Next::load_geometry() {
-    const Shards& g = *gg_;
-    const MetaValue* arch = g.get("general.architecture");
-    // Unsloth's converter writes the name without its hyphen
-    if (!arch || (arch->s != "glm5-next" && arch->s != "glm5next"))
-        throw std::runtime_error("general.architecture is '" + (arch ? arch->s : std::string()) +
-                                 "', this engine runs 'glm5-next'");
-    const std::string pre = arch->s + ".";
-    auto find = [&](const char* key) { return meta_in(g, key); };
-    auto meta = [&](const char* key) -> const MetaValue& {
-        const MetaValue* v = find(key);
-        if (!v) throw std::runtime_error("the GGUF has no " + pre + key);
-        return *v;
-    };
-    auto meta_i = [&](const char* key) { return (int) meta(key).u; };
-    auto meta_f = [&](const char* key) { return (float) meta(key).f; };
+    load_shape();
+    auto find = [&](const char* key) { return meta_in(*gg_, key); };
 
-    // The block that guesses a second token after the model's own is one more block after the model's.  It is the
-    // model's and not a file's: a file that leaves it out can take it from another file of the model (draft_model).
-    // One converter gives the block a token table or an output matrix of its own, which this engine does not run.
-    const MetaValue* nextn = find("nextn_predict_layers");
-    n_layer_ = meta_i("block_count") - (nextn ? (int) nextn->u : 0);
-    if (opt_.draft && opt_.window > 1) {
-        const std::string probe = blk(n_layer_, "nextn.eh_proj.weight");
-        if (nextn && nextn->u == 1 && gg_->find(probe)) block_ = gg_.get();
-        else if (dg_ && dg_->find(probe)) block_ = dg_.get();
-        else if (dg_)
-            throw std::runtime_error(opt_.draft_model + " has no block that guesses ahead for this model: no tensor " +
-                                     probe);
-    }
-    draft_ = block_ && !tensor(n_layer_, "nextn.embed_tokens.weight") &&
-             !tensor(n_layer_, "nextn.shared_head_head.weight");
-    if (!draft_) block_ = nullptr;
-    n_embd_ = meta_i("embedding_length");
-    n_ff_dense_ = meta_i("feed_forward_length");
-    n_head_ = meta_i("attention.head_count");
-    n_vocab_ = meta_i("vocab_size");
-    rms_eps_ = meta_f("attention.layer_norm_rms_epsilon");
+    n_ff_ = shape_i("feed_forward_length");
+    n_head_ = shape_i("attention.head_count");
     // the indexer's LayerNorm; a converter that leaves the key out means the model's own 1e-6
     const MetaValue* norm_eps = find("attention.layer_norm_epsilon");
     norm_eps_ = norm_eps ? (float) norm_eps->f : 1e-6f;
-    n_expert_ = meta_i("expert_count");
-    n_used_ = meta_i("expert_used_count");
-    n_ff_exp_ = meta_i("expert_feed_forward_length");
-    w_scale_ = meta_f("expert_weights_scale");
-    w_norm_ = meta("expert_weights_norm").u != 0;
-    kda_dim_ = meta_i("kda.head_dim");
-    kda_lb_ = meta_f("kda.gate_lower_bound");
-    q_rank_ = meta_i("attention.q_lora_rank");
-    kv_rank_ = meta_i("attention.kv_lora_rank");
-    mla_k_ = meta_i("attention.key_length_mla");
-    mla_v_ = meta_i("attention.value_length_mla");
-    idx_heads_ = meta_i("attention.indexer.head_count");
-    idx_dim_ = meta_i("attention.indexer.key_length");
-    idx_top_k_ = meta_i("attention.indexer.top_k");
+    w_scale_ = shape_f("expert_weights_scale");
+    w_norm_ = shape_i("expert_weights_norm") != 0;
+    kda_dim_ = shape_i("kda.head_dim");
+    kda_lb_ = shape_f("kda.gate_lower_bound");
+    q_rank_ = shape_i("attention.q_lora_rank");
+    kv_rank_ = shape_i("attention.kv_lora_rank");
+    mla_k_ = shape_i("attention.key_length_mla");
+    mla_v_ = shape_i("attention.value_length_mla");
+    idx_heads_ = shape_i("attention.indexer.head_count");
+    idx_dim_ = shape_i("attention.indexer.key_length");
+    idx_top_k_ = shape_i("attention.indexer.top_k");
     // tokens to a pool: a key, or else the second axis of a layer's pooling table
     if (const MetaValue* kpool = find("attention.indexer.kpool")) kpool_ = (int) kpool->u;
     for (int il = 0; il < n_layer_ && kpool_ == 0; ++il)
         if (const TensorInfo* ape = tensor(il, "indexer_compressor_ape.weight"))
             kpool_ = ape->shape.size() == 2 ? (int) ape->shape[1] : 0;
-    sinkhorn_ = meta_i("hyper_connection.sinkhorn_iterations");
-    hc_eps_ = meta_f("hyper_connection.epsilon");
+    sinkhorn_ = shape_i("hyper_connection.sinkhorn_iterations");
+    hc_eps_ = shape_f("hyper_connection.epsilon");
     d_inner_ = n_head_ * kda_dim_;
 
     auto need = [](bool ok, const char* what) {
         if (!ok) throw std::runtime_error(std::string("unsupported model: ") + what);
     };
-    need(meta_i("hyper_connection.count") == kHc, "hyper_connection.count is not 4");
-    need(meta_i("ssm.conv_kernel") == kConv, "ssm.conv_kernel is not 4");
+    need(shape_i("hyper_connection.count") == kHc, "hyper_connection.count is not 4");
+    need(shape_i("ssm.conv_kernel") == kConv, "ssm.conv_kernel is not 4");
     const MetaValue* gating = find("expert_gating_func");   // left out by one converter: the model's sigmoid
     need(!gating || gating->u == 2, "the expert gate is not a sigmoid");
-    need(meta_i("expert_shared_count") == 1, "expert_shared_count is not 1");
-    need(n_layer_ > 0 && n_embd_ > 0 && n_embd_ % 32 == 0 && n_vocab_ > 0, "bad block_count or embedding_length");
+    need(shape_i("expert_shared_count") == 1, "expert_shared_count is not 1");
     need(kda_dim_ > 0 && kda_dim_ % 32 == 0 && kda_dim_ <= 256, "kda.head_dim is not a multiple of 32 up to 256");
     need(idx_dim_ > 0 && idx_dim_ <= 256, "the indexer key is longer than 256");
-    need(n_used_ >= 1 && n_used_ <= kMaxUsed && n_used_ <= n_expert_, "bad expert_used_count");
     need(kpool_ > 1 && idx_top_k_ > 0 && idx_top_k_ % kpool_ == 0, "indexer.top_k is not whole pools");
 
-    // a block from another file must be this model's: a pruned model's has fewer experts to choose among
-    if (block_ && block_ != gg_.get()) {
-        const TensorInfo* gate = tensor(n_layer_, "ffn_gate_inp.weight");
-        if (!gate || gate->shape.size() != 2 || (int64_t) gate->shape[0] != n_embd_ ||
-            (int64_t) gate->shape[1] != n_expert_)
-            throw std::runtime_error(opt_.draft_model + " is not a file of this model: its block's router is " +
-                                     (gate ? shape_of(*gate) : std::string("missing")) + ", the model's layers have [" +
-                                     std::to_string(n_embd_) + ", " + std::to_string(n_expert_) + "]");
-    }
     clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_layer_);
     clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_layer_) : clamp_exp_;
     if (draft_) {   // the draft block's limits are in the file the block is in: the model's own may end before it
@@ -264,18 +218,13 @@ void Glm5Next::load_layer(int il) {
         ++n_kda_;
     }
 
-    L.moe = has("ffn_gate_inp.weight");
-    if (!L.moe) {
-        B.ffn_gate = mat("ffn_gate.weight", n_embd_, n_ff_dense_);
-        B.ffn_up = mat("ffn_up.weight", n_embd_, n_ff_dense_);
-        B.ffn_down = mat("ffn_down.weight", n_ff_dense_, n_embd_);
+    if (!has("ffn_gate_inp.weight")) {
+        B.ffn_gate = mat("ffn_gate.weight", n_embd_, n_ff_);
+        B.ffn_up = mat("ffn_up.weight", n_embd_, n_ff_);
+        B.ffn_down = mat("ffn_down.weight", n_ff_, n_embd_);
         return;
     }
-    L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, n_expert_);
-    L.sh_gate = mat("ffn_gate_shexp.weight", n_embd_, n_ff_exp_);
-    L.sh_up = mat("ffn_up_shexp.weight", n_embd_, n_ff_exp_);
-    L.sh_down = mat("ffn_down_shexp.weight", n_ff_exp_, n_embd_);
-
+    load_moe(il);
     B.probs_b.assign((size_t) n_expert_, 0.f);
     if (const TensorInfo* b = tensor(il, "exp_probs_b.bias")) {
         if (b->type != kTypeF32 || (int64_t) b->elements() != n_expert_)
@@ -284,46 +233,11 @@ void Glm5Next::load_layer(int il) {
         home(*b).payload(*b);
         std::memcpy(B.probs_b.data(), home(*b).data(*b), (size_t) n_expert_ * sizeof(float));
     }
-
-    // the routed experts stay in the file; fill_expert_cache() copies the ones VRAM has room for
-    auto exps = [&](const char* n, int64_t n_in, int64_t rows) -> const TensorInfo& {
-        const TensorInfo* t = tensor(il, n);
-        if (!t) throw std::runtime_error("the GGUF has no tensor " + blk(il, n));
-        if (t->shape.size() != 3 || (int64_t) t->shape[0] != n_in || (int64_t) t->shape[1] != rows ||
-            (int64_t) t->shape[2] != n_expert_)
-            throw std::runtime_error(t->name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
-                                     std::to_string(rows) + ", " + std::to_string(n_expert_) + "]");
-        return *t;
-    };
-    const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
-    const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
-    const TensorInfo& td = exps("ffn_down_exps.weight", n_ff_exp_, n_embd_);
-    if (tg.type != tu.type)
-        throw std::runtime_error(tg.name + " and " + tu.name + " have different types, which this engine does not run");
-    L.gu_type = tg.type;
-    L.d_type = td.type;
-    L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
-    L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
-    home(tu).payload(tu);
-    L.exp_gate = home(tg).data(tg);
-    L.exp_up = home(tu).data(tu);
-    L.exp_down = home(td).data(td);
-    std::string err;
-    if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
-        throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
-    L.slot.assign((size_t) n_expert_, nullptr);
-    ++n_moe_;
 }
 
 // Per-token buffers hold rows_ tokens, row after row.
 void Glm5Next::assign_scratch() {
-    const size_t n = (size_t) rows_, e = n * n_embd_, d = n * d_inner_;
-    const size_t ff = n * std::max(n_ff_dense_, 2 * n_ff_exp_);
-    r_ = fbuf(kHc * e);
-    cur_ = fbuf(e);
-    xn_ = fbuf(e);
-    ao_ = fbuf(e);
-    fo_ = fbuf(e);
+    const size_t n = (size_t) rows_, d = n * d_inner_;
     mix_ = fbuf(n * (kHc * (2 + kHc) + 1));
     hcw_ = fbuf(n * (kHc + kHc * kHc));
 
@@ -353,41 +267,19 @@ void Glm5Next::assign_scratch() {
     const size_t keys = (size_t) std::min(opt_.max_context, idx_top_k_ + kpool_ - 1);
     akeys_ = fbuf(std::min(n, (size_t) kAttnRows) * keys * kv_rank_);
     ascore_ = fbuf(std::min(n, (size_t) kAttnRows) * keys * n_head_);
-
-    g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
-    u_ = fbuf(ff);
-    h_ = fbuf(ff);
-    d_ = fbuf((size_t) n_embd_);   // one routed expert of one token
-    cpu_ = fbuf(e);
-    rl_ = fbuf(n * n_expert_);
-    logits_ = fbuf((size_t) n_vocab_);
-
-    if (mmq_) {
-        const size_t rr = n * n_used_;
-        gu_ = fbuf(rr * 2 * n_ff_exp_);
-        hx_ = fbuf(rr * n_ff_exp_);
-        dx_ = fbuf(rr * n_embd_);
-    }
 }
 
-void Glm5Next::alloc_state() {
-    // --dump-layers prints one token's stages
-    rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
-    const size_t conv_n = size_t(3) * d_inner_ * (kConv - 1), s_n = size_t(n_head_) * kda_dim_ * kda_dim_;
-    kda_n_ = size_t(n_kda_) * (conv_n + s_n);
-    state_n_ = kda_n_ + (draft_ ? (size_t) n_embd_ : 0);
-    state_ = (float*) dmalloc((state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0)) * sizeof(float),
-                              "the recurrent state");
-    if (draft_) {
-        hn_ = state_ + kda_n_;
-        h_dlogits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
-    }
-    // window(): the state after each of its tokens but the last, for keep(), and every token's logits
-    if (opt_.window > 1)
-        snap_ = (float*) dmalloc(size_t(opt_.window - 1) * kda_n_ * sizeof(float), "the recurrent state");
-    wlogits_ = (float*) dmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "scratch");
-    h_wlogits_ = (float*) hmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "pinned memory");
+size_t Glm5Next::recurrent_floats() const {
+    return size_t(n_kda_) * (size_t(3) * d_inner_ * (kConv - 1) + size_t(n_head_) * kda_dim_ * kda_dim_);
+}
 
+int Glm5Next::widest() const {
+    return std::max({d_inner_, n_head_ * mla_v_, n_head_ * mla_k_, q_rank_, kv_rank_, (int) gate_rank_});
+}
+
+// The sparse layers' caches, and each recurrent layer's convolution and delta-rule state in state_.
+void Glm5Next::alloc_caches() {
+    const size_t conv_n = size_t(3) * d_inner_ * (kConv - 1), s_n = size_t(n_head_) * kda_dim_ * kda_dim_;
     const size_t ctx = (size_t) opt_.max_context, lat_n = ctx * kv_rank_, idx_n = ctx * 3 * idx_dim_;
     uint16_t* lat = (uint16_t*) dmalloc(n_dsa_ * lat_n * sizeof(uint16_t), "the attention cache");
     float* idx = (float*) dmalloc(n_dsa_ * idx_n * sizeof(float), "the indexer cache");
@@ -409,70 +301,11 @@ void Glm5Next::alloc_state() {
     score_stride_ = opt_.max_context / kpool_ + 1;
     sel_stride_ = idx_top_k_ + kpool_;
     const size_t n = (size_t) rows_;
-
-    // A prompt batch runs its routed experts through MMQ when the card has a tile for each of their types.
-    // The model's layers: the draft block's experts never run a batch at a time.
-    bool tiles = opt_.gpu_experts && rows_ >= kStageRows && n_moe_ > 0;
-    size_t one_expert = 0;
-    for (int il = 0; il < n_layer_; ++il) {
-        const Layer& L = layers_[(size_t) il];
-        if (!L.moe) continue;
-        tiles = tiles && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
-                Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
-        one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
-    }
-    if (tiles) mmq_ = std::make_unique<Mmq>();
-
-    assign_scratch();   // the first pass only counts
-    scratch_ = (float*) dmalloc(scratch_at_ * sizeof(float), "scratch");
-    scratch_at_ = 0;
-    assign_scratch();
-
-    const int q_max = std::max({n_embd_, d_inner_, n_head_ * mla_v_, n_head_ * mla_k_, q_rank_, kv_rank_,
-                                n_ff_dense_, n_ff_exp_, (int) gate_rank_, 256});
-    xq_ = dmalloc(n * kernels::native_q8_1_bytes(n_embd_), "scratch");
-    q8_ = dmalloc(n * kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
     sel_ = (int32_t*) dmalloc(n * sel_stride_ * sizeof(int32_t), "scratch");
-
-    h_r_ = (float*) hmalloc(n * kHc * n_embd_ * sizeof(float), "pinned memory");
-    h_rl_ = (float*) hmalloc(n * n_expert_ * sizeof(float), "pinned memory");
-    h_x_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
-    h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
-    h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
     h_score_ = (float*) hmalloc(n * score_stride_ * sizeof(float), "pinned memory");
     h_sel_ = (int32_t*) hmalloc(n * sel_stride_ * sizeof(int32_t), "pinned memory");
-
-    if (mmq_) {
-        const size_t rr = n * n_used_, tab = (3 * rr + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t);
-        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
-        mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
-        mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
-        tab_ = (int32_t*) dmalloc(tab, "scratch");
-        h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
-        iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
-        std::vector<int32_t> ramp(rr);
-        std::iota(ramp.begin(), ramp.end(), 0);
-        ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
-
-        stage_bytes_ = std::max((size_t) opt_.stage_mib << 20, one_expert);
-        chunk_bytes_ = std::max(kChunkBytes, one_expert);
-        stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256, "the expert staging buffer");
-        for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
-        for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
-            cudaEvent_t ev = nullptr;
-            ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
-            *e = ev;
-        }
-        cudaStream_t up = nullptr;
-        ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
-        up_ = up;
-        ids_.resize(rr);
-        first_.resize((size_t) n_expert_);
-    }
-
     probs_.resize((size_t) n_expert_);
     pick_.resize((size_t) n_expert_);
-    use_.assign(layers_.size() * n_expert_, 0);
 }
 
 size_t Glm5Next::row_bytes() const {
@@ -515,7 +348,7 @@ void Glm5Next::kda(Block& B, int n) {
     lin(B.wk, xn_, proj_ + d, n, xq_);
     lin(B.wv, xn_, proj_ + 2 * d, n, xq_);
     kda_conv(proj_, B.conv, fp(B.conv_q), fp(B.conv_k), fp(B.conv_v), qkv_, d_inner_, n, st_,
-             n_snap_ > 0 ? snap_ + (B.conv - state_) : nullptr, kda_n_, n_snap_);
+             n_snap_ > 0 ? snap_ + (B.conv - state_) : nullptr, rec_n_, n_snap_);
 
     lin(B.f_a, xn_, fa_, n, xq_);
     lin(B.f_b, fa_, g1_, n);
@@ -524,7 +357,7 @@ void Glm5Next::kda(Block& B, int n) {
     lin(B.g_a, xn_, ga_, n, xq_);
     lin(B.g_b, ga_, g2_, n);
     kda_step(qkv_, g1_, fp(B.a), beta_, B.s, g2_, fp(B.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
-             st_, n_snap_ > 0 ? snap_ + (B.s - state_) : nullptr, kda_n_, n_snap_);
+             st_, n_snap_ > 0 ? snap_ + (B.s - state_) : nullptr, rec_n_, n_snap_);
     lin(B.wo, gated_, ao_, n);
 }
 
@@ -600,7 +433,7 @@ void Glm5Next::dsa(Block& B, int64_t pos, int n) {
 void Glm5Next::dense_ffn(Block& B, int il, int n) {
     lin(B.ffn_gate, xn_, g_, n, xq_);
     lin(B.ffn_up, xn_, u_, n, xq_);
-    swiglu_clamp(g_, u_, h_, n * n_ff_dense_, clamp_shexp_[(size_t) il], st_);
+    swiglu_clamp(g_, u_, h_, n * n_ff_, clamp_shexp_[(size_t) il], st_);
     lin(B.ffn_down, h_, fo_, n);
 }
 
