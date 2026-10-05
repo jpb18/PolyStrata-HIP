@@ -3783,5 +3783,33 @@ class VisionArgs(unittest.TestCase):
                          ["--max-tokens", "1024", "--min-tokens", "768"])
 
 
+class VisionShutdown(unittest.TestCase):
+    """#914: ending the server removes the encoder's scratch directory; unloading keeps it."""
+
+    def test_shutdown_removes_the_work_dir_but_close_keeps_it(self):
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t) / "strata-vision-x"
+            d.mkdir()
+            (d / "k.sve").write_bytes(b"x")
+            v = server.Vision.__new__(server.Vision)
+            v.dir = d
+
+            class Proc:
+                stdin = io.StringIO()
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            v.proc = Proc()
+            v.close()
+            self.assertTrue((d / "k.sve").exists())
+            v.shutdown()
+            self.assertFalse(d.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

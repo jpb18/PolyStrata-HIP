@@ -1722,6 +1722,12 @@ class Vision:
         except Exception:
             self.proc.kill()
 
+    def shutdown(self):
+        """#914: close() for good: the server ends, so the encoder's directory (one ~10 MB .sve per image, on a tmpfs
+        /tmp that is RAM) goes with it instead of piling up with every start.  unload() keeps it for the restart."""
+        self.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
 
 def gpu_list(cfg: dict) -> list[int]:
     """The config's "gpu": one card (2), or several for a layer split ([0, 2] or "0,2"), numbered as nvidia-smi
@@ -4942,7 +4948,7 @@ def main() -> int:
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
     except KeyboardInterrupt:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
-        closers = [httpd.shutdown, getattr(engine, "close", None), vision.close if vision else None,
+        closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
                    hub.close if hub is not None else None]
         for close in filter(None, closers):
             try:
