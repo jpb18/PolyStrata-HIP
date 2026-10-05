@@ -145,6 +145,11 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   (copy back, copy in, move into RAM) instead of one window waiting for the whole round. Not with `--batch` or
   `--peer-device` (the blocking tier runs there). It is not bit-exact from run to run: which window first computes a
   swapped-in expert on the GPU (which rounds differently from the CPU) depends on when its copy lands.
+  It stays on the blocking tier (said in the log) when the exchange buffers are not page-locked, and with
+  `--pipeline-windows`; the stats line reports ms per round.
+- `STRATA_EXCHANGE_ROTATE=1` (opt-in): an adaptive swap hands buffer ownership over instead of copying the evicted
+  blob into the RAM copy (equal-size blobs, fully page-locked copy). Same tokens, fewer host copies; it works with
+  `--adapt-async 1` too. Details and the measurement: [EXCHANGE_ROTATION.md](EXCHANGE_ROTATION.md).
 - The answers are the plain mapped mode's for the same expert placement: the bytes are the file's. With a page-locked
   copy the GPU also takes its usual share of the misses over PCIe (`--pcie-frac`), as with enough RAM; `--pcie-frac 0`
   (or `STRATA_RESIDENT_PIN=0`) gives the mapped mode's exact tokens.
