@@ -419,6 +419,11 @@ void usage() {
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default 1024)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, updated on exit\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
+                 "  --prompt-batch N       prompt tokens read at a time (default 512); about 1 MiB of VRAM each\n"
+                 "  --stage-mib N          VRAM the experts outside the cache pass through in a prompt batch (default\n"
+                 "                         2048); with less, more of them are copied after the layer has routed\n"
+                 "  --stage-ahead N        from N tokens, a batch copies those experts before it routes (default 256,\n"
+                 "                         0 = never)\n"
                  "  --eos-ids ID,ID,...    tokens that end a reply (default: the GGUF's eos, eot and eom)\n"
                  "  --temperature F --top-k N --top-p F --min-p F --seed N   sampling for --tokens (default greedy)\n"
                  "  --dump-layers          print a checksum of every layer's stages to stderr\n"
@@ -450,6 +455,9 @@ int main(int argc, char** argv) {
         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
+        else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
+        else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
+        else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--top-probs") top_probs = std::atoi(val());
         else if (a == "--max-new") max_new = std::atoll(val());

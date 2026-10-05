@@ -25,6 +25,13 @@ struct Options {
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
     bool gpu_experts = true;
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
+    // A prompt batch.  More tokens a call and a larger staging buffer read a prompt faster, and both take VRAM
+    // that the expert cache, and so decoding, does without.
+    int prompt_batch = 512;       ///< prompt tokens one eval() takes; the scratch is about 1 MiB of VRAM a token
+    int stage_mib = 2048;         ///< the buffer the experts that are not cached pass through: by default about
+                                  ///< what a layer of Q2_K experts leaves out of the cache
+    int stage_ahead = 256;        ///< from this many tokens, a call routes to most of a layer's experts, and the
+                                  ///< ones that are not cached start their copy before the layer has routed; 0: never
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.

@@ -28,16 +28,10 @@ namespace {
 constexpr uint32_t kTypeF32 = 0, kTypeQ8_0 = 8, kTypeBF16 = 30;
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
 constexpr int kMaxUsed = 32;
-constexpr int kRows = 512;          // prompt tokens one eval() takes; the scratch is about 1 MiB of VRAM a token
 constexpr int kAttnRows = 32;       // tokens one pass of the sparse attention takes; their keys are 4 MiB a token
 // From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
 constexpr int kStageRows = 32;
-// From this many tokens, a call routes to most of a layer's experts, and the ones that are not cached start their
-// copy before the layer has routed.  The staging buffer holds about what a layer of Q2_K experts leaves out of
-// the cache; the VRAM it takes is cache that decoding does without.
-constexpr int kAheadRows = 256;
-constexpr size_t kStageBytes = size_t(2) << 30;
 constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 
@@ -441,7 +435,7 @@ void Engine::alloc_state() {
     }
 
     // --dump-layers prints one token's stages
-    rows_ = opt_.dump ? 1 : std::min(kRows, opt_.max_context);
+    rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
     score_stride_ = opt_.max_context / kpool_ + 1;
     sel_stride_ = idx_top_k_ + kpool_;
     const size_t n = (size_t) rows_;
@@ -487,7 +481,7 @@ void Engine::alloc_state() {
         std::iota(ramp.begin(), ramp.end(), 0);
         ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
 
-        stage_bytes_ = std::max(kStageBytes, one_expert);
+        stage_bytes_ = std::max((size_t) opt_.stage_mib << 20, one_expert);
         chunk_bytes_ = std::max(kChunkBytes, one_expert);
         stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256, "the expert staging buffer");
         for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
@@ -577,6 +571,10 @@ void Engine::plan_staging() {
 void Engine::load(const Options& o) {
     opt_ = o;
     if (opt_.max_context < 16) throw std::runtime_error("the context must be at least 16 tokens");
+    if (opt_.prompt_batch < 1 || opt_.prompt_batch > 4096)
+        throw std::runtime_error("a prompt batch is 1 to 4096 tokens");
+    if (opt_.stage_mib < 1) throw std::runtime_error("the staging buffer must be at least 1 MiB");
+    if (opt_.stage_ahead < 0) throw std::runtime_error("the batch size to stage ahead from cannot be negative");
     gg_ = std::make_unique<GgufFile>(opt_.model);
     load_geometry();
 
@@ -912,7 +910,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     swiglu_clamp(g_, u_, h_, n * n_ff_exp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
 
-    const int n_ahead = n >= kAheadRows ? (int) L.ahead.size() : 0;
+    const int n_ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead ? (int) L.ahead.size() : 0;
     if (n_ahead > 0) {
         // the buffer is free once the layer before has read it
         ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
