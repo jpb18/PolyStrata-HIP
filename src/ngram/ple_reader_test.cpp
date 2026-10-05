@@ -87,7 +87,8 @@ uint32_t gguf_type_id(const char* name) {
     return 0xFFFFFFFFu;
 }
 
-std::string write_format_table(const std::string& dir, const k::PleFormatInfo& f, uint32_t rows) {
+// `claimed_rows` is the row count the header states; `rows` rows are actually written (equal unless a test lies)
+std::string write_format_table(const std::string& dir, const k::PleFormatInfo& f, uint32_t rows, uint64_t claimed_rows = 0) {
     const std::string path = dir + "/ple_format_selftest.gguf";
     std::ofstream out(path, std::ios::binary);
     if (!out) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return {}; }
@@ -108,7 +109,7 @@ std::string write_format_table(const std::string& dir, const k::PleFormatInfo& f
         head += str("strata.ple.scale") + le(6u, 4) + le(sb, 4);       // 6 = FLOAT32
     }
     head += str("per_layer_token_embd.weight") + le(2u, 4);
-    head += le((uint64_t) k::PLE_HEAD_DIM, 8) + le((uint64_t) rows, 8);
+    head += le((uint64_t) k::PLE_HEAD_DIM, 8) + le(claimed_rows != 0 ? claimed_rows : (uint64_t) rows, 8);
     head += le(gguf_type_id(f.name), 4) + le(0ull, 8);
     while (head.size() % 32) head += '\0';
     out.write(head.data(), (std::streamsize) head.size());
@@ -168,7 +169,36 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
     std::filesystem::remove(path);
 }
 
+/// A table whose header does not match the file is refused with a message, never read past its end (#865): one row
+/// short, one row long (a single-tensor shard must be filled exactly), and a row count that wraps the 64-bit size.
+void bad_sizes_are_refused(const std::string& dir) {
+    for (int i = 0; i < k::ple_format_count(); ++i) {
+        const k::PleFormatInfo& f = k::ple_formats()[i];
+        struct { const char* what; uint32_t rows; uint64_t claimed; } cases[] = {
+            {"claims one row more than the file holds", 500, 501},
+            {"claims one row less than the file holds", 500, 499},
+            {"claims a row count that wraps 2^64", 8, (uint64_t) 0x4000000000000000ull / 3 * 2},
+        };
+        for (const auto& c : cases) {
+            const std::string path = write_format_table(dir, f, c.rows, c.claimed);
+            if (path.empty()) { CHECK(false, "%s: no table was written", f.name); continue; }
+            for (k::PleIo mode : {k::PleIo::Direct, k::PleIo::Mmap}) {
+                k::PleTable t;
+                std::string err;
+                k::PleIoOptions io;
+                io.mode = mode;
+                io.cache_rows = 0;
+                CHECK(!t.open(path, err, io), "%s: a table that %s was accepted", f.name, c.what);
+                CHECK(!err.empty(), "%s: refused without a message (%s)", f.name, c.what);
+                CHECK(!t.is_open(), "%s: left open after refusing (%s)", f.name, c.what);
+            }
+            std::filesystem::remove(path);
+        }
+    }
+}
+
 void all_formats_round_trip(const std::string& dir) {
+    bad_sizes_are_refused(dir);
     CHECK(k::ple_format_count() > 0, "no formats");
     for (int i = 0; i < k::ple_format_count(); ++i) {
         const k::PleFormatInfo& f = k::ple_formats()[i];

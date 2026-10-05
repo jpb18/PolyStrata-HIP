@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #endif
@@ -252,7 +253,6 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
     // 110 B rows go through the exact same generic path (ple_reader_test --selftest covers both 90 and 110 B
     // rows: straddling, caching, in-flight tickets, keep-alive). This refusal was stale.
     impl_->n_rows = t->shape[1];
-    impl_->data = impl_->file->tensor_data(*t);
 
     // THE CHECK THAT MAKES THE OFFSET FALSIFIABLE.  The manifest's `shard2_tensor.offset` is 0, but that is
     // the offset within the GGUF's DATA SECTION: the file's first 192 bytes are a header, and reading at 0
@@ -262,10 +262,18 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
     // assumed.  A wrong data offset would leave a different remainder.
     // A shard may hold other tensors too (Swift 1.5's shard 1 holds layers 0-12 and the table): the table must
     // then fit inside the file at its own offset; alone in its shard (the original's shard 2) it fills it exactly.
+    // The size arithmetic is checked before it is used (#865): a header that claims enough rows to wrap the 64-bit
+    // product, or a data section that starts past the end of the file, must be refused, not compared after wrapping.
+    if (impl_->n_rows > std::numeric_limits<uint64_t>::max() / impl_->rb ||
+        impl_->file->data_start() > impl_->file->file_size()) {
+        err = "PLE table size overflow or invalid data offset in " + gguf_path;
+        close();
+        return false;
+    }
     const uint64_t need = impl_->n_rows * (uint64_t) impl_->rb;
     const uint64_t have = impl_->file->file_size() - impl_->file->data_start();
     const bool alone = impl_->file->tensors().size() == 1;
-    if (alone ? need != have : t->offset + need > have) {
+    if (t->offset > have || need > have - t->offset || (alone && (t->offset != 0 || need != have))) {
         char buf[256];
         std::snprintf(buf, sizeof buf,
                       "PLE table size mismatch: %llu rows x %d B = %llu at offset %llu, but the file holds %llu from "
@@ -277,6 +285,7 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
         close();
         return false;
     }
+    impl_->data = impl_->file->tensor_data(*t);        // only a table that fits the file is mapped
     if (io.mode == PleIo::Direct) {
         // The parse above is the validated source of the offset; the mapping itself is not kept, so no page of
         // the table can enter this process's working set or the file cache through it.
@@ -358,6 +367,8 @@ void PleTable::close() {
     impl_->n_rows = 0;
     impl_->rb = PLE_ROW_BYTES;
     impl_->fmt = &ple_format_info(PleFormat::IQ4_NL);
+    impl_->scale = 1.0f;
+    impl_->bytes_read = 0;
 }
 
 bool PleTable::is_open() const { return impl_->data != nullptr || impl_->reader.is_open(); }
