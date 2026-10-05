@@ -230,6 +230,10 @@ Two cards, exactly two stages, `--serve`. In the config:
   72.4 -> 84.0 (+16%). It pays when the windows are GPU-bound: with the experts read through the OS file cache
   (`--mmap-experts` on that 32 GB PC) the file reads dominate and it measured no faster.
 
+The `STRATA_PIPELINE_*` tuning and test variables (THETA, FORCE_MISS, SWITCH, LOG, TRACE and the like) are read only with
+`STRATA_PIPELINE_DEBUG=1`. `--pipeline-windows` and `--adapt-async 1` exclude each other (the engine says so and keeps the
+pipeline).
+
 ## Several conversations at once
 
 With a layer split, `--batch N --batch-groups G --trim-stage-weights` decodes several conversations together and

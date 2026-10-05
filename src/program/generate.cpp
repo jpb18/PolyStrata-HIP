@@ -203,6 +203,13 @@ bool refill_blocking() {
 
 using Clock = std::chrono::steady_clock;
 
+// --pipeline-windows: every STRATA_PIPELINE_* test and tuning variable (THETA, FORCE_MISS, SWITCH, LOG, TRACE, DOOM_SKIP,
+// LOOKUP_PON, PRESTAGE, AGREE, SNAP_OVERLAP) is read only with STRATA_PIPELINE_DEBUG=1; without it the defaults apply.
+static const char* pipe_dbg_env(const char* name) {
+    static const bool on = [] { const char* v = std::getenv("STRATA_PIPELINE_DEBUG"); return v != nullptr && v[0] != 0 && v[0] != '0'; }();
+    return on ? std::getenv(name) : nullptr;
+}
+
 // The resident RAM mode and the adaptive tier.  A swap copies `in` (held in RAM) into the slot of `out` (held only
 // by that slot).  Before the slot is overwritten, `out`'s bytes are copied back from it into an exchange buffer, so
 // the CPU computes `out` from RAM while the swap is in flight; when the swap has landed, `commit_exchanges` moves
@@ -4833,6 +4840,7 @@ int main(int argc, char** argv) {
                         : o.adapt_every <= 0 || o.adapt_swaps <= 0 ? "the adaptive tier is off"
                         : !o.resident_cpu_experts ? "it needs the resident RAM mode, --resident-experts"
                         : o.batch > 0 ? "not with --batch slots"
+                        : o.pipeline_windows > 0 ? "not with --pipeline-windows (its windows are in flight while the tier adapts)"
                         : peer.valid() ? "not with --peer-device"
                         : remote_opt ? "not with --remote-expert-opt"
                         : nullptr;
@@ -5598,7 +5606,7 @@ int main(int argc, char** argv) {
                                      "decode stays serial\n", (double) pl_snap_bytes / 1048576.0);
                 cudaGetLastError();
                 pl_snap2[0] = nullptr;
-            } else if ([] { const char* v = std::getenv("STRATA_PIPELINE_SNAP_OVERLAP"); return v == nullptr || std::atoi(v) != 0; }()) {
+            } else if ([] { const char* v = pipe_dbg_env("STRATA_PIPELINE_SNAP_OVERLAP"); return v == nullptr || std::atoi(v) != 0; }()) {
                 pl_snap_overlap = cudaMalloc((void**) &pl_snap2[1], pl_snap_bytes) == cudaSuccess &&
                                   cudaStreamCreateWithFlags(&pl_snap_stream, cudaStreamNonBlocking) == cudaSuccess;
                 for (int i = 0; i < 2 && pl_snap_overlap; ++i)
@@ -7498,14 +7506,14 @@ int main(int argc, char** argv) {
             // rollbacks) on one server, with the same expert placement
             int pl_pw = pipe ? o.pipeline_windows : 0;
             float pl_theta = [] {   // a speculative window is launched only when its estimated chance is at least this
-                const char* v = std::getenv("STRATA_PIPELINE_THETA");
+                const char* v = pipe_dbg_env("STRATA_PIPELINE_THETA");
                 return v ? (float) std::atof(v) : 0.2f;
             }();
             int pl_force_miss = [] {   // exactness test: every k-th speculative window gets a wrong first token
-                const char* v = std::getenv("STRATA_PIPELINE_FORCE_MISS");
+                const char* v = pipe_dbg_env("STRATA_PIPELINE_FORCE_MISS");
                 return v ? std::max(0, std::atoi(v)) : 0;
             }();
-            if (static const char* sw = std::getenv("STRATA_PIPELINE_SWITCH"); sw != nullptr && pipe) {
+            if (static const char* sw = pipe_dbg_env("STRATA_PIPELINE_SWITCH"); sw != nullptr && pipe) {
                 if (std::FILE* f = std::fopen(sw, "r")) {
                     char buf[256] = {};
                     const size_t nr = std::fread(buf, 1, sizeof buf - 1, f);
@@ -8066,7 +8074,7 @@ int main(int argc, char** argv) {
                 auto SDf = [&](const PW& w) { return (void*) PSD[w.seq & 1]; };
                 const float theta = pl_theta;
                 const int force_miss = pl_force_miss;
-                static const bool pl_log = std::getenv("STRATA_PIPELINE_LOG") != nullptr;
+                static const bool pl_log = pipe_dbg_env("STRATA_PIPELINE_LOG") != nullptr;
                 const int dev0 = PV[0][0]->device();
                 cudaStream_t s0 = PV[0][0]->stream();
                 // the snapshot of the GDN state window `seq` reads (overlapped: before its launch, on the side stream)
@@ -8117,7 +8125,7 @@ int main(int argc, char** argv) {
                     return 1;
                 };
                 // STRATA_PIPELINE_TRACE=<file>: every event of the loop with its time (appended per request)
-                static const char* pl_trace_path = std::getenv("STRATA_PIPELINE_TRACE");
+                static const char* pl_trace_path = pipe_dbg_env("STRATA_PIPELINE_TRACE");
                 std::string pl_trace;
                 const Clock::time_point pl_tr0 = Clock::now();
                 auto tre = [&](const char* ev, int seq, int x0 = 0, int x1 = 0) {
@@ -8133,7 +8141,7 @@ int main(int argc, char** argv) {
                     // a doomed window (its guess was wrong) gets empty plans: no expert work on the CPU or the GPU for
                     // its remaining layers, so it frees stage 0 and the pool sooner (its rows are discarded and the
                     // undo restores everything it wrote).  STRATA_PIPELINE_DOOM_SKIP=0: served in full.
-                    static const bool doom_skip = [] { const char* e = std::getenv("STRATA_PIPELINE_DOOM_SKIP"); return e == nullptr || std::atoi(e) != 0; }();
+                    static const bool doom_skip = [] { const char* e = pipe_dbg_env("STRATA_PIPELINE_DOOM_SKIP"); return e == nullptr || std::atoi(e) != 0; }();
                     const bool skip = doom_skip && doomed && &w == &D;
                     if (v.service(skip ? nullptr : &drive_pool_split, SDf(w), err) < 0) return false;
                     if (v.done(err)) {
@@ -8253,7 +8261,7 @@ int main(int argc, char** argv) {
                 // speculated behind it (a copied stretch is mostly accepted whole).  STRATA_PIPELINE_LOOKUP_PON: B's
                 // estimate (default 0.75; 0 = no lookup B)
                 static const float pl_lookup_pon = [] {
-                    const char* v = std::getenv("STRATA_PIPELINE_LOOKUP_PON");
+                    const char* v = pipe_dbg_env("STRATA_PIPELINE_LOOKUP_PON");
                     return v ? (float) std::atof(v) : 0.75f;
                 }();
                 auto pick_lookup = [&](PW& w, const int32_t* chain0) {
@@ -8300,11 +8308,11 @@ int main(int argc, char** argv) {
                 double last_verdict = 0.0;
                 int64_t pl_disagree = 0, pl_late = 0;
                 static const bool pl_prestage = [] {   // STRATA_PIPELINE_PRESTAGE=0: B staged at its launch
-                    const char* v = std::getenv("STRATA_PIPELINE_PRESTAGE");
+                    const char* v = pipe_dbg_env("STRATA_PIPELINE_PRESTAGE");
                     return v == nullptr || std::atoi(v) != 0;
                 }();
                 static const bool pl_agree = [] {   // STRATA_PIPELINE_AGREE=0: only the old chain's probabilities
-                    const char* v = std::getenv("STRATA_PIPELINE_AGREE");
+                    const char* v = pipe_dbg_env("STRATA_PIPELINE_AGREE");
                     return v == nullptr || std::atoi(v) != 0;
                 }();
                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
