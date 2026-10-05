@@ -47,8 +47,12 @@ __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__floa
 __device__ __forceinline__ uint16_t hf_sat(float f) { return hf(isnan(f) ? f : fminf(fmaxf(f, -65504.0f), 65504.0f)); }
 // The prompt path's 16-bit activation image for the BF16-weight GEMMs: BF16, or FP16 where the GEMM library is fast
 // only in FP16 (prompt_f16() in gemm.cu: rocBLAS on gfx103x).  Set once per device before the first prompt.
+#if defined(__HIPCC__)   // HIP only (#835): the CUDA kernels stay exactly as they were, they never read the flag
 __device__ int g_act_f16 = 0;
 __device__ __forceinline__ uint16_t act16(float f) { return g_act_f16 ? hf_sat(f) : bf(f); }
+#else
+__device__ __forceinline__ uint16_t act16(float f) { return bf(f); }
+#endif
 // block-wide sum for blockDim.x <= 1024, result broadcast
 __device__ float block_sum(float v, float* sh) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
@@ -1450,11 +1454,16 @@ void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in
     check("kv_append");
 }
 void set_act_f16(bool on) {
+#if !defined(__HIPCC__)
+    (void) on;   // CUDA: the activation image is always BF16
+    return;
+#else
     const int v = on ? 1 : 0;
     if (cudaMemcpyToSymbol(g_act_f16, &v, sizeof v) != cudaSuccess) {
         std::fprintf(stderr, "prefill: setting the FP16 activation image failed: %s\n", cudaGetErrorString(cudaGetLastError()));
         std::exit(1);
     }
+#endif
 }
 void to_f16(const float* x, uint16_t* y, int64_t n, void* stream) {
     if (n <= 0) return;

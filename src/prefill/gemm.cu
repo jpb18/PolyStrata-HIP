@@ -54,13 +54,16 @@ namespace {
 // Y's rows, written by an FP16-out GEMM as FP16 at the start of each FP32 row (ldc = 2 ldy halves), widened in place.
 // Float c overwrites halves 2c and 2c+1, so a row is walked from its end in blocks: a block's halves are read into
 // registers, the block syncs, then writes its floats - which only cover halves of blocks already read.
-__global__ void widen_rows_f16(float* __restrict__ Y, int64_t n, int64_t ldy) {
+// STRATA_DBG_NAN: the FP16 outputs that are not finite (an FP32-accumulated sum past 65504 becomes inf in FP16).
+__device__ unsigned long long g_f16_nonfinite = 0;
+__global__ void widen_rows_f16(float* __restrict__ Y, int64_t n, int64_t ldy, int count_nonfinite) {
     float* y = Y + (int64_t) blockIdx.x * ldy;
     const __half* h = reinterpret_cast<const __half*>(y);
     const int64_t nb = (n + blockDim.x - 1) / blockDim.x;
     for (int64_t b = nb - 1; b >= 0; --b) {
         const int64_t c = b * blockDim.x + threadIdx.x;
         const float v = c < n ? __half2float(h[c]) : 0.0f;
+        if (count_nonfinite && c < n && !isfinite(v)) atomicAdd(&g_f16_nonfinite, 1ull);
         __syncthreads();
         if (c < n) y[c] = v;
         __syncthreads();
@@ -351,16 +354,19 @@ bool prompt_f16() {
     int dev = 0;
     if (hipGetDevice(&dev) != hipSuccess || dev < 0 || dev >= kMaxDev) { (void) hipGetLastError(); return false; }
     if (const int8_t c = cached[dev].load(std::memory_order_relaxed)) return c == 2;
-    bool on = false;
+    // Opt-in (#835): only STRATA_HIP_PROMPT_F16=1 turns it on.  It changes the prompt path's numbers (an FP16 rounding of
+    // each 16-bit GEMM's output), so no card gets it unasked.  On gfx103x it is ~2x faster, so we say so once.
     const char* e = std::getenv("STRATA_HIP_PROMPT_F16");
+    const bool on = e != nullptr && e[0] == '1';
     hipDeviceProp_t p{};
-    if (e && e[0] == '0') on = false;
-    else if (e && e[0] == '1') on = true;
-    else if (hipGetDeviceProperties(&p, dev) == hipSuccess) on = std::strncmp(p.gcnArchName, "gfx103", 6) == 0;
-    else (void) hipGetLastError();
-    if (on) std::fprintf(stderr, "strata prefill: HIP device %d%s%s - the prompt's 16-bit GEMMs run FP16 in and out (rocBLAS "
-                                 "is tuned only for that there; STRATA_HIP_PROMPT_F16=0 keeps BF16 in / FP32 out)\n",
-                         dev, p.gcnArchName[0] ? " " : "", p.gcnArchName);
+    if (hipGetDeviceProperties(&p, dev) != hipSuccess) { (void) hipGetLastError(); p.gcnArchName[0] = 0; }
+    if (on) std::fprintf(stderr, "strata prefill: HIP device %d%s%s - STRATA_HIP_PROMPT_F16=1: the prompt's 16-bit GEMMs run FP16 in and out "
+                                 "(rocBLAS is tuned only for that on gfx103x; not bit-identical to the default)%s",
+                         dev, p.gcnArchName[0] ? " " : "", p.gcnArchName, "\n");
+    else if (e == nullptr && std::strncmp(p.gcnArchName, "gfx103", 6) == 0)
+        std::fprintf(stderr, "strata prefill: HIP device %d %s - tip: STRATA_HIP_PROMPT_F16=1 reads long prompts about 2x faster here "
+                             "(FP16 prompt GEMMs, rocBLAS is tuned only for FP16 on gfx103x; the numbers differ slightly, see docs/AMD_HIP.md)%s",
+                     dev, p.gcnArchName, "\n");
     cached[dev].store(on ? 2 : 1, std::memory_order_relaxed);
     return on;
 #else
@@ -748,7 +754,17 @@ void Gemm::f16_inplace(const uint16_t* X, const uint16_t* W, float* Y, int64_t T
                     (int) K, X, CUDA_R_16F, (int) K, &zero, Y, CUDA_R_16F, (int) (2 * ldy), CUBLAS_COMPUTE_32F,
                     CUBLAS_GEMM_DEFAULT),
        "cublasGemmEx f16 out");
-    widen_rows_f16<<<(unsigned) T, 256, 0, (cudaStream_t) stream_>>>(Y, N, ldy);
+    static const bool dbg_nan = std::getenv("STRATA_DBG_NAN") != nullptr;
+    widen_rows_f16<<<(unsigned) T, 256, 0, (cudaStream_t) stream_>>>(Y, N, ldy, dbg_nan ? 1 : 0);
+    if (dbg_nan) {   // debug only: a sync per GEMM
+        unsigned long long bad = 0, zero_count = 0;
+        (void) hipStreamSynchronize((hipStream_t) stream_);
+        if (hipMemcpyFromSymbol(&bad, HIP_SYMBOL(g_f16_nonfinite), sizeof bad) == hipSuccess && bad != 0) {
+            std::fprintf(stderr, "strata prefill: STRATA_DBG_NAN: %llu non-finite FP16 GEMM outputs (T=%lld N=%lld K=%lld; FP16 ends at 65504)%s",
+                         bad, (long long) T, (long long) N, (long long) K, "\n");
+            (void) hipMemcpyToSymbol(HIP_SYMBOL(g_f16_nonfinite), &zero_count, sizeof zero_count);
+        }
+    }
 #else
     (void) X; (void) W; (void) Y; (void) T; (void) N; (void) K; (void) ldy;
 #endif
