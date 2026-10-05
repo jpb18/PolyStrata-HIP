@@ -250,14 +250,15 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
         }
         red_o[rg][col] = o;
         __syncthreads();
-        float oc = 0.0f;
+        float oc = 0.0f, sq_part = 0.0f;
         if (rg == 0) {
             oc = (red_o[0][col] + red_o[1][col] + red_o[2][col] + red_o[3][col]) * rsqrtf((float) S);
-            float sq_part = oc * oc;
-#pragma unroll
-            for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
-            if ((col & 31) == 0) wsum[col >> 5] = sq_part;
+            sq_part = oc * oc;
         }
+        // every thread takes the shuffles, as the single-token kernel does: inside the `rg == 0` branch hipcc on
+        // gfx1151 gave another rounding for 3% of the outputs (gdn_parity section 5 on Aurora)
+        for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
+        if (rg == 0 && (col & 31) == 0) wsum[col >> 5] = sq_part;
         __syncthreads();
         if (rg == 0) {
             const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
