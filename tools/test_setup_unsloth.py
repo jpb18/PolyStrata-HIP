@@ -181,6 +181,7 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "page_file_gb", lambda: 16.0),
             mock.patch.object(setup, "free_gb", lambda p: free),
             mock.patch.object(setup, "rotational_disk", lambda p: None),   # #605: not the test PC's disk
+            mock.patch.object(setup, "is_wsl", lambda: False),            # #974: the tests are not run inside WSL
             mock.patch.object(setup, "pip_install", lambda *a, **k: None),
             mock.patch.object(setup, "get_llama_cpp", lambda: self.t / "llama.cpp"),
             mock.patch.object(setup, "get_prebuilt", lambda *a, **k: eng),
