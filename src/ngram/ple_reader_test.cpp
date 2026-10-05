@@ -411,9 +411,12 @@ int main(int argc, char** argv) {
     bool direct_only = false;
     bool sync_submit = false;
     bool self = false;
+    std::string make_path, make_fmt, ram_path;   // --make-table PATH FORMAT (uses --rows), --ram-time PATH
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--selftest") self = true;
+        else if (a == "--make-table" && i + 2 < argc) { make_path = argv[i + 1]; make_fmt = argv[i + 2]; i += 2; }
+        else if (a == "--ram-time" && i + 1 < argc) ram_path = argv[++i];
         else if (a == "--dir" && i + 1 < argc) dir = argv[++i];
         else if (a == "--gguf" && i + 1 < argc) gguf = argv[++i];
         else if (a == "--rows" && i + 1 < argc) rows = std::atoi(argv[++i]);
@@ -432,6 +435,32 @@ int main(int argc, char** argv) {
         const int r90 = selftest(dir, ng::ROW_BYTES);
         const int r110 = selftest(dir, 110);
         return r90 != 0 ? r90 : r110;
+    }
+    if (!make_path.empty()) {                      // a big synthetic table, for timing --ple-io ram's fault-in
+        for (int i = 0; i < k::ple_format_count(); ++i) {
+            const k::PleFormatInfo& f = k::ple_formats()[i];
+            if (make_fmt != f.name) continue;
+            const std::string tmp = write_format_table(std::filesystem::path(make_path).parent_path().string(), f, (uint32_t) rows);
+            if (tmp.empty()) return 1;
+            std::filesystem::rename(tmp, make_path);
+            std::printf("wrote %s: %s, %d rows, %.2f GiB\n", make_path.c_str(), f.name, rows,
+                        (double) rows * f.row_bytes / (1024.0 * 1024.0 * 1024.0));
+            return 0;
+        }
+        std::fprintf(stderr, "unknown format %s\n", make_fmt.c_str());
+        return 2;
+    }
+    if (!ram_path.empty()) {                       // open mapped and locked (--ple-io ram): the seconds it takes
+        k::PleTable t;
+        k::PleIoOptions io;
+        io.mode = k::PleIo::Mmap;
+        io.lock = true;
+        std::string err;
+        const double t0 = now_us();
+        const bool ok = t.open(ram_path, err, io);
+        std::printf("ram open: %s, format %s, locked %d, %.2f s\n", ok ? "ok" : err.c_str(), ok ? t.format() : "-", ok && t.locked(),
+                    (now_us() - t0) / 1e6);
+        return ok ? 0 : 1;
     }
     if (!gguf.empty()) return real(gguf, rows, tokens, inflight, direct_first, direct_only, sync_submit);
     std::fprintf(stderr, "nothing to do\n");

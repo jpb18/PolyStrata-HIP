@@ -15,6 +15,9 @@
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #endif
+#include <algorithm>
+#include <atomic>
+#include <thread>
 #include <vector>
 #include <stdexcept>
 
@@ -308,14 +311,30 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
         const uintptr_t a0 = (uintptr_t) impl_->data & ~(uintptr_t) (page - 1);
         const uintptr_t a1 = (uintptr_t) impl_->data + (uintptr_t) need;
         madvise((void*) a0, a1 - a0, MADV_WILLNEED);
+        // Fault the table in with several threads first: mlock (and a single toucher) brings it in one page at a time
+        // from one thread, ~0.5 GB/s from a cold file - 106 s for a 54 GB Q8_0 table.  The pages are then resident
+        // and mlock only pins them.
+        {
+            constexpr uintptr_t kPiece = 64ull << 20;
+            const uintptr_t pieces = (a1 - a0 + kPiece - 1) / kPiece;
+            const unsigned threads = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+            std::atomic<uintptr_t> next{0};
+            auto touch = [&] {
+                volatile uint8_t sink = 0;
+                for (uintptr_t i; (i = next.fetch_add(1)) < pieces;)
+                    for (uintptr_t p = a0 + i * kPiece, e = std::min(a1, p + kPiece); p < e; p += page)
+                        sink = sink + *(const volatile uint8_t*) p;
+                (void) sink;
+            };
+            std::vector<std::thread> pool;
+            for (unsigned t = 0; t < threads; ++t) pool.emplace_back(touch);
+            for (auto& t : pool) t.join();
+        }
         if (mlock((const void*) a0, a1 - a0) == 0) {
             impl_->locked = true;
         } else {
-            std::fprintf(stderr, "strata: PLE table mlock failed (%s; raise `ulimit -l`): touching its pages instead\n",
-                         std::strerror(errno));
-            volatile uint8_t sink = 0;
-            for (uintptr_t p = a0; p < a1; p += page) sink = sink + *(const volatile uint8_t*) p;
-            (void) sink;
+            std::fprintf(stderr, "strata: PLE table mlock failed (%s; raise `ulimit -l`): its pages stay faulted in "
+                                 "but may be reclaimed\n", std::strerror(errno));
         }
 #endif
     }
