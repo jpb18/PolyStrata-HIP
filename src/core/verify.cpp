@@ -107,6 +107,20 @@ const bool g_sh_stream = [] {
 // A one-token window always keeps its token, so its graph advances the sequence state itself (the GDN conv history
 // and recurrence state) and Verifier::commit launches no commit graph after it (eddoursul's fork, F7).  CUDA only:
 // HIP keeps the commit graph after every window (STRATA_ONE_TOKEN_COMMIT=0 does too).
+// The head's hyper-connection read for the window's tokens in one launch set (CUDA; HIP keeps gr_read per token;
+// STRATA_HEAD_MIX_MULTI=0 does too): bitwise the same sums.
+bool head_mix_multi_enabled() {
+#if defined(STRATA_USE_HIP)
+    return false;
+#else
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_HEAD_MIX_MULTI");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    return on;
+#endif
+}
+
 bool one_token_self_commit() {
 #if defined(STRATA_USE_HIP)
     return false;
@@ -1298,6 +1312,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 a.rs = rs_ + t * HC;
                 a.inject_out = head_inj_;
                 a.mixed = head_mixed_ + t * N;
+            }
+            fused_gr_read_multi(fa, T, xn_, cs);
+        } else if (head_mix_multi_enabled() && head_ != nullptr && head_->loaded()) {
+            // the final mixer, the window's tokens in one read (fused_gr_read_multi without the pending write: the
+            // last layer's write was done above; its sums are gr_read's)
+            if (hn->kind != WeightKind::F32 || hd->kind != WeightKind::Bf16InF32 || hu->kind != WeightKind::Bf16InF32) {
+                err = "verify: the output_hc_* weights have the wrong engine forms";
+                return false;
+            }
+            FusedGrArgs fa[kFusedGrMaxT];
+            for (int t = 0; t < T; ++t) {
+                fa[t].R = Rt(t); fa[t].R_out = Rt(t); fa[t].apply = false;
+                fa[t].w_norm = (const float*) hn->data; fa[t].w_down = (const uint16_t*) hd->data;
+                fa[t].w_up = (const uint16_t*) hu->data; fa[t].eps = EPS;
+                fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC; fa[t].mixed = head_mixed_ + t * N;
             }
             fused_gr_read_multi(fa, T, xn_, cs);
         } else {
