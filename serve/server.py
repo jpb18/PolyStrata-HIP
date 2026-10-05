@@ -1457,7 +1457,8 @@ class Vision:
         return Path(tempfile.mkdtemp(prefix="strata-vision-"))
 
     def __init__(self, cfg: dict, log=None, env: dict | None = None):
-        args = [cfg["exe"], "--mmproj", cfg["mmproj"], "--model", cfg["model"]]
+        absolute = lambda p: os.path.abspath(p) if os.path.dirname(str(p)) else p   # the encoder runs in its own dir (#480)  # noqa: E731
+        args = [absolute(cfg["exe"]), "--mmproj", absolute(cfg["mmproj"]), "--model", absolute(cfg["model"])]
         if cfg.get("gpu"):
             args.append("--gpu")
         if cfg.get("threads"):
