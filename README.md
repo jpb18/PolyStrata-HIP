@@ -65,7 +65,7 @@ about 100-140 tokens per second. Long chats and other cards: [speed of each size
 Measured for PolyStrata on one workstation, with a 29K-token prompt.
 
 <table>
-<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q, 120 GB RAM</th></tr>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th></tr>
 <tr><td>
 
 | Size | Writes answers | Reads your prompt |

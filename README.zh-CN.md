@@ -65,7 +65,7 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 由 PolyStrata 在一台工作站上测得，提示长 29K token。
 
 <table>
-<tr><th>NVIDIA：RTX 5090（32 GB）、Xeon Platinum 8470Q、120 GB 内存</th></tr>
+<tr><th>NVIDIA：RTX 5090（32 GB）、Xeon Platinum 8470Q（25 vCPU）、120 GB 内存</th></tr>
 <tr><td>
 
 | 规格 | 写回答 | 读提示 |

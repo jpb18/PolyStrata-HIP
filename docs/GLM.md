@@ -11,7 +11,7 @@ It is early. It has been built and run on one machine, with Linux and one NVIDIA
 | | |
 | --- | --- |
 | Graphics card | RTX 5090, 32 GB |
-| CPU | Xeon Platinum 8470Q, 24 threads used |
+| CPU | Xeon Platinum 8470Q, 25 vCPU of it (a cloud machine), 24 threads used |
 | RAM | 120 GiB |
 | Built with | CUDA 12.8 |
 | Model | `GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf`, 113.6 GB, from [neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) |
