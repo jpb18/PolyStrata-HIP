@@ -1,8 +1,8 @@
-// include/strata/glm/kernels.hpp - the float kernels of the GLM 5.3 Flash forward pass.
+// include/strata/glm/kernels.hpp - the float kernels of the forward passes.
 //
 // Every call enqueues on the given CUDA stream and returns; nothing here but blas_create allocates or waits.
-// Pointers are device pointers.  The math follows llama.cpp's glm5-next graph (src/models/glm5-next.cpp), which is the reference the
-// engine is checked against.
+// Pointers are device pointers.  The math follows llama.cpp's graphs (src/models/glm5-next.cpp and qwen35moe.cpp)
+// and the ggml ops they build, which are the reference the engine is checked against.
 //
 // A call works on `rows` tokens at consecutive positions.  A buffer of per-token values holds them row after row,
 // each row as long as the one-token case describes.
@@ -91,5 +91,38 @@ void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int 
 void axpy(const float* x, float a, float* acc, int n, bool add, void* stream);
 /// acc[row] += b for each of the rows of n values.
 void add_bias(const float* b, float* acc, int n, int rows, void* stream);
+
+// ---- attention over a key and value cache, and the gated delta net with one decay a head (qwen35moe)
+
+/// For `rows` tokens of `heads` heads each: a head's RMS norm with the weights w (dim values, the same for every
+/// head), then ggml's rotary embedding on its first n_rot values in the NeoX pairing: value i goes with value
+/// i + n_rot / 2, and the pair turns by position * theta_scale^i.  A head's input starts x_stride floats after
+/// the one before it; y has dim values a head.
+void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
+                    float theta_scale, int64_t pos, int rows, float eps, void* stream);
+/// Causal attention for the tokens from position `pos`: token t attends the cache rows 0 to pos + t.  q: n_head *
+/// dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the heads read a row's keys and values in turn,
+/// n_head / kv_heads heads each.  out: n_head * dim a token.  It takes `chunk` tokens at a time, and score is
+/// scratch of chunk * n_head * (pos + rows) floats.  A token comes out the same whatever tokens the call has
+/// beside it.
+void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
+            int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream);
+/// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.
+/// With one_gate a group has one gate for all its values.
+void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream);
+/// A causal convolution of four taps over each of `channels` channels, and its SiLU.  x and out: `channels` values
+/// a token.  state: 3 past inputs a channel, oldest first, advanced here by `rows` tokens.  w: (4, channels).
+/// snap, stride and n_snap as in kda_conv.
+void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
+                float* snap = nullptr, size_t stride = 0, int n_snap = 0);
+/// The delta-rule step of every value head and its gated output, token after token: ggml's gated_delta_net op
+/// with one decay a head.  qkv: a token's conv outputs, the k_heads key heads' q, their k, then the n_head value
+/// heads' v, dim values each; value head h reads key head h % k_heads.  alpha and beta: n_head a token, as their
+/// projections give them.  dt, a: n_head.  The state decays by exp(softplus(alpha + dt) * a) and takes
+/// sigmoid(beta) of the error.  s: n_head * dim * dim, updated.  z: n_head * dim a token.
+/// out = rms_norm(o) * o_norm * silu(z), n_head * dim values a token.
+void gdn_step(const float* qkv, const float* alpha, const float* beta, const float* dt, const float* a, float* s,
+              const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
+              float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 
 }  // namespace strata::glm

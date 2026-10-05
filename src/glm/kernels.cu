@@ -1,4 +1,4 @@
-// src/glm/kernels.cu - see the header.  The reference for every formula is llama.cpp's glm5-next graph and the
+// src/glm/kernels.cu - see the header.  The reference for every formula is llama.cpp's graph of the model and the
 // ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
 #include "strata/glm/kernels.hpp"
 
@@ -418,6 +418,160 @@ __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__
     if (i < n) acc[size_t(blockIdx.y) * n + i] += b[i];
 }
 
+// One block per head and token.  The pairs of the rotation are i and i + n_rot / 2 for i below n_rot / 2.
+__global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride, const float* __restrict__ w,
+                                      float* __restrict__ y, int dim, int heads, int n_rot, float theta_scale,
+                                      long long pos, float eps) {
+    __shared__ float part[8];
+    const float* xr = x + size_t(blockIdx.x) * x_stride;
+    float* yr = y + size_t(blockIdx.x) * dim;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) ss += xr[i] * xr[i];
+    ss = block_sum(ss, part);
+    const float scale = 1.0f / sqrtf(ss / float(dim) + eps);
+    const float p = float(pos + blockIdx.x / heads);
+    const int half = n_rot / 2;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+        if (i >= n_rot) {
+            yr[i] = xr[i] * scale * w[i];
+            continue;
+        }
+        const int j = i < half ? i : i - half;
+        const float theta = p * powf(theta_scale, float(j));
+        const float x0 = xr[j] * scale * w[j], x1 = xr[j + half] * scale * w[j + half];
+        yr[i] = i < half ? x0 * cosf(theta) - x1 * sinf(theta) : x0 * sinf(theta) + x1 * cosf(theta);
+    }
+}
+
+// score[head][key] = scale * (q[head] . the key of the head's group in cache row `key`), for the rows up to the
+// token's own.  A block has the token first + blockIdx.y and blockDim.x / n_head rows; a thread is a row and a head.
+__global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
+                                  float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
+                                  long long pos, int first, float scale) {
+    const int tok = first + blockIdx.y;
+    const int key = blockIdx.x * (blockDim.x / n_head) + threadIdx.x / n_head, h = threadIdx.x % n_head;
+    if (key > pos + tok) return;
+    const float* qh = q + (size_t(tok) * n_head + h) * dim;
+    const half* k = kcache + (size_t(key) * kv_heads + h / (n_head / kv_heads)) * dim;
+    float acc = 0.0f;
+    for (int d = 0; d < dim; ++d) acc += qh[d] * __half2float(k[d]);
+    score[(size_t(blockIdx.y) * n_head + h) * n_keys + key] = acc * scale;
+}
+
+// Softmax in place over a head's scores of the rows up to its token's own.  One block per head and token.
+__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first) {
+    __shared__ float part[8];
+    const int n = int(pos) + first + blockIdx.y + 1;
+    float* row = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
+    float mx = -INFINITY;
+    for (int j = threadIdx.x; j < n; j += blockDim.x) mx = fmaxf(mx, row[j]);
+    mx = block_max(mx, part);
+    float sum = 0.0f;
+    for (int j = threadIdx.x; j < n; j += blockDim.x) {
+        row[j] = expf(row[j] - mx);
+        sum += row[j];
+    }
+    const float inv = 1.0f / block_sum(sum, part);
+    for (int j = threadIdx.x; j < n; j += blockDim.x) row[j] *= inv;
+}
+
+// out[head][d] = sum over the rows of score[head][row] * the value of the head's group in that row.  A thread is
+// a value dimension of a head and walks the rows; blockIdx.x counts the heads, `per` blocks each.
+__global__ void attn_value_kernel(const float* __restrict__ score, const half* __restrict__ vcache,
+                                  float* __restrict__ out, int n_keys, int dim, int n_head, int kv_heads,
+                                  long long pos, int first, int per) {
+    const int tok = first + blockIdx.y, h = blockIdx.x / per;
+    const int d = (blockIdx.x % per) * blockDim.x + threadIdx.x;
+    if (d >= dim) return;
+    const int n = int(pos) + tok + 1;
+    const float* p = score + (size_t(blockIdx.y) * n_head + h) * n_keys;
+    const half* v = vcache + size_t(h / (n_head / kv_heads)) * dim + d;
+    const size_t row = size_t(kv_heads) * dim;
+    float acc = 0.0f;
+    for (int j = 0; j < n; ++j) acc += p[j] * __half2float(v[size_t(j) * row]);
+    out[(size_t(tok) * n_head + h) * dim + d] = acc;
+}
+
+__global__ void mul_sigmoid_kernel(float* __restrict__ acc, const float* __restrict__ g, int n, int g_stride,
+                                   bool one_gate) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    acc[size_t(blockIdx.y) * n + i] *= sigmoid(g[size_t(blockIdx.y) * g_stride + (one_gate ? 0 : i)]);
+}
+
+// Three past inputs per channel, then the new one.  A thread is a channel and walks the tokens.  The state as it
+// is after each of the first n_snap tokens goes to snap, a state `stride` floats after the other.
+__global__ void conv4_silu_kernel(const float* __restrict__ x, float* __restrict__ state,
+                                  const float* __restrict__ w, float* __restrict__ out, int channels, int rows,
+                                  float* __restrict__ snap, size_t stride, int n_snap) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    const float* wc = w + 4 * size_t(c);
+    float* st = state + size_t(c) * 3;
+    float s0 = st[0], s1 = st[1], s2 = st[2];
+    for (int row = 0; row < rows; ++row) {
+        const size_t at = size_t(row) * channels + c;
+        const float v = x[at];
+        const float y = s0 * wc[0] + s1 * wc[1] + s2 * wc[2] + v * wc[3];
+        s0 = s1;
+        s1 = s2;
+        s2 = v;
+        out[at] = y * sigmoid(y);
+        if (row < n_snap) {
+            float* m = snap + size_t(row) * stride + size_t(c) * 3;
+            m[0] = s0;
+            m[1] = s1;
+            m[2] = s2;
+        }
+    }
+    st[0] = s0;
+    st[1] = s1;
+    st[2] = s2;
+}
+
+// One block per value head, one thread per value dimension j; the block walks the tokens.  s[i + dim * j] holds
+// key dimension i of column j.
+__global__ void gdn_step_kernel(const float* __restrict__ qkv, const float* __restrict__ alpha,
+                                const float* __restrict__ beta, const float* __restrict__ dt,
+                                const float* __restrict__ a, float* __restrict__ s, const float* __restrict__ z,
+                                const float* __restrict__ o_norm, float* __restrict__ out, int dim, int n_head,
+                                int k_heads, int rows, float norm_eps, float* __restrict__ snap, size_t stride,
+                                int n_snap) {
+    __shared__ float part[8];
+    __shared__ float qn[256], kn[256];
+    const int h = blockIdx.x, j = threadIdx.x, hk = h % k_heads;
+    const size_t keys = size_t(dim) * k_heads, d_inner = size_t(dim) * n_head, row_n = 2 * keys + d_inner;
+    float* col = s + (size_t(h) * dim + j) * dim;
+    for (int row = 0; row < rows; ++row) {
+        const float* x = qkv + size_t(row) * row_n;
+        const float q = x[size_t(hk) * dim + j], k = x[keys + size_t(hk) * dim + j];
+        const float v = x[2 * keys + size_t(h) * dim + j];
+        const float qs = block_sum(q * q, part);
+        const float ks = block_sum(k * k, part);
+        qn[j] = q / sqrtf(qs + norm_eps) * (1.0f / sqrtf(float(dim)));
+        kn[j] = k / sqrtf(ks + norm_eps);
+        __syncthreads();
+        const float g = alpha[size_t(row) * n_head + h] + dt[h];
+        const float decay = expf((g > 20.0f ? g : logf(1.0f + expf(g))) * a[h]);
+        float sk = 0.0f;
+        for (int i = 0; i < dim; ++i) sk += col[i] * decay * kn[i];
+        const float d = (v - sk) * sigmoid(beta[size_t(row) * n_head + h]);
+        float o = 0.0f;
+        float* m = row < n_snap ? snap + size_t(row) * stride + (size_t(h) * dim + j) * dim : nullptr;
+        for (int i = 0; i < dim; ++i) {
+            const float n = col[i] * decay + kn[i] * d;
+            col[i] = n;
+            if (m) m[i] = n;
+            o += n * qn[i];
+        }
+        // the sum's last barrier also ends this token's reads of qn and kn
+        const float os = block_sum(o * o, part);
+        const size_t at = size_t(row) * d_inner + size_t(h) * dim + j;
+        const float gate = z[at];
+        out[at] = o / sqrtf(os / float(dim) + norm_eps) * o_norm[j] * (gate * sigmoid(gate));
+    }
+}
+
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
 inline int grid(size_t n, int block) { return int((n + block - 1) / block); }
 
@@ -557,6 +711,42 @@ void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int 
 
 void add_bias(const float* b, float* acc, int n, int rows, void* stream) {
     add_bias_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(b, acc, n);
+}
+
+void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
+                    float theta_scale, int64_t pos, int rows, float eps, void* stream) {
+    head_norm_rope_kernel<<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
+        x, x_stride, w, y, dim, heads, n_rot, theta_scale, (long long) pos, eps);
+}
+
+void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
+            int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream) {
+    const int n_keys = int(pos) + rows, key_block = std::max(1, 256 / n_head), per = grid(dim, 256);
+    for (int first = 0; first < rows; first += chunk) {
+        const int c = std::min(chunk, rows - first), keys = int(pos) + first + c;   // the chunk's last token's
+        attn_score_kernel<<<dim3(grid(keys, key_block), c), key_block * n_head, 0, cs(stream)>>>(
+            q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale);
+        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first);
+        attn_value_kernel<<<dim3(n_head * per, c), std::min(dim, 256), 0, cs(stream)>>>(
+            score, (const half*) vcache, out, n_keys, dim, n_head, kv_heads, (long long) pos, first, per);
+    }
+}
+
+void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream) {
+    mul_sigmoid_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(acc, g, n, g_stride, one_gate);
+}
+
+void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
+                float* snap, size_t stride, int n_snap) {
+    conv4_silu_kernel<<<grid(channels, 256), 256, 0, cs(stream)>>>(x, state, w, out, channels, rows, snap, stride,
+                                                                  snap ? n_snap : 0);
+}
+
+void gdn_step(const float* qkv, const float* alpha, const float* beta, const float* dt, const float* a, float* s,
+              const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
+              float norm_eps, void* stream, float* snap, size_t stride, int n_snap) {
+    gdn_step_kernel<<<n_head, dim, 0, cs(stream)>>>(qkv, alpha, beta, dt, a, s, z, o_norm, out, dim, n_head, k_heads,
+                                                   rows, norm_eps, snap, stride, snap ? n_snap : 0);
 }
 
 }  // namespace strata::glm
