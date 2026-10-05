@@ -3643,3 +3643,32 @@ class PromptProgressBatch(unittest.TestCase):
         self.assertEqual(prompt_progress(svc), {"total": 4096, "cache": 0, "processed": 512, "time_ms": 900})
         engine.batch = 2
         self.assertIsNone(prompt_progress(svc))
+
+
+class VisionArgs(unittest.TestCase):
+    """#767: vision.min_tokens reaches the encoder as --min-tokens (mtmd's image_min_tokens)."""
+
+    def args_for(self, cfg):
+        import serve.server as server
+        seen = []
+
+        class Proc:
+            stdout = io.StringIO("READY 4096\n")
+            stdin = io.StringIO()
+
+            def poll(self):
+                return None
+
+        def popen(args, **kw):
+            seen.append(args)
+            return Proc()
+
+        with mock.patch.object(server.subprocess, "Popen", popen), mock.patch.object(server, "contain"):
+            server.Vision({"exe": "strata-vision", "mmproj": "m.gguf", "model": "t.gguf", **cfg})
+        return seen[0]
+
+    def test_min_tokens_is_passed_only_when_set(self):
+        base = self.args_for({"max_tokens": 300})
+        self.assertNotIn("--min-tokens", base)
+        self.assertEqual(self.args_for({"max_tokens": 1024, "min_tokens": 768})[-4:],
+                         ["--max-tokens", "1024", "--min-tokens", "768"])
