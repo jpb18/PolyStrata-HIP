@@ -80,10 +80,13 @@ __global__ void combine_k10_vec4(const float4* __restrict__ parts4, const float*
     for (int expert = 1; expert < 10; ++expert) {
         const float w = __ldg(weights + expert);
         const float4 p = parts4[int64_t(expert) * n4 + c4];
-        sum.x += p.x * w;
-        sum.y += p.y * w;
-        sum.z += p.z * w;
-        sum.w += p.w * w;
+        // the documented contract spelled out: the first product rounded, then one FMA per expert in order. Left to the
+        // compiler's contraction, a build may fuse a different product (gfx1151: the float4 kernel then differed from the
+        // scalar one, native_multi_parity)
+        sum.x = fmaf(p.x, w, sum.x);
+        sum.y = fmaf(p.y, w, sum.y);
+        sum.z = fmaf(p.z, w, sum.z);
+        sum.w = fmaf(p.w, w, sum.w);
     }
     const float4 sh = shared4[c4];
     sum.x += sh.x;
