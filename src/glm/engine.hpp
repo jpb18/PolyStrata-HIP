@@ -40,7 +40,8 @@ struct Options {
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     int window = 4;               ///< the most tokens window() takes: the known one and guesses after it; 1: none
-    bool draft = true;            ///< run the block that guesses ahead, when the file has it and window is above 1
+    bool draft = true;            ///< run the block that guesses ahead, when there is one and window is above 1
+    std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
@@ -161,6 +162,7 @@ private:
     Dev upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
                float (*fix)(float) = nullptr);
     const TensorInfo* tensor(int il, const char* name) const;
+    const Shards& home(const TensorInfo& t) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void load_geometry();
     void load_layer(int il);
@@ -195,6 +197,8 @@ private:
 
     Options opt_;
     std::unique_ptr<Shards> gg_;
+    std::unique_ptr<Shards> dg_;      ///< Options::draft_model, while the draft block is read from it
+    const Shards* block_ = nullptr;   ///< the file the draft block is in: gg_ or dg_
     std::unique_ptr<Workers> workers_;
     int node_ = -1;
     double node_share_ = 0;

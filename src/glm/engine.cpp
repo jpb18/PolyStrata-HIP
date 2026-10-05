@@ -306,6 +306,18 @@ private:
     std::unordered_map<std::string, Where> where_;
 };
 
+// A value of the metadata of the model that `g` is a file of, under any of the names converters give it.
+static const MetaValue* meta_of(const Shards& g, const char* key) {
+    const MetaValue* arch = g.get("general.architecture");
+    if (!arch) return nullptr;
+    const std::string pre = arch->s + ".";
+    if (const MetaValue* v = g.get(pre + key)) return v;
+    if (const Names* n = names_of(kMetaNames, key))
+        for (const char* other : n->other)
+            if (const MetaValue* v = other ? g.get(pre + other) : nullptr) return v;
+    return nullptr;
+}
+
 // One expert on its way into the cache.  The engine's thread asks, the follower copies and sends, and the engine's
 // thread gives it the slot once the upload has arrived.
 struct Engine::Swap {
@@ -374,13 +386,19 @@ int64_t Engine::meta_u(const char* key, int64_t fallback) const {
     return v && v->is_num() ? (int64_t) v->u : fallback;
 }
 
-// A layer's tensor, under any of its names.
+// A layer's tensor, under any of its names.  The draft block's are in the file it comes from.
 const TensorInfo* Engine::tensor(int il, const char* name) const {
-    if (const TensorInfo* t = gg_->find(blk(il, name))) return t;
+    const Shards& g = block_ && il >= n_layer_ ? *block_ : *gg_;
+    if (const TensorInfo* t = g.find(blk(il, name))) return t;
     if (const Names* n = names_of(kTensorNames, name))
         for (const char* other : n->other)
-            if (const TensorInfo* t = other ? gg_->find(blk(il, other)) : nullptr) return t;
+            if (const TensorInfo* t = other ? g.find(blk(il, other)) : nullptr) return t;
     return nullptr;
+}
+
+// The file a tensor is in.
+const Shards& Engine::home(const TensorInfo& t) const {
+    return block_ && gg_->find(t.name) != &t ? *block_ : *gg_;
 }
 
 void Engine::load_geometry() {
@@ -391,13 +409,7 @@ void Engine::load_geometry() {
         throw std::runtime_error("general.architecture is '" + (arch ? arch->s : std::string()) +
                                  "', this engine runs 'glm5-next'");
     const std::string pre = arch->s + ".";
-    auto find = [&](const char* key) -> const MetaValue* {
-        if (const MetaValue* v = g.get(pre + key)) return v;
-        if (const Names* n = names_of(kMetaNames, key))
-            for (const char* other : n->other)
-                if (const MetaValue* v = other ? g.get(pre + other) : nullptr) return v;
-        return nullptr;
-    };
+    auto find = [&](const char* key) { return meta_of(g, key); };
     auto meta = [&](const char* key) -> const MetaValue& {
         const MetaValue* v = find(key);
         if (!v) throw std::runtime_error("the GGUF has no " + pre + key);
@@ -406,12 +418,22 @@ void Engine::load_geometry() {
     auto meta_i = [&](const char* key) { return (int) meta(key).u; };
     auto meta_f = [&](const char* key) { return (float) meta(key).f; };
 
-    // A file can carry the block that guesses a second token after the model's own, as one more block after the
-    // model's.  One file has it with a token table or an output matrix of its own, which this engine does not run.
+    // The block that guesses a second token after the model's own is one more block after the model's.  It is the
+    // model's and not a file's: a file that leaves it out can take it from another file of the model (draft_model).
+    // One converter gives the block a token table or an output matrix of its own, which this engine does not run.
     const MetaValue* nextn = find("nextn_predict_layers");
     n_layer_ = meta_i("block_count") - (nextn ? (int) nextn->u : 0);
-    draft_ = opt_.draft && opt_.window > 1 && nextn && nextn->u == 1 && tensor(n_layer_, "nextn.eh_proj.weight") &&
-             !tensor(n_layer_, "nextn.embed_tokens.weight") && !tensor(n_layer_, "nextn.shared_head_head.weight");
+    if (opt_.draft && opt_.window > 1) {
+        const std::string probe = blk(n_layer_, "nextn.eh_proj.weight");
+        if (nextn && nextn->u == 1 && gg_->find(probe)) block_ = gg_.get();
+        else if (dg_ && dg_->find(probe)) block_ = dg_.get();
+        else if (dg_)
+            throw std::runtime_error(opt_.draft_model + " has no block that guesses ahead for this model: no tensor " +
+                                     probe);
+    }
+    draft_ = block_ && !tensor(n_layer_, "nextn.embed_tokens.weight") &&
+             !tensor(n_layer_, "nextn.shared_head_head.weight");
+    if (!draft_) block_ = nullptr;
     n_embd_ = meta_i("embedding_length");
     n_ff_dense_ = meta_i("feed_forward_length");
     n_head_ = meta_i("attention.head_count");
@@ -457,9 +479,23 @@ void Engine::load_geometry() {
     need(n_used_ >= 1 && n_used_ <= kMaxUsed && n_used_ <= n_expert_, "bad expert_used_count");
     need(kpool_ > 1 && idx_top_k_ > 0 && idx_top_k_ % kpool_ == 0, "indexer.top_k is not whole pools");
 
-    const int n_all = n_layer_ + (draft_ ? 1 : 0);
-    clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_all);
-    clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_all) : clamp_exp_;
+    // a block from another file must be this model's: a pruned model's has fewer experts to choose among
+    if (block_ && block_ != gg_.get()) {
+        const TensorInfo* gate = tensor(n_layer_, "ffn_gate_inp.weight");
+        if (!gate || gate->shape.size() != 2 || (int64_t) gate->shape[0] != n_embd_ ||
+            (int64_t) gate->shape[1] != n_expert_)
+            throw std::runtime_error(opt_.draft_model + " is not a file of this model: its block's router is " +
+                                     (gate ? shape_of(*gate) : std::string("missing")) + ", the model's layers have [" +
+                                     std::to_string(n_embd_) + ", " + std::to_string(n_expert_) + "]");
+    }
+    clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_layer_);
+    clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_layer_) : clamp_exp_;
+    if (draft_) {   // the draft block's limits are in the file the block is in: the model's own may end before it
+        const MetaValue* routed = meta_of(*block_, "swiglu_clamp_exp");
+        const MetaValue* shared = meta_of(*block_, "swiglu_clamp_shexp");
+        clamp_exp_.push_back(clamp_limits(routed, n_layer_ + 1).back());
+        clamp_shexp_.push_back(shared ? clamp_limits(shared, n_layer_ + 1).back() : clamp_exp_.back());
+    }
 }
 
 // A tensor to VRAM.  It goes as the file has it when the kernels compute with that type.  Otherwise it is
@@ -473,7 +509,7 @@ Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, i
     if ((int64_t) t->shape[0] != n_in || (int64_t) rest != n_out)
         throw std::runtime_error(t->name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
                                  std::to_string(n_out) + "]");
-    const size_t bytes = gg_->payload(*t), count = (size_t) t->elements();
+    const size_t bytes = home(*t).payload(*t), count = (size_t) t->elements();
     const bool as_is = !fix && (t->type == kTypeF32 || (want != kF32 && t->type == kTypeBF16) ||
                                 (want == kAnyMat && kernels::native_mmvq_supported((int) t->type)));
     const uint32_t type = as_is ? t->type : want == kF32 ? kTypeF32 : kTypeBF16;
@@ -483,14 +519,14 @@ Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, i
     if (!dense_) return d;
     if (dense_at_ > dense_bytes_) throw std::logic_error("the dense arena is too small for " + t->name);
     if (as_is) {
-        ck(cudaMemcpy(d.p, gg_->data(*t), bytes, cudaMemcpyHostToDevice), "weight upload");
+        ck(cudaMemcpy(d.p, home(*t).data(*t), bytes, cudaMemcpyHostToDevice), "weight upload");
         return d;
     }
 
     std::vector<float> f(count);
     const ggml_type_traits* traits = ggml_get_type_traits((ggml_type) t->type);
-    if (t->type == kTypeF32) std::memcpy(f.data(), gg_->data(*t), bytes);
-    else if (traits && traits->to_float) traits->to_float(gg_->data(*t), f.data(), (int64_t) count);
+    if (t->type == kTypeF32) std::memcpy(f.data(), home(*t).data(*t), bytes);
+    else if (traits && traits->to_float) traits->to_float(home(*t).data(*t), f.data(), (int64_t) count);
     else throw std::runtime_error(t->name + " is " + shape_of(*t) + ", a type this engine cannot read");
     if (fix)
         for (float& v : f) v = fix(v);
@@ -566,8 +602,8 @@ void Engine::load_layer(int il) {
         // sign tells those two apart.  The third stores A_log, under a name that says so.
         const TensorInfo* a = tensor(il, "ssm_a");
         float first = -1.f;
-        if (a && a->type == kTypeF32 && gg_->payload(*a) >= sizeof(first))
-            std::memcpy(&first, gg_->data(*a), sizeof(first));
+        if (a && a->type == kTypeF32 && home(*a).payload(*a) >= sizeof(first))
+            std::memcpy(&first, home(*a).data(*a), sizeof(first));
         float (*fix)(float) = nullptr;
         if (a && a->name.find("a_log") != std::string::npos) fix = [](float v) { return -std::exp(v); };
         else if (first > 0.f) fix = [](float v) { return -v; };
@@ -595,8 +631,8 @@ void Engine::load_layer(int il) {
         if (b->type != kTypeF32 || (int64_t) b->elements() != n_expert_)
             throw std::runtime_error(b->name + " is " + shape_of(*b) + ", expected F32 [" +
                                      std::to_string(n_expert_) + "]");
-        gg_->payload(*b);
-        std::memcpy(L.probs_b.data(), gg_->data(*b), (size_t) n_expert_ * sizeof(float));
+        home(*b).payload(*b);
+        std::memcpy(L.probs_b.data(), home(*b).data(*b), (size_t) n_expert_ * sizeof(float));
     }
 
     // the routed experts stay in the file; fill_expert_cache() copies the ones VRAM has room for
@@ -616,12 +652,12 @@ void Engine::load_layer(int il) {
         throw std::runtime_error(tg.name + " and " + tu.name + " have different types, which this engine does not run");
     L.gu_type = tg.type;
     L.d_type = td.type;
-    L.gu_bytes = gg_->payload(tg) / (size_t) n_expert_;
-    L.d_bytes = gg_->payload(td) / (size_t) n_expert_;
-    gg_->payload(tu);
-    L.exp_gate = gg_->data(tg);
-    L.exp_up = gg_->data(tu);
-    L.exp_down = gg_->data(td);
+    L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
+    L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
+    home(tu).payload(tu);
+    L.exp_gate = home(tg).data(tg);
+    L.exp_up = home(tu).data(tu);
+    L.exp_down = home(td).data(td);
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
         throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
@@ -725,9 +761,11 @@ void Engine::alloc_state() {
     const size_t n = (size_t) rows_;
 
     // A prompt batch runs its routed experts through MMQ when the card has a tile for each of their types.
+    // The model's layers: the draft block's experts never run a batch at a time.
     bool tiles = opt_.gpu_experts && rows_ >= kStageRows && n_moe_ > 0;
     size_t one_expert = 0;
-    for (const Layer& L : layers_) {
+    for (int il = 0; il < n_layer_; ++il) {
+        const Layer& L = layers_[(size_t) il];
         if (!L.moe) continue;
         tiles = tiles && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
                 Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
@@ -975,7 +1013,9 @@ void Engine::load(const Options& o) {
     if (opt_.window < 1 || opt_.window > 8) throw std::runtime_error("a window is 1 to 8 tokens");
     opt_.window = std::min(opt_.window, opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context));
     gg_ = std::make_unique<Shards>(opt_.model);
+    if (!opt_.draft_model.empty() && opt_.draft && opt_.window > 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
     load_geometry();
+    if (block_ != dg_.get()) dg_.reset();
 
     cudaStream_t st = nullptr;
     ck(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking), "cudaStreamCreate");
@@ -1041,7 +1081,9 @@ void Engine::load(const Options& o) {
             spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
             spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
         }
-        node_ = stay_near(spans, gg_->paths(), threads, node_share_);
+        std::vector<std::string> files = gg_->paths();
+        if (dg_) files.insert(files.end(), dg_->paths().begin(), dg_->paths().end());
+        node_ = stay_near(spans, files, threads, node_share_);
     }
     workers_ = std::make_unique<Workers>(threads);
     if (cached_ > 0 && opt_.expert_swaps > 0) {

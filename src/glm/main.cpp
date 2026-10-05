@@ -515,7 +515,8 @@ void usage() {
                  "                         count when they turn out right (default 4, 1 = no guesses)\n"
                  "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
                  "                         (default 3, 0 = never)\n"
-                 "  --no-draft             do not run the block that guesses ahead, in a file that has one\n"
+                 "  --no-draft             do not run the block that guesses ahead\n"
+                 "  --draft-model FILE     a file of the same model to take that block from, when --model has none\n"
                  "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
                  "                         as a CUDA graph and replayed)\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
@@ -573,6 +574,7 @@ int main(int argc, char** argv) {
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
         else if (a == "--no-draft") o.draft = false;
+        else if (a == "--draft-model") o.draft_model = val();
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
