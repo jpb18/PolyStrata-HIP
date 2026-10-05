@@ -12,6 +12,10 @@ NVIDIA 或 AMD 显卡（12 GB 及以上）· Windows 或 Linux · 免费开源</
 Strata 能在普通电脑上运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**。这是一个又大又聪明的
 AI 模型，通常要用服务器才能跑。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。所有数据都留在你的电脑上。
 
+> **这个 fork** 多了一个引擎，可以在 Qwen3.8-Flash-Next 之外跑 **GLM 5.3 Flash**。在 RTX 5090（32 GB）上写回答每秒
+> 27 个 token，读 prompt 每秒 312 到 373 个。目前还早，只支持 Linux 和 NVIDIA，要手动配置，见
+> [docs/GLM.md](docs/GLM.md)。本页其余内容来自上游 [Strata](https://github.com/Niko1221/Strata)。
+
 ## 速度有多快？
 
 我们在两台普通的游戏电脑上做了测试。一个 token 大约相当于 ¾ 个英文单词。
