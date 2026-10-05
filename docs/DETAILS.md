@@ -117,6 +117,11 @@ RTX 5090 (IQ3_S, the reporter's measurement).
 smaller subset fits, and the server's start error repeats it; setup suggests `--draft-vocab en` on cards under
 14 GB (only a suggestion: nothing changes unless you pass it).
 
+**Serving without the draft layer (`--mtp` is optional):** `serve` runs without `--mtp`. Drafts then come from the
+suffix/prompt-lookup drafter only (or one token per round), every token is still verified against the model, and the
+draft layer's VRAM (~0.7-1 GiB with its head) goes to the expert cache: 1,000 -> 1,678 slots in one A/B on an 8 GB
+card. The conversation cache (`--conversation-cache-mib`) stays on: a parked conversation then carries no draft K/V.
+
 **Low-RAM mode (engine 0.1.26, chosen by setup):** normally all of a model's experts are copied into RAM (23-50 GB,
 pinned) and the GPU holds a copy of the most-used ones. On a PC whose RAM cannot hold them beside the system (the
 experts plus ~10 GB), setup instead maps them from one file in the model's folder (`--mmap-experts`, the pack's
@@ -136,6 +141,15 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   as far as the RAM allows, their experts are kept in RAM too (so a prompt reads nothing from the SSD either).
 - The cache still follows the conversation (`--adapt-every`): a swap copies the evicted expert back from VRAM into the
   RAM place of the one that replaces it, so the RAM copy keeps holding exactly what the GPU does not.
+- `--adapt-async 1` (opt-in, `--serve`): the swaps of a round advance between decode windows on a helper thread
+  (copy back, copy in, move into RAM) instead of one window waiting for the whole round. Not with `--batch` or
+  `--peer-device` (the blocking tier runs there). It is not bit-exact from run to run: which window first computes a
+  swapped-in expert on the GPU (which rounds differently from the CPU) depends on when its copy lands.
+  It stays on the blocking tier (said in the log) when the exchange buffers are not page-locked, and with
+  `--pipeline-windows`; the stats line reports ms per round.
+- `STRATA_EXCHANGE_ROTATE=1` (opt-in): an adaptive swap hands buffer ownership over instead of copying the evicted
+  blob into the RAM copy (equal-size blobs, fully page-locked copy). Same tokens, fewer host copies; it works with
+  `--adapt-async 1` too. Details and the measurement: [EXCHANGE_ROTATION.md](EXCHANGE_ROTATION.md).
 - The answers are the plain mapped mode's for the same expert placement: the bytes are the file's. With a page-locked
   copy the GPU also takes its usual share of the misses over PCIe (`--pcie-frac`), as with enough RAM; `--pcie-frac 0`
   (or `STRATA_RESIDENT_PIN=0`) gives the mapped mode's exact tokens.

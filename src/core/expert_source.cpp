@@ -526,6 +526,7 @@ void FileExpertSource::close() {
     xstage_blob_ = 0;
     override_.clear();
     staged_.clear();
+    exchange_storage_.clear();
     exchanges_ = 0;
     file_reads_.store(0);
     complement_arena_ = nullptr;
@@ -823,7 +824,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
             const int64_t e = experts[i];
             if (e < 0 || e >= n_expert_) continue;
             const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) e;
-            if (complement_ready_ && index < complement_offsets_.size() && complement_offsets_[index] != kNoComplement)
+            if (complement_ready_ && resident_blob(index) != nullptr)
                 continue;                                     // in the RAM copy
             if (!override_.empty() && override_[index] != nullptr) continue;
             size_t v = 0;
@@ -1142,7 +1143,7 @@ void FileExpertSource::warm(int64_t layer, const int64_t* experts, int64_t n) {
         const int64_t e = experts[j];
         if (e < 0 || e >= n_expert_) continue;
         const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) e;
-        if (complement_ready_ && index < complement_offsets_.size() && complement_offsets_[index] != kNoComplement)
+        if (complement_ready_ && resident_blob(index) != nullptr)
             continue;                                                    // in the RAM copy
         if (warm_stamp_) warm_stamp_[index].store(stamp, std::memory_order_relaxed);
         warm_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1285,7 +1286,7 @@ void FileExpertSource::begin_layer(int64_t layer, const int32_t* ids, int64_t k)
 bool FileExpertSource::transient(int64_t layer, int64_t expert) const {
     if (!staged() || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return false;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
-    if (complement_ready_ && index < complement_offsets_.size() && complement_offsets_[index] != kNoComplement)
+    if (complement_ready_ && resident_blob(index) != nullptr)
         return false;
     return override_.empty() || override_[index] == nullptr;
 }
@@ -1297,7 +1298,7 @@ bool FileExpertSource::copy_blob(int64_t layer, int64_t expert, uint8_t* dst) {
     const uint64_t bytes = layer_blob_bytes_[(size_t) layer];
     if (complement_ready_) {
         const uint8_t* held =
-            detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, nullptr);
+            resident_blob(index);
         if (held == nullptr && !override_.empty()) held = override_[index];
         if (held != nullptr) {
             std::memcpy(dst, held, (size_t) bytes);
@@ -1726,16 +1727,25 @@ bool FileExpertSource::pin_cache_complement(
     return true;
 }
 
+const uint8_t* FileExpertSource::resident_blob(size_t index) const {
+    if (exchange_storage_.active()) return exchange_storage_.resident(index).host;
+    return detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, nullptr);
+}
+
 bool FileExpertSource::has_resident(int64_t layer, int64_t expert) const {
     if (!complement_ready_ || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return false;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
-    return index < complement_offsets_.size() && complement_offsets_[index] != kNoComplement;
+    return resident_blob(index) != nullptr;
 }
 
 bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err) {
     err.clear();
     if (n <= xstage_cap_) return true;
     if (!staged_.empty()) { err = "FileExpertSource: exchange buffers are in use"; return false; }
+    if (exchange_storage_.active()) {
+        err = "FileExpertSource: reserve maximum exchange capacity before enabling rotation";
+        return false; // the original exchange allocation can now contain live resident experts
+    }
     uint64_t blob = 0;
     for (const uint64_t b : layer_blob_bytes_) blob = std::max(blob, b);
     if (blob == 0 || n <= 0) { err = "FileExpertSource: no expert geometry for the exchange buffers"; return false; }
@@ -1745,9 +1755,18 @@ bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err) {
         xstage_ = nullptr;
         xstage_cap_ = 0;
     }
+    if ((uint64_t)n > std::numeric_limits<size_t>::max() / blob) {
+        err = "FileExpertSource: exchange allocation size overflow"; return false;
+    }
+    const char* rotate_env = std::getenv("STRATA_EXCHANGE_ROTATE");
+    const bool requested = rotate_env && std::strcmp(rotate_env, "1") == 0;
+    const bool uniform = std::all_of(layer_blob_bytes_.begin(), layer_blob_bytes_.end(),
+                                    [blob](uint64_t b) { return b == blob; });
+    const bool eligible = requested && uniform && complement_pinned_ && !complement_partial_ &&
+                          complement_host_ && complement_device_ && complement_bytes_ > 0;
     const size_t total = (size_t) n * (size_t) blob;
     void* p = nullptr;
-    if (cudaHostAlloc(&p, total, cudaHostAllocDefault) == cudaSuccess && p != nullptr) {
+    if (cudaHostAlloc(&p, total, eligible ? cudaHostAllocMapped : cudaHostAllocDefault) == cudaSuccess && p != nullptr) {
         xstage_pinned_ = true;
     } else {
         (void) cudaGetLastError();
@@ -1758,16 +1777,36 @@ bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err) {
     xstage_ = (uint8_t*) p;
     xstage_cap_ = n;
     xstage_blob_ = blob;
+    if (requested) {
+        std::string reason = "requires equal-size expert blocks and a fully mapped/pinned RAM complement";
+        void* device = nullptr;
+        if (eligible && xstage_pinned_ && cudaHostGetDevicePointer(&device, p, 0) == cudaSuccess && device) {
+            try {
+                if (exchange_storage_.initialize(complement_offsets_, (uint8_t*)complement_host_, complement_device_,
+                        complement_bytes_, xstage_, (const uint8_t*)device, (size_t)n, (size_t)blob, reason)) {
+                    std::fprintf(stderr, "FileExpertSource: exchange buffer rotation enabled: %lld buffers, %llu bytes each; no host commit memcpy\n",
+                                 (long long)n, (unsigned long long)blob);
+                }
+            } catch (const std::bad_alloc&) { reason = "buffer metadata allocation failed"; }
+        } else if (eligible) {
+            (void) cudaGetLastError();
+            reason = "exchange buffers could not be pinned and mapped";
+        }
+        if (!exchange_storage_.active())
+            std::fprintf(stderr, "FileExpertSource: exchange rotation unavailable; retaining copy path: %s\n", reason.c_str());
+    }
     return true;
 }
 
 uint8_t* FileExpertSource::exchange_buffer(int64_t q) const {
     if (xstage_ == nullptr || q < 0 || q >= xstage_cap_) return nullptr;
+    if (exchange_storage_.active()) return exchange_storage_.spare((size_t)q).host;
     return xstage_ + (size_t) q * (size_t) xstage_blob_;
 }
 
 bool FileExpertSource::stage_exchange(int64_t layer, int64_t in, int64_t out, int64_t q) {
-    if (!has_resident(layer, in) || has_resident(layer, out) || exchange_buffer(q) == nullptr) return false;
+    if (out < 0 || out >= n_expert_ || !has_resident(layer, in) || has_resident(layer, out) ||
+        exchange_buffer(q) == nullptr) return false;
     const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
     const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
     if (override_.empty()) override_.assign((size_t) blobs_, nullptr);
@@ -1783,6 +1822,16 @@ int64_t FileExpertSource::commit_exchanges() {
     int64_t n = 0;
     for (const Exchange& x : staged_) {
         const uint8_t* src = override_[x.out];
+        if (exchange_storage_.active()) {
+            if (!exchange_storage_.commit(x.in, x.out, (size_t)x.q, src, (size_t)x.bytes)) {
+                // Admitting the GPU swap after a failed RAM ownership update would lose an expert.
+                std::fprintf(stderr, "FileExpertSource: invalid exchange rotation commit; refusing corrupt residency\n");
+                std::abort();
+            }
+            ++n;
+            override_[x.out] = nullptr;
+            continue;
+        }
         const uint64_t at = complement_offsets_[x.in];
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
             complement_host_ != nullptr) {
@@ -1796,13 +1845,57 @@ int64_t FileExpertSource::commit_exchanges() {
     return n;
 }
 
+void FileExpertSource::commit_copies() {
+    if (exchange_storage_.active()) return;   // STRATA_EXCHANGE_ROTATE: ownership moves in commit_flip, nothing to copy
+    for (const Exchange& x : staged_) {
+        const uint8_t* src = override_.empty() ? nullptr : override_[x.out];
+        const uint64_t at = complement_offsets_[x.in];
+        if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
+            complement_host_ != nullptr)
+            std::memcpy((uint8_t*) complement_host_ + (size_t) at, src, (size_t) x.bytes);
+    }
+}
+
+int64_t FileExpertSource::commit_flip() {
+    int64_t n = 0;
+    for (const Exchange& x : staged_) {
+        const uint8_t* src = override_[x.out];
+        if (exchange_storage_.active()) {   // STRATA_EXCHANGE_ROTATE: the same ownership transfer as commit_exchanges
+            if (!exchange_storage_.commit(x.in, x.out, (size_t) x.q, src, (size_t) x.bytes)) {
+                std::fprintf(stderr, "FileExpertSource: invalid exchange rotation commit; refusing corrupt residency\n");
+                std::abort();
+            }
+            ++n;
+            override_[x.out] = nullptr;
+            continue;
+        }
+        const uint64_t at = complement_offsets_[x.in];
+        // the same test as commit_copies: an exchange whose bytes were copied is the one that flips
+        if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
+            complement_host_ != nullptr && detail::exchange_cache_complement(complement_offsets_, x.in, x.out))
+            ++n;
+        override_[x.out] = nullptr;
+    }
+    staged_.clear();
+    exchanges_ += n;
+    return n;
+}
+
+const uint8_t* FileExpertSource::resident_blob(int64_t layer, int64_t expert) const {
+    if (!complement_ready_ || complement_host_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ ||
+        expert >= n_expert_) return nullptr;
+    const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
+    if (index >= complement_offsets_.size()) return nullptr;
+    return resident_blob(index);   // through the rotation's ownership table when STRATA_EXCHANGE_ROTATE is on
+}
+
 const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
     if (base_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     const uint8_t* result = nullptr;
     bool from_files = true;
     if (complement_ready_) {
-        result = detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, nullptr);
+        result = resident_blob(index);
         if (result != nullptr) {
             ram_reads_.fetch_add(1, std::memory_order_relaxed);
             from_files = false;
@@ -1829,6 +1922,7 @@ bool FileExpertSource::pinned(int64_t layer, int64_t expert) const {
     if (!complement_ready_ || !complement_pinned_ || complement_host_ == nullptr || layer < 0 || expert < 0 ||
         layer >= n_layers_ || expert >= n_expert_) return false;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
+    if (exchange_storage_.active()) return exchange_storage_.resident(index).host != nullptr;
     if (index >= complement_offsets_.size() || complement_offsets_[index] == kNoComplement) return false;
     // a partial pin (CS-T): only the registered prefix
     return !complement_partial_ ||
@@ -1838,6 +1932,7 @@ bool FileExpertSource::pinned(int64_t layer, int64_t expert) const {
 const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) const {
     if (!pinned(layer, expert) || complement_device_ == nullptr) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
+    if (exchange_storage_.active()) return exchange_storage_.resident(index).device;
     return complement_device_ + (size_t) complement_offsets_[index];
 }
 
@@ -2020,6 +2115,15 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap) {
         int64_t distinct[kMaxWindowEntries], first_of[kMaxWindowEntries];
         int nd = 0, nmiss = 0;
+        // a helper GPU (RemoteExperts) holding the expert computes it in its own VRAM once begin() claims the row: like
+        // the peer tier's, such an expert is no miss of this plan and never part of the PCIe share, which would read it
+        // over the primary's link instead (2x RX 6900 XT, IQ3_S, --remote-expert-opt with the probed share 0.39: ~4
+        // helper experts per layer-window moved to PCIe, 59 ms per window against 34 ms)
+        auto helper_holds = [&](int32_t e) {
+            for (int r = 0; r < d.remote_count; ++r)
+                if (d.remote[r]->holds(d.layers, e)) return true;
+            return false;
+        };
         for (int64_t i = 0; i < n; ++i) {
             first_of[i] = i;
             for (int64_t j = 0; j < i; ++j)
@@ -2028,7 +2132,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 distinct[nd++] = i;
                 const int32_t e = ids[i];
                 if (e >= 0 && e < d.n_expert && d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] < 0 &&
-                    !(d.peer != nullptr && d.peer->has(d.layers, e))) ++nmiss;
+                    !(d.peer != nullptr && d.peer->has(d.layers, e)) && !helper_holds(e)) ++nmiss;
             }
         }
         const bool pcie_ok = d.pcie_num > 0 && d.src->pcie_layer(d.layers);
@@ -2050,6 +2154,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                                                                                  : (size_t) slot * (size_t) d.cache_blob));
                 } else if (d.peer != nullptr && d.peer->has(d.layers, e)) {
                     kd = 2;                        // multi-GPU: the second GPU computes it
+                } else if (helper_holds(e)) {
+                    // left to the helper: kind -1 until RemoteExperts::begin() claims the row (see above)
                 } else {
                     if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64) {
                         const uint8_t* src = d.src->pinned(d.layers, e) ? d.src->blob(d.layers, e) : nullptr;

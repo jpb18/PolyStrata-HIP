@@ -22,6 +22,7 @@
 #pragma once
 
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/exchange_storage.hpp"
 #include "strata/core/hit_hook.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 
@@ -475,17 +476,34 @@ public:
     // buffer and calls `stage_exchange`: `out` is then read from that buffer, and `in` still from here (the CPU
     // computes both until the swap lands).  Once the slot copy has landed, `commit_exchanges` moves `out` into
     // `in`'s place, so the copy keeps holding exactly the experts the GPU does not - with no read of the file.
+    // STRATA_EXCHANGE_ROTATE=1 can instead transfer buffer ownership (uniform, fully pinned/mapped slots).
     /// Whether the compact copy holds `(layer, expert)`.
     bool has_resident(int64_t layer, int64_t expert) const;
     /// Host room for `n` evicted blobs (page-locked when possible).  Idempotent for the same or a smaller `n`.
     bool reserve_exchanges(int64_t n, std::string& err);
     int64_t exchange_capacity() const { return xstage_cap_; }
+    /// The exchange buffers are page-locked (cudaHostAlloc): copies to and from them are asynchronous.
+    bool exchange_pinned() const { return xstage_pinned_; }
     uint8_t* exchange_buffer(int64_t q) const;
     /// Requires `has_resident(layer, in)`, `!has_resident(layer, out)` and `exchange_buffer(q)` holding out's blob.
     bool stage_exchange(int64_t layer, int64_t in, int64_t out, int64_t q);
+    /// --pipeline-windows: size the exchange table now, so a `stage_exchange` on the adaptive tier's thread never
+    /// reallocates it under a concurrent `blob` (the pool reads it while windows are in flight).
+    void prepare_overrides() { if (override_.empty()) override_.assign((size_t) blobs_, nullptr); }
     /// After the GPU copies of every staged swap have landed.  Returns how many exchanges were applied.
     int64_t commit_exchanges();
+    /// `commit_exchanges` in two halves, for the asynchronous adaptive tier (--adapt-async): `commit_copies` moves
+    /// every staged evicted blob into its `in`'s place in the copy (on another thread: safe once nothing computes `in`
+    /// from RAM - it is resident on the GPU - while `out` is still read from its exchange buffer), then `commit_flip`
+    /// (the caller's thread, between windows) points `out` there and drops the staging.  Returns how many were applied.
+    void commit_copies();
+    int64_t commit_flip();
+    /// The compact copy's blob of `(layer, expert)`, or null; not counted as a read (any thread).
+    const uint8_t* resident_blob(int64_t layer, int64_t expert) const;
     int64_t exchanges() const { return exchanges_; }
+    bool exchange_rotation() const { return exchange_storage_.active(); }
+    uint64_t rotated_exchanges() const { return exchange_storage_.exchanges(); }
+    uint64_t avoided_exchange_copy_bytes() const { return exchange_storage_.avoided_bytes(); }
     /// With the compact copy ready: blobs read from the mapped file since (what the plain mmap mode may read from
     /// the SSD).  0 in a steady resident mode; lend-region experts that did not fit the RAM count here.
     int64_t file_reads() const { return file_reads_.load(std::memory_order_relaxed); }
@@ -540,6 +558,7 @@ public:
     int64_t reads() const override { return reads_; }
 
 private:
+    const uint8_t* resident_blob(size_t index) const;
     const uint8_t* mapped_blob(int64_t layer, int64_t expert) const;
     /// The blob's bytes from the mapped file(s) - experts.bin, or the three GGUF role slices - into `dst`.
     bool copy_from_files(int64_t layer, int64_t expert, uint8_t* dst) const;
@@ -609,6 +628,7 @@ private:
     const uint8_t* complement_device_ = nullptr;
     uint64_t complement_bytes_ = 0;
     std::vector<uint64_t> complement_offsets_;
+    detail::ExchangeStorage exchange_storage_; // authoritative when active; original arenas still own memory
     bool complement_pinned_ = false;
     bool complement_partial_ = false;         ///< CS-T: only the first complement_pin_limit_ bytes are registered
     uint64_t complement_pin_limit_ = 0;

@@ -149,6 +149,30 @@ class ParallelArgs(unittest.TestCase):
         self.assertEqual(parallel_args({"parallel": "4"}, []), [])                   # said and ignored
         self.assertEqual(parallel_args({"parallel": True}, []), [])
         self.assertEqual(parallel_args({"parallel": 12}, []), ["--batch", "12"])     # the engine warns and caps
+    def test_parallel_above_the_window_says_so_unless_batch_mtp(self):
+        import contextlib, io, os
+        def said(args, env):
+            buf = io.StringIO()
+            old = os.environ.get("STRATA_BATCH_MTP")
+            if env is None:
+                os.environ.pop("STRATA_BATCH_MTP", None)
+            else:
+                os.environ["STRATA_BATCH_MTP"] = env
+            try:
+                with contextlib.redirect_stdout(buf):
+                    r = parallel_args({"parallel": 12}, args)
+            finally:
+                if old is None:
+                    os.environ.pop("STRATA_BATCH_MTP", None)
+                else:
+                    os.environ["STRATA_BATCH_MTP"] = old
+            self.assertEqual(r, ["--batch", "12"])
+            return "at most" in buf.getvalue()
+        self.assertTrue(said([], None))                  # 0.1.39: the window holds 8 rows
+        self.assertTrue(said([], "0"))
+        self.assertFalse(said(["--batch-mtp"], None))    # --batch-mtp waves more through the window
+        self.assertFalse(said([], "1"))
+
         args = engine_args({"args": ["--pack", "p"], "parallel": 2})
         self.assertEqual(args[-2:], ["--batch", "2"])
 
