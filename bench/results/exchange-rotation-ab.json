@@ -1,5 +1,5 @@
 {
-  "kind": "clean-rotation-only-native-same-binary-ab",
+  "kind": "clean-rotation-only-q2-native-same-binary-ab",
   "date": "2026-10-04",
   "source_commit": "18a30ad775bce86e99a54e6dc552ccb72c66d16e",
   "source_archive_sha256": "a726e0be8b03c40d1c5c09b49da37e28ba6e34ef3fd247bb85adf043de927a88",
@@ -19,50 +19,47 @@
     "cuda_architectures": "120"
   },
   "model": {
-    "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
-    "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
+    "revision": "ed59f92082b1e93c0e96d60a8b11aab089b52f09",
+    "verification": "Both contents verified against the pinned Hugging Face LFS SHA-256 values.",
     "files": [
       {
-        "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf",
-        "size": 10946624,
-        "sha256": "2dabcbb53ca537a7947bc7d20414fd464eeaf4d66d43021b5b2556cc87544ad2"
+        "path": "Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf",
+        "size": 37623740192,
+        "sha256": "69820c02ec7d0b45ef2ebb19d6620299db749fe2aded7f39f93c6b88b199b720"
       },
       {
-        "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00002-of-00006.gguf",
-        "size": 682434912,
-        "sha256": "494ca4ed3dbf97bc28da88af3890b8877b9032f909812d00c0526a9ca5e91d2e"
-      },
-      {
-        "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
-        "size": 54400261312,
-        "sha256": "34efd79a80a1ce540a517a5d56171924b66ce1c38b04c904f17ad6d8ef17cf20"
-      },
-      {
-        "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00004-of-00006.gguf",
-        "size": 49446841216,
-        "sha256": "bfa634025fabbd2658bf7694bc80b90e571699c768723f844c934c7ef06c691a"
-      },
-      {
-        "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00005-of-00006.gguf",
-        "size": 49668930400,
-        "sha256": "232a8f14cc0fa4262e7efe8593774b136fe40909e39c7a020342ddaa27259a97"
-      },
-      {
-        "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf",
-        "size": 34015618784,
-        "sha256": "538a93bca918064983409a41187ad4c68640f9aced6f29564da8f551bf86d7a5"
+        "path": "Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf",
+        "size": 28800138432,
+        "sha256": "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"
       }
-    ],
-    "bytes": 188225033248
+    ]
   },
-  "model_hash_note": "Hashes are from the retained download manifest; file size/inode/mtime are checked for stability before each arm.",
-  "model_formats": "Q8_0 experts, compatibility BF16 small projections, Q5_K head, FP16 KV; explicit existing IQ4_NL PLE override.",
-  "ple_override": {
-    "format": "IQ4_NL",
-    "file": "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
-    "sha256": "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"
+  "model_hash_note": "Both downloaded/reused shard contents were verified against the pinned publisher LFS hashes; size/inode/mtime are checked for stability before each arm.",
+  "layout": {
+    "layers": 48,
+    "experts_per_layer": 512,
+    "blob_bytes": 1382400,
+    "gate_up_type": "Q2_0",
+    "down_type": "Q2_0"
   },
-  "qualification": "This is a mixed-format storage stress fixture using upstream-supported readers, not a full-Q8 quality claim. No Q8 PLE reader extension is present in the tested build.",
+  "model_formats": "Published GSQ-RCO Q2_0 model with its matching IQ4_NL PLE shard; FP16 KV.",
+  "pack_command_template": [
+    "python",
+    "{source}/tools/iq_pack.py",
+    "--gguf",
+    "{native}",
+    "--out",
+    "{pack}"
+  ],
+  "pack_hashes": {
+    "native_experts_sha256": "015e53d3ae36324f172be4942bcf129539b343e2eb4fcd4f25ca5eff180bfa41",
+    "index_sha256": "c758314d495a1261d06a806b1c415596dfabe62e0cbf44ce592dc84c53229ccd",
+    "dense_sha256": "a43d7d0b69525335f4b000d5197a1d3aefcd3c0014fc3e12b3455e0a5d827ba2"
+  },
+  "qualification": "Storage parity on the standard Q2_0 model; no Q8 PLE reader extension or model conversion is required.",
+  "cache_note": "The 12000-slot cache is deliberately smaller than this 96 GB GPU allows to exercise RAM/GPU exchanges. This is not the fastest full-GPU Q2 configuration.",
+  "resident_complement_gib": 16.19,
   "input_tokens": 1024,
   "output_tokens": 1024,
   "allocated_context": 40960,
@@ -76,9 +73,9 @@
     "--native",
     "{native}",
     "--expert-cache",
-    "16400",
+    "12000",
     "--resident-budget-gib",
-    "56",
+    "32",
     "--expert-profile",
     "{source}/data/expert-profile.bin",
     "--adapt-every",
@@ -89,8 +86,6 @@
     "0.7",
     "--pcie-frac",
     "-1",
-    "--ple-gguf",
-    "{ple}",
     "--spec",
     "2",
     "--mtp",
@@ -120,17 +115,9 @@
     "2147483647",
     "--stats",
     "--native-dense-gguf",
-    "{model}/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf",
+    "{model}/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf",
     "--native-dense-gguf",
-    "{model}/Qwen3.8-Flash-Next-Q8_0-00002-of-00006.gguf",
-    "--native-dense-gguf",
-    "{model}/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
-    "--native-dense-gguf",
-    "{model}/Qwen3.8-Flash-Next-Q8_0-00004-of-00006.gguf",
-    "--native-dense-gguf",
-    "{model}/Qwen3.8-Flash-Next-Q8_0-00005-of-00006.gguf",
-    "--native-dense-gguf",
-    "{model}/Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf"
+    "{model}/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf"
   ],
   "environment": {
     "STRATA_ADAPT_NOWAIT": "0",
@@ -148,45 +135,45 @@
     {
       "rotation": 0,
       "output_tokens": 1024,
-      "decode_tokens_per_second": 60.115063989667725,
-      "startup_seconds": 81.38423368299846,
-      "wall_seconds": 18.77454281001701,
+      "decode_tokens_per_second": 104.89546306634843,
+      "startup_seconds": 23.845058003003942,
+      "wall_seconds": 10.330669555987697,
       "timings": {
         "generated": 1024,
         "prompt_tokens": 1024,
-        "prompt_ms": 1736.2,
-        "decode_ms": 17034.0,
+        "prompt_ms": 567.9,
+        "decode_ms": 9762.1,
         "finish": "length",
         "drafts_accepted": 0,
         "drafts_offered": 0,
         "reused": 0,
-        "hits": 465690,
-        "lookups": 484972,
-        "ram_blobs": 28390,
+        "hits": 454042,
+        "lookups": 480592,
+        "ram_blobs": 41285,
         "file_blobs": 0,
         "file_mb": 0.0,
         "prompt_read": 1024,
-        "offloaded": 6548
+        "offloaded": 10928
       },
       "rotation_active": false,
       "rotated_blocks": 0,
-      "resident_exchanges": 2555,
+      "resident_exchanges": 3802,
       "avoided_memcpy_payload_bytes": 0,
       "engine_info": {
         "version": "0.1.39",
         "context": 40960,
         "kv": "fp16",
         "kv_resident": 0,
-        "expert_slots": 16400,
-        "expert_cache_mib": 81679,
-        "expert_slots_primary": 16400,
-        "expert_cache_primary_mib": 81679,
+        "expert_slots": 12000,
+        "expert_cache_mib": 15820,
+        "expert_slots_primary": 12000,
+        "expert_cache_primary_mib": 15820,
         "spec": 2,
         "mtp_max": 1,
         "lookup": 0,
-        "vram_free_mib": 5938,
+        "vram_free_mib": 74168,
         "cvec": 0,
-        "arena_mib": 40720,
+        "arena_mib": 16579,
         "pool_workers": 15,
         "pcie_frac": "0.55",
         "spec_min_p": "0.00",
@@ -198,53 +185,53 @@
         "engine": "0.1.39"
       },
       "diagnostics": [
-        "strata decode timing: 1024 windows, avg T 1.00, 1.00 tokens/window, 16.63 ms/window = verify 14.58 (GPU-reach wait 8.62 + per-layer host 5.45 [plan 0.03 actq 0.01 jobs 0.00 CPU 2.78] + stage 2.56) + commit/emit 0.03 + draft 0.00; per layer-window: CPU experts 0.39 (0.39 entries), VRAM hits 9.47, PCIe 0.13",
-        "strata serve: resident RAM: 39.77 GiB of experts in RAM, 2555 exchanged with the VRAM tier, 0 blob reads from the file"
+        "strata decode timing: 1024 windows, avg T 1.00, 1.00 tokens/window, 9.53 ms/window = verify 8.73 (GPU-reach wait 7.11 + per-layer host 1.28 [plan 0.03 actq 0.02 jobs 0.00 CPU 1.15] + stage 0.01) + commit/emit 0.01 + draft 0.00; per layer-window: CPU experts 0.54 (0.54 entries), VRAM hits 9.24, PCIe 0.22",
+        "strata serve: resident RAM: 16.19 GiB of experts in RAM, 3802 exchanged with the VRAM tier, 0 blob reads from the file"
       ],
       "output_token_ids_sha256": "b384e4b16b5bd1c41f4739d053eb50d100a9cbfdb18fc5b76e31d188015961be"
     },
     {
       "rotation": 1,
       "output_tokens": 1024,
-      "decode_tokens_per_second": 75.12453505689362,
-      "startup_seconds": 81.84003309899708,
-      "wall_seconds": 14.8190471130074,
+      "decode_tokens_per_second": 113.44249218975028,
+      "startup_seconds": 13.035045650991378,
+      "wall_seconds": 9.620121874992037,
       "timings": {
         "generated": 1024,
         "prompt_tokens": 1024,
-        "prompt_ms": 1184.6,
-        "decode_ms": 13630.7,
+        "prompt_ms": 592.7,
+        "decode_ms": 9026.6,
         "finish": "length",
         "drafts_accepted": 0,
         "drafts_offered": 0,
         "reused": 0,
-        "hits": 465690,
-        "lookups": 484972,
-        "ram_blobs": 28390,
+        "hits": 454042,
+        "lookups": 480592,
+        "ram_blobs": 41285,
         "file_blobs": 0,
         "file_mb": 0.0,
         "prompt_read": 1024,
-        "offloaded": 6548
+        "offloaded": 10928
       },
       "rotation_active": true,
-      "rotated_blocks": 2555,
-      "resident_exchanges": 2555,
-      "avoided_memcpy_payload_bytes": 13343232000,
+      "rotated_blocks": 3802,
+      "resident_exchanges": 3802,
+      "avoided_memcpy_payload_bytes": 5255884800,
       "engine_info": {
         "version": "0.1.39",
         "context": 40960,
         "kv": "fp16",
         "kv_resident": 0,
-        "expert_slots": 16400,
-        "expert_cache_mib": 81679,
-        "expert_slots_primary": 16400,
-        "expert_cache_primary_mib": 81679,
+        "expert_slots": 12000,
+        "expert_cache_mib": 15820,
+        "expert_slots_primary": 12000,
+        "expert_cache_primary_mib": 15820,
         "spec": 2,
         "mtp_max": 1,
         "lookup": 0,
-        "vram_free_mib": 5938,
+        "vram_free_mib": 74168,
         "cvec": 0,
-        "arena_mib": 40720,
+        "arena_mib": 16579,
         "pool_workers": 15,
         "pcie_frac": "0.55",
         "spec_min_p": "0.00",
@@ -256,10 +243,10 @@
         "engine": "0.1.39"
       },
       "diagnostics": [
-        "FileExpertSource: exchange buffer rotation enabled: 96 buffers, 5222400 bytes each; no host commit memcpy",
-        "strata decode timing: 1024 windows, avg T 1.00, 1.00 tokens/window, 13.31 ms/window = verify 12.34 (GPU-reach wait 8.67 + per-layer host 3.15 [plan 0.03 actq 0.01 jobs 0.00 CPU 2.74] + stage 0.30) + commit/emit 0.02 + draft 0.00; per layer-window: CPU experts 0.39 (0.39 entries), VRAM hits 9.47, PCIe 0.13",
-        "strata serve: resident RAM: 39.77 GiB of experts in RAM, 2555 exchanged with the VRAM tier, 0 blob reads from the file",
-        "strata serve: exchange rotation: 2555 blocks, 13343232000 host memcpy bytes avoided (cumulative payload)"
+        "FileExpertSource: exchange buffer rotation enabled: 96 buffers, 1382400 bytes each; no host commit memcpy",
+        "strata decode timing: 1024 windows, avg T 1.00, 1.00 tokens/window, 8.82 ms/window = verify 8.41 (GPU-reach wait 6.83 + per-layer host 1.23 [plan 0.03 actq 0.02 jobs 0.01 CPU 1.10] + stage 0.01) + commit/emit 0.01 + draft 0.00; per layer-window: CPU experts 0.54 (0.54 entries), VRAM hits 9.24, PCIe 0.22",
+        "strata serve: resident RAM: 16.19 GiB of experts in RAM, 3802 exchanged with the VRAM tier, 0 blob reads from the file",
+        "strata serve: exchange rotation: 3802 blocks, 5255884800 host memcpy bytes avoided (cumulative payload)"
       ],
       "output_token_ids_sha256": "b384e4b16b5bd1c41f4739d053eb50d100a9cbfdb18fc5b76e31d188015961be"
     }
@@ -289,15 +276,12 @@
       "name": "memcheck",
       "exit_code": 0,
       "seconds": 0.5145799079909921
-    },
-    {
-      "name": "comparison-02",
-      "exit_code": 0,
-      "seconds": 224.55086803800077
     }
   ],
+  "comparison_exit_code": 0,
   "limitations": [
-    "One pair; no universal speedup or speculative-path token-parity claim.",
+    "One off/on pair; no general speedup or speculative-path token-parity claim.",
+    "GPU cache deliberately capped to exercise exchanges; Q2 can fit fully on this 96 GB card.",
     "EOS ignored for exact output length; not an answer-quality measurement.",
     "AMD and Windows GPU execution untested."
   ]

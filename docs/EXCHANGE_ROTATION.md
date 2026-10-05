@@ -80,41 +80,45 @@ GPU execution were not tested for this patch.
 
 ## One native token-identical A/B
 
-Freshly built and measured on 2026-10-04 at
+Measured on 2026-10-04 using the clean rotation build at
 `18a30ad775bce86e99a54e6dc552ccb72c66d16e`, on upstream
-`6f32ec070f23ced9f50e704d854d775da52591ab`. The tested source contains only
-the rotation patch and its tests/docs; no Q8 PLE reader extension.
+`6f32ec070f23ced9f50e704d854d775da52591ab`. The model is the standard
+GSQ-RCO **Q2_0**, with its matching IQ4_NL PLE shard. Both shards were verified
+against the publisher's SHA-256 hashes at the pinned revision in the receipt.
+The native pack uses the existing `tools/iq_pack.py`; no compatibility conversion
+or Q8 PLE reader extension is needed.
 
 Both arms used the same Release binary (GCC 13.3, CUDA 13.2), RTX PRO 6000
 Blackwell 96GB, Ryzen 9 7950X and 128GB installed RAM. A fresh engine per arm
 generated exactly 1,024 tokens after the same 1,024-token counting prompt.
-The context allocation was 40,960, with 16,400 GPU expert slots, a 39.77 GiB
+The context allocation was 40,960, with 12,000 GPU expert slots, a 16.19 GiB
 pinned/mapped resident complement, FP16 KV, greedy target-only decoding and
-zero offered drafts or reused prompt tokens. Only `STRATA_EXCHANGE_ROTATE`
-changed. Transfer completion is awaited before admission.
+zero offered drafts, reused prompt tokens or file-tier blob reads during
+generation. Only `STRATA_EXCHANGE_ROTATE` changed. Transfer completion is
+awaited before admission.
 
-The fixture uses uniform Q8_0 experts, compatibility BF16 small projections,
-a Q5_K output head and an explicitly selected **IQ4_NL PLE table**, all read
-through existing upstream paths. This mixed-format fixture tests storage
-parity; it is not a full-Q8 model or answer-quality claim. The out-of-vocabulary
-EOS sentinel `2147483647` forces the exact generated length.
+The GPU cache was deliberately capped at 12,000 slots (15.45 GiB) to exercise
+resident RAM exchanges. Q2 can fit entirely on this 96GB GPU; this is a storage
+path comparison, not the fastest full-GPU configuration. It does not change
+the project's presets or enable resident mode for existing users.
 
 | Rotation | Decode tokens/s | Resident exchanges | Avoided host-copy payload | Output IDs |
 |---|---:|---:|---:|---|
-| `0` | 60.12 | 2,555 | 0 bytes | 1,024, identical |
-| `1` | 75.12 | 2,555 | 13,343,232,000 bytes | 1,024, identical |
+| `0` | 104.90 | 3,802 | 0 bytes | 1,024, identical |
+| `1` | 113.44 | 3,802 | 5,255,884,800 bytes | 1,024, identical |
 
-Decode rates exclude startup and prefill. This single pair is not a general
-speedup or speculative-path parity guarantee. The fresh Blackwell build also
-passed both CTest checks and the three-mode CUDA fixture; Compute Sanitizer
-reported 0 errors. AMD and Windows GPU execution remain untested.
+Decode rates exclude startup and prefill. The observed throughput change was
++8.1% in this one pair; repeated timing or a general speedup is not established.
+The out-of-vocabulary EOS sentinel `2147483647` forces the exact output length,
+so this is not a model-quality evaluation. Speculative-path token parity,
+AMD and Windows GPU execution remain untested.
 
-The [receipt](../bench/results/exchange-rotation-ab.json) contains the source,
-binary, model, PLE and profile hashes, arguments, timings and diagnostics.
-The [raw IDs](../bench/results/exchange-rotation-token-ids.json) retain the
-input and both outputs. Model-shard hashes come from the retained download
-manifest; their size/inode/mtime were checked before each arm. The PLE override
-was hashed in this run. To check the token comparison without a model:
+The same Blackwell binary passed both CTest checks and the three-mode CUDA
+fixture; Compute Sanitizer reported 0 errors. The
+[receipt](../bench/results/exchange-rotation-ab.json) contains source, binary,
+model, pack and profile hashes, arguments, timings and diagnostics. The
+[raw IDs](../bench/results/exchange-rotation-token-ids.json) retain the input
+and both outputs. To check the token comparison without a model:
 
 ```bash
 python - <<'PY'
