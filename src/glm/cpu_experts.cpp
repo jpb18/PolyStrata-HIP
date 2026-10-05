@@ -43,14 +43,19 @@ void Workers::drain(Batch& b) {
     }
 }
 
-// A worker counts itself in users_ before it reads cur_, so run() can tell when nobody holds its Batch any more.
+// A worker with nothing to do only reads cur_: a write there by each of them, every turn of the loop, kept run()
+// from ever seeing users_ at zero for long.  When there is a batch, the worker counts itself in users_ and reads
+// cur_ again before it uses it, so run() can tell when nobody holds its Batch any more.
 void Workers::loop() {
     int idle = 0;
     while (!quit_.load(std::memory_order_relaxed)) {
-        users_.fetch_add(1);
-        Batch* b = cur_.load();
-        if (b) drain(*b);
-        users_.fetch_sub(1);
+        Batch* b = cur_.load(std::memory_order_acquire);
+        if (b) {
+            users_.fetch_add(1);
+            b = cur_.load();
+            if (b) drain(*b);
+            users_.fetch_sub(1);
+        }
         if (b) {
             idle = 0;
             continue;
@@ -80,8 +85,8 @@ void Workers::run(int n, const std::function<void(int)>& fn) {
         cv_.notify_all();
     }
     drain(b);
+    cur_.store(nullptr);   // every task is taken: a worker that comes now has nothing to find
     while (b.left.load(std::memory_order_acquire) != 0) _mm_pause();
-    cur_.store(nullptr);
     while (users_.load() != 0) _mm_pause();
 }
 

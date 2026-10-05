@@ -37,8 +37,9 @@ private:
     static void drain(Batch& b);
 
     std::vector<std::thread> th_;
-    std::atomic<Batch*> cur_{nullptr};
-    std::atomic<int> users_{0};      ///< workers that may hold a Batch pointer
+    // every idle worker reads cur_ in a loop; users_ is written, so it has a cache line of its own
+    alignas(64) std::atomic<Batch*> cur_{nullptr};
+    alignas(64) std::atomic<int> users_{0};      ///< workers that may hold a Batch pointer
     std::atomic<int> sleepers_{0};
     std::atomic<bool> quit_{false};
     std::mutex m_;
