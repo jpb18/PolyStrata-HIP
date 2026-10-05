@@ -21,8 +21,8 @@ What the first run does (each step is skipped when it is already done):
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
 GLM 5.3 Flash (--family glm, docs/GLM.md) is a second model with an engine of its own, compiled here: Linux, one
-NVIDIA card.  Its setup asks for the context and the conversation cache and has no steps for a pack, a draft layer or
-images.
+NVIDIA card.  Its setup asks for the context and the conversation cache and has no steps for a pack or images.  The
+model has one draft block for all its sizes: a size whose file leaves it out gets the block alone (~2.8 GB).
 
 Options: --family qwen|swift, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
@@ -160,7 +160,8 @@ MODELS = {
     # GLM 5.3 Flash (docs/GLM.md): a GGUF read in place by its own engine (glm_setup).  "arena_gb" is the routed
     # experts; the ones the GPU does not hold come through the OS file cache.  "ram_gb" is glm_ram_need() for a
     # 32 GB card, an estimate: it has run with 120 GB of RAM only.  A size may have its own repository ("hf"),
-    # expert profile and VRAM beside the experts ("vram_beside_gb", measured at 32K on that card).
+    # expert profile and VRAM beside the experts ("vram_beside_gb", measured at 32K on that card).  "draft": "own":
+    # the file carries the model's draft block; a size without the key gets the block from FAMILIES["glm"]["draft"].
     "3.0BIT": {"about": "the whole model: 3-bit GSQ-RCO experts, Q4_K attention", "download_gb": 113.6,
                "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",), "shards": 1,
                "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"},
@@ -170,14 +171,14 @@ MODELS = {
     "UD-IQ2_XXS": {"about": "the whole model at about 2 bits (Unsloth): less RAM, reads faster, writes slower",
                    "download_gb": 101.8, "ram_gb": 82, "arena_gb": 92.5, "families": ("glm",), "shards": 4,
                    "file": "GLM-5.3-Flash-UD-IQ2_XXS-0000{i}-of-00004.gguf", "vram_beside_gb": 12.5,
-                   "hf": hf("unsloth/GLM-5.3-Flash-GGUF") + "UD-IQ2_XXS/"},
+                   "hf": hf("unsloth/GLM-5.3-Flash-GGUF") + "UD-IQ2_XXS/", "draft": "own"},
     # REAP50 (patrickbdevaney): 144 of each layer's 288 routed experts kept, so its experts are 72 GB.  Expert
-    # numbers are its own: a profile of its own
+    # numbers are its own: a profile of its own, and a draft block of its own, pruned with the layers
     "REAP50-Q3_K_M": {"about": "half the routed experts (REAP50), 3-bit K-quant: less RAM", "download_gb": 78.8,
                       "ram_gb": 60, "arena_gb": 72.1, "families": ("glm",), "shards": 1,
                       "file": "GLM-5.3-Flash-REAP50-Q3_K_M.gguf", "vram_beside_gb": 11,
                       "hf": hf("patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF"),
-                      "profile": "expert-profile-glm-reap50.txt"},
+                      "profile": "expert-profile-glm-reap50.txt", "draft": "own"},
 }
 # The experimental Unsloth file's four shards at the pinned revision: name -> (bytes, sha256), checked after the
 # download (setup trusts no other model file by name and size alone either: check_shards reads their directories).
@@ -244,13 +245,15 @@ FAMILIES = {
                 "vision": False, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
     # GLM 5.3 Flash: another architecture (llama.cpp's glm5-next), run by strata-glm from its one GGUF - no pack,
-    # no draft layer, no image encoder.  "engine": its setup is glm_setup, not main()'s steps (docs/GLM.md)
+    # no image encoder.  "engine": its setup is glm_setup, not main()'s steps (docs/GLM.md).  "draft": the model's
+    # draft block in the data folder, one for every size whose file has none (tools/glm_draft_fetch.py)
     "glm": {"title": "GLM 5.3 Flash", "by": "files from neuralll, Unsloth and patrickbdevaney",
             "about": "another model, with its own engine: Linux, one NVIDIA card (run on 32 GB), 64-128 GB of RAM",
             "hf": hf("neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF"),
             "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf", "shards": 1, "tag": "glm-",
             "name": "glm-5.3-flash", "engine": "glm", "vision": False, "experimental": True,
             "profile": "expert-profile-glm.txt",
+            "draft": "mtp/glm-5.3-flash/draft-block.gguf", "draft_gb": 2.8,
             "sha256": {"GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf":
                        (113585695168, "5f03b74ffe7513479795ca60a0fd8c40cbb3101769672b2c91b3df01138d9f6d"),
                        "GLM-5.3-Flash-REAP50-Q3_K_M.gguf":
@@ -3860,10 +3863,22 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     if not profile.exists():
         pack.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "data" / d.get("profile", fam["profile"]), profile)
+    # The draft block is the model's, one for every size.  A size whose file leaves it out gets it here: the block
+    # alone is downloaded, not the file it comes from.
+    draft = None
+    if d.get("draft") != "own":
+        draft = find_in([data, *elsewhere], fam["draft"]) or data / fam["draft"]
+        if not draft.exists():
+            say("  The draft block lets the model guess a few words ahead and check them at once (faster answers).")
+            say(f"  {model}'s file has none, so the block alone is downloaded (~{fam['draft_gb']} GB).")
+            run([sys.executable, str(ROOT / "tools" / "glm_draft_fetch.py"), "fetch", "--out", str(draft)])
+        ok(f"draft block: {draft}")
     ok(f"model prepared: {pack}")
 
     step(7, "writing the start script")
     args = ["--model", str(gguf), "--max-context", str(ctx), "--expert-profile", str(profile)]
+    if draft:
+        args += ["--draft-model", str(draft)]
     if conv:
         args += ["--conversation-cache-mib", str(conv)]
     if a.vram_reserve_mib is not None:

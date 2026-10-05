@@ -62,7 +62,7 @@ class Pins(unittest.TestCase):
         self.assertEqual(size, 78776759712)
         self.assertRegex(sha, r"^[0-9a-f]{64}$")
         rows = [line.split() for line in (ROOT / "data" / d["profile"]).read_text().splitlines()]
-        self.assertEqual(sorted({int(r[0]) for r in rows}), list(range(3, 45)))
+        self.assertEqual(sorted({int(r[0]) for r in rows}), list(range(3, 46)))     # 45: its draft block
         self.assertEqual(max(int(r[1]) for r in rows), 143)             # 144 experts a layer
 
     def test_not_in_the_other_families(self):
@@ -73,7 +73,7 @@ class Pins(unittest.TestCase):
     def test_the_shipped_profile_names_every_routed_layer(self):
         rows = [line.split() for line in (ROOT / "data" / setup.FAMILIES["glm"]["profile"]).read_text().splitlines()]
         self.assertTrue(all(len(r) == 3 and int(r[2]) > 0 for r in rows))
-        self.assertEqual(sorted({int(r[0]) for r in rows}), list(range(3, 45)))
+        self.assertEqual(sorted({int(r[0]) for r in rows}), list(range(3, 46)))     # 45: the draft block
         self.assertEqual(max(int(r[1]) for r in rows), 287)
 
 
@@ -219,16 +219,21 @@ class Main(unittest.TestCase):
         self.assertEqual(self.downloads, [setup.FAMILIES["glm"]["hf"] + FILE])
         self.assertEqual(self.verified, [(FILE, *setup.FAMILIES["glm"]["sha256"][FILE])])
         self.assertEqual(self.built, [["120"]])
-        self.assertEqual(len(self.runs), 1, self.runs)                 # the tokenizer: no pack, no draft layer
+        self.assertEqual(len(self.runs), 2, self.runs)                 # the tokenizer and the draft block: no pack
         self.assertTrue(self.runs[0][1].endswith("strata_tokenizer.py"))
         pack = self.t / "data" / "packs" / "glm-3.0bit"
         self.assertEqual(self.runs[0][self.runs[0].index("--out") + 1], str(pack))
+        # this size's file has no draft block: the model's is fetched, and the engine is given it
+        block = self.t / "data" / "mtp" / "glm-5.3-flash" / "draft-block.gguf"
+        self.assertTrue(self.runs[1][1].endswith("glm_draft_fetch.py"))
+        self.assertEqual(self.runs[1][2:], ["fetch", "--out", str(block)])
         self.assertEqual((pack / "expert-profile.txt").read_text(), "3 0 7\n")
         args = cfg["args"]
         self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_GLM_DIR / setup.GEXE)
         self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-3.0BIT" / FILE)
         self.assertEqual(args[args.index("--max-context") + 1], "32768")
         self.assertEqual(Path(args[args.index("--expert-profile") + 1]), pack / "expert-profile.txt")
+        self.assertEqual(Path(args[args.index("--draft-model") + 1]), block)
         self.assertEqual(args[args.index("--conversation-cache-mib") + 1], "8192")
         for flag in ("--pack", "--native", "--mtp", "--kv", "--vision", "--pool-workers", "--prefill"):
             self.assertNotIn(flag, args)
@@ -237,6 +242,15 @@ class Main(unittest.TestCase):
         self.assertEqual(cfg["lib_dirs"], ["/cuda/lib64"])
         self.assertNotIn("vision", cfg)
         self.assertEqual(cfg["gpu"], 0)                                # as main() does for every model
+
+    def test_a_draft_block_that_is_there_is_not_fetched_again(self):
+        block = self.t / "data" / "mtp" / "glm-5.3-flash" / "draft-block.gguf"
+        block.parent.mkdir(parents=True)
+        block.write_bytes(b"GGUF")
+        code, out, cfg = self.main()
+        self.assertEqual(code, 0, out)
+        self.assertEqual([Path(r[1]).name for r in self.runs], ["strata_tokenizer.py"])
+        self.assertEqual(Path(cfg["args"][cfg["args"].index("--draft-model") + 1]), block)
 
     def test_the_engine_keeps_its_own_profile(self):
         pack = self.t / "data" / "packs" / "glm-3.0bit"
@@ -275,6 +289,8 @@ class Main(unittest.TestCase):
         self.assertEqual((pack / "expert-profile.txt").read_text(), "3 1 5\n")     # its own profile
         args = cfg["args"]
         self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-REAP50-Q3_K_M" / HALF_FILE)
+        self.assertNotIn("--draft-model", args)                          # its file has its own, pruned with it
+        self.assertEqual([Path(r[1]).name for r in self.runs], ["strata_tokenizer.py"])
 
     def test_a_size_in_several_files(self):
         code, out, cfg = self.main(ram=88.0)
@@ -286,6 +302,8 @@ class Main(unittest.TestCase):
         self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-UD-IQ2_XXS" / SPLIT_FILES[0])
         pack = self.t / "data" / "packs" / "glm-ud-iq2_xxs"
         self.assertEqual((pack / "expert-profile.txt").read_text(), "3 0 7\n")     # the whole model's profile
+        self.assertNotIn("--draft-model", args)                          # the draft block is in its last file
+        self.assertEqual([Path(r[1]).name for r in self.runs], ["strata_tokenizer.py"])
 
     def test_too_little_ram(self):
         code, out, cfg = self.main(ram=40.0)

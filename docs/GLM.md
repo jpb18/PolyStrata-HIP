@@ -38,7 +38,7 @@ such a tie.
 - RAM for the experts the card does not hold. The file is mapped and they are read from it while the model answers,
   so they should stay in the OS file cache: about 86 GB of the 107 GB on a 32 GB card. Setup's estimate for that card
   is 96 GB of RAM. It has run with 120 GB only.
-- 114 GB of disk for the model file.
+- 114 GB of disk for the model file, and 3 GB for its draft block.
 
 ## Sizes
 
@@ -63,7 +63,8 @@ fork the file was made for, on a prompt of 1,678 tokens, the first 63 tokens wer
 
 Setup checks the PC and asks three things: the size, the context, and whether to keep several conversations in
 RAM. Then it
-compiles the engine, downloads the model, checks its SHA-256 and starts it. The web app is at
+compiles the engine, downloads the model, checks its SHA-256 and starts it. For 3.0BIT it also downloads the model's
+draft block, 2.8 GB, once for every size that needs it. The web app is at
 `http://127.0.0.1:8080`. After that, `./setup.sh` starts the model again without asking.
 
 - The compile needs g++ and the CUDA toolkit (12.8 or newer for an RTX 50 card). Setup offers to install what is
@@ -148,16 +149,24 @@ of the file. The rest of the weights are always in VRAM.
   knows and up to three guesses through the model together. A guess counts only when it is the token the model
   picks itself, so the answer is the same with guessing and without. The guesses come from two places. An answer
   often repeats text the conversation already has, code it was asked to change or a passage it quotes: when the
-  last few tokens match an earlier place, what followed there is the guess. And some files carry a block made for
+  last few tokens match an earlier place, what followed there is the guess. And the model has a block made for
   guessing, one more layer that takes a token and what the model made of the token before it, and says what is
-  likely to come next. The REAP50 files and Unsloth's have it, 3.0BIT does not. A right guess saves less than a
-  whole token, because its experts outside VRAM still run on the CPU: four tokens together take about three times
-  as long as one. Measured with REAP50-Q3_K_M on the 32 GB card, 600-token answers, twice each: plain text went
-  from 41 to between 44 and 46 tokens/s, an answer that quoted from a document from 41 to between 48 and 51, and
-  one that gave a 670-token file back with one name changed from 42 to between 50 and 59. The block's first guess
-  was right 80 to 99% of the time. 3.0BIT has only the repeats to guess from: there the file went from 41.2 to
-  45.0 and the quotes from 41.1 to 47.5, and plain text stayed where it was. `--no-draft` and `--lookup 0` turn
-  the two off.
+  likely to come next. The block is the model's, one for every size. Unsloth's files carry it. The 3.0BIT file
+  leaves it out, so setup downloads the block alone for it, 2.8 GB out of Unsloth's files, and gives it to the
+  engine as `--draft-model`. REAP50 has its own, pruned like its layers. A right guess saves less than a whole
+  token, because its experts outside VRAM still run on the CPU: four tokens together take about three times as
+  long as one. Measured on the 32 GB card, 600-token answers, twice each, in tokens/s:
+
+  | Answer | 3.0BIT without guesses | with | REAP50-Q3_K_M without | with |
+  | --- | ---: | ---: | ---: | ---: |
+  | plain text | 40 | 46 to 47 | 41 | 44 to 46 |
+  | quotes from a document | 42 | 49 to 51 | 41 | 48 to 51 |
+  | a 670-token file given back with one name changed | 42 | 51 to 52 | 42 | 50 to 59 |
+
+  Of 3.0BIT's guesses 87 to 98% were right. UD-IQ2_XXS gains little: its experts are i-quants, which the CPU
+  computes more slowly, so a guessed token costs it nearly what a token costs. Three 200-token answers wrote 30.7,
+  33.7 and 31.4 tokens/s with its block and 31.3, 30.9 and 31.4 without. `--no-draft` and `--lookup 0` turn the two
+  sources off.
 - **Reading a prompt.** The prompt goes in up to 1,024 tokens at a time. For each layer the experts outside the
   cache are copied through a buffer in VRAM and run there. A larger batch reads faster and leaves less VRAM for the
   expert cache, so answers get slower: 4,096 at a time read the 11,673-token prompt at 396 tokens/s and wrote 18.5
@@ -203,7 +212,8 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--expert-swaps N` | 16 | while an answer is written, experts on their way into VRAM at a time, each in place of a cached one the answer uses less; 0 = the cache stays as it was loaded |
 | `--window N` | 4 | the most tokens that go through the model together while an answer is written: the known one and guesses after it; 1 = no guesses |
 | `--lookup N` | 3 | guess what followed an earlier repeat of the last N or more tokens; 0 = never |
-| `--no-draft` | | do not run the block that guesses ahead, in a file that has one |
+| `--no-draft` | | do not run the block that guesses ahead |
+| `--draft-model FILE.gguf` | | a file of the same model to take that block from, when `--model` has none; setup passes the one it downloaded |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
 | `--stage-ahead N` | 256 | from N tokens, a batch copies those experts before the layer has chosen; 0 = never |
