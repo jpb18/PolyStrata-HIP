@@ -12,8 +12,13 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -23,6 +28,16 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define PSAPI_VERSION 2
+#include <windows.h>
+#include <psapi.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -35,9 +50,9 @@ void require(bool ok, const std::string& message) {
 struct TempDirectory {
     fs::path path;
 
-    TempDirectory() {
+    explicit TempDirectory(const fs::path& base = fs::temp_directory_path()) {
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path = fs::temp_directory_path() / ("strata-file-source-test-" + std::to_string(stamp));
+        path = base / ("strata-file-source-test-" + std::to_string(stamp));
         fs::create_directories(path);
     }
 
@@ -82,6 +97,48 @@ void check_file_size_rejection(strata::core::FileExpertSource& source, const fs:
     require(!source.mapped() && !err.empty(), "oversized-file rejection left the source mapped or unreported");
 }
 
+#if defined(_WIN32)
+void check_mapped_release(strata::core::FileExpertSource& source, int64_t layer, int64_t expert, uint64_t bytes) {
+    const uint8_t* p = source.blob(layer, expert);
+    require(p != nullptr, "release fixture has no mapped blob");
+    const std::vector<uint8_t> saved(p, p + (size_t) bytes);
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const uintptr_t page = info.dwPageSize;
+    const uintptr_t first = ((uintptr_t) p + page - 1) / page * page;
+    const uintptr_t end = ((uintptr_t) p + bytes) / page * page;
+    require(end > first, "release fixture has no full interior page");
+    auto resident = [&](uintptr_t address) {
+        PSAPI_WORKING_SET_EX_INFORMATION state{};
+        state.VirtualAddress = (void*) address;
+        require(QueryWorkingSetEx(GetCurrentProcess(), &state, sizeof state) != 0,
+                "QueryWorkingSetEx failed for the release fixture");
+        return state.VirtualAttributes.Valid != 0;
+    };
+    const char* setting = std::getenv("STRATA_FILE_RELEASE");
+    const bool enabled = setting != nullptr && std::strcmp(setting, "1") == 0;
+    for (int round = 0; round < 3; ++round) {
+        require(std::memcmp(p, saved.data(), saved.size()) == 0, "release changed the mapped expert bytes");
+        require(resident(first), "reading the expert did not bring its interior page into the working set");
+        const uint64_t released = source.release(layer, expert);
+        require(released == (enabled ? end - first : 0), "release did not honor full pages or its opt-in switch");
+        // Off: the page stays.  On: Windows may keep a trimmed page on its standby list and map it back at once, so a
+        // page that is still valid is reported, not failed (the byte count above is the contract).
+        if (!enabled) require(resident(first), "release trimmed pages with the switch off");
+        else if (resident(first)) std::fprintf(stderr, "note: the trimmed page is already back in the working set\n");
+        if ((uintptr_t) p < first)
+            require(resident((uintptr_t) p), "release trimmed the expert's shared first page");
+        if (end < (uintptr_t) p + bytes)
+            require(resident(end), "release trimmed the expert's shared last page");
+    }
+    require(std::memcmp(p, saved.data(), saved.size()) == 0, "the expert changed after repeated release/read cycles");
+    require(source.release(-1, expert) == 0 && source.release(layer, -1) == 0 &&
+                source.release(std::numeric_limits<int64_t>::max(), expert) == 0 &&
+                source.release(layer, std::numeric_limits<int64_t>::max()) == 0,
+            "release accepted an invalid layer or expert");
+}
+#endif
+
 void test_canonical_layout() {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
@@ -113,6 +170,10 @@ void test_canonical_layout() {
                 source.blob(layers, 0) == nullptr && source.blob(0, experts) == nullptr,
             "canonical bounds check accepted an invalid layer or expert");
     require(source.reads() == 3, "invalid canonical lookups changed the read count");
+#if defined(_WIN32)
+    check_mapped_release(source, 0, 0, BLOB);
+    check_mapped_release(source, 0, 1, BLOB);
+#endif
 
     check_file_size_rejection(source, dir.path, layers, experts, total);
     create_pack(dir.path, total, {{layer_bytes, 'c'}});
@@ -122,6 +183,7 @@ void test_canonical_layout() {
     const uint8_t* reopened = source.blob(1, 0);
     require(reopened && source.reads() == 1 && reopened[0] == 'c', "reopened canonical source kept stale state");
     source.close();
+    require(source.release(0, 0) == 0, "a closed file source released pages");
 }
 
 #if defined(STRATA_NATIVE_EXPERTS)
@@ -176,6 +238,10 @@ void test_native_variable_layout() {
                 source.blob(layers, 0) == nullptr && source.blob(0, experts) == nullptr,
             "native bounds check accepted an invalid layer or expert");
     require(source.reads() == 4, "invalid native lookups changed the read count");
+#if defined(_WIN32)
+    check_mapped_release(source, 0, 1, first_fmt.bytes);
+    check_mapped_release(source, 1, 1, second_fmt.bytes);
+#endif
 
     check_file_size_rejection(source, dir.path, layers, experts, total);
     create_pack(dir.path, total, {{layer0_bytes, 'c'}});
@@ -256,6 +322,35 @@ void test_resident_exchange() {
     require(offsets == before, "exchanging back did not restore the plan");
 }
 
+void test_resident_memory_budget() {
+    using strata::core::detail::clamp_resident_budget;
+    constexpr uint64_t GiB = 1ull << 30, margin = 256ull << 20, headroom = 4 * GiB;
+    constexpr uint64_t unlimited = std::numeric_limits<uint64_t>::max();
+    // #730: RAM can hold the requested cache, but Windows cannot commit it.
+    require(clamp_resident_budget(66 * GiB, 69 * GiB, 47 * GiB, headroom) == 43 * GiB - margin,
+            "a RAM budget exceeded available commit capacity");
+    require(clamp_resident_budget(66 * GiB, 47 * GiB, 69 * GiB, headroom) == 43 * GiB - margin,
+            "a RAM budget exceeded available physical memory");
+    require(clamp_resident_budget(40 * GiB, 69 * GiB, 47 * GiB, headroom) == 40 * GiB,
+            "a smaller explicit budget was changed");
+    require(clamp_resident_budget(unlimited, 69 * GiB, 47 * GiB, headroom) == 43 * GiB - margin,
+            "the what-fits budget ignored commit capacity");
+    require(clamp_resident_budget(66 * GiB, 47 * GiB, unlimited, headroom) == 43 * GiB - margin,
+            "a platform without a commit reading lost its RAM limit");
+    require(clamp_resident_budget(43 * GiB, 69 * GiB, 47 * GiB, headroom) == 43 * GiB,
+            "a budget that exactly fits received the clamping margin");
+    require(clamp_resident_budget(66 * GiB, 69 * GiB, 0, headroom) == 0,
+            "exhausted commit capacity was treated as unlimited");
+    require(clamp_resident_budget(66 * GiB, 0, 69 * GiB, headroom) == 0,
+            "exhausted RAM produced a positive budget");
+    require(clamp_resident_budget(66 * GiB, 69 * GiB, headroom - 1, headroom) == 0 &&
+                clamp_resident_budget(66 * GiB, 69 * GiB, headroom, headroom) == 0,
+            "subtracting headroom underflowed");
+    require(clamp_resident_budget(66 * GiB, 69 * GiB, headroom + margin - 1, headroom) == 0 &&
+                clamp_resident_budget(66 * GiB, 69 * GiB, headroom + margin, headroom) == 0,
+            "subtracting the clamping margin underflowed");
+}
+
 void test_cgroup_memory_budget() {
     using namespace strata::core::detail;
     constexpr uint64_t GiB = 1ull << 30;
@@ -291,6 +386,76 @@ void test_cgroup_memory_budget() {
             "missing memory.stat counters did not fail closed");
 }
 
+void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value != nullptr ? value : "");
+#else
+    if (value != nullptr) setenv(name, value, 1);
+    else unsetenv(name);
+#endif
+}
+
+// #286: the unbuffered file tier (Windows: FILE_FLAG_NO_BUFFERING; Linux: O_DIRECT + io_submit) hands out the same
+// bytes as the mapping - one blob at a time, a batch of adjacent experts (merged into one request), and copy_blob - and
+// never falls back to the mapping.  The pack lives in the working directory, not the temp directory: a tmpfs /tmp has
+// no O_DIRECT, and there the test says so and skips.
+void test_unbuffered_reads() {
+    using namespace strata::core;
+    using namespace strata::kernels::cpu;
+    constexpr int64_t layers = 2;
+    constexpr int64_t experts = 3;
+    const uint64_t layer_bytes = (uint64_t) experts * BLOB;
+    const uint64_t total = (uint64_t) layers * layer_bytes;
+    TempDirectory dir(fs::current_path());
+    std::string err;
+    require(expert_layout_load(dir.path.string(), layers, experts, err), "could not load canonical layout: " + err);
+    std::vector<uint8_t> bytes((size_t) total);
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+    for (uint8_t& b : bytes) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        b = (uint8_t) (x >> 56);
+    }
+    {
+        std::ofstream out(dir.path / "experts.bin", std::ios::binary | std::ios::trunc);
+        out.write((const char*) bytes.data(), (std::streamsize) bytes.size());
+        require((bool) out, "could not write the synthetic experts.bin");
+    }
+    FileExpertSource source;
+    require(source.open(dir.path.string(), layers, experts, err), "could not map the synthetic pack: " + err);
+    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    std::string why;
+    const bool unbuffered = source.set_unbuffered(0, why);
+    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+#if defined(_WIN32) || defined(__linux__)
+    if (!unbuffered) {
+        std::cout << "file_expert_source_test: unbuffered reads skipped (" << why << ")\n";
+        source.close();
+        return;
+    }
+#else
+    require(!unbuffered, "unbuffered reads on a platform without them");
+    source.close();
+    return;
+#endif
+    require(source.unbuffered(), "set_unbuffered succeeded but the source is not unbuffered");
+    const int64_t batch[experts] = {0, 1, 2};
+    source.prefetch(1, batch, experts);   // layer 1 in one batch: three adjacent blobs
+    for (int64_t l = 0; l < layers; ++l)
+        for (int64_t e = 0; e < experts; ++e) {
+            const uint8_t* b = source.blob(l, e);
+            require(b != nullptr, "an unbuffered blob lookup failed");
+            require(std::memcmp(b, bytes.data() + (size_t) (l * (int64_t) layer_bytes + e * (int64_t) BLOB),
+                                (size_t) BLOB) == 0,
+                    "an unbuffered blob differs from the file");
+        }
+    std::vector<uint8_t> copy((size_t) BLOB);
+    require(source.copy_blob(0, 2, copy.data()) &&
+                std::memcmp(copy.data(), bytes.data() + (size_t) (2 * BLOB), (size_t) BLOB) == 0,
+            "an unbuffered copy_blob differs from the file");
+    require(source.direct_fallbacks() == 0, "an unbuffered read fell back to the mapping");
+    source.close();
+}
+
 // #633: the host RAM probe with fake /proc and cgroup trees: v2 (a limit, "max", a missing or malformed limit), v1
 // (a limit, unlimited), and no cgroup line at all.  Elsewhere than Linux it reads the machine's RAM.
 void test_host_memory() {
@@ -308,7 +473,10 @@ void test_host_memory() {
                       root = (t.path / "fs").string();
     auto probe = [&](const std::string& self) {
         put("cgroup", self);
-        return host_available_memory(m, mi, cg, root);
+        m.commit = 0;
+        const bool ok = host_available_memory(m, mi, cg, root);
+        require(m.commit == ~0ull, "Linux memory probe retained a commit limit");
+        return ok;
     };
     // no cgroup line at all: MemAvailable alone (before #633: "cannot determine")
     require(probe("") && m.available == 100 * GiB && m.cgroup_limit == ~0ull, "no cgroup: MemAvailable alone");
@@ -337,6 +505,11 @@ void test_host_memory() {
     require(probe("4:memory:/elsewhere\n") && m.available == 100 * GiB, "v1 group not mounted");
 #else
     require(host_available_memory(m) && m.available > 0 && m.cgroup_limit == ~0ull, "this PC's RAM");
+#if defined(_WIN32)
+    require(m.commit != ~0ull, "Windows memory probe did not report commit capacity");
+#else
+    require(m.commit == ~0ull, "a platform without commit accounting imposed a limit");
+#endif
     (void) GiB;
 #endif
 }
@@ -435,9 +608,11 @@ int main(int argc, char** argv) {
         test_complement_plan();
         test_resident_lend_region();
         test_resident_exchange();
+        test_resident_memory_budget();
         test_cgroup_memory_budget();
         test_host_memory();
         test_canonical_layout();
+        test_unbuffered_reads();
 #if defined(STRATA_NATIVE_EXPERTS)
         test_native_variable_layout();
 #endif

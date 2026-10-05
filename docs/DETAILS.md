@@ -171,6 +171,15 @@ start writes `experts.bin` (when the drive has room for it), later starts map it
 are handed back to the OS. Run it with `--pcie-frac 0` (the GPUs get no mapped alias). Without the variable nothing
 changes.
 
+**Releasing mapped expert pages on Windows (opt-in):** `STRATA_FILE_RELEASE=1` lets `FileExpertSource` trim the
+full file-backed pages of experts after their GPU uploads complete, including the slots lent to prefill and then
+refilled. It works with `experts.bin` and the direct GGUF views; shared boundary pages and private/pinned buffers
+are left alone. Unset or `0` keeps the previous behavior. On one 32 GB Windows 11 laptop with an RTX 4080 Laptop
+and a Thunderbolt RTX 3090, IQ2_XS with `--mmap-experts --layer-split 12 --trim-stage-weights` raised median available
+RAM from 0.51 to 12.19 GiB across 1K/4K/16K prompt trials, with 3.7-4.4% lower prefill throughput. It did not reduce
+committed memory or physical SSD reads. This is a working-set hint, not an unmap or a guarantee that the OS drops
+its file cache. See the [configuration, measurements and limits](../bench/results/2026-10-04-windows-mapped-release/README.md).
+
 **Low-RAM mode without `experts.bin` (engine 0.1.31):** for the native packs (IQ2_XS, IQ3_XXS, IQ3_S, the Coder, Swift,
 Q2_0 packed by `tools/iq_pack.py`; not the canonical Q2_0 pack setup makes for AVX-512 CPUs) the mapped mode no longer
 needs the pack's `experts.bin`: when the pack has none, the engine
@@ -183,15 +192,22 @@ engine fetches a layer's missing experts on 8 threads (`STRATA_FETCH_THREADS`) w
 
 **A RAM budget (engine 0.1.31, `--resident-budget-gib N`):** the resident variant for a model whose experts do not all
 fit: the N GiB of experts the GPU cache does not hold that the expert profile ranks hottest are copied into RAM at
-start (locked; page-locked when the driver allows the whole budget), and the rest are read from the files through the
-OS file cache. It implies `--mmap-experts` and leaves 4 GB of free RAM (a larger N is clamped to that less 256 MiB,
-with a message; #403: a clamped budget no longer fails the safety check that follows, and a budget that cannot be
-kept at all is a warning, with every expert read from the files). Setup sets N with `--resident-budget-gib N`. With
+start (locked; page-locked when the driver allows the whole budget), and the rest are read from the files.
+It implies `--mmap-experts` and leaves 4 GiB of headroom. On Windows, available commit capacity also
+limits the budget; a larger N is clamped to the smaller limit less 4 GiB and a 256 MiB margin, with a message.
+A clamped budget no longer fails the safety check that follows (#403). A budget that cannot be kept at all is a
+warning, with every expert read from the files. Setup sets N with `--resident-budget-gib N`. With
 the GGUF read in place it also warms the next layer's likely experts: while the CPU works on a layer, a thread applies
 the next layer's router to this layer's input and asks the OS for the pages of the predicted experts that neither the
 GPU nor the RAM budget holds (only pages - the experts computed are the same; `STRATA_LOOKAHEAD=0` turns it off). This
 is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 GB PC: 7-8.5 tokens/s at N = 40 on an
 RTX 5070, against ~3 tokens/s before these changes.
+
+**Read-ahead at start (Linux):** the weights, the native dense matrices, the GPU cache's fill from the profile, the
+resident RAM copy and the MTP draft files are asked for ahead of their reads (madvise / posix_fadvise WILLNEED in
+128 KiB steps), so the drive sees a deep queue instead of one page fault at a time. Measured on a Gen3 NVMe (RTX 5090,
+32 GB, Q2_0 resident at 262K): ready in 70 s instead of ~920 s; the fill went from 39 MB/s to 3.2 GB/s.
+`STRATA_READ_AHEAD=0` turns it off; `STRATA_FILL_AHEAD=N` sets how many fill pairs are asked for ahead (default 256).
 
 **How much came from where:** with `--stats` the engine prints the tiers of the decode (`expert tiers`: blobs from the
 RAM copy, blobs and MB from the files, the time spent reading them; `routing prefetch`: how many of the file reads had
