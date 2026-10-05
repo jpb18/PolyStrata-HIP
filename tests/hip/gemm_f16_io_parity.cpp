@@ -37,9 +37,13 @@ bool run(strata::prefill::Gemm& gemm, hipStream_t stream, bool bf16_w, int t, in
     }
     for (size_t i = 0; i < w.size(); ++i) {
         if (bf16_w) {
-            const hip_bfloat16 v(dist(rng));
-            w[i] = v.data;
-            const uint32_t wide = static_cast<uint32_t>(v.data) << 16;
+            // round to nearest even by hand (hip_bfloat16's host constructor gave zeros on ROCm 7.14)
+            const float f = dist(rng);
+            uint32_t bits;
+            std::memcpy(&bits, &f, 4);
+            bits += 0x7fffu + ((bits >> 16) & 1u);
+            w[i] = (uint16_t) (bits >> 16);
+            const uint32_t wide = static_cast<uint32_t>(w[i]) << 16;
             std::memcpy(&wf[i], &wide, 4);
         } else {
             const __half v = __float2half_rn(dist(rng));
@@ -80,8 +84,9 @@ bool run(strata::prefill::Gemm& gemm, hipStream_t stream, bool bf16_w, int t, in
     const double rel = std::sqrt(diff2 / std::max(ref2, 1e-300));
     // one FP16 rounding of the output (beta = 0), or the ordinary FP32 path (beta = 1)
     ok = ok && rel < (beta == 0.0f ? 2e-3 : 1e-4);
-    std::printf("%s %s T=%d N=%d K=%d ldy=%d beta=%.1f rel_l2=%.3g max_abs=%.3g\n", ok ? "PASS" : "FAIL",
-                bf16_w ? "BF16W" : "F16", t, n, k, ldy, beta, rel, maximum);
+    ok = ok && ref2 > 0;   // an all-zero reference would pass anything
+    std::printf("%s %s T=%d N=%d K=%d ldy=%d beta=%.1f rel_l2=%.3g max_abs=%.3g ref_rms=%.3g\n", ok ? "PASS" : "FAIL",
+                bf16_w ? "BF16W" : "F16", t, n, k, ldy, beta, rel, maximum, std::sqrt(ref2 / ((double) t * n)));
     return ok;
 }
 
