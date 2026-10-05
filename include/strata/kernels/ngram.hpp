@@ -46,7 +46,32 @@ inline constexpr float NG_RMS_EPS = 1e-6f;
 inline constexpr uint64_t PLE_TABLE_ROWS = 320001536ull;
 inline constexpr int PLE_ROW_BYTES = (PLE_HEAD_DIM / 32) * 18;           // 90: an IQ4_NL row
 inline constexpr int PLE_ROW_BYTES_FP8 = PLE_HEAD_DIM;                   // 160: an F8_E4M3 row, one byte a value
-inline constexpr int PLE_ROW_BYTES_MAX = PLE_ROW_BYTES_FP8;
+inline constexpr int PLE_ROW_BYTES_MAX = PLE_ROW_BYTES_FP8;              // the widest row any format in `ple_formats()` has
+
+/// THE FORMATS OF THE TABLE, ONE ROW EACH. A table type is one entry here (its GGUF type name, the bytes of one
+/// 160-value row, how to turn a row into floats) and nothing else: `PleTable::open`, `format()`, the reader's row size,
+/// the error string and the buffers' size all read this list, so a new format cannot be in one switch and missing from
+/// another. A row is always `PLE_HEAD_DIM` = 160 values = 5 blocks of 32 for the block formats.
+enum class PleFormat : uint8_t { IQ4_NL, Q5_0, F8_E4M3 };
+
+struct PleFormatInfo {
+    PleFormat id;
+    const char* name;          ///< what `PleTable::format()` returns
+    const char* gguf_type;     ///< `TensorInfo::type_name()` of the table tensor ("I8" for F8_E4M3: GGUF has no FP8 type)
+    uint32_t row_bytes;        ///< bytes of one 160-value row in the file
+    bool needs_scale;          ///< the table has one scale in the GGUF metadata (`strata.ple.scale`), F8_E4M3 only
+    void (*dequant)(const uint8_t* row, float scale, float* out160);
+};
+
+/// Every format, in the order of `PleFormat`; `ple_format_count()` entries.
+const PleFormatInfo* ple_formats();
+int ple_format_count();
+const PleFormatInfo& ple_format_info(PleFormat f);
+/// The format whose table tensor has this GGUF type name, or nullptr. F8_E4M3's name is "I8"; the caller checks the
+/// `strata.ple.format` marker and the scale.
+const PleFormatInfo* ple_format_for_type(const char* gguf_type_name);
+/// "IQ4_NL, Q5_0 or FP8 (I8)": the formats for an error message, built from the list.
+std::string ple_format_list();
 
 /// The artifact's own hash constants, transcribed from `docs/gguf-dump-shard1.txt`:
 ///
