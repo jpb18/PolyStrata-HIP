@@ -137,7 +137,7 @@ public:
     /// in the model's place.  p is the probability the block gives what it returns.  pos() + i must be inside the
     /// context.  logits() is left alone.
     bool drafts() const { return draft_; }
-    virtual int32_t draft(int32_t token, int i, float* prob);
+    int32_t draft(int32_t token, int i, float* prob);
 
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
@@ -188,8 +188,10 @@ protected:
     virtual void route(int il, const float* logits, int* ids, float* w) = 0;
     /// The shared expert, into fo_.  It runs on the GPU while the host routes.
     virtual void moe_shared(const Layer& L, int il, int n) = 0;
-    /// The draft block's rows for tokens [first, n) of a call that has run (draft()).
-    virtual void draft_rows(const int32_t* tokens, int first, int n) { (void) tokens, (void) first, (void) n; }
+    /// The draft block's attention for n tokens from position `pos`.  xn_ and xq_ hold its normed input; ao_ gets
+    /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
+    virtual void block_attend(int64_t pos, int n) { (void) pos, (void) n; }
+    virtual void block_rows(int64_t pos, int n) { (void) pos, (void) n; }
     /// The other names of a tensor or a metadata key in the files of this architecture, or null.
     virtual const Names* tensor_alias(const char* name) const { (void) name; return nullptr; }
     virtual const Names* meta_alias(const char* key) const { (void) key; return nullptr; }
@@ -208,6 +210,8 @@ protected:
     void load_moe(int il);
     void alloc();
     void shared_scratch();
+    float* draft_input(const int32_t* tokens, const float* h, int n);
+    void draft_rows(const int32_t* tokens, int first, int n);
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);

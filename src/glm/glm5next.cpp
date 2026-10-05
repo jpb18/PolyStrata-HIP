@@ -498,78 +498,8 @@ void Glm5Next::layer_head(Layer& L, int il, int n) {
     }
 }
 
-// The draft block's input for n tokens: each token's embedding and the model's output for the token before it
-// (h, a row a token), each normed, the two side by side through the block's projection.  Returns the block's
-// residual, and leaves its normed attention input in xn_ and xq_.  r_ is free between the model's calls, and the
-// block works in it: n rows of the two halves, then the residual.
-//
-// h_r_ is free to write: every call that copied out of it has waited for the card since.
-float* Glm5Next::draft_input(const int32_t* tokens, const float* h, int n) {
-    const size_t e = (size_t) n_embd_, rows = (size_t) n;
-    for (int t = 0; t < n; ++t) embed(tokens[t], h_r_ + (size_t) t * e);
-    ck(cudaMemcpyAsync(cur_, h_r_, rows * e * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
-    rms_norm(cur_, fp(d_enorm_), r_, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
-    rms_norm(h, fp(d_hnorm_), r_ + e, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
-    float* x = r_ + 2 * rows * e;
-    lin(d_proj_, r_, x, n);
-    rms_norm(x, fp(layers_[(size_t) n_layer_].attn_norm), xn_, n_embd_, n, rms_eps_, st_);
-    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
-    return x;
-}
-
-// The rows the draft block's attention keeps for tokens [first, n) of a call that has run: token i is at pos() + i,
-// and hn_'s row i is the model's output for the token before it.  A row is all a later guess reads of a token, so
-// the rest of the block is not computed for it.  Then the call's last output is the one the next token pairs with.
-void Glm5Next::draft_rows(const int32_t* tokens, int first, int n) {
-    const size_t e = (size_t) n_embd_;
-    if (first < n) {
-        draft_input(tokens + first, hn_ + (size_t) first * e, n - first);
-        dsa_store(blocks_[(size_t) n_layer_], pos_ + first, n - first);
-    }
-    ck(cudaMemcpyAsync(hn_, hn_ + (size_t) n * e, e * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)), "draft");
-    ahead_pos_ = -1;
-}
-
-// One token through the draft block, at pos() + i.  The first token's row is then what draft_rows() would leave
-// for it, and eval() and keep() skip it; the rows of the guesses after it are written again when the positions get
-// their real tokens.
-int32_t Glm5Next::draft(int32_t token, int i, float* prob) {
-    if (!draft_) throw std::logic_error("draft: this model has no block that guesses ahead");
-    if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
-    if (i < 0 || pos_ + i >= opt_.max_context) throw std::logic_error("draft: the position is outside the context");
-    ck(cudaStreamSynchronize(cs(st_)), "draft");
-    Layer& L = layers_[(size_t) n_layer_];
-    float* own = hn_ + n_embd_;   // the block's output, which stands in for the model's from the second guess on
-    float* x = draft_input(&token, i == 0 ? hn_ : own, 1);
-    dsa(blocks_[(size_t) n_layer_], pos_ + i, 1);
-    axpy(ao_, 1.f, x, n_embd_, true, st_);
-    rms_norm(x, fp(L.ffn_norm), xn_, n_embd_, 1, rms_eps_, st_);
-    kernels::native_quantize_q8_1(xn_, xq_, n_embd_, 1, st_);
-    moe_router(L, 1);
-    ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
-    moe_shared(L, n_layer_, 1);
-    moe(L, n_layer_, 1);
-    axpy(fo_, 1.f, x, n_embd_, true, st_);
-    rms_norm(x, fp(d_head_), own, n_embd_, 1, rms_eps_, st_);
-    lin(output_, own, logits_, 1);
-    ck(cudaMemcpyAsync(h_dlogits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
-       "draft");
-    ck(cudaStreamSynchronize(cs(st_)), "draft");
-    if (i == 0) {
-        ahead_pos_ = pos_;
-        ahead_tok_ = token;
-    }
-
-    const float* l = h_dlogits_;
-    int best = 0;
-    for (int v = 1; v < n_vocab_; ++v)
-        if (l[v] > l[best]) best = v;
-    // the softmax's sum without the tokens too unlikely to change it
-    double sum = 0.0;
-    for (int v = 0; v < n_vocab_; ++v)
-        if (l[v] > l[best] - 20.f) sum += std::exp((double) (l[v] - l[best]));
-    *prob = (float) (1.0 / sum);
-    return best;
-}
+// The draft block is one more sparse-attention layer.
+void Glm5Next::block_attend(int64_t pos, int n) { dsa(blocks_[(size_t) n_layer_], pos, n); }
+void Glm5Next::block_rows(int64_t pos, int n) { dsa_store(blocks_[(size_t) n_layer_], pos, n); }
 
 }  // namespace strata::glm

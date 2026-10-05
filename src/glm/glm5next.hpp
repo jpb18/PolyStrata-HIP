@@ -14,7 +14,6 @@ public:
     size_t row_bytes() const override;
     void save_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
-    int32_t draft(int32_t token, int i, float* prob) override;
 
 protected:
     void load_geometry() override;
@@ -31,7 +30,8 @@ protected:
     void output_rows(int first, int rows, float* h) override;
     void route(int il, const float* logits, int* ids, float* w) override;
     void moe_shared(const Layer& L, int il, int n) override;
-    void draft_rows(const int32_t* tokens, int first, int n) override;
+    void block_attend(int64_t pos, int n) override;
+    void block_rows(int64_t pos, int n) override;
     const Names* tensor_alias(const char* name) const override;
     const Names* meta_alias(const char* key) const override;
 
@@ -60,7 +60,6 @@ private:
     void dsa_store(Block& B, int64_t pos, int n);
     void dsa_select(Block& B, int64_t pos, int first, int n);
     void dense_ffn(Block& B, int il, int n);
-    float* draft_input(const int32_t* tokens, const float* h, int n);
 
     std::vector<Block> blocks_;   ///< one a layer of layers_
 
