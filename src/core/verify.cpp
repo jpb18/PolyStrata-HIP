@@ -104,6 +104,21 @@ const bool g_sh_stream = [] {
 #endif
 }();
 
+// A one-token window always keeps its token, so its graph advances the sequence state itself (the GDN conv history
+// and recurrence state) and Verifier::commit launches no commit graph after it (eddoursul's fork, F7).  CUDA only:
+// HIP keeps the commit graph after every window (STRATA_ONE_TOKEN_COMMIT=0 does too).
+bool one_token_self_commit() {
+#if defined(STRATA_USE_HIP)
+    return false;
+#else
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_ONE_TOKEN_COMMIT");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    return on;
+#endif
+}
+
 bool mapped(size_t bytes, void** h, void** d) {
 #if defined(STRATA_USE_HIP)
     if (g_coherent) {
@@ -464,6 +479,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
         arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
+        one_ = b.take<int32_t>(4);
         hist_snap_ = b.take<float>(T * HS);
         ple_key_ = b.take<float>(T * (uint64_t) strata::kernels::NG_HC_DIM); ple_val_ = b.take<float>(T * N);
     };
@@ -500,6 +516,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     Bump real;
     real.base = (uint8_t*) arena_;
     carve(real);
+    {
+        const int32_t one = 1;
+        if (cudaMemcpy(one_, &one, sizeof one, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "verify: the arena could not be set";
+            return false;
+        }
+    }
     sink_.staging = (unsigned long long) staging_;
     sink_.staging_cap = kStagingBlobs;
     (void) TS;
@@ -603,6 +626,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     const bool ple_on = ss.ple.ready() && ple_stage();
     auto Rt = [&](int t) { return R_ + (size_t) t * HC * N; };
     const int G = (split_ && T >= 2 && !batch_rec_) ? 2 : 1;   // a batch window is one group
+    const bool self_commit = T == 1 && !batch_rec_ && !g_qfuse() && one_token_self_commit();   // see Verifier::commit
     static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
     auto stamp = [&](int64_t l, int i, int grp) {
         if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
@@ -809,7 +833,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           hb + (size_t) first * C, (int) C, (int) (2 * HK), EPS, t - first, cs, 0);
                     }
                 } else
-                gdn_conv_l2_multi(conv, qkv, (const float*) wc->data, hb, (int) C, (int) (2 * HK), EPS, n, cs, tb);
+                // a one-token window keeps its token: it advances the conv history and the state itself (commit)
+                gdn_conv_l2_multi(conv, qkv, (const float*) wc->data, hb, (int) C, (int) (2 * HK), EPS, n, cs, tb,
+                                  self_commit);
                 stamp(l, 3, grp);
                 gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
                              (const float*) wsa->data, gate + (size_t) tb * HV, beta + (size_t) tb * HV, (int) N, (int) HV,
@@ -831,7 +857,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     }
                 } else
                 gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_, (int) HK,
-                                    (int) HV, te, nullptr, cs, tb, g_qfuse() ? (void*) xq_ : nullptr);
+                                    (int) HV, te, self_commit ? one_ : nullptr, cs, tb, g_qfuse() ? (void*) xq_ : nullptr);
                 stamp(l, 6, grp);
                 if (!g_qfuse()) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);   // STRATA_QFUSE: done above
                 native_mmvq(wout->native_type, wout->native_data, xq_, bo_ + tb * N, (int) ZV, (int) N, n, cs);
@@ -1874,20 +1900,24 @@ bool Verifier::commit(int n_keep, std::string& err) {
     h_commit_[0] = n_keep;
     h_commit_[1] = n_keep - 1;
     for (int t = 0; t < max_t_; ++t) h_commit_[2 + t] = t < n_keep ? (int32_t) (last_pos0_ + t) : -1;
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    const cudaError_t le = cudaGraphLaunch(commit_exec_, cs_);
-    if (le != cudaSuccess) { err = std::string("verify: commit launch: ") + cudaGetErrorString(le); return false; }
-    // set_commit_async: no wait here - the next window runs on the same stream after it, and the drafter (its own
-    // stream) reads only this window's final rows and its own K/V. h_commit_ is next written after the next window's
-    // results are read, i.e. after this graph has run.  Everything else waits on commit_done_ (wait_commit).
-    if (!g_commit_async || next_ != nullptr) {
-        const cudaError_t se = cudaStreamSynchronize(cs_);
-        if (se != cudaSuccess) { err = std::string("verify: commit: ") + cudaGetErrorString(se); return false; }
+    if (last_t_ == 1 && one_token_self_commit()) {
+        // a one-token window has advanced the state itself (record_window): no commit graph
     } else {
-        const cudaError_t re = cudaEventRecord(commit_done_, cs_);
-        if (re != cudaSuccess) { err = std::string("verify: commit event: ") + cudaGetErrorString(re); return false; }
-        (void) cudaStreamQuery(cs_);
-        commit_pending_ = true;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        const cudaError_t le = cudaGraphLaunch(commit_exec_, cs_);
+        if (le != cudaSuccess) { err = std::string("verify: commit launch: ") + cudaGetErrorString(le); return false; }
+        // set_commit_async: no wait here - the next window runs on the same stream after it, and the drafter (its own
+        // stream) reads only this window's final rows and its own K/V. h_commit_ is next written after the next window's
+        // results are read, i.e. after this graph has run.  Everything else waits on commit_done_ (wait_commit).
+        if (!g_commit_async || next_ != nullptr) {
+            const cudaError_t se = cudaStreamSynchronize(cs_);
+            if (se != cudaSuccess) { err = std::string("verify: commit: ") + cudaGetErrorString(se); return false; }
+        } else {
+            const cudaError_t re = cudaEventRecord(commit_done_, cs_);
+            if (re != cudaSuccess) { err = std::string("verify: commit event: ") + cudaGetErrorString(re); return false; }
+            (void) cudaStreamQuery(cs_);
+            commit_pending_ = true;
+        }
     }
     if (ple_stage())   // stages that share one session must advance it once
         for (int t = 0; t < n_keep; ++t) {
