@@ -628,26 +628,26 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
 
 // The layer for T rows.  full = false stops after the K/V append (the prompt only needs the cache).
 bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::string& err) {
-    using namespace strata::kernels;
-    const ModelGeometry& g = *g_;
-    SessionState& ss = *ss_;
     // step_row0 >= 0: the full layer on step rows [step_row0, +T); step_row0 < 0: K/V only on rows [-1 - step_row0, +T)
     const bool full = step_row0 >= 0;
-    const int row0 = full ? step_row0 : -1 - step_row0;
     if (full && T != 1) { err = "mtp: the full layer runs one row at a time (its attention scratch is sized for one)"; return false; }
-    const int64_t N = g.n_embd, HC = g.hc, K = ss.k, NH = g.n_head, HD = g.head_dim, NKV = g.n_head_kv;
+    if (!record_front(T, full ? step_row0 : -1 - step_row0, cs, err)) return false;
+    return !full || record_rest(step_row0, cs, err);
+}
+
+bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err) {
+    using namespace strata::kernels;
+    const ModelGeometry& g = *g_;
+    const int64_t N = g.n_embd, HC = g.hc, NH = g.n_head, HD = g.head_dim, NKV = g.n_head_kv;
     const QsaShapes s = shapes_of(g);
-    const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
     const int32_t* step = step_ + row0 * 4;
     const int32_t* pos = pos_ + row0 * NH;
     // --mtp-q4: each projection's format and weights for this pass (Q8_0 unless the Q4_0 copies exist)
-    int wt_fc_embedding, wt_fc_hidden, wt_k_proj, wt_v_proj, wt_q_proj, wt_o_proj;
+    int wt_fc_embedding, wt_fc_hidden, wt_k_proj, wt_v_proj;
     const void* wp_fc_embedding = wq("fc_embedding.weight", wt_fc_embedding);
     const void* wp_fc_hidden = wq("fc_hidden.weight", wt_fc_hidden);
     const void* wp_k_proj = wq("self_attn.k_proj.weight", wt_k_proj);
     const void* wp_v_proj = wq("self_attn.v_proj.weight", wt_v_proj);
-    const void* wp_q_proj = wq("self_attn.q_proj.weight", wt_q_proj);
-    const void* wp_o_proj = wq("self_attn.o_proj.weight", wt_o_proj);
     try {
         // ---- the two input branches
         const WeightRef* we = wt_->find("token_embd.weight");
@@ -688,17 +688,12 @@ bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::stri
             }
             fused_gr_read_multi(fa, T, xn_, cs);
         }
-        // ---- attention: K/V into the layer's own cache, then (full) dense attention over every cell
-        auto norm_rope = [&](float* data, const float* gamma, int rows, int cols, const int32_t* p) {
-            native_qsa_rms_norm_weighted(data, gamma, data, cols, rows, EPS, cs);
-            if (native_rope_enabled()) native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), p, cs);
-            else rope_neox_apply(data, data, rows, cols, (int) s.n_rot, st_.cos_tab, st_.sin_tab, p, cs);
-        };
+        // ---- attention: K/V into the layer's own cache
         native_quantize_q8_1(mixed_, xq_, (int) N, T, cs);
         native_mmvq(wt_k_proj, wp_k_proj, xq_, kcur_, (int) N, (int) (NKV * HD), T, cs);
         native_mmvq(wt_v_proj, wp_v_proj, xq_, vcur_, (int) N, (int) (NKV * HD), T, cs);
         for (int t = 0; t < T; ++t) {
-            norm_rope(kcur_ + t * NKV * HD, f32("self_attn.k_norm.weight"), (int) NKV, (int) HD, pos + t * NH);
+            norm_rope(kcur_ + t * NKV * HD, f32("self_attn.k_norm.weight"), (int) NKV, (int) HD, pos + t * NH, cs);
             if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
                 fwht256_inplace_cuda(kcur_ + t * NKV * HD, NKV, cs);
                 fwht256_inplace_cuda(vcur_ + t * NKV * HD, NKV, cs);
@@ -714,7 +709,37 @@ bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::stri
                 kv_append_step(st_.k_pool, st_.v_pool, st_.page_table, step + t * 4, kcur_ + t * NKV * HD,
                                vcur_ + t * NKV * HD, s, cs, &st_.host);
         }
-        if (!full) return true;
+    } catch (const std::exception& e) {
+        err = std::string("mtp: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+void MtpDrafter::norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs) {
+    using namespace strata::kernels;
+    const QsaShapes s = shapes_of(*g_);
+    native_qsa_rms_norm_weighted(data, gamma, data, cols, rows, EPS, cs);
+    if (native_rope_enabled()) native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), p, cs);
+    else rope_neox_apply(data, data, rows, cols, (int) s.n_rot, st_.cos_tab, st_.sin_tab, p, cs);
+}
+
+bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
+    using namespace strata::kernels;
+    const ModelGeometry& g = *g_;
+    SessionState& ss = *ss_;
+    const int T = 1;
+    const int64_t N = g.n_embd, HC = g.hc, K = ss.k, NH = g.n_head, HD = g.head_dim;
+    const QsaShapes s = shapes_of(g);
+    const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
+    const int32_t* step = step_ + step_row * 4;
+    const int32_t* pos = pos_ + step_row * NH;
+    // --mtp-q4: the q and o projections' format and weights (Q8_0 unless the Q4_0 copies exist)
+    int wt_q_proj, wt_o_proj;
+    const void* wp_q_proj = wq("self_attn.q_proj.weight", wt_q_proj);
+    const void* wp_o_proj = wq("self_attn.o_proj.weight", wt_o_proj);
+    try {
+        // ---- dense attention over every cell
         native_mmvq(wt_q_proj, wp_q_proj, xq_, qfull_, (int) N, (int) (NH * 2 * HD), T, cs);
         for (int t = 0; t < T; ++t) {
             float* qc = qcur_ + t * NH * HD;
@@ -723,7 +748,7 @@ bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::stri
                 err = "mtp: q split failed";
                 return false;
             }
-            norm_rope(qc, f32("self_attn.q_norm.weight"), (int) NH, (int) HD, pos + t * NH);
+            norm_rope(qc, f32("self_attn.q_norm.weight"), (int) NH, (int) HD, pos + t * NH, cs);
             if (st_.kv_rot) fwht256_inplace_cuda(qc, NH, cs);
         }
         const QsaAttnPools pools = qsa_attn_pools(st_);
@@ -887,18 +912,22 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     copy_i32_from_mapped(pos_, m_pos_, (int64_t) 2 * T * g_->n_head, cs_);
     copy_i32_from_mapped(row_, m_row_, 2, cs_);
     copy_from_mapped(Rin_, window_R_, (int64_t) T * HCN, cs_);
-    // the catch-up: K/V for the window's T cells, then the full layer for row a only (its cell's K/V is written
-    // again, identically), staged by the host in step row 2*max_t - 1; the draft chain is one graph per step
-    // (`capture_step`) so the host can stop it when a draft is unlikely
+    // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
+    // a's intermediates copied to row 0, at the cell the host staged in step row 2*max_t - 1; the draft chain is
+    // one graph per step (`capture_step`) so the host can stop it when a draft is unlikely
     const int ra = 2 * max_t_ - 1;
-    ok = record_forward(T, -1, cs_, err);
-    if (ok) mtp_select(Rin_, HCN, tok_, row_, Rin_, tok_, nullptr, 0, cs_);
+    const int64_t N = g_->n_embd;
+    ok = record_front(T, 0, cs_, err);
     if (ok) {
+        if (T > 1) {
+            copy_row_to_first(row_, R_, HCN, inj_, g_->hc, mixed_, N, cs_);
+            native_quantize_q8_1(mixed_, xq_, (int) N, 1, cs_);
+        }
         copy_i32_from_mapped(step_ + ra * 4, m_step_ + ra * 4, 4, cs_);
         copy_i32_from_mapped(pos_ + ra * g_->n_head, m_pos_ + ra * g_->n_head, g_->n_head, cs_);
         coupled_rec_ = coupled;
         coupled_j_ = 0;
-        ok = record_forward(1, ra, cs_, err);
+        ok = record_rest(ra, cs_, err);
         coupled_rec_ = false;
     }
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
