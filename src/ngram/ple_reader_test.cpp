@@ -177,6 +177,11 @@ void all_formats_round_trip(const std::string& dir) {
         format_round_trip(dir, f, 2000);
     }
     CHECK(k::ple_format_for_type("Q6_K") == nullptr, "Q6_K must not be a PLE format");
+    if (g_fail == 0) {
+        std::printf("ple formats, both readers vs their dequantizers:");
+        for (int i = 0; i < k::ple_format_count(); ++i) std::printf(" %s", k::ple_formats()[i].name);
+        std::printf(": OK\n");
+    }
 }
 
 // row_bytes: ng::ROW_BYTES (90, IQ4_NL) is the production default; 110 (#296, OrcaRouter's Q5_0 PLE rows) is
