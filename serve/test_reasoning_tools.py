@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+import unittest.mock
 import urllib.request
 from pathlib import Path
 
@@ -92,6 +93,16 @@ class Parser(unittest.TestCase):
             evs = run(text, width)
             self.assertEqual(len([e for e in evs if e.kind == "tool_call"]), 1)
             self.assertEqual(joined(evs, "reasoning"), "think")
+
+    def test_a_tag_that_never_closes_does_not_hold_the_thinking_back(self):
+        from serve import frontend
+        text = "a <tool_call> " + "thinking on and on " * 3000 + "</think>\n\nanswer"
+        with unittest.mock.patch.object(frontend, "RCALL_MAX", 1000):
+            evs = run(text, 50)
+        first_reasoning_at = next(i for i, e in enumerate(evs) if e.kind == "reasoning" and len(e.text) > 100)
+        self.assertLess(first_reasoning_at, 100)                     # streamed, not kept until </think>
+        self.assertEqual(joined(evs, "reasoning"), text.split("</think>")[0])
+        self.assertEqual(joined(evs, "content"), "answer")
 
     def test_a_partial_tag_is_held(self):
         p = OutputParser(thinking=True, tools=TOOLS)

@@ -538,6 +538,9 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     return ToolCall(name=name, arguments=args)
 
 
+RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
+
+
 class OutputParser:
     """Incremental parser of the model's text. Feed deltas; get events. A tag split across deltas is held back
     until it is complete, so clients never see `<tool_` or `</thi`."""
@@ -700,6 +703,10 @@ class OutputParser:
                 elif think >= 0:                     # the thinking ended inside it: it never was a call
                     out.append(Event("reasoning", self.buf[:len(CALL_START) + think]))
                     self.buf = body[think:]
+                    self.state = "reasoning"
+                elif len(body) > RCALL_MAX:          # a tag in the prose that never closes: stop holding the thinking back
+                    out.append(Event("reasoning", self.buf))
+                    self.buf = ""
                     self.state = "reasoning"
                 else:
                     return out
