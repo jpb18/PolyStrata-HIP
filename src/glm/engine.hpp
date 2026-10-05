@@ -108,6 +108,19 @@ public:
     bool restore();
     int64_t checkpoint_pos() const { return ck_pos_; }
 
+    // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
+    // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
+    size_t state_bytes() const { return state_n_ * sizeof(float); }
+    size_t row_bytes() const;
+    /// The recurrent state at pos(), state_bytes() long.
+    void save_state(uint8_t* dst);
+    /// Back to position `pos` with the recurrent state it had there.  The rows before pos must be the sequence's.
+    void load_state(const uint8_t* src, int64_t pos);
+    /// The rows of positions [first, first + n), n * row_bytes() long: layer after layer, a layer's rows together.
+    void save_rows(int64_t first, int64_t n, uint8_t* dst);
+    /// Rows [first, first + n) out of what save_rows wrote for [from, from + count).
+    void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
+
     const Stats& stats() const { return stats_; }
     int cached_experts() const { return cached_; }
     int total_experts() const { return n_moe_ * n_expert_; }

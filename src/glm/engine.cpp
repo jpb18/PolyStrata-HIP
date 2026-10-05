@@ -646,6 +646,52 @@ bool Engine::restore() {
     return true;
 }
 
+size_t Engine::row_bytes() const {
+    return (size_t) n_dsa_ * ((size_t) kv_rank_ * sizeof(uint16_t) + (size_t) 3 * idx_dim_ * sizeof(float));
+}
+
+void Engine::save_state(uint8_t* dst) {
+    ck(cudaStreamSynchronize(cs(st_)), "save state");
+    ck(cudaMemcpy(dst, state_, state_bytes(), cudaMemcpyDeviceToHost), "save state");
+}
+
+void Engine::load_state(const uint8_t* src, int64_t pos) {
+    if (pos < 0 || pos > opt_.max_context) throw std::logic_error("load_state: the position is outside the context");
+    ck(cudaStreamSynchronize(cs(st_)), "load state");
+    ck(cudaMemcpy(state_, src, state_bytes(), cudaMemcpyHostToDevice), "load state");
+    pos_ = pos;
+}
+
+void Engine::save_rows(int64_t first, int64_t n, uint8_t* dst) {
+    if (first < 0 || n < 0 || first + n > opt_.max_context)
+        throw std::logic_error("save_rows: the rows are outside the context");
+    ck(cudaStreamSynchronize(cs(st_)), "save rows");
+    const size_t lat = (size_t) kv_rank_ * sizeof(uint16_t), idx = (size_t) 3 * idx_dim_ * sizeof(float);
+    const size_t at = (size_t) first, rows = (size_t) n;
+    for (const Layer& L : layers_) {
+        if (!L.dsa || rows == 0) continue;
+        ck(cudaMemcpy(dst, (const uint8_t*) L.lat + at * lat, rows * lat, cudaMemcpyDeviceToHost), "save rows");
+        dst += rows * lat;
+        ck(cudaMemcpy(dst, (const uint8_t*) L.idx + at * idx, rows * idx, cudaMemcpyDeviceToHost), "save rows");
+        dst += rows * idx;
+    }
+}
+
+void Engine::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
+    if (from < 0 || first < from || n < 0 || first + n > from + count || first + n > opt_.max_context)
+        throw std::logic_error("load_rows: the rows are outside what was saved");
+    ck(cudaStreamSynchronize(cs(st_)), "load rows");
+    const size_t lat = (size_t) kv_rank_ * sizeof(uint16_t), idx = (size_t) 3 * idx_dim_ * sizeof(float);
+    const size_t at = (size_t) first, rows = (size_t) n, skip = (size_t) (first - from), all = (size_t) count;
+    for (const Layer& L : layers_) {
+        if (!L.dsa || rows == 0) continue;
+        ck(cudaMemcpy((uint8_t*) L.lat + at * lat, src + skip * lat, rows * lat, cudaMemcpyHostToDevice), "load rows");
+        src += all * lat;
+        ck(cudaMemcpy((uint8_t*) L.idx + at * idx, src + skip * idx, rows * idx, cudaMemcpyHostToDevice), "load rows");
+        src += all * idx;
+    }
+}
+
 // A Q8_0 row: per 32 values, an fp16 scale and 32 int8.
 void Engine::embed(int32_t token, float* dst) const {
     const uint8_t* b = tok_embd_ + (size_t) token * (size_t) (n_embd_ / 32) * 34;
