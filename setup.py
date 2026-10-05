@@ -24,7 +24,10 @@ GLM 5.3 Flash (--family glm, docs/GLM.md) is a second model with an engine of it
 NVIDIA card.  Its setup asks for the context and the conversation cache and has no steps for a pack or images.  The
 model has one draft block for all its sizes: a size whose file leaves it out gets the block alone (~2.8 GB).
 
-Options: --family qwen|swift, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
+That engine also runs Qwen3.6-35B-A3B (--family qwen36), Ornith 1.5 (--family ornith) and Gemma 4 26B-A4B (--family
+gemma4) from one GGUF each, 13 to 17 GB (docs/BACKENDS.md).  Their setup is GLM's, with nothing more to fetch.
+
+Options: --family qwen|swift|..., --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
@@ -74,6 +77,9 @@ HF_REVISIONS = {
     "neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF": "7feedfeb5ee924bfbe0064c63b124728b443ddc0",  # 2026-09-26
     "patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF": "46cb1bb887721d919e978d2f3eb18da245fecd77",           # 2026-10-05
     "unsloth/GLM-5.3-Flash-GGUF": "621d456e93e926e4b52f85cff5f634358c1828f9",                          # 2026-10-05
+    "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                    # 2026-10-05
+    "mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF": "4c326713c52d13fdb40983a2a09a46cca8e88739",             # 2026-10-05
+    "unsloth/gemma-4-26B-A4B-it-GGUF": "c099eb48e663fd284577b04978a94ffccb261841",                     # 2026-10-05
 }
 
 
@@ -266,6 +272,43 @@ FAMILIES = {
                        (49248507840, "89180f13784dc1128586b98adf1ca876279881a20bc4f01747703ce352563372"),
                        "GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf":
                        (2690716000, "9e0ef47daa1fdffce3cf2ac1594ce4634d176ad018be6e692729757f38d5fbf6")}},
+    # The models the GLM engine also runs, each from one GGUF (docs/BACKENDS.md): "engine": "glm" gives them
+    # glm_setup's steps.  "models": the family's own sizes, as MODELS has them for the others: Unsloth calls a
+    # quantization the same for every model, so two families' sizes share a name.  A size's "arena_gb" (its routed
+    # experts) is from its file, "vram_beside_gb" was measured on an RTX 5090 at 32K, and "row_bytes" is the VRAM a
+    # context token takes, measured from 8K to 131K there.  "ram_gb" is glm_ram_need() for an 8 GB card.  They ship
+    # no expert profile: the engine starts one.
+    "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
+               "about": "on GLM's engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card",
+               "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
+               "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "glm", "vision": False, "experimental": True,
+               "row_bytes": 26624,
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
+                                        "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6,
+                                        "vram_beside_gb": 4.8, "draft": "own"}},
+               "sha256": {"Qwen3.6-35B-A3B-UD-Q3_K_M.gguf":
+                          (17104402720, "8966dd0cd8c543c4228490a2a8b0e0814fc4f1e6a8e199ceed4de6754ae7b8e1")}},
+    "ornith": {"title": "Ornith 1.5 35B-A3B", "by": "ornith-ai; APEX quantization by mudler",
+               "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, ~22 GB of RAM beside an 8 GB card",
+               "hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf",
+               "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "glm", "vision": False,
+               "experimental": True, "row_bytes": 26624,
+               "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the file",
+                                             "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8,
+                                             "vram_beside_gb": 4.2,
+                                             "file": "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf", "draft": "own"}},
+               "sha256": {"Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf":
+                          (17437861408, "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165")}},
+    "gemma4": {"title": "Gemma 4 26B-A4B", "by": "Google; quantized by Unsloth",
+               "about": "on GLM's engine too; a 13 GB file, ~17 GB of RAM beside an 8 GB card; text only here",
+               "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
+               "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "glm", "vision": False, "experimental": True,
+               "row_bytes": 28672,
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic); it guesses ahead from repeats only",
+                                        "download_gb": 12.7, "ram_gb": 17, "arena_gb": 10.3,
+                                        "vram_beside_gb": 5.3}},
+               "sha256": {"gemma-4-26B-A4B-it-UD-Q3_K_M.gguf":
+                          (12728497888, "811882f6df81c8ea204a5d382f196d6bd601245091786912d4c70df41cdfa052")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -886,13 +929,20 @@ def split_mmap(cfg: dict) -> bool:
     return True
 
 
+def family_models(family: str) -> dict:
+    """A family's sizes, each name with what MODELS says of a size.  A family may name its own ("models")."""
+    fam = FAMILIES[family]
+    return fam["models"] if "models" in fam else \
+        {m: d for m, d in MODELS.items() if family in d.get("families", ("qwen", "swift"))}
+
+
 def model_file(fam: dict, model: str, i: int) -> str:
     """Shard i's file name: the family's pattern, or the model's own (#621: UD-IQ4_XS has three shards, not four)."""
-    return MODELS.get(model, {}).get("file", fam["file"]).format(q=model, i=i)
+    return fam.get("models", MODELS).get(model, {}).get("file", fam["file"]).format(q=model, i=i)
 
 
 def model_shards(fam: dict, model: str) -> int:
-    return MODELS.get(model, {}).get("shards", fam.get("shards", 2))
+    return fam.get("models", MODELS).get(model, {}).get("shards", fam.get("shards", 2))
 
 
 def budget_model(cfg: dict) -> str:
@@ -2765,7 +2815,8 @@ def write_config(path: Path, cfg: dict):
 # #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
 # "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
-                        "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
+                        "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision",
+                        "display_name"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_RESIDENT_PIN"})   # the "env" entries setup writes
 SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
 
@@ -2875,14 +2926,15 @@ def choices_from_config(cfg_path: Path) -> dict:
     tag = cfg_path.stem[len("strata-"):]
     family = next((f for f, d in FAMILIES.items() if d["tag"] and tag.startswith(d["tag"])), "qwen")
     model = (tag[len(FAMILIES[family]["tag"]):] if tag.startswith(FAMILIES[family]["tag"]) else tag).upper()
-    if model not in MODELS:                            # (sizes have no dash except UD-Q4_K_XL: the old rule)
+    sizes = FAMILIES[family].get("models", MODELS)     # a family's own sizes, where it has them
+    if model not in sizes:                             # (sizes have no dash except UD-Q4_K_XL: the old rule)
         model = tag.split("-")[-1].upper()
     a = cfg.get("args", [])
     val = lambda k: a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else None   # noqa: E731
     vis = cfg.get("vision")
     esp = val("--control-vector-scaled")
     esp_path = esp.rsplit(":", 1)[0] if esp else None
-    return {"family": family, "model": model if model in MODELS else None,
+    return {"family": family, "model": model if model in sizes else None,
             "context": int(val("--max-context")) if val("--max-context") else None,
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
@@ -3596,36 +3648,37 @@ def glm_config(cfg: dict) -> bool:
     return Path(str(cfg.get("exe", ""))).name == GEXE
 
 
-def glm_beside_gb(model) -> float:
-    """The GiB of VRAM the model takes before any expert, at a 32K context."""
-    return MODELS[model].get("vram_beside_gb", GLM_VRAM_BESIDE_GB)
+# The estimates below take a size's entry: what MODELS, or a family's own "models", says of it (family_models()).
+def glm_beside_gb(d) -> float:
+    """The GiB of VRAM a size takes before any expert, at a 32K context."""
+    return d.get("vram_beside_gb", GLM_VRAM_BESIDE_GB)
 
 
-def glm_held_gb(model, vram_gb) -> float:
-    """About the GB of the model's experts a card with this much VRAM (GiB) holds at a 32K context."""
-    return min(MODELS[model]["arena_gb"], max(0.0, vram_gb - glm_beside_gb(model)) * 1.073741824)
+def glm_held_gb(d, vram_gb) -> float:
+    """About the GB of a size's experts a card with this much VRAM (GiB) holds at a 32K context."""
+    return min(d["arena_gb"], max(0.0, vram_gb - glm_beside_gb(d)) * 1.073741824)
 
 
-def glm_default(names, ram, vram_gb) -> str:
+def glm_default(sizes, ram, vram_gb) -> str:
     """The size setup takes when none is named: the first whose RAM estimate this PC meets, else the one that wants
     the least."""
-    return next((m for m in names if ram >= glm_ram_need(m, vram_gb) - 4),
-                min(names, key=lambda m: glm_ram_need(m, vram_gb)))
+    return next((m for m, d in sizes.items() if ram >= glm_ram_need(d, vram_gb) - 4),
+                min(sizes, key=lambda m: glm_ram_need(sizes[m], vram_gb)))
 
 
-def glm_ram_need(model, vram_gb) -> float:
-    """About the GB of RAM the model wants on that card: the experts the card does not hold, in the OS file cache,
+def glm_ram_need(d, vram_gb) -> float:
+    """About the GB of RAM a size wants on that card: the experts the card does not hold, in the OS file cache,
     and room for the rest.  An estimate from one machine (32 GB of VRAM, 120 GB of RAM)."""
-    return MODELS[model]["arena_gb"] - glm_held_gb(model, vram_gb) + GLM_RAM_BESIDE_GB
+    return d["arena_gb"] - glm_held_gb(d, vram_gb) + GLM_RAM_BESIDE_GB
 
 
-def glm_verdict(model, ram, vram_gb, hip) -> str:
-    """--check's line for GLM 5.3 Flash."""
+def glm_verdict(d, ram, vram_gb, hip) -> str:
+    """--check's line for a size of the GLM engine's models."""
     if hip:
         return "does not run on AMD cards (its engine is a CUDA program)"
-    if vram_gb < glm_beside_gb(model) + 2:
-        return f"does not fit: it takes about {glm_beside_gb(model)} GB of VRAM before any expert"
-    need = glm_ram_need(model, vram_gb)
+    if vram_gb < glm_beside_gb(d) + 2:
+        return f"does not fit: it takes about {glm_beside_gb(d)} GB of VRAM before any expert"
+    need = glm_ram_need(d, vram_gb)
     return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN else "") + (
         f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)" if ram >= need - 4 else
         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
@@ -3701,9 +3754,11 @@ def update_glm_engine(cfg: dict, yes=False) -> None:
              "starting the installed one")
 
 
-def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted) -> int:
-    """Steps 2 to 7 for GLM 5.3 Flash (docs/GLM.md): its questions, the Python packages, the engine (compiled here),
-    the model file, its tokenizer and expert profile, the run config and the start script."""
+def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted) -> int:
+    """Steps 2 to 7 for a model of the GLM engine (docs/GLM.md, docs/BACKENDS.md): its questions, the Python
+    packages, the engine (compiled here), the model file, its tokenizer and expert profile, the run config and the
+    start script."""
+    fam = FAMILIES[family]
     title = fam["title"]
     if hip:
         fail(f"{title} runs on NVIDIA cards only: its engine is a CUDA program",
@@ -3715,7 +3770,7 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     if WIN:
         confirm_risk(f"{title}'s engine has been compiled and run on Linux only: on Windows the compile may fail",
                      bool(a.family), a.yes, f"{title} has not been tried on Windows",
-                     "use Linux, or --family glm --yes to try it here")
+                     f"use Linux, or --family {family} --yes to try it here")
     if multi:
         warn(f"{title} runs on one GPU: {gpu_name(gpu)} alone")
     unused = [flag for flag, given in (
@@ -3729,22 +3784,23 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
     if unused:
         warn(f"not used with {title} (its engine has no such setting): " + ", ".join(unused))
 
-    names = [m for m in MODELS if "glm" in MODELS[m].get("families", ())]
+    sizes = family_models(family)
+    names = list(sizes)
     if a.model and a.model not in names:
         fail(f"{title} has no {a.model} model file", "choose one of: " + ", ".join(names))
     vram = gpu["vram_gb"]
-    model = a.model or glm_default(names, ram, vram)
+    model = a.model or glm_default(sizes, ram, vram)
     if not a.model and len(names) > 1:
         say()
         say("  Which size?  The RAM is setup's estimate for this card: the experts it does not hold stay in RAM.")
         for i, m in enumerate(names, 1):
-            say(f"  {i}) {m:14s} {MODELS[m]['about']}; download {MODELS[m]['download_gb']:.0f} GB, "
-                f"~{glm_ram_need(m, vram):.0f} GB of RAM")
+            say(f"  {i}) {m:14s} {sizes[m]['about']}; download {sizes[m]['download_gb']:.0f} GB, "
+                f"~{glm_ram_need(sizes[m], vram):.0f} GB of RAM")
         model = names[int(ask("Size?", [str(i) for i in range(1, len(names) + 1)], str(names.index(model) + 1),
                               a.yes)) - 1]
-    d = MODELS[model]
-    beside = glm_beside_gb(model)
-    held, need_ram = glm_held_gb(model, vram), glm_ram_need(model, vram)
+    d = sizes[model]
+    beside = glm_beside_gb(d)
+    held, need_ram = glm_held_gb(d, vram), glm_ram_need(d, vram)
     say()
     say(f"  {model}: {d['about']}; download {d['download_gb']:.0f} GB. The file is read in place: about {held:.0f} of")
     say(f"  its {d['arena_gb']:.0f} GB of experts fit this card, the rest stay in RAM (the OS file cache).")
@@ -3752,11 +3808,11 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
         confirm_risk(f"{title} takes about {beside} GB of VRAM before any expert (measured on a 32 GB "
                      f"card at a 32K context); {gpu_name(gpu)} has less than it takes to start", bool(a.model), a.yes,
                      f"{title} needs more VRAM than {vram:.0f} GB",
-                     f"--family glm --model {model} --yes installs it anyway")
+                     f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
     elif vram < 30:
         warn(f"{title} has run on a 32 GB card only. On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of its "
-             f"experts fit in VRAM ({100 * glm_held_gb(model, 31.84) / d['arena_gb']:.0f}% there): more of every "
+             f"experts fit in VRAM ({100 * glm_held_gb(d, 31.84) / d['arena_gb']:.0f}% there): more of every "
              "answer is computed on the CPU, so it is slower")
     if ram < need_ram - 4:
         confirm_risk(f"RAM: {ram:.0f} GB. {title} wants about {need_ram:.0f} GB on this card by setup's estimate: the "
@@ -3764,7 +3820,7 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
                      "cache. With less RAM they come from the SSD while it answers: expect it to be much slower (not "
                      "measured)", bool(a.model), a.yes,
                      f"{title} wants about {need_ram:.0f} GB of RAM; this PC has {ram:.0f}",
-                     f"--family glm --model {model} --yes installs it anyway")
+                     f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {ram:.0f} GB of RAM, as you chose")
     ok(f"size: {model}")
     tag = fam["tag"] + model                           # names of the config, the start script and the data folders
@@ -3777,9 +3833,10 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
         say()
         say("  Context length = how much text the model can see at once (your chat, files, tool output).")
         say("  Longer takes VRAM from the expert cache:")
+        row = fam.get("row_bytes", GLM_ROW_BYTES)
         for i, c in enumerate(GLM_CONTEXTS, 1):
             note = "   (recommended: the one it was measured with)" if c == 32768 else \
-                f"   ({(c - 32768) * GLM_ROW_BYTES / 1e9:.1f} GB more VRAM; started, no long prompt run)" if c > 32768 else ""
+                f"   ({(c - 32768) * row / 1e9:.1f} GB more VRAM; started, no long prompt run)" if c > 32768 else ""
             say(f"  {i}) {c // 1024}K tokens{note}")
         ctx = GLM_CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(GLM_CONTEXTS) + 1)],
                                    str(GLM_CONTEXTS.index(32768) + 1), a.yes)) - 1]
@@ -3858,15 +3915,16 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
         run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
             env=dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py")))   # writes <pack>/tokenizer/
     # The engine counts which experts are used and writes the counts back when it stops, so its profile is a file of
-    # this install's own: it starts as the counts the repository ships.
+    # this install's own: it starts as the counts the repository ships, or with none where it ships none.
     profile = pack / "expert-profile.txt"
-    if not profile.exists():
+    shipped = d.get("profile", fam.get("profile"))
+    if shipped and not profile.exists():
         pack.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / "data" / d.get("profile", fam["profile"]), profile)
-    # The draft block is the model's, one for every size.  A size whose file leaves it out gets it here: the block
+        shutil.copyfile(ROOT / "data" / shipped, profile)
+    # GLM's draft block is the model's, one for every size.  A size whose file leaves it out gets it here: the block
     # alone is downloaded, not the file it comes from.
     draft = None
-    if d.get("draft") != "own":
+    if d.get("draft") != "own" and fam.get("draft"):
         draft = find_in([data, *elsewhere], fam["draft"]) or data / fam["draft"]
         if not draft.exists():
             say("  The draft block lets the model guess a few words ahead and check them at once (faster answers).")
@@ -3886,8 +3944,8 @@ def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adop
         ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
            "that much less)")
     cfg = {"exe": str(eng / GEXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
-           "lib_dirs": lib_dirs, "port": port}
+           "model_name": f"{fam['name']}-{model.lower()}", "display_name": f"{title} {model}",
+           "log": str(ROOT / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True
@@ -3944,8 +4002,10 @@ def sycl_setup(argv) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=list(FAMILIES),
-                    help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, glm = GLM 5.3 Flash (docs/GLM.md)")
-    ap.add_argument("--model", choices=list(MODELS))
+                    help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, glm = GLM 5.3 Flash (docs/GLM.md), qwen36 = "
+                         "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B (docs/BACKENDS.md)")
+    ap.add_argument("--model", choices=list(dict.fromkeys(
+        [*MODELS, *(m for f in FAMILIES.values() for m in f.get("models", {}))])))
     ap.add_argument("--context", type=int)
     ap.add_argument("--rope-scaling", choices=["none", "linear", "yarn"],
                     help="the RoPE extension for a context past the model's trained 262144: linear (position "
@@ -4049,7 +4109,7 @@ def main() -> int:
             a.gpu = int(a.gpu)
         else:
             ap.error(f"--gpu takes a GPU number as nvidia-smi numbers them, e.g. --gpu 1 (or --gpus 0,2), not {a.gpu!r}")
-    say("PolyStrata - Qwen3.8-Flash-Next and GLM 5.3 Flash on a normal PC (a GPU + system RAM + CPU)")
+    say("PolyStrata - Qwen3.8-Flash-Next, GLM 5.3 Flash and smaller MoE models on a normal PC (a GPU + system RAM + CPU)")
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:
@@ -4215,7 +4275,9 @@ def main() -> int:
     cpu, avx2, avx512 = cpu_info()
     need = min(d["ram_gb"] for d in MODELS.values())
     low_ok = low_ram_fits("IQ1_M", ram, gpu["vram_gb"]) and a.low_ram != "off"   # the smallest model, mapped
-    if ram < need - 4 and not a.check and not low_ok:
+    # a family of the GLM engine has its own estimate of the RAM it wants, by size and card (glm_setup)
+    own_ram = bool(a.family) and FAMILIES[a.family].get("engine") == "glm"
+    if ram < need - 4 and not a.check and not low_ok and not own_ram:
         # every model keeps ALL its experts in RAM (23+ GB); VRAM only holds a copy of the most-used ones, so a
         # bigger GPU does not lower this.  The owner's rule: a stop by default, a risk the user can take (--model
         # with --yes, or y)
@@ -4225,9 +4287,10 @@ def main() -> int:
                      f"RAM: {ram:.0f} GB - the smallest model (the Coder) needs about {need} GB",
                      "PolyStrata keeps all of the model's experts in RAM (23-50 GB, whatever the GPU) and the GPU holds a "
                      "copy of the most-used ones: it needs 32 GB of RAM or more (48 GB for the full model); --model "
-                     "NAME --yes installs one anyway")
+                     "NAME --yes installs one anyway. Qwen3.6, Ornith 1.5 and Gemma 4 want less: --family qwen36, "
+                     "ornith or gemma4")
         warn(f"going on with {ram:.0f} GB of RAM, as you chose")
-    ok(f"RAM: {ram:.0f} GB" if ram >= need - 4 else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)"
+    ok(f"RAM: {ram:.0f} GB" if ram >= need - 4 or own_ram else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)"
        + ("; the GPU's VRAM makes up for it (the low-RAM mode)" if ram < need - 4 and low_ok else ""))
     pf = page_file_gb()
     if pf is not None and pf < 4:
@@ -4255,7 +4318,7 @@ def main() -> int:
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
             if "glm" in d.get("families", ()):
-                verdict = glm_verdict(m, ram, gpu["vram_gb"], hip)
+                verdict = glm_verdict(d, ram, gpu["vram_gb"], hip)
             elif d.get("budget"):
                 verdict = (("EXPERIMENTAL, " if d.get("experimental") else "") +
                            f"fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
@@ -4267,6 +4330,9 @@ def main() -> int:
                            "of its experts, " + ("the rest stays in RAM)" if low_ram_resident(m, ram, gpu["vram_gb"])
                                                  else "the rest is read from the SSD as needed)"))
             say(f"  {m:8s} needs ~{d['ram_gb']} GB RAM: {verdict}")
+        for f, fd in FAMILIES.items():                  # the families with sizes of their own
+            for m, d in fd.get("models", {}).items():
+                say(f"  {fd['title']} {m}: {glm_verdict(d, ram, gpu['vram_gb'], hip)}")
         say("\nThis PC can run PolyStrata. Run it again without --check to install.")
         return 0
 
@@ -4285,13 +4351,13 @@ def main() -> int:
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
     if fam.get("engine") == "glm":                     # another engine: its own questions and steps
-        return glm_setup(a, fam, gpu, hip, cuda_tk, bool(multi), ram, data, elsewhere, port, adopted)
+        return glm_setup(a, family, gpu, hip, cuda_tk, bool(multi), ram, data, elsewhere, port, adopted)
     say()
     names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
     names.sort(key=lambda m: bool(MODELS[m].get("experimental")))   # an experimental size last, never the default
     if a.model and a.model not in names:
         # #444: say which family has that size, and (with --gguf-dir) which files PolyStrata can run at all
-        elsewhere_fams = [f for f in FAMILIES if f in MODELS[a.model].get("families", ("qwen", "swift"))]
+        elsewhere_fams = [f for f in FAMILIES if a.model in family_models(f)]
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names)
              + (f" (or {a.model}: " + ", ".join(f"--family {f} --model {a.model}" for f in elsewhere_fams) + ")"
                 if elsewhere_fams else "")

@@ -86,6 +86,22 @@ FALLBACK_FAMILIES = {
     "glm": {"title": "GLM 5.3 Flash", "about": "another model, with its own engine: Linux, one NVIDIA card (run on "
                                                "32 GB), 64-128 GB of RAM", "tag": "glm-", "engine": "glm",
             "vision": False, "experimental": True},
+    # a family with sizes of its own ("models"): two of these have a size of one name
+    "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on GLM's engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB "
+                                                     "of RAM beside an 8 GB card", "tag": "qwen36-", "engine": "glm",
+               "vision": False, "experimental": True,
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
+                                        "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6}}},
+    "ornith": {"title": "Ornith 1.5 35B-A3B", "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, "
+                                                        "~22 GB of RAM beside an 8 GB card", "tag": "ornith-",
+               "engine": "glm", "vision": False, "experimental": True,
+               "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the "
+                                                      "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8}}},
+    "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on GLM's engine too; a 13 GB file, ~17 GB of RAM beside an 8 GB "
+                                                     "card; text only here", "tag": "gemma4-", "engine": "glm",
+               "vision": False, "experimental": True,
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic); it guesses ahead from repeats only",
+                                        "download_gb": 12.7, "ram_gb": 17, "arena_gb": 10.3}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
@@ -440,6 +456,12 @@ class Strata:
         return sorted((m for m in models if family in models[m].get("families", ("qwen", "swift"))),
                       key=lambda m: bool(models[m].get("experimental")))
 
+    def sizes(self, family) -> dict:
+        """A family's sizes, each with what the tables say of it: its own ("models"), else the ones that name it."""
+        models, families, _ctx, _src = self.tables()
+        own = families[family].get("models")
+        return own if own is not None else {m: models[m] for m in self.sizes_of(models, family)}
+
     # ---- paths
     def settings_path(self) -> Path:
         if WIN:
@@ -686,9 +708,10 @@ class Strata:
             fam, model, why = "coder", "IQ1_M", (f"{ram:.0f} GB of RAM is below the Coder's 32 GB, but the GPU's "
                                                  f"{vram:.0f} GB make up for it (setup's low-RAM mode: slower)")
         else:
-            return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: PolyStrata needs 32 GB or more "
-                                                          "(the smallest model, the Coder, keeps ~23 GB of experts in "
-                                                          "RAM)"}
+            return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Qwen3.8-Flash-Next needs 32 GB or "
+                                                          "more (its smallest, the Coder, keeps ~23 GB of experts in "
+                                                          "RAM); the 13-17 GB models (family qwen36, ornith or "
+                                                          "gemma4: Linux, experimental) want 17-22 GB"}
         ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
         if vram < 11:
             notes.append("less than 12 GB of VRAM: it runs, but slowly (most experts stay on the CPU)")
@@ -713,8 +736,7 @@ class Strata:
         out = []
         for f, fd in families.items():
             sizes = []
-            for m in self.sizes_of(models, f):
-                d = models[m]
+            for m, d in self.sizes(f).items():
                 tag = (fd.get("tag", "") + m).lower()
                 verdict = None
                 if ram is not None:
@@ -724,7 +746,7 @@ class Strata:
                             verdict = (("experimental: " if d.get("experimental") else "")
                                        + "part of its experts in RAM, the rest read from the SSD"
                                        if ram >= d["ram_gb"] else "does not fit")
-                        elif S and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
+                        elif S and m in models and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
                             verdict = "fits in the low-RAM mode (slower: the GPU holds part of the experts)"
                     except Exception:                   # noqa: BLE001
                         pass
@@ -957,14 +979,15 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
         {"name": "strata_models", "title": "PolyStrata models",
          "description": "The models and sizes PolyStrata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
                         "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit, glm = GLM 5.3 Flash, another "
-                        "model with its own engine), with download size, RAM needed, "
+                        "model with its own engine, qwen36 = Qwen3.6-35B-A3B, ornith = Ornith 1.5 and gemma4 = "
+                        "Gemma 4 26B-A4B, 13-17 GB models on that engine), with download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
                         "Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
          "annotations": ro},
         {"name": "strata_install", "title": "Install PolyStrata",
          "description": "Install a PolyStrata model on this PC by running PolyStrata's setup non-interactively in the "
-                        "background (Python packages, the engine, a 58-114 GB model download, preparation, start "
+                        "background (Python packages, the engine, a 13-114 GB model download, preparation, start "
                         "script). Without confirm=true it only returns the plan (what would be downloaded, disk "
                         "space): show it to the user and call again with confirm=true once they agree. Returns at "
                         "once; call it again (no arguments needed) to see the progress, or with cancel=true to stop "
@@ -977,8 +1000,12 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "unsloth = Unsloth's ~4-bit (UD-IQ4_XS; UD-Q4_K_XL is "
                                        "experimental), part of the experts read from the SSD, glm = GLM 5.3 "
                                        "Flash (another model: Linux, one NVIDIA card, 64-128 GB of RAM, a 79 or "
-                                       "114 GB download, no images)"},
-             "model": {"type": "string", "enum": list(models),
+                                       "114 GB download, no images), qwen36 = Qwen3.6-35B-A3B, ornith = Ornith "
+                                       "1.5, gemma4 = Gemma 4 26B-A4B (GLM's engine: Linux, one NVIDIA card, a "
+                                       "13-17 GB download, 17-22 GB of RAM beside an 8 GB card by setup's "
+                                       "estimate, no images)"},
+             "model": {"type": "string", "enum": list(dict.fromkeys(
+                           [*models, *(m for f in families.values() for m in f.get("models", ()))])),
                        "description": "the size (quantization): see strata_models"},
              "context": {"type": "integer", "enum": contexts,
                          "description": "context length in tokens (more needs more VRAM)"},
@@ -1234,28 +1261,32 @@ class Tools:
             family, model = rec["family"], rec["model"]
             context = context or rec["context"]
         elif model is None:
-            sizes = s.sizes_of(models, family)
+            sizes = s.sizes(family)
             model = rec["model"] if rec.get("family") == family else ("IQ3_XXS" if "IQ3_XXS" in sizes and
-                                                                     hw.get("ram_gb", 0) >= 60 else sizes[0])
+                                                                     hw.get("ram_gb", 0) >= 60 else next(iter(sizes)))
             S = s.setup_module()
             if families[family].get("engine") == "glm" and S and hw.get("ram_gb"):   # setup's own pick for this PC
                 cards = [g["vram_gb"] for g in hw.get("gpus", []) if g.get("usable")]
                 model = S.glm_default(sizes, hw["ram_gb"], max(cards, default=0.0))
         elif family is None:
-            fams = [f for f in families if model in s.sizes_of(models, f)]
+            fams = [f for f in families if model in s.sizes(f)]
+            if len(fams) > 1 and "qwen" not in fams:
+                raise ToolError(f"{model} is a size of " + " and of ".join(families[f]["title"] for f in fams)
+                                + ": give family too (" + " or ".join(fams) + ")")
             family = "qwen" if "qwen" in fams else fams[0]
-        sizes = s.sizes_of(models, family)
+        sizes = s.sizes(family)
         if model not in sizes:
             raise ToolError(f"{families[family]['title']} has no {model}; its sizes: {', '.join(sizes)}")
+        d = sizes[model]
         if context is None:
             usable = [g for g in hw.get("gpus", []) if g.get("usable")]
             vram = max((g["vram_gb"] for g in usable), default=12)
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
-            if models[model].get("budget"):
+            if d.get("budget"):
                 context = 8192 if vram < 14 else 32768
             if families[family].get("engine") == "glm":
                 context = 32768                         # the one it was measured with, setup's own default
-        if vision in ("yes", "gpu", "cpu") and models[model].get("vision", families[family].get("vision")) is False:
+        if vision in ("yes", "gpu", "cpu") and d.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is not None and backend == "hip" and vision != "no":
             raise ToolError("images are not available on the AMD backend yet: use vision=no")
@@ -1263,7 +1294,7 @@ class Tools:
         tag = (families[family].get("tag", "") + model)
         have_dir = target / "models" / tag
         partly = have_dir.is_dir() and any(have_dir.glob("*.gguf*"))
-        need = (8 if partly else models[model]["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
+        need = (8 if partly else d["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
         free = s.disk_free(target)
         short = None
         if free is not None and free < need:
@@ -1282,11 +1313,11 @@ class Tools:
         fit = None
         ram = hw.get("ram_gb")
         if ram is not None:
-            need_ram = models[model]["ram_gb"]
+            need_ram = d["ram_gb"]
             fit = "fits" if ram >= need_ram else f"needs ~{need_ram} GB of RAM, this PC has {ram:.0f} GB"
         installed = (s.root / f"strata-{tag.lower()}.json").exists()
         plan = {"title": f"{families[family]['title']} {model}", "family": family, "model": model,
-                "context": context, "images": vision or "no", "download_gb": models[model]["download_gb"],
+                "context": context, "images": vision or "no", "download_gb": d["download_gb"],
                 "partly_downloaded": partly, "ram": fit, "data_folder": str(target), "disk_free_gb": free,
                 "disk_needed_gb": round(need), "disk_short": short, "already_installed": installed,
                 "setup_command": ("START-HERE.bat " if WIN else "./setup.sh ") + " ".join(args),
@@ -1297,7 +1328,7 @@ class Tools:
                             "the options (finished steps are skipped)")
         if families[family].get("license"):
             plan["license"] = families[family]["license"]
-        if families[family].get("experimental") or models[model].get("experimental"):
+        if families[family].get("experimental") or d.get("experimental"):
             plan["experimental"] = True
         return plan, args
 

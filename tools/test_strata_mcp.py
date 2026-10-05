@@ -382,6 +382,32 @@ class Install(FakeRoot):
         self.assertTrue(err)
         self.assertIn("images are not available", res["error"])
 
+    def test_a_family_with_sizes_of_its_own(self):
+        """Qwen3.6, Ornith 1.5 and Gemma 4: one size each, two of them of one name; a 32 GB PC with an 8 GB card."""
+        card = {**FAKE_HW["gpus"][0], "vram_gb": 8.0}
+        self.strata._hardware = lambda: {**FAKE_HW, "ram_gb": 32.0, "gpus": [card]}
+        res, err = self.call("strata_install", {"family": "gemma4"})
+        self.assertFalse(err, res)
+        p = res["plan"]
+        self.assertEqual((p["family"], p["model"], p["context"], p["download_gb"], p["ram"]),
+                         ("gemma4", "UD-Q3_K_M", 32768, 12.7, "fits"))
+        self.assertIn("--family gemma4 --model UD-Q3_K_M --context 32768 --vision no", p["setup_command"])
+        res, err = self.call("strata_install", {"model": "APEX-I-COMPACT"})
+        self.assertFalse(err, res)
+        self.assertEqual((res["plan"]["family"], res["plan"]["download_gb"]), ("ornith", 17.4))
+        res, err = self.call("strata_install", {"model": "UD-Q3_K_M"})
+        self.assertTrue(err)
+        self.assertIn("give family too (qwen36 or gemma4)", res["error"])
+        res, err = self.call("strata_install", {"family": "qwen", "model": "UD-Q3_K_M"})
+        self.assertTrue(err)
+        self.assertIn("Qwen3.8-Flash-Next has no UD-Q3_K_M", res["error"])
+        res, err = self.call("strata_models", {})
+        self.assertFalse(err, res)
+        by = {f["family"]: f["sizes"] for f in res["families"]}
+        self.assertEqual([(x["model"], x["download_gb"], x["on_this_pc"], x["id"]) for x in by["qwen36"]],
+                         [("UD-Q3_K_M", 17.1, "fits", "qwen36-ud-q3_k_m")])
+        self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (12.7, False))
+
     def test_progress_while_running_and_cancel(self):
         (self.root / "slow").write_text("")
         res, err = self.call("strata_install", {"family": "coder", "confirm": True})
@@ -566,6 +592,11 @@ class Helpers(unittest.TestCase):
         self.assertEqual(list(S.FAMILIES), list(M.FALLBACK_FAMILIES))
         for f, d in S.FAMILIES.items():
             self.assertEqual(d["tag"], M.FALLBACK_FAMILIES[f]["tag"])
+            own = M.FALLBACK_FAMILIES[f].get("models", {})
+            self.assertEqual(list(d.get("models", {})), list(own), f)
+            for m, size in d.get("models", {}).items():
+                for k in ("about", "download_gb", "ram_gb", "arena_gb"):
+                    self.assertEqual(size[k], own[m][k], f"{f} {m} {k}")
         self.assertEqual(list(S.CONTEXTS), M.FALLBACK_CONTEXTS)
 
     def test_unsloth_sizes(self):

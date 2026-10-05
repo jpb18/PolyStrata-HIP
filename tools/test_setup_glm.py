@@ -80,21 +80,21 @@ class Pins(unittest.TestCase):
 class Estimates(unittest.TestCase):
     def test_the_measured_card(self):
         # an RTX 5090 lists 31.8 GiB; its cache held 19.9 GiB of experts at 32K
-        self.assertAlmostEqual(setup.glm_held_gb(M, 31.84) / 1.073741824, 19.9, delta=0.2)
-        self.assertAlmostEqual(setup.glm_ram_need(M, 31.84), 96, delta=1)
+        self.assertAlmostEqual(setup.glm_held_gb(setup.MODELS[M], 31.84) / 1.073741824, 19.9, delta=0.2)
+        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[M], 31.84), 96, delta=1)
 
     def test_the_half_expert_size(self):
         # the same card held 20.8 GiB of its experts
-        self.assertAlmostEqual(setup.glm_held_gb(HALF, 31.84) / 1.073741824, 20.8, delta=0.2)
-        self.assertAlmostEqual(setup.glm_ram_need(HALF, 31.84), 60, delta=1)
+        self.assertAlmostEqual(setup.glm_held_gb(setup.MODELS[HALF], 31.84) / 1.073741824, 20.8, delta=0.2)
+        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[HALF], 31.84), 60, delta=1)
 
     def test_the_size_taken_when_none_is_named(self):
-        names = [m for m in setup.MODELS if "glm" in setup.MODELS[m].get("families", ())]
-        self.assertEqual(names, [M, SPLIT, HALF])                        # the whole model before the half of it
-        self.assertEqual(setup.glm_default(names, 128, 31.84), M)
-        self.assertEqual(setup.glm_default(names, 88, 31.84), SPLIT)     # 3.0BIT wants 96 GB there
-        self.assertEqual(setup.glm_default(names, 64, 31.84), HALF)
-        self.assertEqual(setup.glm_default(names, 32, 31.84), HALF)      # none fits: the one that wants least
+        sizes = setup.family_models("glm")
+        self.assertEqual(list(sizes), [M, SPLIT, HALF])                  # the whole model before the half of it
+        self.assertEqual(setup.glm_default(sizes, 128, 31.84), M)
+        self.assertEqual(setup.glm_default(sizes, 88, 31.84), SPLIT)     # 3.0BIT wants 96 GB there
+        self.assertEqual(setup.glm_default(sizes, 64, 31.84), HALF)
+        self.assertEqual(setup.glm_default(sizes, 32, 31.84), HALF)      # none fits: the one that wants least
 
     def test_the_split_size(self):
         fam, d = setup.FAMILIES["glm"], setup.MODELS[SPLIT]
@@ -103,18 +103,18 @@ class Estimates(unittest.TestCase):
         self.assertRegex(d["hf"], r"^https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF/resolve/[0-9a-f]{40}/UD-IQ2_XXS/$")
         self.assertAlmostEqual(sum(fam["sha256"][f][0] for f in SPLIT_FILES) / 1e9, d["download_gb"], delta=0.1)
         # the same card held 19.3 GiB of its experts
-        self.assertAlmostEqual(setup.glm_held_gb(SPLIT, 31.84) / 1.073741824, 19.3, delta=0.1)
-        self.assertAlmostEqual(setup.glm_ram_need(SPLIT, 31.84), d["ram_gb"], delta=1)
+        self.assertAlmostEqual(setup.glm_held_gb(setup.MODELS[SPLIT], 31.84) / 1.073741824, 19.3, delta=0.1)
+        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[SPLIT], 31.84), d["ram_gb"], delta=1)
 
     def test_a_card_that_holds_none(self):
-        self.assertEqual(setup.glm_held_gb(M, 8.0), 0.0)
-        self.assertAlmostEqual(setup.glm_ram_need(M, 8.0), 117.2, delta=0.1)
+        self.assertEqual(setup.glm_held_gb(setup.MODELS[M], 8.0), 0.0)
+        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[M], 8.0), 117.2, delta=0.1)
 
     def test_check_lines(self):
-        self.assertIn("AMD", setup.glm_verdict(M, 256, 24.0, True))
-        self.assertIn("does not fit", setup.glm_verdict(M, 256, 12.0, False))
-        self.assertIn("fits by setup's estimate", setup.glm_verdict(M, 128, 31.84, False))
-        self.assertIn("read from the SSD", setup.glm_verdict(M, 64, 31.84, False))
+        self.assertIn("AMD", setup.glm_verdict(setup.MODELS[M], 256, 24.0, True))
+        self.assertIn("does not fit", setup.glm_verdict(setup.MODELS[M], 256, 12.0, False))
+        self.assertIn("fits by setup's estimate", setup.glm_verdict(setup.MODELS[M], 128, 31.84, False))
+        self.assertIn("read from the SSD", setup.glm_verdict(setup.MODELS[M], 64, 31.84, False))
 
 
 class Config(unittest.TestCase):
@@ -151,9 +151,9 @@ class Main(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def main(self, argv=(), ram=128.0, vram=31.84, model=False, answers=None, win=False, n_gpus=1):
+    def main(self, argv=(), ram=128.0, vram=31.84, model=False, answers=None, win=False, n_gpus=1, family="glm"):
         """answers: None = --yes; else {words of a question: its answer} (Enter for the others); the questions asked
-        are kept in self.asked."""
+        are kept in self.asked.  model: False, True (this file's M) or a size's name."""
         self.asked = []
 
         def fake_input(prompt=""):
@@ -201,7 +201,8 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "run", lambda cmd, *a, **k: self.runs.append([str(x) for x in cmd])),
             mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: self.t / f"start-{tag}.sh"),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
-            mock.patch.object(sys, "argv", ["setup.py", "--family", "glm", *(["--model", M] if model else []),
+            mock.patch.object(sys, "argv", ["setup.py", "--family", family,
+                                            *(["--model", M if model is True else model] if model else []),
                                             *(["--yes"] if answers is None else []), "--no-start",
                                             "--models-dir", str(self.t / "models"), *argv]),
             mock.patch("builtins.input", fake_input),
@@ -210,7 +211,7 @@ class Main(unittest.TestCase):
             for p in patches:
                 st.enter_context(p)
             code, out = quiet(setup.main)
-        cfg = next(iter(sorted(self.t.glob("strata-glm-*.json"))), None)
+        cfg = next(iter(sorted(self.t.glob(f"strata-{setup.FAMILIES[family]['tag']}*.json"))), None)
         return code, out, (json.loads(cfg.read_text()) if cfg else None)
 
     def test_install(self):
