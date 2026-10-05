@@ -2599,17 +2599,17 @@ def low_ram_wanted(model, ram, choice="auto") -> bool:
 
 
 def kv_streaming_ram_gb(ctx, kv) -> float:
-    """The RAM a streamed KV cache takes: ~13.7 KB per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with
-    4-bit - 12 QSA layers + the draft layer."""
+    """The RAM a streamed KV cache takes: ~13.7 KB per context token with 8-bit KV (1.7 GB at 128K), 10.6 KB with
+    K8V4, 7.5 KB with 4-bit - 12 QSA layers + the draft layer."""
     return ctx * (13 * KV_CELL_BYTES.get(kv, 1056)) / 1e9
 
 
 def kv_streaming_wanted(model, ctx, kv, ram, choice="auto") -> bool:
     """Will setup stream this model's KV cache on this PC: from 64K up, when the RAM holds the cache beside the
-    model's experts (+1 GB); `--kv-streaming on|off` overrides the RAM test (the owner's rule), and hybrid K8/V4
-    and WSL never stream.  Step 7 writes `--kv-resident` on exactly this answer, and the launcher's preset diff
+    model's experts (+1 GB); `--kv-streaming on|off` overrides the RAM test (the owner's rule), and WSL never
+    streams.  Step 7 writes `--kv-resident` on exactly this answer, and the launcher's preset diff
     asks it too: a config's `--kv-resident` and a preset's "auto" are the same setting when this says yes."""
-    if kv == "k8v4" or is_wsl() or choice == "off":
+    if is_wsl() or choice == "off":
         return False
     return ctx >= 65536 and (ram >= MODELS[model]["ram_gb"] + kv_streaming_ram_gb(ctx, kv) + 1 or choice == "on")
 
