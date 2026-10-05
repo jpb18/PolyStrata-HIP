@@ -761,8 +761,10 @@ int down_chunk(bool staged, int* tile_out) {
         if (optin > 0 && want > optin) want = optin;
         if (small_tile) {
             cudaFuncSetAttribute(gr_down_multi_kernel<1280>, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
+            cudaFuncSetAttribute(gr_down_multi_kernel<1280, kFusedGrMaxT, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
         } else {
             cudaFuncSetAttribute(gr_down_multi_kernel<2560>, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
+            cudaFuncSetAttribute(gr_down_multi_kernel<2560, kFusedGrMaxT, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
         }
         int want_staged = (int) (2 * kFusedGrMaxT * H_TILE * sizeof(float));
         if (optin > 0 && want_staged > optin) want_staged = optin;
