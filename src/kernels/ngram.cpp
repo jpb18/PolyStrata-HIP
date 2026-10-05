@@ -304,6 +304,8 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
                       (unsigned long long) t->offset, (unsigned long long) have,
                       (unsigned long long) impl_->file->data_start());
         err = buf;
+        if (alone && have > need)   // #657: extra bytes after the table: a damaged or wrong file, not a format question
+            err += "; the file is longer than its table - delete it and its .done mark and run setup again";
         close();
         return false;
     }
