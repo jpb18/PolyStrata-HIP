@@ -4912,6 +4912,24 @@ int main(int argc, char** argv) {
                                     : ((tokens + 255) / 256) * 256;
         return std::min(max_chunk, rounded);
     };
+    // STRATA_PREFILL_EQUAL=1 (opt-in, PR #693): a segment of `tokens` reads in n = ceil(tokens / max_chunk) chunks of EQUAL
+    // size (ceil(tokens / n) rounded up to 256) instead of full chunks and a short last one.  A chunk of
+    // stream_all_min_tokens() or more streams every expert the GPU does not hold, whatever its length, so a prompt's cost
+    // is its number of such chunks and equal chunks borrow no more slots than that count needs.  A last chunk below
+    // stream_all_min_tokens() stays as it is (it moves only the experts its own tokens route to).  Used ONLY where a
+    // segment's chunk is chosen (the serve lend, generate's prompt); `request_chunk` is unchanged because
+    // STRATA_SPLIT_SMALL_OWN uses it too.  The chunk geometry changes the rounding, so it is off by default.
+    static const bool equal_chunks = [] { const char* e = std::getenv("STRATA_PREFILL_EQUAL"); return e != nullptr && e[0] == '1'; }();
+    auto equal_chunk = [&](int64_t tokens, int64_t max_chunk) -> int64_t {
+        const int64_t plain = request_chunk(tokens, max_chunk);
+        if (!equal_chunks || tokens <= 0 || max_chunk <= 0) return plain;
+        const int64_t n = tokens / max_chunk + (tokens % max_chunk != 0);
+        const int64_t last = tokens - (n - 1) * max_chunk;
+        if (n <= 1 || last < strata::prefill::Prefill::stream_all_min_tokens()) return plain;
+        const int64_t per = tokens / n + (tokens % n != 0);
+        const int64_t rounded = per > std::numeric_limits<int64_t>::max() - 255 ? per : ((per + 255) / 256) * 256;
+        return std::min(max_chunk, rounded);
+    };
     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
     // or with --prefill auto the largest chunk whose buffers take at most kAutoLendPct % of the slots (a
     // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
@@ -8504,7 +8522,7 @@ int main(int argc, char** argv) {
                 const auto t_ln = Clock::now();
                 // what this segment needs, capped by the configured chunk: a request lends only what its own
                 // prompt needs, so a large chunk costs a short prompt nothing
-                const int64_t want_full = request_chunk(tokens, o.prefill_chunk);
+                const int64_t want_full = equal_chunk(tokens, o.prefill_chunk);
                 // #340: a short enough request reads in the stages' own S-token chunks (nothing lent)
                 const int64_t want = split_small > 0 && tokens <= split_small_max ? std::min(want_full, split_small)
                                                                                  : want_full;
@@ -9886,7 +9904,7 @@ int main(int argc, char** argv) {
         if (!o.no_prefill_borrow && !host_res.empty() && d_res != nullptr) {
             int64_t chunk = o.prefill_chunk;
             int64_t k = plan_lend(chunk);             // auto: the largest chunk that fits; fixed: halved to fit
-            const int64_t request_sized = request_chunk(n_batched, chunk);
+            const int64_t request_sized = equal_chunk(n_batched, chunk);
             if (k > 0 && request_sized < chunk) {                     // no bigger than this prompt segment needs
                 chunk = request_sized;
                 k = lend_slots(chunk);
