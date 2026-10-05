@@ -185,6 +185,7 @@ private:
     std::unique_ptr<Mmq> mmq_;   ///< null when the card has no MMQ tile for the experts' types
     float *gu_ = nullptr, *hx_ = nullptr, *dx_ = nullptr;   ///< the rows' gate|up, hidden and down values
     void *mq_ = nullptr, *mq2_ = nullptr;                   ///< the rows quantized for the two products
+    void* mqx_ = nullptr;                                   ///< lin()'s tokens quantized for a product
     int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
     int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...
     uint8_t* stage_ = nullptr;                    ///< experts that are not cached, on their way through VRAM

@@ -468,6 +468,7 @@ void Engine::alloc_state() {
         const size_t rr = n * n_used_, tab = (3 * rr + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t);
         mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
         mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
+        mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
         tab_ = (int32_t*) dmalloc(tab, "scratch");
         h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
         iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
@@ -645,6 +646,11 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
         return gemv_f32(fp(w), x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
     if (w.type == kTypeBF16)
         return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
+    // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens
+    if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out)) {
+        Mmq::quantize(x, nullptr, mqx_, (int) w.type, w.n_in, w.n_in, n, st_);
+        return mmq_->mul(w.p, (int) w.type, w.n_out, w.n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, w.n_out, st_);
+    }
     if (!xq) {
         // the tokens' blocks are back to back, so they quantize as one long vector
         kernels::native_quantize_q8_1(x, q8_, w.n_in * n, 1, st_);
