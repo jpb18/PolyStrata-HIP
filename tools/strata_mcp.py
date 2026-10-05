@@ -66,6 +66,8 @@ FALLBACK_MODELS = {
                            "less than ~80 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "vision": True},
+    "3.0BIT": {"about": "3-bit GSQ-RCO experts with Q4_K attention, the one size there is", "download_gb": 113.6,
+               "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",)},
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -77,6 +79,9 @@ FALLBACK_FAMILIES = {
                                                                   "of RAM part of its experts are read from the SSD "
                                                                   "(UD-Q4_K_XL, 111 GB: experimental)",
                 "tag": "unsloth-", "vision": False},
+    "glm": {"title": "GLM 5.3 Flash", "about": "another model, with its own engine: Linux, one NVIDIA card (run on "
+                                               "32 GB), ~128 GB of RAM", "tag": "glm-", "engine": "glm",
+            "vision": False, "experimental": True},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
@@ -942,14 +947,15 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
          "annotations": ro},
         {"name": "strata_models", "title": "Strata models",
          "description": "The models and sizes Strata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
-                        "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit), with download size, RAM needed, "
+                        "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit, glm = GLM 5.3 Flash, another "
+                        "model with its own engine), with download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
                         "Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
          "annotations": ro},
         {"name": "strata_install", "title": "Install Strata",
          "description": "Install a Strata model on this PC by running Strata's setup non-interactively in the "
-                        "background (Python packages, the engine, a 58-111 GB model download, preparation, start "
+                        "background (Python packages, the engine, a 58-114 GB model download, preparation, start "
                         "script). Without confirm=true it only returns the plan (what would be downloaded, disk "
                         "space): show it to the user and call again with confirm=true once they agree. Returns at "
                         "once; call it again (no arguments needed) to see the progress, or with cancel=true to stop "
@@ -960,7 +966,9 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                         "description": "qwen = Qwen3.8-Flash-Next (the original), swift = Swift 1.5 (thinks "
                                        "shorter), coder = the Coder (half the experts, ~32 GB RAM, for code), "
                                        "unsloth = Unsloth's ~4-bit (UD-IQ4_XS; UD-Q4_K_XL is "
-                                       "experimental), part of the experts read from the SSD"},
+                                       "experimental), part of the experts read from the SSD, glm = GLM 5.3 "
+                                       "Flash (another model: Linux, one NVIDIA card, ~128 GB of RAM, a 114 GB "
+                                       "download, no images)"},
              "model": {"type": "string", "enum": list(models),
                        "description": "the size (quantization): see strata_models"},
              "context": {"type": "integer", "enum": contexts,
@@ -1232,6 +1240,8 @@ class Tools:
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
             if models[model].get("budget"):
                 context = 8192 if vram < 14 else 32768
+            if families[family].get("engine") == "glm":
+                context = 32768                         # the one it was measured with, setup's own default
         if vision in ("yes", "gpu", "cpu") and models[model].get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is not None and backend == "hip" and vision != "no":

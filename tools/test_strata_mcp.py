@@ -368,6 +368,20 @@ class Install(FakeRoot):
         st, _ = self.call("strata_status", {"hardware": False})
         self.assertEqual([m["model"] for m in st["installed"]["models"]], ["q2_0"])
 
+    def test_glm_plan(self):
+        """GLM 5.3 Flash: its one size, no images, and the context it was measured with whatever the card."""
+        card = {**FAKE_HW["gpus"][0], "vram_gb": 31.5}
+        self.strata._hardware = lambda: {**FAKE_HW, "ram_gb": 128.0, "gpus": [card]}
+        res, err = self.call("strata_install", {"family": "glm"})
+        self.assertFalse(err, res)
+        p = res["plan"]
+        self.assertEqual((p["family"], p["model"], p["context"], p["images"]), ("glm", "3.0BIT", 32768, "no"))
+        self.assertIn("--family glm --model 3.0BIT --context 32768 --vision no", p["setup_command"])
+        self.assertNotIn("--experimental-speed-projection", p["setup_command"])
+        res, err = self.call("strata_install", {"family": "glm", "vision": "yes"})
+        self.assertTrue(err)
+        self.assertIn("images are not available", res["error"])
+
     def test_progress_while_running_and_cancel(self):
         (self.root / "slow").write_text("")
         res, err = self.call("strata_install", {"family": "coder", "confirm": True})
