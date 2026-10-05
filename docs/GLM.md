@@ -86,8 +86,8 @@ of the file. The rest of the weights are always in VRAM.
 
 - **The expert cache.** The experts used most often are kept in VRAM: 2,573 of them, 19.9 GiB, on the 32 GB card
   at a 32K context. `--expert-profile FILE` is where the engine keeps count of which ones are used. It reads the
-  file at the start to choose, and writes it back when it stops. Without a profile it has no counts yet and takes
-  the experts in layer order, so the second start is the one to measure.
+  file at the start to choose, and writes it back when it stops. Without a profile it has no counts yet and keeps
+  the same number of experts from every layer, so the second start is the one to measure.
 - **Writing an answer.** An expert that is not in VRAM runs on the CPU while the card runs its share.
 - **Reading a prompt.** The prompt goes in up to 1,024 tokens at a time. For each layer the experts outside the
   cache are copied through a buffer in VRAM and run there. A larger batch reads faster and leaves less VRAM for the
