@@ -494,14 +494,20 @@ int main(int argc, char** argv) {
                 run_ref(n);
                 down(y, d_y); down(yr, d_yr); down(st, d_st); down(sr, d_sr);
                 bool ok = true;
-                for (int t = c.tb; t < n; ++t)
-                    if (std::memcmp(y.data() + (size_t) t * vd, yr.data() + (size_t) t * vd, (size_t) vd * 4) != 0) ok = false;
+                size_t y_bad = 0, y_all = 0;
+                for (int t = c.tb; t < n; ++t) {
+                    for (int i = 0; i < vd; ++i, ++y_all)
+                        if (std::memcmp(&y[(size_t) t * vd + i], &yr[(size_t) t * vd + i], 4) != 0) ++y_bad;
+                }
+                if (y_bad) ok = false;
                 // the verify half leaves the state untouched; the commit half writes the state after n tokens
                 const std::vector<float>& want_st = c.n_keep < 0 ? st0 : sr;
                 if (std::memcmp(st.data(), want_st.data(), st.size() * 4) != 0) ok = false;
                 ++sn_n;
                 if (!ok) {
-                    std::printf("    *** gdn_step_norm_multi T=%d '%s' differs from fused_gdn_step_norm (memcmp) ***\n", T, c.name);
+                    std::printf("    *** gdn_step_norm_multi T=%d '%s' differs from fused_gdn_step_norm (memcmp): %zu of %zu y words%s ***\n",
+                                T, c.name, y_bad, y_all,
+                                std::memcmp(st.data(), (c.n_keep < 0 ? st0 : sr).data(), st.size() * 4) != 0 ? ", state too" : "");
                     ++sn_bad;
                 }
             }
