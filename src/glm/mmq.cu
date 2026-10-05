@@ -31,12 +31,14 @@ Mmq::Mmq() { ctx_ = new ggml_backend_cuda_context(ggml_cuda_get_device()); }
 Mmq::~Mmq() { delete (ggml_backend_cuda_context*) ctx_; }
 
 // mul_mat_q_case's own choice: a tile size whose configuration exists for this card and fits its shared memory.
-// It aborts the process when there is none.  The kernels step through a matrix MMQ_ITER_K columns at a time and
-// read a whole step: a matrix with part of one would have the next row's blocks, or what lies behind it, read as
-// its own.
+// It aborts the process when there is none.
+//
+// The kernels step through a matrix MMQ_ITER_K columns at a time and read a whole step.  Where a row ends inside a
+// step they read on into what lies behind it, and multiply that by the zeros quantize() pads the rows of x with.
+// So what lies behind a matrix must be readable and must not be read as an infinite block scale: the engine keeps
+// zero bytes there (kTail in runtime.hpp), as ggml-cuda does behind its tensors.
 bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
     const ggml_type t = (ggml_type) type;
-    if (w_cols % MMQ_ITER_K != 0) return false;
     switch (t) {
 #define X(T) case GGML_TYPE_##T:
         STRATA_GLM_MMQ_TYPES(X)
@@ -44,6 +46,7 @@ bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
         break;
         default: return false;
     }
+    if (w_cols % ggml_blck_size(t) != 0) return false;
     const bool fallback = w_rows % 128 != 0;
     const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
     for (int J = 8; J <= 128; J += 8) {

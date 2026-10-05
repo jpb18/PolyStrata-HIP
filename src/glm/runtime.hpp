@@ -26,6 +26,9 @@ constexpr int kCpuRows = 8;         // tokens whose CPU experts one call compute
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
 constexpr int kStageRows = 32;
 constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
+// Zero bytes behind every matrix the batched kernels may multiply (Mmq::fits): they read up to a step of 256
+// columns past a row that ends inside one, which is at most 7 blocks of 34 bytes.
+constexpr size_t kTail = 256;
 // follow(): an expert's recent use is the count of its uses, halved every kSwapHalf tokens.  An expert takes a
 // cached one's slot when it was used twice lately and more than twice as much as that one.  Counts this small are
 // noisy, and an upload gets in the way of the work: a slot goes to an expert that will clearly be used more.

@@ -384,7 +384,7 @@ Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, i
     const uint32_t type = as_is ? t->type : want == kF32 ? kTypeF32 : kTypeBF16;
     const size_t out = as_is ? bytes : count * (type == kTypeF32 ? sizeof(float) : sizeof(uint16_t));
     const Dev d{dense_ ? dense_ + dense_at_ : nullptr, type, (int) n_in, (int) n_out};
-    dense_at_ += pad(out);
+    dense_at_ += pad(out) + kTail;
     if (!dense_) return d;
     if (dense_at_ > dense_bytes_) throw std::logic_error("the dense arena is too small for " + t->name);
     if (as_is) {
@@ -430,7 +430,7 @@ void Engine::fill_expert_cache() {
         if (!L.moe || !kernels::native_mmvq_supported((int) L.gu_type) ||
             !kernels::native_mmvq_supported((int) L.d_type))
             continue;
-        const size_t bytes = pad(2 * L.gu_bytes + L.d_bytes);
+        const size_t bytes = pad(2 * L.gu_bytes + L.d_bytes + kTail);
         if (std::find(sizes.begin(), sizes.end(), bytes) == sizes.end()) sizes.push_back(bytes);
         L.trade = (int) (std::find(sizes.begin(), sizes.end(), bytes) - sizes.begin());
         slot_max_ = std::max(slot_max_, bytes);
@@ -447,6 +447,7 @@ void Engine::fill_expert_cache() {
     const size_t arena = std::min(all, free_b - reserve);
     if (arena == 0) return;
     exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
+    ck(cudaMemset(exp_, 0, arena + 256), "the expert cache");   // the slots' tails stay zero (kTail)
     for (const Cand& c : cands) {
         if (exp_at_ + c.bytes > arena) continue;   // a smaller expert of another layer may still fit
         Layer& L = layers_[(size_t) c.il];
@@ -649,6 +650,7 @@ void Engine::load(const Options& o) {
         if (pass == 0) {
             dense_bytes_ = dense_at_;
             dense_ = (uint8_t*) dmalloc(dense_bytes_ + 256, "the dense weights");
+            ck(cudaMemset(dense_, 0, dense_bytes_ + 256), "the dense weights");   // between the tensors: kTail
         }
     }
 
@@ -774,7 +776,7 @@ void Engine::alloc() {
 
         stage_bytes_ = std::max((size_t) opt_.stage_mib << 20, one_expert);
         chunk_bytes_ = std::max(kChunkBytes, one_expert);
-        stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256, "the expert staging buffer");
+        stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256 + kTail, "the expert staging buffer");
         for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
         for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
             cudaEvent_t ev = nullptr;
@@ -976,6 +978,7 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream) 
            "expert staging");
         ck(cudaEventRecord(left, cs(stream)), "expert staging");
     }
+    ck(cudaMemsetAsync(stage_ + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
 }
 
 // A MoE layer for a prompt batch: every token's experts on the GPU, by llama.cpp's MMQ.  A row is a token and one
