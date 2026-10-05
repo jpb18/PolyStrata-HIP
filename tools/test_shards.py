@@ -160,6 +160,15 @@ class PackBuildOccupied(unittest.TestCase):
                 self.run_build(out)
             self.assertTrue(out.is_dir())
 
+    def test_force_builds_into_an_occupied_dir(self):
+        # #634: setup rebuilds a pack that lost its index.txt or experts.bin with --force
+        out = self.dir / "forced"
+        out.mkdir()
+        (out / "manifest.json").write_text("the pack that was there", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(Stop):
+            strata_pack.build(self.dir / "m-00001-of-00002.gguf", out, None, True, True)
+
     def test_unfinished_build_is_rebuilt(self):
         # experts.bin without manifest.json is a build that stopped before its last file: not a pack, rebuilt as before
         out = self.dir / "unfinished"

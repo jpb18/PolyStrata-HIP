@@ -217,13 +217,13 @@ def occupied(out_dir: pathlib.Path) -> pathlib.Path | None:
     return None
 
 
-def build(gguf: pathlib.Path, out_dir: pathlib.Path, n_layers: int | None, skip_hash: bool) -> int:
+def build(gguf: pathlib.Path, out_dir: pathlib.Path, n_layers: int | None, skip_hash: bool, force: bool = False) -> int:
     # refused before anything is opened or written: build used to mkdir(exist_ok=True) and overwrite experts.bin,
     # dense.bin, embd.bin and manifest.json of whatever pack was there, with nothing said
-    marker = occupied(out_dir)
+    marker = None if force else occupied(out_dir)   # --force: setup rebuilding a pack that lost index.txt or experts.bin
     if marker is not None:
-        print("%s already holds a pack (%s is there) - refusing to build; delete the directory or pass another "
-              "--out" % (out_dir, marker.name))
+        print("%s already holds a pack (%s is there) - refusing to build; delete the directory, pass another "
+              "--out, or --force to rebuild it" % (out_dir, marker.name))
         return 1
     out_dir.mkdir(parents=True, exist_ok=True)
     g = G.GGUFFile(gguf)
@@ -423,6 +423,7 @@ def main() -> int:
     b.add_argument("--out", required=True)
     b.add_argument("--layers", type=int, default=None, help="expert layers to emit (default 48)")
     b.add_argument("--skip-hash", action="store_true")
+    b.add_argument("--force", action="store_true", help="build into a directory that already holds a pack (#634)")
     v = sub.add_parser("verify")
     v.add_argument("--gguf", required=True)
     v.add_argument("--out", required=True)
@@ -434,7 +435,7 @@ def main() -> int:
     n.add_argument("--out", required=True)
     args = ap.parse_args()
     if args.cmd == "build":
-        return build(pathlib.Path(args.gguf), pathlib.Path(args.out), args.layers, args.skip_hash)
+        return build(pathlib.Path(args.gguf), pathlib.Path(args.out), args.layers, args.skip_hash, args.force)
     if args.cmd == "verify":
         return verify(pathlib.Path(args.gguf), pathlib.Path(args.out), args.limit, args.expert_every)
     return info(pathlib.Path(args.out))
