@@ -810,6 +810,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(native_multi_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(native_multi_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME native_multi_parity COMMAND native_multi_parity)
+  # #783 PR-d: the batched K/V append (INT8, Q4_0, the hybrid fold) against the per-cell appends, memcmp
+  add_executable(kv_steps_parity src/kernels/kv_steps_parity.cpp)
+  target_include_directories(kv_steps_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(kv_steps_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME kv_steps_parity COMMAND kv_steps_parity)
   if(STRATA_HIP_GFX906)
     # the S6 router (STRATA_HIP_ROUTER_FAST=1 on gfx906) against the portable kernel, bitwise, on wave64
     add_executable(hip_router_fast tests/hip/router_fast.cpp)

@@ -89,6 +89,7 @@ const bool g_coherent = env_on("STRATA_VERIFY_COHERENT");
 const bool g_doorbell_store = env_on("STRATA_DOORBELL_STORE");
 #endif
 const bool g_trace = env_on("STRATA_VERIFY_TRACE");
+const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
 
 // The shared expert runs on its own stream, forked off and joined back per layer (`sh_fork` in record_window).  The
 // overlap pays off on CUDA, where it was added (cfd3b72).  On HIP a cross-stream event dependency costs more than the
@@ -927,12 +928,28 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                              slot_ss(t).qsa_states[qi].idx_tail, TS, cs);
                 } else
                 if (grp == 0) copy_from_mapped(tail_snap_ + (size_t) qi * TS, st.idx_tail, TS, cs);
-                const bool kv_multi = g_lfuse() && !st.kv_hybrid && !st.kv_q4 && st.kv_int8 && n > 1;   // S26 STRATA_LFUSE
-                if (kv_multi)
-                    kv_append_q8_steps(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, step_ + tb * kStepCount,
-                                       (int) kStepCount, kcur_ + tb * NKV * HD, vcur_ + tb * NKV * HD, (int) (NKV * HD), n,
-                                       s, cs, &st.host);
-                else
+                // #783 PR-d (stuchapin909): the window's K/V cells in one launch per pool instead of one per token (a
+                // batch's rows each have their own K/V, so that case keeps the loop)
+                if (dec_batch && !g_no_batch_kv && !batch_rec_) {
+                    const int32_t* step_b = step_ + tb * kStepCount;
+                    const float* kc_b = kcur_ + tb * NKV * HD;
+                    const float* vc_b = vcur_ + tb * NKV * HD;
+                    if (st.kv_hybrid) {   // K8V4: the unused half's lanes folded onto the used pool (layer.cpp)
+                        kv_append_q8_steps(st.k_q, st.k_q, st.k_scale, st.k_scale, st.page_table, step_b, kStepCount,
+                                           kc_b, kc_b, (int) (NKV * HD), n, s, cs, nullptr);
+                        kv_append_q4_steps(st.v_q4, st.v_q4, st.page_table, step_b, kStepCount, n, vc_b, vc_b, s, cs,
+                                           nullptr);
+                    } else if (st.kv_q4)
+                        kv_append_q4_steps(st.k_q4, st.v_q4, st.page_table, step_b, kStepCount, n, kc_b, vc_b, s, cs,
+                                           &st.host);
+                    else if (st.kv_int8)
+                        kv_append_q8_steps(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, step_b, kStepCount,
+                                           kc_b, vc_b, (int) (NKV * HD), n, s, cs, &st.host);
+                    else
+                        for (int t = tb; t < te; ++t)
+                            kv_append_step(st.k_pool, st.v_pool, st.page_table, step_ + t * kStepCount,
+                                           kcur_ + t * NKV * HD, vcur_ + t * NKV * HD, s, cs, &st.host);
+                } else
                 for (int t = tb; t < te; ++t) {
                     const QsaState& st = slot_ss(t).qsa_states[qi];   // the row's own K/V (ss's outside a batch)
                     const int32_t* step_t = step_ + t * kStepCount;
@@ -953,12 +970,19 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         kv_append_step(st.k_pool, st.v_pool, st.page_table, step_t, kcur_ + t * NKV * HD,
                                        vcur_ + t * NKV * HD, s, cs, &st.host);
                 }
-                for (int t = tb; t < te; ++t) {
-                    const QsaState& sx = slot_ss(t).qsa_states[qi];
-                    const QsaIndexerBuffers ib{sx.idx_tail, sx.idx_dead, sx.idx_pooled, sx.idx_block_pos};
-                    native_qsa_indexer_append(idx_raw + t * ID, step_ + t * kStepCount + kStepPos, 0,
-                                              (const float*) wikn->data, EPS, ib, s, sx.max_cells,
-                                              rope_scaling(), cs);
+                if (dec_batch && !g_no_batch_kv && !batch_rec_) {
+                    const QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
+                    native_qsa_indexer_append_steps(idx_raw + tb * ID, step_ + tb * kStepCount + kStepPos, kStepCount,
+                                                    n, 0, (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                                                    rope_scaling(), cs);
+                } else {
+                    for (int t = tb; t < te; ++t) {
+                        const QsaState& sx = slot_ss(t).qsa_states[qi];
+                        const QsaIndexerBuffers ib{sx.idx_tail, sx.idx_dead, sx.idx_pooled, sx.idx_block_pos};
+                        native_qsa_indexer_append(idx_raw + t * ID, step_ + t * kStepCount + kStepPos, 0,
+                                                  (const float*) wikn->data, EPS, ib, s, sx.max_cells,
+                                                  rope_scaling(), cs);
+                    }
                 }
                 stamp(l, 9, grp);
                 native_mmvq(wq->native_type, wq->native_data, xq_, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD),
@@ -1521,10 +1545,15 @@ bool Verifier::capture_commit(std::string& err) {
                 if (!wikn) { ok = false; break; }
                 copy_from_mapped(st.idx_tail, tail_snap_ + (size_t) qsa_index * TS, TS, cs_);
                 const QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
-                for (int64_t t = 0; t < MT; ++t)
-                    native_qsa_indexer_append(idx_raw_L_ + (size_t) (qsa_index * MT + t) * ID, commit_ + 2 + t, 0,
-                                              (const float*) wikn->data, EPS, ib, s, st.max_cells,
-                                              rope_scaling(), cs_);
+                if (!g_no_batch_kv) {
+                    native_qsa_indexer_append_steps(idx_raw_L_ + (size_t) qsa_index * MT * ID, commit_ + 2, 1, (int) MT, 0,
+                                                    (const float*) wikn->data, EPS, ib, s, st.max_cells, rope_scaling(), cs_);
+                } else {
+                    for (int64_t t = 0; t < MT; ++t)
+                        native_qsa_indexer_append(idx_raw_L_ + (size_t) (qsa_index * MT + t) * ID, commit_ + 2 + t, 0,
+                                                  (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                                                  rope_scaling(), cs_);
+                }
                 ++qsa_index;
             }
         }
