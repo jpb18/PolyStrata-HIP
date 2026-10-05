@@ -22,6 +22,7 @@
 
 #ifdef __linux__
 #include <sched.h>
+#include <unistd.h>
 #endif
 
 namespace strata::glm {
@@ -155,6 +156,82 @@ int usable_cpus() {
     return (int) std::max(n, 1LL);
 }
 
+// On a machine with several NUMA nodes the file cache's pages are on the node whose CPU read them first, and the
+// CPU reads the experts at the speed of memory: from the other node that is slower (29.4 against 22.5 ms of CPU
+// experts a token on a two-socket Xeon).  `spans` are the experts in the mapped files.  When most of their pages
+// are on one node, and the process may use `threads` CPUs of it, this thread is kept on that node's CPUs, and so
+// are the threads it starts from then on.  Returns the node, or -1 when nothing was changed.
+int stay_near(const std::vector<std::pair<const uint8_t*, size_t>>& spans, const std::vector<std::string>& files,
+              int threads, double& share) {
+#ifdef __linux__
+    if (access("/sys/devices/system/node/node1", F_OK) != 0) return -1;   // one node
+    // A page shows in numa_maps once it is mapped: touch a few thousand, spread over the experts.
+    size_t total = 0;
+    for (const auto& s : spans) total += s.second;
+    const size_t step = std::max<size_t>(total / 4096, 4096);
+    volatile uint8_t seen = 0;
+    for (const auto& s : spans)
+        for (size_t at = 0; at < s.second; at += step) seen = (uint8_t) (seen + s.first[at]);
+
+    std::vector<std::string> real;
+    for (const std::string& f : files)
+        if (char* r = realpath(f.c_str(), nullptr)) {
+            real.emplace_back(r);
+            std::free(r);
+        }
+    std::vector<long long> pages;   // per node, of the model's files
+    if (FILE* f = std::fopen("/proc/self/numa_maps", "r")) {
+        char* line = nullptr;
+        size_t cap = 0;
+        while (getline(&line, &cap, f) > 0) {
+            const char* file = std::strstr(line, " file=");
+            if (!file) continue;
+            file += 6;
+            const size_t len = std::strcspn(file, " \n");
+            bool ours = false;
+            for (const std::string& r : real) ours = ours || (r.size() == len && r.compare(0, len, file, len) == 0);
+            for (const char* p = file + len; ours && (p = std::strstr(p, " N")) != nullptr; ++p) {
+                int node = 0;
+                long long n = 0;
+                if (std::sscanf(p, " N%d=%lld", &node, &n) != 2 || node < 0 || node > 1023) continue;
+                if ((size_t) node >= pages.size()) pages.resize((size_t) node + 1, 0);
+                pages[(size_t) node] += n;
+            }
+        }
+        std::free(line);
+        std::fclose(f);
+    }
+    long long all = 0;
+    for (long long n : pages) all += n;
+    if (all == 0) return -1;
+    const int best = (int) (std::max_element(pages.begin(), pages.end()) - pages.begin());
+    share = (double) pages[(size_t) best] / (double) all;
+    if (share < 0.6) return -1;   // split between the nodes: one is as good as another
+
+    cpu_set_t may, node;
+    CPU_ZERO(&node);
+    const std::string list = "/sys/devices/system/node/node" + std::to_string(best) + "/cpulist";
+    if (FILE* f = std::fopen(list.c_str(), "r")) {   // "52-103,156-207"
+        int a = 0, b = 0;
+        while (std::fscanf(f, "%d", &a) == 1) {
+            b = a;
+            int c = std::fgetc(f);
+            if (c == '-' && std::fscanf(f, "%d", &b) == 1) c = std::fgetc(f);
+            for (int i = a; i <= b && i < CPU_SETSIZE; ++i) CPU_SET(i, &node);
+            if (c != ',') break;
+        }
+        std::fclose(f);
+    }
+    if (sched_getaffinity(0, sizeof(may), &may) != 0) return -1;
+    CPU_AND(&node, &node, &may);
+    if (CPU_COUNT(&node) < threads || sched_setaffinity(0, sizeof(node), &node) != 0) return -1;
+    return best;
+#else
+    (void) spans, (void) files, (void) threads, (void) share;
+    return -1;
+#endif
+}
+
 // Lines of "layer expert count".  A missing file is not an error: the first run writes it.
 void read_profile(const std::string& path, int n_layer, int n_expert, std::vector<int64_t>& out) {
     FILE* f = std::fopen(path.c_str(), "r");
@@ -175,6 +252,7 @@ class Shards {
 public:
     explicit Shards(const std::string& path) {
         files_.push_back(std::make_unique<GgufFile>(path));
+        paths_.push_back(path);
         const MetaValue* no = files_[0]->get("split.no");
         const MetaValue* count = files_[0]->get("split.count");
         if (no && no->is_num() && no->u != 0)
@@ -192,6 +270,7 @@ public:
             for (int i = 2; i <= n; ++i) {
                 std::snprintf(tail, sizeof(tail), "-%05d-of-%05d.gguf", i, n);
                 files_.push_back(std::make_unique<GgufFile>(base + tail));
+                paths_.push_back(base + tail);
             }
         }
         for (const auto& f : files_)
@@ -201,6 +280,7 @@ public:
     }
 
     const MetaValue* get(const std::string& key) const { return files_[0]->get(key); }
+    const std::vector<std::string>& paths() const { return paths_; }
     const TensorInfo* find(const std::string& name) const {
         const auto it = where_.find(name);
         return it == where_.end() ? nullptr : it->second.t;
@@ -221,6 +301,7 @@ private:
         const GgufFile* file;
     };
     std::vector<std::unique_ptr<GgufFile>> files_;
+    std::vector<std::string> paths_;
     std::unordered_map<std::string, Where> where_;
 };
 
@@ -913,7 +994,18 @@ void Engine::load(const Options& o) {
     alloc_state();
     if (!opt_.profile.empty()) read_profile(opt_.profile, n_layer_, n_expert_, prior_);
     fill_expert_cache();
-    workers_ =std::make_unique<Workers>(opt_.threads > 0 ? opt_.threads : usable_cpus());
+    const int threads = opt_.threads > 0 ? opt_.threads : usable_cpus();
+    if (opt_.stay_near) {   // before any thread that reads the experts is started
+        std::vector<std::pair<const uint8_t*, size_t>> spans;
+        for (const Layer& L : layers_) {
+            if (!L.moe) continue;
+            spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_bytes);
+            spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
+            spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
+        }
+        node_ = stay_near(spans, gg_->paths(), threads, node_share_);
+    }
+    workers_ = std::make_unique<Workers>(threads);
     if (cached_ > 0 && opt_.expert_swaps > 0) {
         swap_ = std::make_unique<Swap[]>((size_t) opt_.expert_swaps);
         cudaStream_t up = nullptr;

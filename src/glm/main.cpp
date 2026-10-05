@@ -435,6 +435,8 @@ void usage() {
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default 1024)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, updated on exit\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
+                 "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"
+                 "                         (default: on the node whose memory holds most of the experts)\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
                  "                         into VRAM, in place of cached ones it uses less (default 16, 0 = the cache\n"
                  "                         stays as it was loaded)\n"
@@ -485,6 +487,7 @@ int main(int argc, char** argv) {
         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
+        else if (a == "--any-node") o.stay_near = false;
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
@@ -533,6 +536,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata-glm: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
+        if (engine.numa_node() >= 0)
+            std::fprintf(stderr, "strata-glm: the CPU threads stay on NUMA node %d, which has %.0f%% of the experts' "
+                                 "pages\n", engine.numa_node(), 100.0 * engine.numa_share());
         if (eos.empty())
             for (const char* key : {"tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",
                                     "tokenizer.ggml.eom_token_id"}) {

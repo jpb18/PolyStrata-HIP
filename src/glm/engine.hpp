@@ -37,6 +37,7 @@ struct Options {
                                   ///< ones that are not cached start their copy before the layer has routed; 0: never
     int expert_swaps = 16;        ///< experts on their way into the cache at a time while an answer is written, each
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
+    bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
@@ -98,6 +99,9 @@ public:
     int n_vocab() const { return n_vocab_; }
     int max_context() const { return opt_.max_context; }
     int threads() const { return workers_ ? workers_->threads() : 0; }
+    /// The NUMA node the CPU threads were kept on, and the share of the experts' pages it holds; -1: no node chosen.
+    int numa_node() const { return node_; }
+    double numa_share() const { return node_share_; }
     int64_t pos() const { return pos_; }
     int64_t meta_u(const char* key, int64_t fallback) const;
 
@@ -160,6 +164,8 @@ private:
     Options opt_;
     std::unique_ptr<Shards> gg_;
     std::unique_ptr<Workers> workers_;
+    int node_ = -1;
+    double node_share_ = 0;
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     void* blas_ = nullptr; ///< cuBLAS on st_, for the sparse attention
     void* ev_ = nullptr;   ///< marks the router's copy to the host

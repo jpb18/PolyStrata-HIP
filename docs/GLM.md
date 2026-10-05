@@ -139,7 +139,10 @@ of the file. The rest of the weights are always in VRAM.
   was loaded. The same prompt then also gets the same answer every time: an expert's result differs in its last
   digits between the CPU and the card, and with swaps an expert can run on one in one run and on the other in
   the next.
-- **Writing an answer.** An expert that is not in VRAM runs on the CPU while the card runs its share.
+- **Writing an answer.** An expert that is not in VRAM runs on the CPU while the card runs its share. The CPU reads
+  such an expert from memory, and on a PC with more than one NUMA node that memory is on the node whose CPU first
+  read the file. The engine looks where the experts' pages are and keeps its CPU threads on that node: from the
+  other node the same work took 30% longer on the machine above. `--any-node` turns that off.
 - **Reading a prompt.** The prompt goes in up to 1,024 tokens at a time. For each layer the experts outside the
   cache are copied through a buffer in VRAM and run there. A larger batch reads faster and leaves less VRAM for the
   expert cache, so answers get slower: 4,096 at a time read the 11,673-token prompt at 396 tokens/s and wrote 18.5
@@ -180,6 +183,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--vram-reserve-mib N` | 1024 | VRAM left free beside the expert cache |
 | `--expert-profile FILE` | | expert use counts, read at the start and written back at the end |
 | `--no-gpu-experts` | | keep every routed expert on the CPU |
+| `--any-node` | | on a PC with several NUMA nodes, let the CPU threads run on any of them |
 | `--expert-swaps N` | 16 | while an answer is written, experts on their way into VRAM at a time, each in place of a cached one the answer uses less; 0 = the cache stays as it was loaded |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
