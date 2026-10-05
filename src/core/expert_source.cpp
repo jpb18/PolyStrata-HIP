@@ -1585,7 +1585,7 @@ const uint8_t* FileExpertSource::mapped_blob(int64_t layer, int64_t expert) cons
 uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 #if defined(_WIN32)
     static const bool enabled = [] {
-        const char* v = std::getenv("STRATA_ARENA_RELEASE");
+        const char* v = std::getenv("STRATA_FILE_RELEASE");
         return v != nullptr && std::strcmp(v, "1") == 0;
     }();
     if (!enabled || base_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_)

@@ -1,7 +1,7 @@
 # Windows mapped expert-page release
 
 Measured October 4, 2026, against upstream `6f32ec070f23ced9f50e704d854d775da52591ab` (0.1.39).
-The same patched executable was run with `STRATA_ARENA_RELEASE=0` and `STRATA_ARENA_RELEASE=1`.
+The same patched executable was run with `STRATA_FILE_RELEASE=0` and `STRATA_FILE_RELEASE=1`.
 Releasing file-backed expert pages after GPU copies substantially increased available physical RAM on this
 machine. Prefill was slightly slower. This is a memory-pressure improvement, not a general speed claim.
 
@@ -15,7 +15,7 @@ resident complements, CUDA-pinned buffers or the temporary buffers used to assem
 
 Existing cache-upload release calls use this implementation. Two additional calls release pages after prefill's
 lent cache slots have finished refilling, in serving and one-shot generation. Other platforms are unchanged.
-`STRATA_ARENA_RELEASE=1` enables it; unset, `0`, or any other value leaves it disabled. The switch is read once
+`STRATA_FILE_RELEASE=1` enables it; unset, `0`, or any other value leaves it disabled. The switch is read once
 per engine process, so restart the engine when changing it.
 
 This builds on the existing working-set handling in [#467](https://github.com/Niko1221/Strata/issues/467) and the
@@ -101,13 +101,13 @@ These observations do not establish a decode-speed improvement, output equivalen
 
 ## Reproduction and checks
 
-`measurements.json` contains the individual successful trials, their request/output hashes, timing summaries and
-the host-window statistics. It is a scoped export of the recorded runs, not raw SSE streams or a full system trace.
-`benchmark.py`, `test_benchmark.py` and `monitor_windows.py` are the unchanged scripts used for these measurements.
+`benchmark.py` and `monitor_windows.py` are the scripts used for these measurements (the raw per-trial export and the harness
+self-tests were left out of the repository). The switch was called `STRATA_ARENA_RELEASE` in the prototype that measured this;
+it is `STRATA_FILE_RELEASE` here, because the old name already means the opposite elsewhere (`=0` keeps experts a GPU holds).
 The benchmark needs the repository's normal server/tokenizer dependencies; the Windows monitor also needs psutil.
 
 Start a dedicated server on `127.0.0.1:18080` using a configuration with the runtime settings above, the patched
-engine, and `"env": {"STRATA_ARENA_RELEASE": "0"}`. Wait until the engine is loaded and idle. In another terminal,
+engine, and `"env": {"STRATA_FILE_RELEASE": "0"}`. Wait until the engine is loaded and idle. In another terminal,
 run the monitor against the server process ID, and then the benchmark (replace the uppercase placeholders):
 
 ```powershell
@@ -128,11 +128,10 @@ The C++ tests cover canonical and variable native layouts, full-page alignment, 
 three release/read cycles with byte-for-byte checks, invalid indices, a closed source, and three GGUF roles
 across two shards. Build with `STRATA_BUILD_TESTS=ON` and `STRATA_NATIVE_EXPERTS=ON`, then run
 `ctest --test-dir BUILD_DIR -R "^(file_expert_source_test|expert_layout_test)$" --output-on-failure` in fresh
-processes with the switch unset, `0`, and `1`. The HTTP harness checks run with
-`python -m unittest discover -s bench/results/2026-10-04-windows-mapped-release -p test_benchmark.py`.
+processes with the switch unset, `0`, and `1`.
 
 The final submitted source was rebuilt with the toolchain above. Both C++ tests passed with the switch unset,
-`0`, and `1`, and all eight HTTP harness tests passed. That rebuilt engine also completed a warmup and one fresh
+`0`, and `1`. That rebuilt engine also completed a warmup and one fresh
 request each at 1023 and 4096 prompt tokens, generating 256 tokens per measured request on both GPUs with release
 enabled. This was an inference smoke test, not a replacement for the prototype's OFF/ON performance comparison.
 Its executable SHA-256 is `9f1e96c36b2ddb530422ee37734606491c0f4c3c9b720095c68d63953e89913b`.

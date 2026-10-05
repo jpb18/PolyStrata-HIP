@@ -302,7 +302,7 @@ def main():
                              "STRATA_ARENA_PIN_GIB", "STRATA_RESIDENT_PIN", "STRATA_RESIDENT_HEADROOM_GIB",
                              "STRATA_ARENA_MMAP", "STRATA_PREFILL_HELP", "STRATA_FETCH_THREADS", "STRATA_LOOKAHEAD",
                              "STRATA_DECODE_TIMING", "STRATA_SPLIT_TIMING", "STRATA_VERIFY_PROFILE",
-                             "STRATA_SPLIT_MISS_MS", "STRATA_PF_FUSED", "STRATA_ARENA_RELEASE"}
+                             "STRATA_SPLIT_MISS_MS", "STRATA_PF_FUSED", "STRATA_FILE_RELEASE"}
         config["env"] = {key: value for key, value in source.get("env", {}).items()
                          if key in compute_variables}
     revision = subprocess.run(["git", "-c", f"safe.directory={args.root.as_posix()}", "rev-parse", "HEAD"],

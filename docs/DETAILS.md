@@ -171,7 +171,7 @@ start writes `experts.bin` (when the drive has room for it), later starts map it
 are handed back to the OS. Run it with `--pcie-frac 0` (the GPUs get no mapped alias). Without the variable nothing
 changes.
 
-**Releasing mapped expert pages on Windows (opt-in):** `STRATA_ARENA_RELEASE=1` lets `FileExpertSource` trim the
+**Releasing mapped expert pages on Windows (opt-in):** `STRATA_FILE_RELEASE=1` lets `FileExpertSource` trim the
 full file-backed pages of experts after their GPU uploads complete, including the slots lent to prefill and then
 refilled. It works with `experts.bin` and the direct GGUF views; shared boundary pages and private/pinned buffers
 are left alone. Unset or `0` keeps the previous behavior. On one 32 GB Windows 11 laptop with an RTX 4080 Laptop

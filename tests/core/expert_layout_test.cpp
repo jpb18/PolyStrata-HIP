@@ -228,7 +228,7 @@ void arena() {
                              std::memcmp(buf.data(), dst.data() + L.blob_offset(l, e), n) == 0;
                     const uint64_t released = fs.release(l, e);
 #if defined(_WIN32)
-                    const char* setting = std::getenv("STRATA_ARENA_RELEASE");
+                    const char* setting = std::getenv("STRATA_FILE_RELEASE");
                     const bool enabled = setting != nullptr && std::strcmp(setting, "1") == 0;
                     check(enabled ? released > 0 : released == 0, "GGUF mapped release honors its opt-in switch");
 #else
