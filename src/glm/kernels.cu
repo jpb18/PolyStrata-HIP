@@ -372,6 +372,26 @@ __global__ void axpy_kernel(const float* __restrict__ x, float a, float* __restr
     acc[i] = add ? acc[i] + x[i] * a : x[i] * a;
 }
 
+__global__ void swiglu_clamp_rows_kernel(const float* __restrict__ gate_up, float* __restrict__ out, int n,
+                                         float limit) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* row = gate_up + size_t(blockIdx.y) * 2 * n;
+    const float g = fminf(row[i], limit);
+    const float u = fminf(fmaxf(row[n + i], -limit), limit);
+    out[size_t(blockIdx.y) * n + i] = g / (1.0f + expf(-g)) * u;
+}
+
+__global__ void moe_sum_kernel(const float* __restrict__ x, const float* __restrict__ w, float* __restrict__ acc,
+                               int n, int n_used) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const size_t first = size_t(blockIdx.y) * n_used;
+    float s = 0.0f;
+    for (int k = 0; k < n_used; ++k) s += w[first + k] * x[(first + k) * n + i];
+    acc[size_t(blockIdx.y) * n + i] += s;
+}
+
 __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__ acc, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) acc[size_t(blockIdx.y) * n + i] += b[i];
@@ -463,6 +483,14 @@ void swiglu_clamp(const float* gate, const float* up, float* out, int n, float l
 
 void axpy(const float* x, float a, float* acc, int n, bool add, void* stream) {
     axpy_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(x, a, acc, n, add);
+}
+
+void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float limit, void* stream) {
+    swiglu_clamp_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n, limit);
+}
+
+void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int rows, void* stream) {
+    moe_sum_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(x, w, acc, n, n_used);
 }
 
 void add_bias(const float* b, float* acc, int n, int rows, void* stream) {

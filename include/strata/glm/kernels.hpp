@@ -70,6 +70,11 @@ void idx_score(const float* q, const float* w, const float* cache, float* score,
 
 /// out = silu(min(gate, limit)) * clamp(up, -limit, limit).
 void swiglu_clamp(const float* gate, const float* up, float* out, int n, float limit, void* stream);
+/// swiglu_clamp for rows that each hold n gate values and then n up values; out has n values a row.
+void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float limit, void* stream);
+/// acc[t] += sum over k < n_used of w[t * n_used + k] * x[t * n_used + k], for rows of n values: a token's
+/// weighted experts added to its row.
+void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int rows, void* stream);
 /// acc = x * a, or acc += x * a when `add`.
 void axpy(const float* x, float a, float* acc, int n, bool add, void* stream);
 /// acc[row] += b for each of the rows of n values.

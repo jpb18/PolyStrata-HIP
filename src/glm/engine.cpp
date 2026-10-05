@@ -1,6 +1,7 @@
 // src/glm/engine.cpp - see the header.  The reference for the math is llama.cpp's glm5-next graph.
 #include "engine.hpp"
 
+#include "mmq.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/glm/kernels.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -28,6 +29,10 @@ constexpr uint32_t kTypeF32 = 0, kTypeQ8_0 = 8, kTypeBF16 = 30;
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
 constexpr int kMaxUsed = 32;
 constexpr int kRows = 512;          // prompt tokens one eval() takes; the scratch is about 1 MiB of VRAM a token
+// From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
+// through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
+constexpr int kStageRows = 32;
+constexpr size_t kStageBytes = size_t(512) << 20;
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 
 using Clock = std::chrono::steady_clock;
@@ -133,8 +138,11 @@ Engine::Engine() = default;
 Engine::~Engine() {
     if (st_) cudaStreamSynchronize(cs(st_));
     workers_.reset();
+    mmq_.reset();
     for (void* p : dev_allocs_) cudaFree(p);
     for (void* p : host_allocs_) cudaFreeHost(p);
+    for (void* e : ev_stage_)
+        if (e) cudaEventDestroy((cudaEvent_t) e);
     if (ev_) cudaEventDestroy((cudaEvent_t) ev_);
     if (st_) cudaStreamDestroy(cs(st_));
 }
@@ -388,6 +396,13 @@ void Engine::assign_scratch() {
     cpu_ = fbuf(e);
     rl_ = fbuf(n * n_expert_);
     logits_ = fbuf((size_t) n_vocab_);
+
+    if (mmq_) {
+        const size_t rr = n * n_used_;
+        gu_ = fbuf(rr * 2 * n_ff_exp_);
+        hx_ = fbuf(rr * n_ff_exp_);
+        dx_ = fbuf(rr * n_embd_);
+    }
 }
 
 void Engine::alloc_state() {
@@ -420,6 +435,16 @@ void Engine::alloc_state() {
     sel_stride_ = idx_top_k_ + kpool_;
     const size_t n = (size_t) rows_;
 
+    // A prompt batch runs its routed experts through MMQ when the card has a tile for each of their types.
+    bool tiles = opt_.gpu_experts && rows_ >= kStageRows && n_moe_ > 0;
+    size_t one_expert = 0;
+    for (const Layer& L : layers_) {
+        if (!L.moe) continue;
+        tiles = tiles && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_) && Mmq::fits((int) L.d_type, n_embd_);
+        one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
+    }
+    if (tiles) mmq_ = std::make_unique<Mmq>();
+
     assign_scratch();   // the first pass only counts
     scratch_ = (float*) dmalloc(scratch_at_ * sizeof(float), "scratch");
     scratch_at_ = 0;
@@ -438,6 +463,29 @@ void Engine::alloc_state() {
     h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
     h_score_ = (float*) hmalloc(n * score_stride_ * sizeof(float), "pinned memory");
     h_sel_ = (int32_t*) hmalloc(n * sel_stride_ * sizeof(int32_t), "pinned memory");
+
+    if (mmq_) {
+        const size_t rr = n * n_used_, tab = (3 * rr + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t);
+        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
+        mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
+        tab_ = (int32_t*) dmalloc(tab, "scratch");
+        h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
+        iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
+        std::vector<int32_t> ramp(rr);
+        std::iota(ramp.begin(), ramp.end(), 0);
+        ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
+
+        stage_bytes_ = std::max(kStageBytes, one_expert);
+        stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256, "the expert staging buffer");
+        for (int b = 0; b < 2; ++b) {
+            h_stage_[b] = (uint8_t*) hmalloc(stage_bytes_ + 256, "pinned memory");
+            cudaEvent_t ev = nullptr;
+            ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+            ev_stage_[b] = ev;
+        }
+        ids_.resize(rr);
+        first_.resize((size_t) n_expert_);
+    }
 
     probs_.resize((size_t) n_expert_);
     pick_.resize((size_t) n_expert_);
@@ -781,6 +829,128 @@ void Engine::moe(Layer& L, int il, int n) {
     axpy(cpu_, 1.f, fo_, n * n_embd_, true, st_);
 }
 
+// A MoE layer for a prompt batch: every token's experts on the GPU, by llama.cpp's MMQ.  A row is a token and one
+// of the experts it routes to.  The rows are sorted by expert, the experts of the VRAM cache first; the other
+// experts pass through the staging buffer, as many at a time as it holds.
+void Engine::moe_rows(Layer& L, int il, int n) {
+    const int rr = n * n_used_;
+    const size_t cap = (size_t) rows_ * n_used_;
+    lin(L.gate_inp, xn_, rl_, n, xq_);
+    ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+       "router");
+    ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+
+    lin(L.sh_gate, xn_, g_, n, xq_);
+    lin(L.sh_up, xn_, u_, n, xq_);
+    swiglu_clamp(g_, u_, h_, n * n_ff_exp_, clamp_shexp_[(size_t) il], st_);
+    lin(L.sh_down, h_, fo_, n);
+
+    const Clock::time_point t0 = Clock::now();
+    ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+    stats_.route_wait_ms += ms_since(t0);
+
+    // The layer's tables.  tok and place: a row's token, and its place among that token's experts.  bounds: each
+    // expert's first row.  rel: the same for the experts of a staging round, counted from the round's first row.
+    // w: the weight of each place.
+    int32_t* tok = h_tab_;
+    int32_t* place = tok + cap;
+    int32_t* bounds = place + cap;
+    int32_t* rel = bounds + n_expert_ + 1;
+    float* w = (float*) (rel + 2 * n_expert_ + 2);
+    const int32_t* d_tok = tab_;
+    const int32_t* d_place = d_tok + cap;
+    const int32_t* d_bounds = d_place + cap;
+    const int32_t* d_rel = d_bounds + n_expert_ + 1;
+    const float* d_w = (const float*) (d_rel + 2 * n_expert_ + 2);
+
+    count_.assign((size_t) n_expert_, 0);
+    for (int t = 0; t < n; ++t) {
+        int32_t* ids = ids_.data() + (size_t) t * n_used_;
+        route(L, h_rl_ + (size_t) t * n_expert_, ids, w + (size_t) t * n_used_);
+        for (int k = 0; k < n_used_; ++k) {
+            ++count_[(size_t) ids[k]];
+            ++use_[(size_t) il * n_expert_ + (size_t) ids[k]];
+        }
+    }
+    group_.clear();
+    for (int e = 0; e < n_expert_; ++e)
+        if (count_[(size_t) e] > 0 && L.slot[(size_t) e]) group_.push_back(e);
+    const int n_cached = (int) group_.size();
+    for (int e = 0; e < n_expert_; ++e)
+        if (count_[(size_t) e] > 0 && !L.slot[(size_t) e]) group_.push_back(e);
+    const int n_group = (int) group_.size();
+    auto rows_of = [&](int g) { return count_[(size_t) group_[(size_t) g]]; };
+
+    int at = 0;
+    for (int g = 0; g < n_group; ++g) {
+        bounds[g] = at;
+        first_[(size_t) group_[(size_t) g]] = at;
+        at += rows_of(g);
+    }
+    bounds[n_group] = at;
+    for (int i = 0; i < rr; ++i) {
+        const int row = first_[(size_t) ids_[(size_t) i]]++;
+        tok[row] = i / n_used_;
+        place[row] = i;
+    }
+    const size_t gu2 = 2 * L.gu_bytes;
+    const int per_round = (int) (stage_bytes_ / (gu2 + L.d_bytes));
+    for (int g0 = n_cached, r = 0; g0 < n_group; g0 += per_round, ++r)
+        for (int g = g0; g <= std::min(g0 + per_round, n_group); ++g) rel[g - n_cached + r] = bounds[g] - bounds[g0];
+    ck(cudaMemcpyAsync(tab_, h_tab_, (3 * cap + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t),
+                       cudaMemcpyHostToDevice, cs(st_)),
+       "expert rows");
+
+    const int rc = bounds[n_cached];   // the rows of the cached experts
+    stats_.gpu_experts += rc;
+    stats_.staged_experts += rr - rc;
+
+    const float limit = clamp_exp_[(size_t) il];
+    const int gt = (int) L.gu_type, dt = (int) L.d_type;
+    const int64_t ff = n_ff_exp_, ff2 = 2 * ff;
+    Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rr, st_);
+
+    for (int g = 0; g < n_cached; ++g)
+        mmq_->mul(L.slot[(size_t) group_[(size_t) g]], gt, ff2, n_embd_, gu2, 1, mq_, d_bounds + g, iota_, rr,
+                  rows_of(g), gu_, ff2, st_);
+    if (rc > 0) {
+        swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_);
+        Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
+    }
+    for (int g = 0; g < n_cached; ++g)
+        mmq_->mul(L.slot[(size_t) group_[(size_t) g]] + gu2, dt, n_embd_, ff, L.d_bytes, 1, mq2_, d_bounds + g,
+                  d_place, rc, rows_of(g), dx_, n_embd_, st_);
+
+    for (int g0 = n_cached, r = 0; g0 < n_group; g0 += per_round, ++r) {
+        const int m = std::min(per_round, n_group - g0);
+        const size_t down_at = pad((size_t) m * gu2);
+        // The two pinned buffers take turns, so the workers fill one while the other's upload and products run.
+        stage_turn_ ^= 1;
+        uint8_t* h = h_stage_[stage_turn_];
+        const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
+        ck(cudaEventSynchronize(left), "expert staging");
+        workers_->run(3 * m, [&](int i) {
+            const size_t j = (size_t) i / 3, e = (size_t) group_[(size_t) g0 + j];
+            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_bytes, L.gu_bytes);
+            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_bytes, L.gu_bytes);
+            else std::memcpy(h + down_at + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+        });
+        ck(cudaMemcpyAsync(stage_, h, down_at + (size_t) m * L.d_bytes, cudaMemcpyHostToDevice, cs(st_)),
+           "expert staging");
+        ck(cudaEventRecord(left, cs(st_)), "expert staging");
+
+        const int r0 = bounds[g0], rows = bounds[g0 + m] - r0;
+        int most = 0;
+        for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
+        mmq_->mul(stage_, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rr, most, gu_, ff2, st_);
+        swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
+        Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
+        mmq_->mul(stage_ + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r), d_place + r0,
+                  rows, most, dx_, n_embd_, st_);
+    }
+    moe_sum(dx_, d_w, fo_, n_embd_, n_used_, n, st_);
+}
+
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
     for (int t = 0; t < n; ++t)
@@ -815,8 +985,9 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
         rms_norm(cur_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
         kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
         dbg("ffn_in", il, xn_, n_embd_);
-        if (L.moe) moe(L, il, n);
-        else dense_ffn(L, il, n);
+        if (!L.moe) dense_ffn(L, il, n);
+        else if (mmq_ && n >= kStageRows) moe_rows(L, il, n);
+        else moe(L, il, n);
         dbg("ffn", il, fo_, n_embd_);
         hc_post(fo_, hcw_, r_, n_embd_, n, st_);
     }

@@ -61,10 +61,13 @@ struct Layer {
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
 };
 
+/// A routed expert is run from the VRAM cache, on the CPU, or (in a prompt batch) from the staging buffer.
 struct Stats {
-    int64_t tokens = 0, gpu_experts = 0, cpu_experts = 0;
+    int64_t tokens = 0, gpu_experts = 0, cpu_experts = 0, staged_experts = 0;
     double cpu_ms = 0, route_wait_ms = 0;
 };
+
+class Mmq;
 
 class Engine {
 public:
@@ -117,6 +120,7 @@ private:
     void dsa_select(Layer& L, int first, int n);
     void dense_ffn(Layer& L, int il, int n);
     void moe(Layer& L, int il, int n);
+    void moe_rows(Layer& L, int il, int n);
     void route(const Layer& L, const float* logits, int* ids, float* w);
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
@@ -176,6 +180,19 @@ private:
     float *h_r_ = nullptr, *h_rl_ = nullptr, *h_x_ = nullptr, *h_cpu_ = nullptr, *h_logits_ = nullptr,
           *h_score_ = nullptr;
     int32_t* h_sel_ = nullptr;
+
+    // A prompt batch's MoE (moe_rows).  A row is a token and one of the experts it routes to.
+    std::unique_ptr<Mmq> mmq_;   ///< null when the card has no MMQ tile for the experts' types
+    float *gu_ = nullptr, *hx_ = nullptr, *dx_ = nullptr;   ///< the rows' gate|up, hidden and down values
+    void *mq_ = nullptr, *mq2_ = nullptr;                   ///< the rows quantized for the two products
+    int32_t *tab_ = nullptr, *h_tab_ = nullptr;   ///< a layer's row tables, in VRAM and pinned
+    int32_t* iota_ = nullptr;                     ///< 0, 1, 2, ...
+    uint8_t* stage_ = nullptr;                    ///< experts that are not cached, on their way through VRAM
+    uint8_t* h_stage_[2] = {};                    ///< pinned; filled in turn
+    void* ev_stage_[2] = {};                      ///< marks the upload out of each
+    size_t stage_bytes_ = 0;
+    int stage_turn_ = 0;
+    std::vector<int32_t> ids_, count_, first_, group_;
 
     int64_t pos_ = 0, ck_pos_ = -1;
     std::vector<float> probs_, pick_;

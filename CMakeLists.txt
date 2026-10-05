@@ -1238,10 +1238,25 @@ endif()
 # A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
 # CPU experts' dot products from ggml-cpu.
 if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
+  # The prompt path's quantized products: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the K-quants the routed
+  # experts come in, from the checkout strata_mmq is compiled from and with the same host symbols.  A library of
+  # its own, so that what `strata` multiplies with MMQ stays as it is.
+  add_library(strata_glm_mmq STATIC src/glm/mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu
+              ${_strata_mmq}/template-instances/mmq-instance-q2_k.cu
+              ${_strata_mmq}/template-instances/mmq-instance-q3_k.cu
+              ${_strata_mmq}/template-instances/mmq-instance-q4_k.cu)
+  target_include_directories(strata_glm_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+                                                    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_options(strata_glm_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+  if(MSVC)
+    target_compile_options(strata_glm_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+  endif()
+  target_link_libraries(strata_glm_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
+
   add_executable(strata-glm src/glm/main.cpp src/glm/engine.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu)
   target_include_directories(strata-glm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-  target_link_libraries(strata-glm PRIVATE strata_kernels ggml-cpu ggml-base ${_strata_gpu_runtime_target}
-                                           Threads::Threads)
+  target_link_libraries(strata-glm PRIVATE strata_glm_mmq strata_kernels ggml-cpu ggml-base
+                                           ${_strata_gpu_runtime_target} Threads::Threads)
   # needs the model file, so it is run by hand: glm_expert_parity MODEL.gguf
   add_executable(glm_expert_parity src/glm/expert_parity.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu)
   target_include_directories(glm_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
