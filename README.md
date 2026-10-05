@@ -1,22 +1,26 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">PolyStrata</h1>
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
-<p align="center"><b>Run a 125-billion-parameter AI model on your own gaming PC</b><br>
-NVIDIA or AMD graphics card (12 GB or more) · Windows or Linux · free and open source</p>
+<p align="center"><b>Run large AI models on your own PC</b><br>
+Qwen3.8-Flash-Next and GLM 5.3 Flash · free and open source</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
 <sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with Strata (IQ3_S, 128K context) ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">full video (49 s)</a></sub></p>
 
-Strata runs **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** on a normal PC. This is a
-large, smart AI model that usually needs a server. It chats, writes code, reads pictures and works with your apps
-and coding agents. Nothing leaves your PC.
+PolyStrata runs large AI models on a normal PC, models that usually need a server. It is built on
+[Strata](https://github.com/Niko1221/Strata) by Niko1221 and runs two models so far:
 
-> **This fork** adds a second engine that runs **GLM 5.3 Flash** beside Qwen3.8-Flash-Next. On an RTX 5090 (32 GB)
-> it writes 27 tokens per second and reads prompts at 312 to 373. It is early, Linux and NVIDIA only, and installed
-> with `./setup.sh --family glm`: [docs/GLM.md](docs/GLM.md). The rest of this page is upstream
-> [Strata](https://github.com/Niko1221/Strata)'s.
+- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**, the way Strata runs it: an NVIDIA or
+  AMD graphics card with 12 GB or more, Windows or Linux. It chats, writes code, reads pictures and works with your
+  apps and coding agents. This page from here on is about it, and it is Strata's work: the text still says Strata.
+- **GLM 5.3 Flash**, with a second engine written for it: Linux and one NVIDIA card. On an RTX 5090 (32 GB) it
+  writes 27 tokens per second and reads prompts at 312 to 373, and it keeps several conversations in RAM so that an
+  agent and its subagents do not make it read their prompts again. It is early:
+  [docs/GLM.md](docs/GLM.md).
+
+Nothing leaves your PC.
 
 ## How fast is it?
 
@@ -82,7 +86,7 @@ The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 Do you use an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...)? Paste this into it:
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - follow docs/AI_SETUP.md in that repository.
 ```
 
 It checks your graphics card, RAM and disk and picks the model that fits. Then it installs and starts it and tells
@@ -91,7 +95,7 @@ you how to connect your apps. AI tools can also install, start and stop Strata t
 
 ### Or do it yourself
 
-[Download Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip) and unzip it (or `git clone` it).
+[Download PolyStrata](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) and unzip it (or `git clone` it).
 **Windows:** double-click **`START-HERE.bat`**. **Linux:** run **`./setup.sh`** in the Strata folder.
 
 The steps are the same for NVIDIA and AMD. The installer finds your card and sets up the right engine for it. It
@@ -177,7 +181,7 @@ More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [t
 - **It says port 8080 is already in use.** Strata is already running. Look for its window.
 
 More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder. Found a
+[issue](https://github.com/VecSzn/PolyStrata/issues) and attach `strata-<model>.log` from the Strata folder. Found a
 security problem? Report it privately: [SECURITY.md](SECURITY.md).
 
 ## How does it work?
@@ -205,7 +209,9 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Every part
 
 The model is [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team. It was
 compressed by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5)
-and Unsloth. Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
+and Unsloth. GLM 5.3 Flash's file is from
+[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF). PolyStrata is built on
+[Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors. Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). Strata is open source under the [MIT License](LICENSE). A few
 parts and every model have their own licenses ([which ones](docs/HOW_IT_WORKS.md#license)).
 

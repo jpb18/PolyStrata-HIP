@@ -77,7 +77,7 @@ A lista completa: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 Você usa um assistente de programação com IA (Claude Code, Cursor, Codex, GitHub Copilot, ...)? Cole isto nele:
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - follow docs/AI_SETUP.md in that repository.
 ```
 
 Ele verifica sua placa de vídeo, RAM e disco e escolhe o modelo que cabe. Depois instala, inicia e explica como
@@ -86,7 +86,7 @@ conectar seus apps. Ferramentas de IA também podem instalar, iniciar e parar o 
 
 ### Ou faça você mesmo
 
-[Baixe o Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip) e descompacte (ou use `git clone`).
+[Baixe o PolyStrata](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) e descompacte (ou use `git clone`).
 **Windows:** clique duas vezes em **`START-HERE.bat`**. **Linux:** rode **`./setup.sh`** na pasta do Strata.
 
 Os passos são os mesmos para NVIDIA e AMD. O instalador encontra sua placa e configura o engine certo para ela.
@@ -177,7 +177,7 @@ Mais: [onde suas conversas ficam salvas](docs/INSTALL.md#where-things-are-stored
 - **Diz que a porta 8080 já está em uso.** O Strata já está rodando. Procure a janela dele.
 
 Mais problemas e como resolver: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Ainda sem solução? Abra uma
-[issue](https://github.com/Niko1221/Strata/issues) e anexe o `strata-<model>.log` da pasta do Strata. Encontrou um
+[issue](https://github.com/VecSzn/PolyStrata/issues) e anexe o `strata-<model>.log` da pasta do Strata. Encontrou um
 problema de segurança? Informe em particular: [SECURITY.md](SECURITY.md).
 
 ## Como funciona?

@@ -75,4 +75,4 @@ See [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration): the mapped expert 
 ## Still stuck?
 
 Look in the [full troubleshooting table](DETAILS.md#troubleshooting), or open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder.
+[issue](https://github.com/VecSzn/PolyStrata/issues) and attach `strata-<model>.log` from the Strata folder.

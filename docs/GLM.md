@@ -1,6 +1,6 @@
 # GLM 5.3 Flash (`strata-glm`)
 
-This fork adds a second engine, `strata-glm`, that runs GLM 5.3 Flash. It sits beside `strata`, which still runs
+PolyStrata adds a second engine, `strata-glm`, that runs GLM 5.3 Flash. It sits beside `strata`, which still runs
 Qwen3.8-Flash-Next as before. The server, the web app and the API are the same for both: a run config names the
 engine it starts.
 

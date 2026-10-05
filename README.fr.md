@@ -77,7 +77,7 @@ La liste complète : [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 Vous utilisez un assistant de code IA (Claude Code, Cursor, Codex, GitHub Copilot, ...) ? Collez-lui ceci :
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - follow docs/AI_SETUP.md in that repository.
 ```
 
 Il vérifie votre carte graphique, votre RAM et votre disque, et choisit le modèle qui convient. Ensuite il l'installe,
@@ -86,7 +86,7 @@ arrêter Strata grâce à son [serveur MCP](docs/MCP_SERVER.md).
 
 ### Ou faites-le vous-même
 
-[Téléchargez Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip) et décompressez-le (ou faites un `git clone`).
+[Téléchargez PolyStrata](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) et décompressez-le (ou faites un `git clone`).
 **Windows :** double-cliquez sur **`START-HERE.bat`**. **Linux :** lancez **`./setup.sh`** dans le dossier Strata.
 
 Les étapes sont les mêmes pour NVIDIA et AMD. L'installateur détecte votre carte et installe le bon moteur pour elle.
@@ -179,7 +179,7 @@ Plus d'infos : [où sont stockées vos discussions](docs/INSTALL.md#where-things
 - **Il dit que le port 8080 est déjà utilisé.** Strata tourne déjà. Cherchez sa fenêtre.
 
 Autres problèmes et leurs solutions : [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Toujours bloqué ? Ouvrez une
-[issue](https://github.com/Niko1221/Strata/issues) et joignez `strata-<model>.log` depuis le dossier Strata. Vous
+[issue](https://github.com/VecSzn/PolyStrata/issues) et joignez `strata-<model>.log` depuis le dossier Strata. Vous
 avez trouvé un problème de sécurité ? Signalez-le en privé : [SECURITY.md](SECURITY.md).
 
 ## Comment ça marche ?

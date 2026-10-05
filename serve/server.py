@@ -546,12 +546,12 @@ class StrataEngine:
         for line in reversed(tail.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+                        "line: " + line.strip() + " - please report it at github.com/VecSzn/PolyStrata/issues.")
         rc = self.proc.poll()
         last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip().startswith(("strata", "ERR"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
-                    "report it at github.com/Niko1221/Strata/issues with the log.")
+                    "report it at github.com/VecSzn/PolyStrata/issues with the log.")
         return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
                 "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
                 "smaller model (Q2_0 / IQ2_XS).")

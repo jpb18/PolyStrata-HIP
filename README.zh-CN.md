@@ -1,20 +1,25 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">PolyStrata</h1>
 
 [English](README.md) · **简体中文** · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
-<p align="center"><b>在你自己的游戏电脑上运行 1250 亿参数的 AI 模型</b><br>
-NVIDIA 或 AMD 显卡（12 GB 及以上）· Windows 或 Linux · 免费开源</p>
+<p align="center"><b>在你自己的电脑上运行大型 AI 模型</b><br>
+Qwen3.8-Flash-Next 和 GLM 5.3 Flash · 免费开源</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Strata 的模型写出的体素宝塔花园，在浏览器中运行"></a><br>
 <sub>体素宝塔花园，一次提示生成，在 RTX 5070 上用 Strata 运行（IQ3_S，128K 上下文）·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">完整视频（49 秒）</a></sub></p>
 
-Strata 能在普通电脑上运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**。这是一个又大又聪明的
-AI 模型，通常要用服务器才能跑。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。所有数据都留在你的电脑上。
+PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它基于 Niko1221 的
+[Strata](https://github.com/Niko1221/Strata)，目前能跑两个模型：
 
-> **这个 fork** 多了一个引擎，可以在 Qwen3.8-Flash-Next 之外跑 **GLM 5.3 Flash**。在 RTX 5090（32 GB）上写回答每秒
-> 27 个 token，读 prompt 每秒 312 到 373 个。目前还早，只支持 Linux 和 NVIDIA，用
-> `./setup.sh --family glm` 安装，见 [docs/GLM.md](docs/GLM.md)。本页其余内容来自上游 [Strata](https://github.com/Niko1221/Strata)。
+- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**，跑法和 Strata 一样：12 GB 及以上的 NVIDIA 或
+  AMD 显卡，Windows 或 Linux。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。本页下面讲的都是它，这部分是
+  Strata 的成果，文字里仍然写作 Strata。
+- **GLM 5.3 Flash**，用专门为它写的第二个引擎：Linux 加一张 NVIDIA 显卡。在 RTX 5090（32 GB）上写回答每秒 27 个
+  token，读 prompt 每秒 312 到 373 个；它能把多个对话留在内存里，智能体和子代理轮流请求时不用重读 prompt。目前还早，见
+  [docs/GLM.md](docs/GLM.md)。
+
+所有数据都留在你的电脑上。
 
 ## 速度有多快？
 
@@ -80,7 +85,7 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 你在用 AI 编程助手吗（Claude Code、Cursor、Codex、GitHub Copilot 等）？把下面这段粘贴给它：
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - follow docs/AI_SETUP.md in that repository.
 ```
 
 它会检查你的显卡、内存和硬盘，选出合适的模型。然后安装并启动它，再告诉你怎么连接你的应用。AI 工具也可以通过
@@ -88,7 +93,7 @@ Strata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Strata
 
 ### 或者自己动手
 
-[下载 Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip) 并解压（或者用 `git clone`）。
+[下载 PolyStrata](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) 并解压（或者用 `git clone`）。
 **Windows：** 双击 **`START-HERE.bat`**。**Linux：** 在 Strata 文件夹里运行 **`./setup.sh`**。
 
 NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并装好对应的引擎。它会问你几个问题：
@@ -166,7 +171,7 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 - **提示 8080 端口已被占用。** Strata 已经在运行了。找一下它的窗口。
 
 更多问题和解决办法：[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。还是解决不了？提交一个
-[issue](https://github.com/Niko1221/Strata/issues)，并附上 Strata 文件夹里的 `strata-<model>.log`。发现了安全问题？
+[issue](https://github.com/VecSzn/PolyStrata/issues)，并附上 Strata 文件夹里的 `strata-<model>.log`。发现了安全问题？
 请私下报告：[SECURITY.md](SECURITY.md)。
 
 ## 它是怎么工作的？

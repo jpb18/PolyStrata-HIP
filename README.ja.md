@@ -77,7 +77,7 @@ NVIDIA：Q2_0 はエンジン 0.1.36、ほかの行は 0.1.26 で測定（回答
 AI コーディングアシスタント（Claude Code、Cursor、Codex、GitHub Copilot など）を使っていますか？ これを貼り付けてください：
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - follow docs/AI_SETUP.md in that repository.
 ```
 
 AI がグラフィックカード、RAM、ディスクを調べて、合うモデルを選びます。それからインストールして起動し、
@@ -86,7 +86,7 @@ Strata のインストール、起動、停止もできます。
 
 ### 自分でやる
 
-[Strata をダウンロード](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip)して展開します（または `git clone` します）。
+[Strata をダウンロード](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip)して展開します（または `git clone` します）。
 **Windows：** **`START-HERE.bat`** をダブルクリック。**Linux：** Strata フォルダーで **`./setup.sh`** を実行します。
 
 手順は NVIDIA でも AMD でも同じです。インストーラーがカードを見つけて、それに合うエンジンを用意します。
@@ -171,7 +171,7 @@ Strata のインストール、起動、停止もできます。
 - **ポート 8080 がすでに使われていると表示される。** Strata はもう動いています。そのウィンドウを探してください。
 
 ほかの問題と解決方法：[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。それでも解決しない場合は
-[issue](https://github.com/Niko1221/Strata/issues) を作成し、Strata フォルダーにある `strata-<model>.log` を添付してください。
+[issue](https://github.com/VecSzn/PolyStrata/issues) を作成し、Strata フォルダーにある `strata-<model>.log` を添付してください。
 セキュリティの問題を見つけたら、非公開で報告してください：[SECURITY.md](SECURITY.md)。
 
 ## しくみ
