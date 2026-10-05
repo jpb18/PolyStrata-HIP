@@ -92,3 +92,12 @@ class EmptyTurnsSwitch(unittest.TestCase):
         self.assertEqual(template.render(msgs), clean)
         with mock.patch.dict(os.environ, {"STRATA_KEEP_EMPTY_TURNS": "1"}):
             self.assertNotEqual(template.render(msgs), clean)
+
+
+class ForcedCallOpening(unittest.TestCase):
+    def test_required_with_one_tool_names_it(self):
+        from serve.frontend import forced_call
+        one, two = [{"name": "a"}], [{"name": "a"}, {"name": "b"}]
+        self.assertTrue(forced_call("required", one).endswith("<function=a>\n"))
+        self.assertTrue(forced_call("required", two).endswith("<function="))
+        self.assertIsNone(forced_call("auto", one))

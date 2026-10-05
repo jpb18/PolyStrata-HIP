@@ -496,6 +496,8 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
     names = {t.get("name") for t in tools or [] if isinstance(t, dict)}
     if kind in ("auto", "none"):
         return None
+    if kind == "required" and len(names) == 1:     # one tool to call: name it, the model cannot invent another
+        kind, name = "named", next(iter(names))
     if kind == "required" and names:
         return CALL_START + "\n<function="
     if kind == "named" and name in names:
