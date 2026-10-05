@@ -11,6 +11,9 @@ this for you with [AI_SETUP.md](AI_SETUP.md).
 
 ## What you need
 
+This is for Qwen3.8-Flash-Next. GLM 5.3 Flash needs Linux, one NVIDIA card and far more RAM:
+[GLM.md](GLM.md#what-you-need).
+
 | | |
 | --- | --- |
 | **GPU** | **NVIDIA** RTX 20, 30, 40 or 50 series, **12 GB VRAM or more** (8 GB runs, slowly). Measured on an RTX 5070 and an RTX 3090; RTX 20 (Turing, since 0.1.27) was tested by a contributor on an RTX 2070. **AMD** Radeon RX 7900 XT / XTX, RX 9070 / 9070 XT and Radeon AI PRO R9700 (validated), RX 7800 XT / 7700 XT and RX 9060 XT (validated by their owners), RX 6800 / 6900 series (community-reported), with 12 GB of VRAM or more. See [AMD cards](#amd-cards). |

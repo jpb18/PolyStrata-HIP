@@ -6,26 +6,31 @@
 Qwen3.8-Flash-Next 和 GLM 5.3 Flash · 免费开源</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="模型写出的体素宝塔花园，在浏览器中运行"></a><br>
-<sub>体素宝塔花园，一次提示生成，在 RTX 5070 上用 <a href="https://github.com/Niko1221/Strata">Strata</a> 运行（IQ3_S，128K 上下文）·
+<sub>体素宝塔花园，一次提示生成，在 RTX 5070 上用 <a href="https://github.com/Niko1221/Strata">Strata</a> 运行（Qwen3.8-Flash-Next IQ3_S，128K 上下文）·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">完整视频（49 秒）</a></sub></p>
 
-PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它基于 Niko1221 的
-[Strata](https://github.com/Niko1221/Strata)，目前能跑两个模型：
-
-- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**，用的是 Strata 项目的引擎，没有改动：12 GB
-  及以上的 NVIDIA 或 AMD 显卡，Windows 或 Linux。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。本页大部分内容讲的是它。
-- **GLM 5.3 Flash**，用专门为它写的第二个引擎：Linux 加一张 NVIDIA 显卡。在 RTX 5090（32 GB）上写回答每秒 27 个
-  token，读提示每秒 312 到 373 个；它能把多个对话留在内存里，智能体和子代理轮流请求时不用重读提示。目前还早，见
-  [docs/GLM.md](docs/GLM.md)。
-
+PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它们能聊天、写代码，还能配合你的应用和编程智能体一起工作。
 所有数据都留在你的电脑上。
+
+它能跑两个模型，各有各的引擎：
+
+- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**：12 GB 及以上的 NVIDIA 或 AMD 显卡，Windows 或
+  Linux。它还能看图片。引擎是 Strata 项目的，没有改动。
+- **[GLM 5.3 Flash](docs/GLM.md)**：Linux 加一张 NVIDIA 显卡。引擎是为 PolyStrata 写的。目前是实验性的：只在一台电脑上跑过，
+  显卡是 32 GB。
+
+PolyStrata 基于 Niko1221 的 [Strata](https://github.com/Niko1221/Strata)。
 
 ## 速度有多快？
 
-下面是 Strata 项目在两台普通游戏电脑上测得的 Qwen3.8-Flash-Next 速度。一个 token 大约相当于 ¾ 个英文单词。
+一个 token 大约相当于 ¾ 个英文单词。
 
 - **写回答：** 短对话中回复出现的速度。每秒 60 个 token 已经比你的阅读速度还快。
-- **读提示：** 读入你发送内容的速度（这里是一份 32K token 的文档、代码或聊天记录）。
+- **读提示：** 读入你发送内容的速度（文档、代码或聊天记录）。
+
+### Qwen3.8-Flash-Next
+
+由 Strata 项目在两台普通的游戏电脑上测得，提示长 32K token。
 
 <table>
 <tr><th>NVIDIA：RTX 5070（12 GB）、Ryzen 5 7600、64 GB 内存</th><th>AMD：RX 9070 XT（16 GB）、Ryzen 9 3900X、47 GB 内存</th></tr>
@@ -52,28 +57,40 @@ PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI
 
 NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答，32K 提示）。完整表格见
 [DETAILS.md](docs/DETAILS.md#speed-measured)。显存越大的显卡越快：RTX 3090（24 GB）写回答应该能达到每秒约
-100-140 个 token。长对话和其他显卡的数据：[各模型的速度](docs/MODELS.md#how-fast-is-each-size)、
+100-140 个 token。长对话和其他显卡的数据：[各规格的速度](docs/MODELS.md#how-fast-is-each-size)、
 [社区测试结果](docs/COMMUNITY_BENCHMARKS.md)。
 
-GLM 5.3 Flash 是 PolyStrata 自己测的：RTX 5090（32 GB）、Xeon 8470Q、120 GB 内存，写回答每秒 27 个 token，读 3K 到 29K
-token 的提示每秒 312 到 373 个：[docs/GLM.md](docs/GLM.md#what-it-was-measured-on)。
+### GLM 5.3 Flash
 
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="请我喝杯咖啡" height="50"></a><br>
-<sub>PolyStrata 是免费的。这杯咖啡请的是 <a href="https://github.com/Niko1221/Strata">Strata</a> 的作者，PolyStrata 就是在它的基础上做的。</sub></p>
+由 PolyStrata 在一台工作站上测得，上下文 32K。
+
+<table>
+<tr><th>NVIDIA：RTX 5090（32 GB）、Xeon Platinum 8470Q、120 GB 内存</th></tr>
+<tr><td>
+
+| 规格 | 写回答 | 读 3K 提示 | 读 12K 提示 | 读 29K 提示 |
+| --- | ---: | ---: | ---: | ---: |
+| **3.0BIT** | 27 tokens/s | 373 tokens/s | 334 tokens/s | 312 tokens/s |
+
+</td></tr>
+</table>
+
+同一台电脑上用 llama.cpp 跑同一个文件，写回答每秒 26 个 token，读提示每秒约 265 个。GLM 5.3 Flash 比
+Qwen3.8-Flash-Next 大得多，这张卡的 32 GB 显存只放得下它约五分之一的专家，所以写得慢一些。
+测了什么、怎么测的：[docs/GLM.md](docs/GLM.md#what-it-was-measured-on)。
 
 ## 你需要什么
+
+### Qwen3.8-Flash-Next
 
 | | |
 | --- | --- |
 | **显卡** | **NVIDIA** GeForce RTX 20、30、40 或 50 系列，或 **AMD** Radeon RX 7900 XT / XTX、RX 7800 XT / 7700 XT、RX 9060 XT、RX 9070 / 9070 XT、Radeon AI PRO R9700 或 RX 6800 / 6900 系列。需要 **12 GB 或以上显存**。 |
-| **内存** | 32 GB 或以上。内存大小决定能装下[哪个模型](#该选哪个模型)。64 GB 可以运行所有规格。 |
+| **内存** | 32 GB 或以上。内存大小决定能装下[哪个规格](#该选哪个模型)。64 GB 可以运行所有规格。 |
 | **硬盘** | 约 80 GB 可用空间。尽量用 SSD：第一次启动会快很多。 |
 | **系统** | Windows 10 / 11 或 Linux，以及 NVIDIA 或 AMD 的最新显卡驱动。 |
 
 其他的都由安装程序搞定。两到三张显卡可以分担同一个模型（[多 GPU](docs/MULTI_GPU.md)）。
-
-GLM 5.3 Flash 要求更高：Linux、一张 32 GB 的 NVIDIA 显卡、96 GB 或以上内存、114 GB 硬盘。目前只在一台机器上跑过
-（[docs/GLM.md](docs/GLM.md#what-you-need)）。
 
 实验性支持，由社区成员在自己的机器上编写和测试：
 
@@ -82,6 +99,20 @@ GLM 5.3 Flash 要求更高：Linux、一张 32 GB 的 NVIDIA 显卡、96 GB 或�
 - **不支持 AVX2 的老处理器**：能用，但很慢。[较老的 CPU](docs/INSTALL.md#older-cpus-experimental)。
 
 完整列表：[docs/INSTALL.md](docs/INSTALL.md#what-you-need)。
+
+### GLM 5.3 Flash
+
+| | |
+| --- | --- |
+| **显卡** | 一张 **NVIDIA** GeForce RTX 20 系列或更新的显卡。目前只在 **32 GB 显存**上跑过。放专家之前就要占掉约 12 GB，所以 12 GB 的卡启动不了。 |
+| **内存** | 配 32 GB 显卡需要 **96 GB 或以上**。显卡越小，需要的内存越多（[具体多少](#该选哪个模型)）。实际跑过的是 120 GB。 |
+| **硬盘** | 模型文件 114 GB，要放在 SSD 上。 |
+| **系统** | Linux，以及 NVIDIA 的最新显卡驱动。 |
+
+其他的都由安装程序搞定。它会在你的电脑上编译引擎，缺 g++ 和 CUDA 工具包时会提出帮你装。
+暂时不支持：Windows、AMD 显卡、多张显卡、图片。
+
+完整列表：[docs/GLM.md](docs/GLM.md#what-you-need)。
 
 ## 安装
 
@@ -101,14 +132,17 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 [下载 PolyStrata](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) 并解压（或者用 `git clone`）。
 **Windows：** 双击 **`START-HERE.bat`**。**Linux：** 在 PolyStrata 文件夹里运行 **`./setup.sh`**。
 
-NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并装好对应的引擎。它会问你几个问题：
+安装程序会识别你的显卡，并装好对应的引擎。它会问你几个问题：
 
 - 用哪个模型、哪个规格，
 - 上下文多大（模型能记住多少文字），
-- 是否要识别图片。
+- 是否要识别图片（Qwen3.8-Flash-Next）。
 
-每次直接按回车就是推荐选项。之后它会下载模型（约 70 GB）并启动。如果下载中断了，再运行一次即可：它会从中断的地方继续。
-浏览器会打开 PolyStrata 应用，地址是 `http://127.0.0.1:8080`。
+每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 114 GB）并启动。
+如果下载中断了，再运行一次即可：它会从中断的地方继续。浏览器会打开 PolyStrata 应用，地址是 `http://127.0.0.1:8080`。
+
+GLM 5.3 Flash 就在安装程序的模型列表里。想直接装它，运行 `./setup.sh --family glm`
+（[它会问什么、写什么](docs/GLM.md#install)）。
 
 > **模型启动时，你的电脑可能会变慢或卡住 1-3 分钟**（第一次最久）。
 > PolyStrata 会把 35-55 GB 加载到内存，并为显卡锁定其中一部分。这是正常的。请耐心等待，不要关闭窗口。
@@ -119,6 +153,8 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 [docs/INSTALL.md](docs/INSTALL.md)。
 
 ## 该选哪个模型
+
+### Qwen3.8-Flash-Next
 
 安装程序会根据你的内存推荐一个。同一个模型有几种规格，压缩程度不同。规格越小越快，越大越聪明一些。
 
@@ -138,16 +174,32 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 - **[Unsloth UD-Q4_K_XL](docs/MODELS.md#unsloth-ud-q4_k_xl-experimental)**（实验性）：最接近完整模型。但 PolyStrata
   回答时要从 SSD 读取其中大部分内容，所以在 64 GB 的电脑上每秒只能写 7-8.5 个 token。
 - **[OrcaRouter 的 Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)：** 需要手动设置，不在安装程序的菜单里。
-- **[GLM 5.3 Flash](docs/GLM.md)**（实验性）：另一个模型，有自己的引擎。需要 Linux 和一张 32 GB 的 NVIDIA 显卡，下载 114 GB，
-  暂时不能看图片。在安装程序的菜单里选它，或者运行 `./setup.sh --family glm`。
 
 规格、下载以及各配置能装下什么：[docs/MODELS.md](docs/MODELS.md)。以后想再添加模型，运行
 `SETUP.bat`（Linux：`./setup.sh --setup`）。
 
+### GLM 5.3 Flash
+
+目前只有一个规格 **3.0BIT**：专家压到 3-bit，下载 114 GB。需要多少内存取决于你的显卡，因为显卡放不下的专家都得留在内存里。
+
+| 你的显卡 | 需要的内存 | |
+| --- | --- | --- |
+| **32 GB** | **96 GB** | 实测用的就是这种配置，内存 120 GB |
+| **24 GB** | 约 104 GB | 还没跑过 |
+| **16 GB** | 约 113 GB | 还没跑过；显卡只放得下 4% 的专家，会更慢 |
+| **12 GB 或以下** | | 启动不了 |
+
+内存数字是安装程序根据唯一跑过的那台电脑估算的。内存不够也能启动，但回答时要从 SSD 读专家，会慢很多。
+安装程序会先说明并征求你的同意。
+
+GLM 5.3 Flash 的其他量化版本暂时不支持：[还缺什么](docs/GLM.md#what-is-missing)。
+
 ## 使用方法
 
-<p align="center"><img src="docs/media/runpagoda.png" width="900" alt="PolyStrata 应用的 Monitor 标签页，旁边是一个编程智能体"><br>
-<sub>PolyStrata 应用的 <b>Monitor</b>（左），编程智能体正在写视频里的宝塔花园（右）</sub></p>
+两个模型的用法一样：同一个应用，同一套 API。
+
+<p align="center"><img src="docs/media/runpagoda.png" width="900" alt="应用的 Monitor 标签页，旁边是一个编程智能体"><br>
+<sub>应用的 <b>Monitor</b>（左），编程智能体正在写视频里的宝塔花园（右）。截图来自 <a href="https://github.com/Niko1221/Strata">Strata</a>。</sub></p>
 
 - **在浏览器里：** 打开 `http://127.0.0.1:8080`。里面有 **Chat**（聊天）、实时 **Monitor**（监控模型和你的
   GPU/CPU/内存），以及 **About**（设置和地址）。
@@ -159,12 +211,16 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
     （[设置方法](docs/DETAILS.md#the-responses-api-and-codex-cli)）。
 - **思考：** 在聊天菜单或应用的“reasoning effort”里选择 **off、low、medium 或 high**。off 最快，
   high 最适合难题。
-- **图片：** 在安装时对“Images?”选是。然后在聊天里点 **Picture**，或在你的应用里附上图片。
-  AMD 显卡在 Linux 上通过处理器识别图片；在 Windows 上暂时还不行。
 - **从手机或另一台电脑访问：** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`。一定要设置 key。
-- **一次处理一个请求：** 默认情况下 PolyStrata 一次只回答一个请求，其他请求排队等待。想同时回答多个，
-  设置 `"parallel": 2`（[BATCHING.md](docs/BATCHING.md)）。在 12 GB 显卡上，这会让每个回答变慢。
-- **长提示：** PolyStrata 会完整读入对话的第一条消息，大约每 30,000 个 token 需要 1 分钟。之后的消息几秒内就开始回答。
+
+两个模型不一样的地方：
+
+| | Qwen3.8-Flash-Next | GLM 5.3 Flash |
+| --- | --- | --- |
+| **图片** | 在安装时对“Images?”选是。然后在聊天里点 **Picture**，或在你的应用里附上图片。AMD 显卡在 Linux 上通过处理器识别图片；在 Windows 上暂时还不行。 | 暂时不支持。 |
+| **多个请求** | 默认一次只回答一个，其他请求排队等待。设置 `"parallel": 2` 可以同时回答多个（[BATCHING.md](docs/BATCHING.md)）；在 12 GB 显卡上，这会让每个回答变慢。 | 一次只回答一个，其他请求排队等待。 |
+| **多个对话** | 保留最近的一个对话，所以后续消息几秒内就开始回答。加两个引擎参数可以在内存里保留多个（[详情](docs/DETAILS.md#using-it)）。 | 保留最近的一个对话。安装程序会问要不要在内存里保留多个，这样智能体和子代理轮流请求时不用重读提示（[原理](docs/GLM.md#several-conversations-at-once)）。 |
+| **长提示** | 对话的第一条消息要完整读入，大约每 30,000 个 token 需要 1 分钟。 | 第一条消息要完整读入，大约每 30,000 个 token 需要 1.5 分钟。 |
 
 更多：[聊天记录存在哪里](docs/INSTALL.md#where-things-are-stored)、[API](docs/DETAILS.md#using-it)。
 
@@ -183,8 +239,10 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 
 ## 它是怎么工作的？
 
-这类模型通常运行在拥有数百 GB 显存的服务器上。而你的显卡只有 12-24 GB。PolyStrata 让模型装得下的办法是
+这类模型通常运行在拥有数百 GB 显存的服务器上。而你的显卡只有 12-32 GB。PolyStrata 让模型装得下的办法是
 **把工作分摊到整台电脑上**。可以想象一个厨房：常用的东西放在台面上，其余的放在储藏室里。
+
+### Qwen3.8-Flash-Next
 
 <p align="center"><img src="docs/media/how-it-works.svg" width="860" alt="模型的 24,576 个专家：最常用的在显卡上，全部在内存里，一张查找表在 SSD 上"></p>
 
@@ -200,13 +258,22 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 更详细的解释：[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)。每个部分及其数据：
 [详细说明](docs/DETAILS.md#how-it-works)和[论文](docs/paper/Strata-Paper.pdf)。
 
+### GLM 5.3 Flash
+
+- **这个模型有 12,096 个专家**，42 层，每层 288 个。每个词要从每一层里用 8 个。
+- **你的显卡** 存放最常用的那些，32 GB 的卡上约 2,570 个。引擎会统计你的使用中哪些专家用得多，下次启动时重新挑选。
+- **写回答时**，显卡放不下的专家由处理器来算。**读提示时**，它们分批经过显卡，每批 1,024 个 token。
+- **模型文件原地使用**，硬盘上不会多出一份副本。文件进了内存缓存之后，启动只要 6 秒左右。
+
+每个部分及其数据：[docs/GLM.md](docs/GLM.md#how-it-uses-the-card)。
+
 ## 致谢与许可证
 
-模型是 Qwen 团队的 [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)。它由
+Qwen3.8-Flash-Next 来自 [Qwen 团队](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)，由
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)、UkisAI（Swift 1.5）
-和 Unsloth 压缩。GLM 5.3 Flash 的文件来自
-[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF)。PolyStrata 基于 Niko1221
-和各位贡献者的 [Strata](https://github.com/Niko1221/Strata)，并使用了
+和 Unsloth 压缩。GLM 5.3 Flash 用的是
+[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) 的 3-bit 文件。PolyStrata 基于
+Niko1221 和各位贡献者的 [Strata](https://github.com/Niko1221/Strata)，并使用了
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) 的部分代码。完整致谢：
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits)。PolyStrata 以 [MIT 许可证](LICENSE)开源。少数部分和每个模型
 有各自的许可证（[具体是哪些](docs/HOW_IT_WORKS.md#license)）。

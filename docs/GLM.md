@@ -171,6 +171,11 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 
 ## What is missing
 
+- Other files of the model. The engine reads one GGUF file in the layout of neurall's llama.cpp fork, with Q2_K,
+  Q3_K and Q4_K experts and a Q8_0 token table. By their headers pfeifferj's 3.0-bit and 3.5-bit files have that,
+  but only the file above has been run. The smaller files on Hugging Face (Unsloth's, antirez's, the REAP50 ones
+  with half the experts) name their tensors differently or use other weight formats, and ggml-org's are split in
+  two. None of them is read yet.
 - Release builds of `strata-glm`: setup compiles it.
 - Windows. Nothing has been compiled there, and setup asks before it tries.
 - AMD and Intel cards, and more than one card.
