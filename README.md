@@ -71,11 +71,12 @@ Measured for PolyStrata on one workstation, with a 29K-token prompt.
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **3.0BIT** | 27 tokens/s | 312 tokens/s |
+| **REAP50-Q3_K_M** | 27 tokens/s | 384 tokens/s |
 
 </td></tr>
 </table>
 
-llama.cpp with the same file on the same PC wrote 26 tokens/s and read about 265. GLM 5.3 Flash is a much larger
+llama.cpp with the 3.0BIT file on the same PC wrote 26 tokens/s and read about 265. GLM 5.3 Flash is a much larger
 model than Qwen3.8-Flash-Next, and about a fifth of its experts fit in this card's 32 GB, so it writes more slowly.
 What was measured and how: [docs/GLM.md](docs/GLM.md#what-it-was-measured-on).
 
@@ -105,8 +106,8 @@ The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 | | |
 | --- | --- |
 | **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer. It has run on **32 GB of VRAM** only. About 12 GB are taken before any expert, so a 12 GB card cannot start it. |
-| **RAM** | **96 GB or more** beside a 32 GB card. A smaller card needs more RAM ([how much](#which-model-should-i-pick)). It has run with 120 GB. |
-| **Disk** | 114 GB for the model file, on an SSD. |
+| **RAM** | Beside a 32 GB card, **96 GB or more** for the whole model, 60 GB for the size with half the experts. A smaller card needs more RAM ([how much](#which-model-should-i-pick)). It has run with 120 GB. |
+| **Disk** | 114 GB or 79 GB for the model file, on an SSD. |
 | **System** | Linux, and a current NVIDIA driver. |
 
 The installer sets up everything else. It compiles the engine on your PC and offers to install what that needs
@@ -140,7 +141,7 @@ The installer finds your card and sets up the right engine for it. It asks you a
 - whether it should read pictures (Qwen3.8-Flash-Next).
 
 Press Enter each time for the recommended answer. Then it downloads the model (about 70 GB for Qwen3.8-Flash-Next,
-114 GB for GLM 5.3 Flash) and starts it. If the download stops, run it again: it continues where it left off. Your
+79 or 114 GB for GLM 5.3 Flash) and starts it. If the download stops, run it again: it continues where it left off. Your
 browser opens the PolyStrata app at `http://127.0.0.1:8080`.
 
 GLM 5.3 Flash is in the installer's list of models. `./setup.sh --family glm` goes straight to it
@@ -186,15 +187,21 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). To add a
 
 ### GLM 5.3 Flash
 
-It comes in one size so far, **3.0BIT**: 3-bit experts, a 114 GB download. Your graphics card decides how much RAM
-it needs, because the experts the card does not hold have to stay in RAM.
+Two sizes so far. The installer takes the first one your RAM is enough for.
 
-| Your graphics card | RAM it needs | |
-| --- | --- | --- |
-| **32 GB** | **96 GB** | the PC it was measured on, with 120 GB |
-| **24 GB** | about 104 GB | not run yet |
-| **16 GB** | about 113 GB | not run yet; the card holds 4% of the experts, so expect it to be slower |
-| **12 GB or less** | | it does not start |
+| Size | What it is | Download | RAM beside a 32 GB card |
+| --- | --- | ---: | ---: |
+| **3.0BIT** | the whole model | 114 GB | 96 GB |
+| **REAP50-Q3_K_M** | half of the routed experts removed ([REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF) by patrickbdevaney) | 79 GB | 60 GB |
+
+Your graphics card decides how much RAM it needs, because the experts the card does not hold have to stay in RAM.
+
+| Your graphics card | 3.0BIT | REAP50-Q3_K_M | |
+| --- | ---: | ---: | --- |
+| **32 GB** | **96 GB** | **60 GB** | the PC it has run on (120 GB of RAM) |
+| **24 GB** | about 104 GB | about 68 GB | not run yet |
+| **16 GB** | about 113 GB | about 77 GB | not run yet |
+| **12 GB or less** | | | it does not start |
 
 The RAM numbers are the installer's estimate from the one PC it has run on. With less RAM it still starts, but it
 reads experts from the SSD while it answers and gets much slower. The installer says so and asks first.
@@ -284,8 +291,9 @@ Every part and its numbers: [docs/GLM.md](docs/GLM.md#how-it-uses-the-card).
 
 Qwen3.8-Flash-Next is by the [Qwen team](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). It was compressed by
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) and Unsloth.
-GLM 5.3 Flash runs from the 3-bit file by
-[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF). PolyStrata is built on
+GLM 5.3 Flash runs from the files of
+[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) and patrickbdevaney.
+PolyStrata is built on
 [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors, and uses parts of
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). PolyStrata is open source under the [MIT License](LICENSE). A few

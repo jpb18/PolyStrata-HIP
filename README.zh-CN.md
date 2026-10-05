@@ -71,11 +71,12 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 | 规格 | 写回答 | 读提示 |
 | --- | ---: | ---: |
 | **3.0BIT** | 27 tokens/s | 312 tokens/s |
+| **REAP50-Q3_K_M** | 27 tokens/s | 384 tokens/s |
 
 </td></tr>
 </table>
 
-同一台电脑上用 llama.cpp 跑同一个文件，写回答每秒 26 个 token，读提示每秒约 265 个。GLM 5.3 Flash 比
+同一台电脑上用 llama.cpp 跑 3.0BIT 的文件，写回答每秒 26 个 token，读提示每秒约 265 个。GLM 5.3 Flash 比
 Qwen3.8-Flash-Next 大得多，这张卡的 32 GB 显存只放得下它约五分之一的专家，所以写得慢一些。
 测了什么、怎么测的：[docs/GLM.md](docs/GLM.md#what-it-was-measured-on)。
 
@@ -105,8 +106,8 @@ Qwen3.8-Flash-Next 大得多，这张卡的 32 GB 显存只放得下它约五分
 | | |
 | --- | --- |
 | **显卡** | 一张 **NVIDIA** GeForce RTX 20 系列或更新的显卡。目前只在 **32 GB 显存**上跑过。放专家之前就要占掉约 12 GB，所以 12 GB 的卡启动不了。 |
-| **内存** | 配 32 GB 显卡需要 **96 GB 或以上**。显卡越小，需要的内存越多（[具体多少](#该选哪个模型)）。实际跑过的是 120 GB。 |
-| **硬盘** | 模型文件 114 GB，要放在 SSD 上。 |
+| **内存** | 配 32 GB 显卡时，完整模型需要 **96 GB 或以上**，专家减半的规格需要 60 GB。显卡越小，需要的内存越多（[具体多少](#该选哪个模型)）。实际跑过的是 120 GB。 |
+| **硬盘** | 模型文件 114 GB 或 79 GB，要放在 SSD 上。 |
 | **系统** | Linux，以及 NVIDIA 的最新显卡驱动。 |
 
 其他的都由安装程序搞定。它会在你的电脑上编译引擎，缺 g++ 和 CUDA 工具包时会提出帮你装。
@@ -138,7 +139,7 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 - 上下文多大（模型能记住多少文字），
 - 是否要识别图片（Qwen3.8-Flash-Next）。
 
-每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 114 GB）并启动。
+每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 79 或 114 GB）并启动。
 如果下载中断了，再运行一次即可：它会从中断的地方继续。浏览器会打开 PolyStrata 应用，地址是 `http://127.0.0.1:8080`。
 
 GLM 5.3 Flash 就在安装程序的模型列表里。想直接装它，运行 `./setup.sh --family glm`
@@ -180,14 +181,21 @@ GLM 5.3 Flash 就在安装程序的模型列表里。想直接装它，运行 `.
 
 ### GLM 5.3 Flash
 
-目前只有一个规格 **3.0BIT**：专家压到 3-bit，下载 114 GB。需要多少内存取决于你的显卡，因为显卡放不下的专家都得留在内存里。
+目前有两个规格，安装程序会选内存够用的第一个。
 
-| 你的显卡 | 需要的内存 | |
-| --- | --- | --- |
-| **32 GB** | **96 GB** | 实测用的就是这种配置，内存 120 GB |
-| **24 GB** | 约 104 GB | 还没跑过 |
-| **16 GB** | 约 113 GB | 还没跑过；显卡只放得下 4% 的专家，会更慢 |
-| **12 GB 或以下** | | 启动不了 |
+| 规格 | 是什么 | 下载 | 配 32 GB 显卡需要的内存 |
+| --- | --- | ---: | ---: |
+| **3.0BIT** | 完整模型 | 114 GB | 96 GB |
+| **REAP50-Q3_K_M** | 去掉了一半的路由专家（patrickbdevaney 的 [REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF)） | 79 GB | 60 GB |
+
+需要多少内存取决于你的显卡，因为显卡放不下的专家都得留在内存里。
+
+| 你的显卡 | 3.0BIT | REAP50-Q3_K_M | |
+| --- | ---: | ---: | --- |
+| **32 GB** | **96 GB** | **60 GB** | 跑过的就是这台电脑，内存 120 GB |
+| **24 GB** | 约 104 GB | 约 68 GB | 还没跑过 |
+| **16 GB** | 约 113 GB | 约 77 GB | 还没跑过 |
+| **12 GB 或以下** | | | 启动不了 |
 
 内存数字是安装程序根据唯一跑过的那台电脑估算的。内存不够也能启动，但回答时要从 SSD 读专家，会慢很多。
 安装程序会先说明并征求你的同意。
@@ -272,7 +280,7 @@ GLM 5.3 Flash 的其他量化版本暂时不支持：[还缺什么](docs/GLM.md#
 Qwen3.8-Flash-Next 来自 [Qwen 团队](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)，由
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)、UkisAI（Swift 1.5）
 和 Unsloth 压缩。GLM 5.3 Flash 用的是
-[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) 的 3-bit 文件。PolyStrata 基于
+[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) 和 patrickbdevaney 的文件。PolyStrata 基于
 Niko1221 和各位贡献者的 [Strata](https://github.com/Niko1221/Strata)，并使用了
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) 的部分代码。完整致谢：
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits)。PolyStrata 以 [MIT 许可证](LICENSE)开源。少数部分和每个模型
