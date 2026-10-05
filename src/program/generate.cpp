@@ -3140,7 +3140,15 @@ int main(int argc, char** argv) {
         const double cover_b = std::getenv("STRATA_SPLIT_COVER_B") ? std::atof(std::getenv("STRATA_SPLIT_COVER_B")) : 3.0;
         std::vector<double> mass(n_ranked);
         double total_mass = 0;
+        // Up to 3 GPUs the 0.1.39 curve (r+1)^-1.2 is kept, so 2- and 3-GPU placements do not move (the new curve is a
+        // fit to a 4-way rig and was not measured on them); STRATA_SPLIT_COVER_B asks for the coverage curve at any
+        // GPU count.
+        const bool coverage_curve = ns >= 4 || std::getenv("STRATA_SPLIT_COVER_B") != nullptr;
         for (size_t r = 0; r < n_ranked; ++r) {
+            if (!coverage_curve) {
+                total_mass += (mass[r] = std::pow((double) r + 1.0, -1.2));
+                continue;
+            }
             const double hi = std::pow(1.0 - (double) r / (double) n_ranked, cover_b);
             const double lo = std::pow(1.0 - (double) (r + 1) / (double) n_ranked, cover_b);
             total_mass += (mass[r] = hi - lo);
