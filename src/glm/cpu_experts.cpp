@@ -109,7 +109,7 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int gu_type, int d_type, int n_embd, int n_ff,
-                 const float* x, float limit, float* out) {
+                 const float* x, float limit, float* out, const std::function<void()>* meanwhile) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
     const ggml_type_traits_cpu* td = traits(d_type);
@@ -127,7 +127,10 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int gu_type,
     const uint8_t* actp = act.data();
     float* hp = h.data();
     const int gu_tasks = (n_ff + kRowsPerTask - 1) / kRowsPerTask;
-    workers.run(n * gu_tasks, [&](int t) {
+    const int first = meanwhile ? 1 : 0;   // task 0, so it is taken at once
+    workers.run(first + n * gu_tasks, [&](int t) {
+        if (t < first) return (*meanwhile)();
+        t -= first;
         const CpuExpert& e = experts[t / gu_tasks];
         float* he = hp + (size_t) (t / gu_tasks) * n_ff;
         const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);

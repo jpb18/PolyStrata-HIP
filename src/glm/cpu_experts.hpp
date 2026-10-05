@@ -58,7 +58,8 @@ struct CpuExpert {
 bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err);
 
 /// out[n_embd] = sum over the experts of weight * down(silu(min(gate x, limit)) * clamp(up x, -limit, limit)).
+/// `meanwhile`, when given, is run once by one of the threads, beside the first products.  It must not throw.
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int gu_type, int d_type, int n_embd, int n_ff,
-                 const float* x, float limit, float* out);
+                 const float* x, float limit, float* out, const std::function<void()>* meanwhile = nullptr);
 
 }  // namespace strata::glm
