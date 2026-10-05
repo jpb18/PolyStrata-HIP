@@ -85,6 +85,11 @@ struct Q6KBlock {
     int8_t scales[16];
     half d;
 };
+struct Q2KBlock {
+    uint8_t scales[16];
+    uint8_t qs[64];
+    half2 dm;
+};
 struct Q40Block {
     half d;
     uint8_t qs[16];
@@ -117,6 +122,8 @@ static_assert(sizeof(Q4KBlock) == 144 && alignof(Q4KBlock) == 4 &&
 static_assert(sizeof(Q6KBlock) == 210 && alignof(Q6KBlock) == 2 &&
               offsetof(Q6KBlock, qh) == 128 && offsetof(Q6KBlock, scales) == 192 &&
               offsetof(Q6KBlock, d) == 208);
+static_assert(sizeof(Q2KBlock) == 84 && alignof(Q2KBlock) == 4 &&
+              offsetof(Q2KBlock, qs) == 16 && offsetof(Q2KBlock, dm) == 80);
 static_assert(sizeof(Q40Block) == 18 && alignof(Q40Block) == 2 && offsetof(Q40Block, qs) == 2);
 static_assert(sizeof(Q50Block) == 22 && alignof(Q50Block) == 2 &&
               offsetof(Q50Block, qh) == 2 && offsetof(Q50Block, qs) == 6);
@@ -409,6 +416,69 @@ __global__ void native_q3_k_mmvq_kernel(const Q3KBlock* __restrict__ w,
             if (row0 + i < n_out) {
                 const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
                 tmp[i] += q3_q8_dot(w + block, x + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        tmp[i] = warp_sum(tmp[i]);
+        if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
+    }
+}
+
+// Q2_K: llama.cpp's vec_dot_q2_K_q8_1 in its mmvq form, same float accumulation order.
+__device__ __forceinline__ float q2k_q8_dot(const Q2KBlock* __restrict__ w,
+                                           const Q81Block* __restrict__ x, int iqs) {
+    const int bq8_offset = 4 * (iqs / 8);
+    const uint8_t* scales = w->scales + (iqs - iqs % 8 + (iqs % 8) / 4);
+    const int v = reinterpret_cast<const int*>(w->qs)[iqs];
+    float sumf_d = 0.0f;
+    float sumf_m = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int u = reinterpret_cast<const int*>(x[bq8_offset + i].qs)[iqs % 8];
+        const float d8 = __low2float(x[bq8_offset + i].ds);
+        const int sc = scales[2 * i];
+        const int vi = (v >> (2 * i)) & 0x03030303;
+        sumf_d += d8 * (STRATA_DP4A(vi, u, 0) * (sc & 0xF));
+        int m = sc >> 4;
+        m |= m << 8;
+        m |= m << 16;
+        sumf_m += d8 * STRATA_DP4A(m, u, 0);
+    }
+    const float2 dm = __half22float2(w->dm);
+    return dm.x * sumf_d - dm.y * sumf_m;
+}
+
+// Q2_K generic MMVQ: QK=256, QI=16, VDR=1, eight blocks per iteration, as Q3_K.
+template<bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_q2_k_mmvq_kernel(const Q2KBlock* __restrict__ w,
+                                        const Q81Block* __restrict__ x,
+                                        float* __restrict__ y, int n_in, int n_out) {
+    constexpr int ROWS = SmallK ? WARPS : 1;
+    constexpr int BLOCKS_PER_ITER = WARPS * WARP / 16;
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / 256;
+    float tmp[ROWS] = {};
+    for (int kbx = tid / 16; kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
+        const int kby = kbx * 8;
+        const int kqs = tid % 16;
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                tmp[i] += q2k_q8_dot(w + block, x + kby, kqs);
             }
         }
     }
@@ -1402,6 +1472,31 @@ void native_q3_k_f32(const void* weights, const float* x, void* scratch_q8_1,
     native_q3_k_mmvq(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
+// Q2_K has no multi-column kernel yet: each column is its own single-column launch.
+void native_q2_k_mmvq(const void* weights, const void* x_q8_1, float* y,
+                      int n_in, int n_out, int ncols, void* stream) {
+    validate_shape(n_in, ncols, 256);
+    if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
+    validate_pointer(weights);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    const auto* w = static_cast<const Q2KBlock*>(weights);
+    const auto s = static_cast<cudaStream_t>(stream);
+    const dim3 threads(WARP, WARPS);
+    for (int j = 0; j < ncols; ++j) {
+        const auto* x = static_cast<const Q81Block*>(x_q8_1) + std::size_t(j) * (n_in / Q8K);
+        float* yj = y + std::size_t(j) * n_out;
+        if (n_in / 256 < WARPS * WARP / 16) {
+            const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
+            native_q2_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, yj, n_in, n_out);
+        } else {
+            native_q2_k_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, yj, n_in, n_out);
+        }
+    }
+    launch_check();
+}
+
 void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
     validate_shape(n_in, ncols, 256);
@@ -1563,7 +1658,7 @@ void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
 }
 
 bool native_mmvq_supported(int ggml_type) noexcept {
-    return ggml_type == 2 || ggml_type == 6 || ggml_type == 7 || ggml_type == 8 || ggml_type == 11 ||
+    return ggml_type == 2 || ggml_type == 6 || ggml_type == 7 || ggml_type == 8 || ggml_type == 10 || ggml_type == 11 ||
            ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 20 ||
            ggml_type == 23 || ggml_type == 42 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 ||
            ggml_type == 21 || ggml_type == 22 || ggml_type == 29;
@@ -1577,6 +1672,7 @@ std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out) {
     case 7: block_elems = 32; block_bytes = 24; break;
     case 8: block_elems = 32; block_bytes = 34; break;
     case 20: block_elems = 32; block_bytes = 18; break;
+    case 10: block_elems = 256; block_bytes = 84; break;
     case 11: block_elems = 256; block_bytes = 110; break;
     case 12: block_elems = 256; block_bytes = 144; break;
     case 13: block_elems = 256; block_bytes = 176; break;
@@ -1604,6 +1700,7 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
     case 7: iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 8: native_q8_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 20: native_iq4_nl_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
+    case 10: native_q2_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 11: native_q3_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 12: native_q4_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 13: native_q5_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
