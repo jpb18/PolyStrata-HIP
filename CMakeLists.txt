@@ -1233,6 +1233,17 @@ if(STRATA_BUILD_TESTS)
   endif()
 endif()
 
+# ---- strata-glm: GLM 5.3 Flash (llama.cpp's glm5-next), read from its GGUF ----
+#
+# A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
+# CPU experts' dot products from ggml-cpu.
+if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
+  add_executable(strata-glm src/glm/main.cpp src/glm/engine.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu)
+  target_include_directories(strata-glm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
+  target_link_libraries(strata-glm PRIVATE strata_kernels ggml-cpu ggml-base ${_strata_gpu_runtime_target}
+                                           Threads::Threads)
+endif()
+
 if(STRATA_BUILD_TESTS)
   enable_testing()
   # Model-level checks may be absent from source distributions.
