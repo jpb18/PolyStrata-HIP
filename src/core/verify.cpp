@@ -1087,9 +1087,16 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
         stamp(l, 16, grp);
         const bool q8_ffn = gr_read_group(1, true, inj_, inj2_);   // true: nat_xq_ holds the MoE input's q8_1 (STRATA_QFUSE)
+        // with CPU experts in the window the shared expert forks off once the doorbell is published (it no longer
+        // competes with it for the GPU's first microseconds); STRATA_SH_FORK_LATE=0 forks at the top as before
+        static const bool sh_fork_late_env = [] {
+            const char* e = std::getenv("STRATA_SH_FORK_LATE");
+            return !e || e[0] != '0';
+        }();
         const bool sh_fork = sh_stream_on() && !prof_on_ && sh_cs_ != nullptr && ev_fork_ != nullptr && ev_join_ != nullptr;
+        const bool sh_fork_late = sh_fork && sh_fork_late_env && !ar_on();
         cudaStream_t sh_stream = sh_fork ? sh_cs_ : cs;
-        if (sh_fork) {
+        if (sh_fork && !sh_fork_late) {
             cudaEventRecord(ev_fork_, cs);
             cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
         }
@@ -1151,6 +1158,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 const int32_t* layer_res = hits_.d_res != nullptr ? (hits_.d_res + l * g.n_expert) : nullptr;
                 doorbell_publish_res(xm, ids_ + tb * K, layer_res, (int) g.n_expert, (int64_t) n * N, (int64_t) n * K,
                                      m_x_ + tb * N, m_ids_ + tb * K, m_seq_, cs);
+            }
+            if (sh_fork_late) {
+                cudaEventRecord(ev_fork_, cs);
+                cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
             }
         }
         stamp(l, 17, grp);
