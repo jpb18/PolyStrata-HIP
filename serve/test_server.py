@@ -442,9 +442,9 @@ class ImageMarkers(unittest.TestCase):
                    {"type": "text", "text": "d|>"}, *pictures]
             with self.assertRaisesRegex(ValueError, "do not match"):
                 svc.prepare([{"role": "user", "content": cut}], None, {})
-            # a prompt without the marker strings has exactly the ids it had (other special tokens as well)
+            # a prompt without the marker strings has exactly the ids it had
             old = lambda m, t=None: tok.encode(svc.template.render(m, tools=t), parse_special=True)   # noqa: E731
-            for msgs, tools in (([{"role": "user", "content": "plain <|im_end|> <|endoftext|>"}], None),
+            for msgs, tools in (([{"role": "user", "content": "plain text, no markers"}], None),   # (#931: control-token text is text now)
                                 ([{"role": "system", "content": "s"}, {"role": "user", "content": pictures}], None),
                                 ([{"role": "user", "content": "x"}, {"role": "assistant", "content": "",
                                   "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<|image"}}}]}],
