@@ -204,6 +204,19 @@ __device__ __forceinline__ uint4 sign_entry(int i, bool parity) {
 }
 #endif
 // 8 nibbles of q4 through a 16-entry int8 table (4 words): the low nibbles' values in .x, the high ones' in .y
+// W (X5): direct-selector form on gfx: p = low 3 bits of each nibble picks within the table half, bit 3 picks the half;
+// exhaustively bit-exact over all 2^32 inputs (X5). Disable with -DSTRATA_W_NO_T16.
+#if defined(__HIPCC__) && !defined(STRATA_W_NO_T16)
+__device__ __forceinline__ uint32_t table16_one(uint32_t x, const uint32_t (&t)[4]) {
+    const uint32_t p = x & 0x07070707u;
+    const uint32_t a = __builtin_amdgcn_perm(t[1], t[0], p), b = __builtin_amdgcn_perm(t[3], t[2], p);
+    return __builtin_amdgcn_perm(b, a, ((x >> 1) & 0x04040404u) | 0x03020100u);
+}
+__device__ __forceinline__ void table16(uint32_t q4, const uint32_t (&t)[4], uint32_t& lo, uint32_t& hi) {
+    lo = table16_one(q4, t);
+    hi = table16_one(q4 >> 4, t);
+}
+#else
 __device__ __forceinline__ void table16(uint32_t q4, const uint32_t (&t)[4], uint32_t& lo, uint32_t& hi) {
     uint32_t tmp[2];
     const uint32_t sel = 0x32103210u | ((q4 & 0x88888888u) >> 1);
@@ -216,6 +229,7 @@ __device__ __forceinline__ void table16(uint32_t q4, const uint32_t (&t)[4], uin
     lo = __byte_perm(tmp[0], tmp[1], 0x6420);
     hi = __byte_perm(tmp[0], tmp[1], 0x7531);
 }
+#endif
 
 // Raw bytes of sub-block `ib` of the block at `bp` (IQ: the 256-value super-block, ib 0..7; Q2_0: the 64-value block,
 // ib 0..1; IQ4_NL: the 32-value block).
@@ -661,8 +675,10 @@ __device__ __forceinline__ nw_i8 nw_wmma(nw_i4 a, nw_i4 b, nw_i8 c) {
 }
 __device__ __forceinline__ nw_i4 nw_u4(uint4 v) { return nw_i4{(int) v.x, (int) v.y, (int) v.z, (int) v.w}; }
 
-template <int WT, bool GU>
-__global__ void __launch_bounds__(NW_THREADS)
+// W (X1): ALIAS = the H tile lives on the weight buffers (one extra barrier); LB > 0 = amdgpu_waves_per_eu(LB) (VGPR cap).
+// Disable both with -DSTRATA_W_NO_OCC (the launch sites then use <WT, GU, false, 0> and grid factor wgp_blocks).
+template <int WT, bool GU, bool ALIAS = false, int LB = 0>
+__global__ void __launch_bounds__(NW_THREADS) __attribute__((amdgpu_waves_per_eu(LB > 0 ? LB : 1)))
 native_w11_kernel(const Batch b, const NativeGeom geo, const Tables tb, const uint8_t* __restrict__ act,
                   const int32_t* __restrict__ src, uint8_t* __restrict__ out, float* __restrict__ dm) {
 #if STRATA_NAT_W11
@@ -680,7 +696,9 @@ native_w11_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
                             ? sign_entries(WT) : 1;
     __shared__ __align__(16) uint4 ssign[SGN];                   // the signs of a sign byte, as byte masks
     __shared__ int srow[kTileRows];
-    __shared__ float hs[GU ? kTileRows : 1][GU ? 65 : 1];
+    __shared__ float hs_sep[(GU && !ALIAS) ? kTileRows : 1][65];
+    static_assert(!ALIAS || (size_t) kTileRows * 65 * 4 <= (size_t) 2 * NW_ROWS * WLD, "H tile must fit the weight buffers");
+    float(*hs)[65] = ALIAS ? reinterpret_cast<float(*)[65]>(wtbuf) : hs_sep;
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
     const int wm = wave & 3, wn = wave >> 2, l16 = lane & 15, hi = lane >> 4;
     if constexpr (grid_bytes(WT) > 0) {
@@ -811,6 +829,7 @@ native_w11_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
             }
         }
         if constexpr (GU) {
+            if constexpr (ALIAS) __syncthreads();                 // every wave is done reading the weight buffers
             if (on) {
 #pragma unroll
                 for (int mt = 0; mt < 2; ++mt)
@@ -1030,11 +1049,21 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
 #if defined(__HIPCC__)
     {
         const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
-        const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / NW_ROWS), (int64_t) d.sms * wgp_blocks(d.occ));
-        const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / NW_ROWS), (int64_t) d.sms * wgp_blocks(d.occ));
+        // W (X1): LDS alias of the H tile + waves_per_eu(8) (192 VGPRs) + 4 blocks per WGP, only for the types whose
+        // kernels do not spill under the cap (measured: gate/up IQ2_*, IQ3_*, IQ4_XS 0-5 regs; down IQ4_NL 11, Q8_0 / Q2_0 0;
+        // Q4_K / Q5_K gate/up and Q5_1 down spill 100+ and keep the old launch).
+#ifdef STRATA_W_NO_OCC
+        const bool occ_gu = false, occ_d = false;
+#else
+        const bool occ_gu = g.gu_type == T_IQ2_XXS || g.gu_type == T_IQ2_XS || g.gu_type == T_IQ2_S ||
+                            g.gu_type == T_IQ3_XXS || g.gu_type == T_IQ3_S || g.gu_type == T_IQ4_XS;
+        const bool occ_d = g.d_type == T_Q2_0 || g.d_type == T_Q8_0 || g.d_type == T_IQ4_NL;
+#endif
+        const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / NW_ROWS), (int64_t) d.sms * (occ_gu ? 4 : wgp_blocks(d.occ)));
+        const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / NW_ROWS), (int64_t) d.sms * (occ_d ? 4 : wgp_blocks(d.occ)));
         const uint8_t* xa8 = (const uint8_t*) xa;
         uint8_t* ha8 = (uint8_t*) ha;
-#define STRATA_NW_GU(T) native_w11_kernel<T, true><<<g_gu, NW_THREADS, 0, s>>>(b, g, tb, xa8, src, ha8, nullptr)
+#define STRATA_NW_GU(T) do { if (occ_gu) native_w11_kernel<T, true, true, 8><<<g_gu, NW_THREADS, 0, s>>>(b, g, tb, xa8, src, ha8, nullptr); else native_w11_kernel<T, true><<<g_gu, NW_THREADS, 0, s>>>(b, g, tb, xa8, src, ha8, nullptr); } while (0)
         switch (g.gu_type) {
             case T_IQ2_XXS: STRATA_NW_GU(T_IQ2_XXS); break;
             case T_IQ2_XS: STRATA_NW_GU(T_IQ2_XS); break;
@@ -1046,7 +1075,7 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
             default: STRATA_NW_GU(T_IQ4_XS); break;
         }
 #undef STRATA_NW_GU
-#define STRATA_NW_D(T) native_w11_kernel<T, false><<<g_d, NW_THREADS, 0, s>>>(b, g, tb, ha8, src, nullptr, dm)
+#define STRATA_NW_D(T) do { if (occ_d) native_w11_kernel<T, false, true, 8><<<g_d, NW_THREADS, 0, s>>>(b, g, tb, ha8, src, nullptr, dm); else native_w11_kernel<T, false><<<g_d, NW_THREADS, 0, s>>>(b, g, tb, ha8, src, nullptr, dm); } while (0)
         if (g.d_type == T_Q2_0) STRATA_NW_D(T_Q2_0);
         else if (g.d_type == T_Q5_1) STRATA_NW_D(T_Q5_1);
         else if (g.d_type == T_Q8_0) STRATA_NW_D(T_Q8_0);

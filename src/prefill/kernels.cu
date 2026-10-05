@@ -1063,6 +1063,32 @@ __global__ void moe_combine_kernel(const float* __restrict__ Dm, const int32_t* 
     bo[i] = s + shared[i] * sigm(sg[t]);
 }
 
+// W (X5): four columns per thread, one float4 load per slot; the per-element expression and the k order are unchanged
+// (bitwise equal to moe_combine_kernel). Needs 16-byte aligned Dm / shared / bo (N * 4 bytes per row is a multiple of 16).
+__global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t* __restrict__ slot,
+                                    const float* __restrict__ w, const float4* __restrict__ shared,
+                                    const float* __restrict__ sg, float4* __restrict__ bo, int64_t T) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;   // float4 index
+    if (i >= T * (N / 4)) return;
+    const int64_t t = i / (N / 4), d = (i % (N / 4)) * 4;
+    float4 s = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 v[10];
+    float ww[10];
+#pragma unroll
+    for (int k = 0; k < 10; ++k) {
+        ww[k] = w[t * 10 + k];
+        v[k] = *reinterpret_cast<const float4*>(Dm + (int64_t) slot[t * 10 + k] * N + d);
+    }
+#pragma unroll
+    for (int k = 0; k < 10; ++k) {
+        s.x = fmaf(ww[k], v[k].x, s.x); s.y = fmaf(ww[k], v[k].y, s.y);
+        s.z = fmaf(ww[k], v[k].z, s.z); s.w = fmaf(ww[k], v[k].w, s.w);
+    }
+    const float g = sigm(sg[t]);
+    const float4 sh = shared[i];
+    bo[i] = make_float4(s.x + sh.x * g, s.y + sh.y * g, s.z + sh.z * g, s.w + sh.w * g);
+}
+
 // ---------------------------------------------------------------- QSA helpers
 __global__ void rms_rows_kernel(float* __restrict__ x, const float* __restrict__ w, int64_t cols, int64_t ld, float eps) {
     __shared__ float sh[32];
@@ -1472,6 +1498,14 @@ void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int
 }
 void moe_combine(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
                  int64_t T, void* stream) {
+#ifndef STRATA_W_NO_COMB
+    if (((reinterpret_cast<uintptr_t>(Dm) | reinterpret_cast<uintptr_t>(shared) | reinterpret_cast<uintptr_t>(bo)) & 15) == 0) {
+        moe_combine4_kernel<<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
+            Dm, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T);
+        check("moe_combine");
+        return;
+    }
+#endif
     moe_combine_kernel<<<blocks_for(T * N), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T);
     check("moe_combine");
 }
