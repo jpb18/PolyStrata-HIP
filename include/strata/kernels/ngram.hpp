@@ -76,11 +76,6 @@ const PleFormatInfo* ple_format_for_type(const char* gguf_type_name);
 /// "IQ4_NL, Q5_0 or FP8 (I8)": the formats for an error message, built from the list.
 std::string ple_format_list();
 
-inline constexpr int PLE_ROW_BYTES_Q8_0 = (PLE_HEAD_DIM / 32) * 34;      // 170: a Q8_0 row (Unsloth's UD-Q6_K_XL)
-inline constexpr int PLE_ROW_BYTES_MAX = PLE_ROW_BYTES_Q8_0;
-
-inline constexpr int PLE_ROW_BYTES_MAX = PLE_ROW_BYTES_FP8;
-
 /// The artifact's own hash constants, transcribed from `docs/gguf-dump-shard1.txt`:
 ///
 ///     layer_multipliers = [23703573157769, 20109073645365, 8052911324071]

@@ -242,15 +242,6 @@ void all_formats_round_trip(const std::string& dir) {
 // row_bytes: ng::ROW_BYTES (90, IQ4_NL) is the production default; 110 (#296, OrcaRouter's Q5_0 PLE rows) is
 // run too, through the exact same generic row_bytes path -- nothing here is IQ4_NL-specific, so a second row
 // size run here is the correctness evidence for lifting ngram.cpp's "Q5_0 PLE requires --ple-io mmap" refusal.
-
-// row_bytes: ng::ROW_BYTES (90, IQ4_NL) is the production default; 110 (#296, OrcaRouter's Q5_0 PLE rows) and
-// 170 (Unsloth's UD-Q6_K_XL Q8_0 PLE rows) are run too, through the exact same generic row_bytes path --
-// nothing here is IQ4_NL-specific, so extra row sizes run here are the correctness evidence for lifting
-// ngram.cpp's format-specific refusals.
-
-// row_bytes: ng::ROW_BYTES (90, IQ4_NL) is the production default; 110 (#296, OrcaRouter's Q5_0 PLE rows) is
-// run too, through the exact same generic row_bytes path -- nothing here is IQ4_NL-specific, so a second row
-// size run here is the correctness evidence for lifting ngram.cpp's "Q5_0 PLE requires --ple-io mmap" refusal.
 int selftest(const std::string& dir, uint32_t rb) {
     const uint32_t N = 500000;                          // 45 MB: large enough for thousands of distinct pages
     const std::string path = dir + "/ple_reader_selftest_" + std::to_string(rb) + ".bin";
@@ -466,11 +457,6 @@ int main(int argc, char** argv) {
         // same generic row_bytes path -- see the comment on selftest().
         all_formats_round_trip(dir);               // every format of k::ple_formats(), both readers, vs its dequantizer
         if (g_fail != 0) return 1;
-
-        // ng::ROW_BYTES (90, IQ4_NL, production default), 110 (#296, OrcaRouter's Q5_0 PLE rows) and 170
-        // (Unsloth's UD-Q6_K_XL Q8_0 PLE rows) through the same generic row_bytes path -- see the comment on
-        // selftest().
-
         const int r90 = selftest(dir, ng::ROW_BYTES);
         const int r110 = selftest(dir, 110);
         return r90 != 0 ? r90 : r110;

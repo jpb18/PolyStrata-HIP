@@ -289,10 +289,6 @@ whose header shows the same formats.
 - UD-Q4_K_XL and UD-IQ4_XS at revision `38bb39e` are targeted, and plain Q4_0 files ([above](#q4_0-files)). Other
   quantizations use formats this engine may not have kernels for; the engine checks every layer's formats at start
   and refuses an unsupported one by name.
-
-- UD-Q4_K_XL and UD-IQ4_XS at revision `38bb39e` are targeted. Other Unsloth quantizations use formats this engine may
-  not have kernels for; the engine checks every layer's formats at start and refuses an unsupported one by name.
-  (UD-Q6_K_XL of the same revision is documented separately: [UNSLOTH_Q6.md](UNSLOTH_Q6.md).)
 - Tests: the packer's synthetic 4-shard and conversion tests (`.venv/bin/python -m unittest discover -s tools -p
   test_iq_pack.py`); CTests `gguf_split_test`, `expert_layout_test`, `native_expert_parity_*` (the three real expert
   format pairs against ggml-cpu, the Q5_1 min term, Q8_0 rows, Q4_0/Q4_0 and Q4_0/Q4_1), `prefill_mmq_kquant_test` (with `-DSTRATA_MMQ_KQUANTS=ON`: the
