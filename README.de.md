@@ -20,6 +20,11 @@ Es lässt zwei Modelle laufen, jedes mit seiner eigenen Engine:
 - **[GLM 5.3 Flash](docs/GLM.md)** unter Linux mit einer NVIDIA-Karte. Seine Engine wurde für PolyStrata
   geschrieben. Es ist experimentell: Es ist bisher auf einem einzigen PC gelaufen, mit einer 32-GB-Karte.
 
+Diese zweite Engine führt auch Qwen3.6-35B-A3B, Ornith 1.5 und Gemma 4 26B-A4B aus, Dateien von 13 bis 17 GB, und
+der Server kann im laufenden Betrieb zwischen installierten Modellen wechseln. Sie stehen in der Modellliste des
+Installers; `./setup.sh --family qwen36`, `ornith` oder `gemma4` führt direkt zu einem davon. Was gemessen wurde,
+steht in [Modelle und Backends](docs/BACKENDS.md) (englisch).
+
 PolyStrata baut auf [Strata](https://github.com/Niko1221/Strata) von Niko1221 auf.
 
 ## Wie schnell ist es?

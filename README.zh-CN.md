@@ -19,6 +19,10 @@ PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI
 - **[GLM 5.3 Flash](docs/GLM.md)**：Linux 加一张 NVIDIA 显卡。引擎是为 PolyStrata 写的。目前是实验性的：只在一台电脑上跑过，
   显卡是 32 GB。
 
+第二个引擎还能跑 Qwen3.6-35B-A3B、Ornith 1.5 和 Gemma 4 26B-A4B，文件 13 到 17 GB；服务器运行时可以在已安装的模型之间切换。
+它们也在安装程序的模型列表里，想直接装其中一个，运行 `./setup.sh --family qwen36`（或 `ornith`、`gemma4`）。
+测了什么见[模型和后端](docs/BACKENDS.md)（英文）。
+
 PolyStrata 基于 Niko1221 的 [Strata](https://github.com/Niko1221/Strata)。
 
 ## 速度有多快？

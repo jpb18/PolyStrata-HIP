@@ -20,6 +20,11 @@ PolyStrata は、ふつうはサーバーが必要な大きな AI モデルを�
 - **[GLM 5.3 Flash](docs/GLM.md)**：Linux と NVIDIA カード 1 枚。エンジンは PolyStrata のために書いたものです。
   まだ実験的で、32 GB のカードを載せた 1 台の PC でしか動かしていません。
 
+この 2 つ目のエンジンは Qwen3.6-35B-A3B、Ornith 1.5、Gemma 4 26B-A4B も動かします。ファイルは 13〜17 GB です。
+サーバーは動かしたまま、インストール済みのモデルを切り替えられます。これらもインストーラーのモデル一覧にあり、
+`./setup.sh --family qwen36`（または `ornith`、`gemma4`）なら直接そこへ進みます。測定の内容は
+[モデルとバックエンド](docs/BACKENDS.md)（英語）にあります。
+
 PolyStrata は Niko1221 の [Strata](https://github.com/Niko1221/Strata) をもとにしています。
 
 ## どのくらい速い？

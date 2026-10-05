@@ -20,6 +20,11 @@ Ejecuta dos modelos, cada uno con su propio motor:
 - **[GLM 5.3 Flash](docs/GLM.md)** en Linux con una tarjeta NVIDIA. Su motor se escribió para PolyStrata. Es
   experimental: solo ha funcionado en un PC, con una tarjeta de 32 GB.
 
+Ese segundo motor también ejecuta Qwen3.6-35B-A3B, Ornith 1.5 y Gemma 4 26B-A4B, archivos de 13 a 17 GB, y el
+servidor puede cambiar entre los modelos instalados mientras está en marcha. Están en la lista de modelos del
+instalador; `./setup.sh --family qwen36`, `ornith` o `gemma4` va directo a uno. Qué se midió:
+[Modelos y backends](docs/BACKENDS.md) (en inglés).
+
 PolyStrata está hecho sobre [Strata](https://github.com/Niko1221/Strata) de Niko1221.
 
 ## ¿Qué velocidad tiene?

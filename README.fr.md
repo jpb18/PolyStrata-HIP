@@ -20,6 +20,11 @@ Il fait tourner deux modèles, chacun avec son propre moteur :
 - **[GLM 5.3 Flash](docs/GLM.md)** sous Linux avec une carte NVIDIA. Son moteur a été écrit pour PolyStrata. Il
   est expérimental : il n'a tourné que sur un seul PC, avec une carte de 32 Go.
 
+Ce second moteur fait aussi tourner Qwen3.6-35B-A3B, Ornith 1.5 et Gemma 4 26B-A4B, des fichiers de 13 à 17 Go, et
+le serveur peut passer d'un modèle installé à un autre pendant qu'il tourne. Ils figurent dans la liste des modèles
+de l'installeur ; `./setup.sh --family qwen36`, `ornith` ou `gemma4` mène directement à l'un d'eux. Ce qui a été
+mesuré : [Modèles et backends](docs/BACKENDS.md) (en anglais).
+
 PolyStrata est construit sur [Strata](https://github.com/Niko1221/Strata) de Niko1221.
 
 ## Quelle est sa vitesse ?
