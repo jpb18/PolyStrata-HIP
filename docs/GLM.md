@@ -184,6 +184,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--expert-profile FILE` | | expert use counts, read at the start and written back at the end |
 | `--no-gpu-experts` | | keep every routed expert on the CPU |
 | `--any-node` | | on a PC with several NUMA nodes, let the CPU threads run on any of them |
+| `--no-graphs` | | launch a token's kernels one by one, not as the CUDA graph a layer that is recorded at the first token |
 | `--expert-swaps N` | 16 | while an answer is written, experts on their way into VRAM at a time, each in place of a cached one the answer uses less; 0 = the cache stays as it was loaded |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |

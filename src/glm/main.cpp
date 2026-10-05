@@ -437,6 +437,8 @@ void usage() {
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
                  "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"
                  "                         (default: on the node whose memory holds most of the experts)\n"
+                 "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
+                 "                         as a CUDA graph and replayed)\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
                  "                         into VRAM, in place of cached ones it uses less (default 16, 0 = the cache\n"
                  "                         stays as it was loaded)\n"
@@ -488,6 +490,7 @@ int main(int argc, char** argv) {
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
         else if (a == "--any-node") o.stay_near = false;
+        else if (a == "--no-graphs") o.graphs = false;
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());

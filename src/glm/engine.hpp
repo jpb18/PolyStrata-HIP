@@ -38,6 +38,7 @@ struct Options {
     int expert_swaps = 16;        ///< experts on their way into the cache at a time while an answer is written, each
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
+    bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
@@ -74,6 +75,8 @@ struct Layer {
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
     int trade = -1;                    ///< layers with the same number can take each other's slots: same size
+    void* head = nullptr;              ///< one token's launches up to the router, recorded (eval())
+    void* shared = nullptr;            ///< and the shared expert's
 };
 
 /// A routed expert is run from the VRAM cache or on the CPU when tokens come a few at a time, as an answer's do
@@ -149,7 +152,12 @@ private:
     void dsa(Layer& L, int n);
     void dsa_select(Layer& L, int first, int n);
     void dense_ffn(Layer& L, int il, int n);
+    void layer_head(Layer& L, int il, int n);
+    void moe_router(const Layer& L, int n);
+    void moe_shared(const Layer& L, int il, int n);
     void moe(Layer& L, int il, int n);
+    template <class F>
+    void* record(F&& work);
     void moe_rows(Layer& L, int il, int n);
     void stage(const Layer& L, const int32_t* experts, int m, void* stream);
     void follow(int written);
@@ -170,6 +178,8 @@ private:
     void* blas_ = nullptr; ///< cuBLAS on st_, for the sparse attention
     void* ev_ = nullptr;   ///< marks the router's copy to the host
     std::vector<void*> dev_allocs_, host_allocs_;
+    std::vector<void*> graphs_;   ///< every recorded graph, to destroy
+    void* tail_ = nullptr;        ///< one token's launches from the last layer to the logits, recorded
 
     // geometry
     int n_embd_ = 0, n_layer_ = 0, n_head_ = 0, kda_dim_ = 0, d_inner_ = 0, n_vocab_ = 0;

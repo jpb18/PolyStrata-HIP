@@ -338,6 +338,7 @@ Engine::~Engine() {
         if (e) cudaEventDestroy((cudaEvent_t) e);
     for (int j = 0; j < n_swap_; ++j)
         if (swap_[(size_t) j].done) cudaEventDestroy(swap_[(size_t) j].done);
+    for (void* g : graphs_) cudaGraphExecDestroy((cudaGraphExec_t) g);
     blas_destroy(blas_);
     if (swap_st_) cudaStreamDestroy(cs(swap_st_));
     if (up_) cudaStreamDestroy(cs(up_));
@@ -1241,19 +1242,25 @@ void Engine::route(const Layer& L, const float* logits, int* ids, float* w) {
     }
 }
 
-void Engine::moe(Layer& L, int il, int n) {
-    const size_t e_row = (size_t) n_embd_, rows = (size_t) n;
+// The router's scores, and the copies of them and of the layer's input to the host.
+void Engine::moe_router(const Layer& L, int n) {
+    const size_t rows = (size_t) n;
     lin(L.gate_inp, xn_, rl_, n, xq_);
     ck(cudaMemcpyAsync(h_rl_, rl_, rows * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
-    ck(cudaMemcpyAsync(h_x_, xn_, rows * e_row * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
-    ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+    ck(cudaMemcpyAsync(h_x_, xn_, rows * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
+}
 
-    // the shared expert runs on the GPU while the host routes
+// The shared expert.  It runs on the GPU while the host routes.
+void Engine::moe_shared(const Layer& L, int il, int n) {
     lin(L.sh_gate, xn_, g_, n, xq_);
     lin(L.sh_up, xn_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_exp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
+}
 
+// The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.
+void Engine::moe(Layer& L, int il, int n) {
+    const size_t e_row = (size_t) n_embd_, rows = (size_t) n;
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
     stats_.route_wait_ms += ms_since(t0);
@@ -1476,6 +1483,53 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     moe_sum(dx_, d_w, fo_, n_embd_, n_used_, n, st_);
 }
 
+// Records what `work` hands to the stream, as a graph that is launched with one call from then on.
+template <class F>
+void* Engine::record(F&& work) {
+    cudaGraph_t g = nullptr;
+    ck(cudaStreamBeginCapture(cs(st_), cudaStreamCaptureModeThreadLocal), "cudaStreamBeginCapture");
+    try {
+        work();
+    } catch (...) {
+        if (cudaStreamEndCapture(cs(st_), &g) == cudaSuccess && g) cudaGraphDestroy(g);
+        throw;
+    }
+    ck(cudaStreamEndCapture(cs(st_), &g), "cudaStreamEndCapture");
+    cudaGraphExec_t exec = nullptr;
+    const cudaError_t made = cudaGraphInstantiateWithFlags(&exec, g, 0);
+    cudaGraphDestroy(g);
+    ck(made, "cudaGraphInstantiate");
+    graphs_.push_back(exec);
+    return exec;
+}
+
+// A layer from its input to its router's copy (a dense layer: to its end).  A prompt batch's MoE (moe_rows) does
+// its own routing.
+void Engine::layer_head(Layer& L, int il, int n) {
+    hc_pre(r_, fp(L.hc_attn_fn), fp(L.hc_attn_scale), fp(L.hc_attn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
+           hc_eps_, sinkhorn_, st_);
+    rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
+    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    dbg("attn_in", il, xn_, n_embd_);
+    if (L.dsa) dsa(L, n);
+    else kda(L, n);
+    dbg("attn", il, ao_, n_embd_);
+    hc_post(ao_, hcw_, r_, n_embd_, n, st_);
+
+    hc_pre(r_, fp(L.hc_ffn_fn), fp(L.hc_ffn_scale), fp(L.hc_ffn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
+           hc_eps_, sinkhorn_, st_);
+    rms_norm(cur_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
+    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    dbg("ffn_in", il, xn_, n_embd_);
+    if (!L.moe) {
+        dense_ffn(L, il, n);
+        dbg("ffn", il, fo_, n_embd_);
+        hc_post(fo_, hcw_, r_, n_embd_, n, st_);
+    } else if (!(mmq_ && n >= kStageRows)) {
+        moe_router(L, n);
+    }
+}
+
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
     for (int t = 0; t < n; ++t)
@@ -1494,37 +1548,51 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     }
     ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
 
+    // A token alone hands the card the same launches every time, some thirty a layer up to the router, and they
+    // cost this thread more than the card.  They are recorded once, a graph a layer, and replayed with one call.
+    // Not the sparse attention's: its launches take the position.
+    const bool replay = opt_.graphs && n == 1 && !opt_.dump;
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
-        hc_pre(r_, fp(L.hc_attn_fn), fp(L.hc_attn_scale), fp(L.hc_attn_base), mix_, hcw_, cur_, n_embd_, n,
-               rms_eps_, hc_eps_, sinkhorn_, st_);
-        rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
-        kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
-        dbg("attn_in", il, xn_, n_embd_);
-        if (L.dsa) dsa(L, n);
-        else kda(L, n);
-        dbg("attn", il, ao_, n_embd_);
-        hc_post(ao_, hcw_, r_, n_embd_, n, st_);
-
-        hc_pre(r_, fp(L.hc_ffn_fn), fp(L.hc_ffn_scale), fp(L.hc_ffn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
-               hc_eps_, sinkhorn_, st_);
-        rms_norm(cur_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
-        kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
-        dbg("ffn_in", il, xn_, n_embd_);
-        if (!L.moe) dense_ffn(L, il, n);
-        else if (mmq_ && n >= kStageRows) moe_rows(L, il, n);
-        else moe(L, il, n);
+        if (replay && !L.dsa) {
+            if (!L.head) L.head = record([&] { layer_head(L, il, 1); });
+            ck(cudaGraphLaunch((cudaGraphExec_t) L.head, cs(st_)), "layer graph");
+        } else {
+            layer_head(L, il, n);
+        }
+        if (!L.moe) continue;
+        if (mmq_ && n >= kStageRows) {
+            moe_rows(L, il, n);
+        } else {
+            ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+            if (replay) {
+                if (!L.shared) L.shared = record([&] { moe_shared(L, il, 1); });
+                ck(cudaGraphLaunch((cudaGraphExec_t) L.shared, cs(st_)), "layer graph");
+            } else {
+                moe_shared(L, il, n);
+            }
+            moe(L, il, n);
+        }
         dbg("ffn", il, fo_, n_embd_);
         hc_post(fo_, hcw_, r_, n_embd_, n, st_);
     }
 
     if (want_logits) {
-        hc_mean(r_ + (size_t) (n - 1) * r_row, cur_, n_embd_, st_);
-        rms_norm(cur_, fp(out_norm_), xn_, n_embd_, 1, rms_eps_, st_);
-        dbg("out_norm", n_layer_, xn_, n_embd_);
-        lin(output_, xn_, logits_, 1);
-        ck(cudaMemcpyAsync(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
-           "logits");
+        const auto logits = [&] {
+            hc_mean(r_ + (size_t) (n - 1) * r_row, cur_, n_embd_, st_);
+            rms_norm(cur_, fp(out_norm_), xn_, n_embd_, 1, rms_eps_, st_);
+            dbg("out_norm", n_layer_, xn_, n_embd_);
+            lin(output_, xn_, logits_, 1);
+            ck(cudaMemcpyAsync(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost,
+                               cs(st_)),
+               "logits");
+        };
+        if (replay) {
+            if (!tail_) tail_ = record(logits);
+            ck(cudaGraphLaunch((cudaGraphExec_t) tail_, cs(st_)), "logits graph");
+        } else {
+            logits();
+        }
         ck(cudaStreamSynchronize(cs(st_)), "eval");
     }
     pos_ += n;
