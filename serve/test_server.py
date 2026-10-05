@@ -3090,6 +3090,14 @@ class AnswerBeforeTheBody(unittest.TestCase):
     def test_not_the_apps_own_page(self):
         self.assertEqual(self.status("POST", "/load", {"Origin": "https://example.com"}), "HTTP/1.0 403 Forbidden")
 
+    def test_a_body_a_handler_read_is_not_waited_for(self):
+        """#594: /config and /load read their body themselves: the close must not wait for the drain's 5 s."""
+        for path in ("/config", "/load", "/unload"):
+            with self.subTest(path=path):
+                t0 = time.monotonic()
+                self.status("POST", path)
+                self.assertLess(time.monotonic() - t0, 1.5)       # the status() helper itself pauses 0.5 s
+
     def test_a_host_the_server_does_not_answer_to(self):
         self.assertEqual(self.status("POST", "/v1/chat/completions", {"Host": "rebind.example.com"}),
                          "HTTP/1.0 403 Forbidden")

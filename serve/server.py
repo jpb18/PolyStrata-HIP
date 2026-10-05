@@ -3435,6 +3435,7 @@ def make_handler(svc: Service):
                 complete = False
             finally:
                 self.connection.settimeout(timeout)
+                self.body_read = True                    # nothing left for the drain to wait for (#594)
             if not complete:
                 self._json(400, {"error": {"message": "incomplete control request body"}})
             return complete
@@ -3465,7 +3466,7 @@ def make_handler(svc: Service):
         def _config_post(self):
             """#564: change a few documented keys of the run config - JSON from Strata's own page only, as
             /settings (the key is checked before); every other key of the file stays as it is."""
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = self._body()
             if not self._own_page("the run config can be changed"):
                 return
             if not svc.config_path:
