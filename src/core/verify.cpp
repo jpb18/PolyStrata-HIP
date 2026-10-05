@@ -895,7 +895,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (!native_of(wq, v.name("attn_q.weight"), err) || !native_of(wk, v.name("attn_k.weight"), err) ||
                     !native_of(wv, v.name("attn_v.weight"), err) || !native_of(wo, v.name("attn_output.weight"), err))
                     return false;
+                // #783 PR-f (stuchapin909): the per-head RMSNorm and the rope in one launch, bit-identical to the pair
+                // (rope_parity check 6); STRATA_NO_NORM_ROPE=1 keeps the two; off on HIP until its parity check passes
+                const bool fuse_nr = native_qsa_enabled() && native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);
                 auto norm_rope = [&](float* data, const WeightRef* norm, int rows, int cols, const int32_t* pos) {
+                    if (fuse_nr && native_norm_rope_usable(cols, (int) s.n_rot)) {
+                        native_qsa_rms_norm_rope(data, cols, (const float*) norm->data, data, rows, cols, (int) s.n_rot, EPS,
+                                                 rope_scaling(), pos, cs);
+                        return;
+                    }
                     if (native_qsa_enabled()) native_qsa_rms_norm_weighted(data, (const float*) norm->data, data, cols, rows, EPS, cs);
                     else rms_norm_weighted(data, (const float*) norm->data, rows, cols, EPS, cs);
                     if (native_rope_enabled()) native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), pos, cs);
@@ -988,12 +996,18 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 native_mmvq(wq->native_type, wq->native_data, xq_, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD),
                             n, cs);
                 if (qb) {
+                    if (fuse_nr) {   // the q/gate split reads q straight out of the q|gate rows (stride 2 * HD)
+                        native_qsa_rms_norm_rope(qfull_ + tb * NH * 2 * HD, (int) (2 * HD), (const float*) wqn->data,
+                                                 qcur_ + tb * NH * HD, (int) (n * NH), (int) HD, (int) s.n_rot, EPS,
+                                                 rope_scaling(), pos_ + tb * NH, cs);
+                    } else {
                     if (cudaMemcpy2DAsync(qcur_ + tb * NH * HD, (size_t) HD * 4, qfull_ + tb * NH * 2 * HD, (size_t) HD * 2 * 4,
                                           (size_t) HD * 4, (size_t) (n * NH), cudaMemcpyDeviceToDevice, cs) != cudaSuccess) {
                         err = "verify: the q/gate split failed";
                         return false;
                     }
                     norm_rope(qcur_ + tb * NH * HD, wqn, (int) (n * NH), (int) HD, pos_ + tb * NH);
+                    }
                     if (st.kv_rot) fwht256_inplace_cuda(qcur_ + tb * NH * HD, (int64_t) n * NH, cs);   // <Hq, Hk> = <q, k>
                     bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wiq->data, qidx_ + tb * IQ * ID, IQ * ID,
                                               N, IQ * ID, n, cs);
@@ -1001,12 +1015,17 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 } else {
                 for (int t = tb; t < te; ++t) {
                     float* qc = qcur_ + t * NH * HD;
+                    if (fuse_nr) {
+                        native_qsa_rms_norm_rope(qfull_ + t * NH * 2 * HD, (int) (2 * HD), (const float*) wqn->data, qc,
+                                                 (int) NH, (int) HD, (int) s.n_rot, EPS, rope_scaling(), pos_ + t * NH, cs);
+                    } else {
                     if (cudaMemcpy2DAsync(qc, (size_t) HD * 4, qfull_ + t * NH * 2 * HD, (size_t) HD * 2 * 4,
                                           (size_t) HD * 4, (size_t) NH, cudaMemcpyDeviceToDevice, cs) != cudaSuccess) {
                         err = "verify: the q/gate split failed";
                         return false;
                     }
                     norm_rope(qc, wqn, (int) NH, (int) HD, pos_ + t * NH);
+                    }
                     if (st.kv_rot) fwht256_inplace_cuda(qc, NH, cs);   // <Hq, Hk> = <q, k>
                 }
                 for (int t = tb; t < te; ++t) {

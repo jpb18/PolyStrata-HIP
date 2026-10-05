@@ -707,11 +707,20 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
             const char* v = std::getenv("STRATA_NO_BATCH_KV_STEP");
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }();
-        native_qsa_rms_norm_weighted(kcur_, f32("self_attn.k_norm.weight"), kcur_, (int) HD, (int) (T * NKV), EPS, cs);
-        for (int t = 0; t < T; ++t) {
-            float* kc = kcur_ + t * NKV * HD;
-            if (native_rope_enabled()) native_rope_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, rope_scaling(), pos + t * NH, cs);
-            else rope_neox_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, st_.cos_tab, st_.sin_tab, pos + t * NH, cs);
+        // #783 PR-f (stuchapin909): the per-head RMSNorm and the rope fused (bit-identical to the pair, rope_parity
+        // check 6; STRATA_NO_NORM_ROPE=1 keeps the two; off on HIP until its parity check passes). K rows of one token
+        // are consecutive in `pos`, tokens are NH apart, so a one-token window is the fusable case.
+        const bool fuse_nr = native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);
+        if (T == 1 && fuse_nr) {
+            native_qsa_rms_norm_rope(kcur_, (int) HD, f32("self_attn.k_norm.weight"), kcur_, (int) NKV, (int) HD,
+                                     (int) s.n_rot, EPS, rope_scaling(), pos, cs);
+        } else {
+            native_qsa_rms_norm_weighted(kcur_, f32("self_attn.k_norm.weight"), kcur_, (int) HD, (int) (T * NKV), EPS, cs);
+            for (int t = 0; t < T; ++t) {
+                float* kc = kcur_ + t * NKV * HD;
+                if (native_rope_enabled()) native_rope_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, rope_scaling(), pos + t * NH, cs);
+                else rope_neox_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, st_.cos_tab, st_.sin_tab, pos + t * NH, cs);
+            }
         }
         if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
             fwht256_inplace_cuda(kcur_, (int64_t) T * NKV, cs);
@@ -764,25 +773,28 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
     int wt_q_proj, wt_o_proj;
     const void* wp_q_proj = wq("self_attn.q_proj.weight", wt_q_proj);
     const void* wp_o_proj = wq("self_attn.o_proj.weight", wt_o_proj);
+    const bool fuse_nr = native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);   // #783 PR-f
     try {
         // ---- dense attention over every cell
         native_mmvq(wt_q_proj, wp_q_proj, xq_, qfull_, (int) N, (int) (NH * 2 * HD), T, cs);
-        for (int t = 0; t < T; ++t) {
-            float* qc = qcur_ + t * NH * HD;
-            if (cudaMemcpy2DAsync(qc, (size_t) HD * 4, qfull_ + t * NH * 2 * HD, (size_t) HD * 2 * 4, (size_t) HD * 4,
-                                  (size_t) NH, cudaMemcpyDeviceToDevice, cs) != cudaSuccess) {
+        // all T tokens' q rows at once (the rows of token t sit at pos[t * NH ..], so row r reads pos[r])
+        if (fuse_nr) {
+            native_qsa_rms_norm_rope(qfull_, (int) (2 * HD), f32("self_attn.q_norm.weight"), qcur_, (int) (T * NH),
+                                     (int) HD, (int) s.n_rot, EPS, rope_scaling(), pos, cs);
+        } else {
+            if (cudaMemcpy2DAsync(qcur_, (size_t) HD * 4, qfull_, (size_t) HD * 2 * 4, (size_t) HD * 4,
+                                  (size_t) (T * NH), cudaMemcpyDeviceToDevice, cs) != cudaSuccess) {
                 err = "mtp: q split failed";
                 return false;
             }
-            norm_rope(qc, f32("self_attn.q_norm.weight"), (int) NH, (int) HD, pos + t * NH, cs);
-            if (st_.kv_rot) fwht256_inplace_cuda(qc, NH, cs);
+            norm_rope(qcur_, f32("self_attn.q_norm.weight"), (int) (T * NH), (int) HD, pos, cs);
         }
+        if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
         const QsaAttnPools pools = qsa_attn_pools(st_);
         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
         qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
         if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
-        for (int t = 0; t < T; ++t)
-            native_qsa_gate_apply(attn_ + t * NH * HD, qfull_ + t * NH * 2 * HD, attn32_ + t * NH * HD, (int) NH, (int) HD, cs);
+        native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
         native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
         native_mmvq(wt_o_proj, wp_o_proj, xq_, bo_, (int) (NH * HD), (int) N, T, cs);
         // ---- the MLP hyper-connection (the attention write folded in)
