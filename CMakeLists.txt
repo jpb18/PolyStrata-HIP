@@ -1240,13 +1240,16 @@ endif()
 # A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
 # CPU experts' dot products from ggml-cpu.
 if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
-  # The prompt path's quantized products: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the K-quants the routed
-  # experts come in, from the checkout strata_mmq is compiled from and with the same host symbols.  A library of
-  # its own, so that what `strata` multiplies with MMQ stays as it is.
+  # The prompt path's quantized products: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the types the model's
+  # GGUFs keep their matrices in (the list in src/glm/mmq.cu), from the checkout strata_mmq is compiled from and
+  # with the same host symbols.  A library of its own, so that what `strata` multiplies with MMQ stays as it is.
+  set(_strata_glm_mmq_instances "")
+  foreach(_t q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq1_s iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl
+             iq4_xs)
+    list(APPEND _strata_glm_mmq_instances ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
+  endforeach()
   add_library(strata_glm_mmq STATIC src/glm/mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu
-              ${_strata_mmq}/template-instances/mmq-instance-q2_k.cu
-              ${_strata_mmq}/template-instances/mmq-instance-q3_k.cu
-              ${_strata_mmq}/template-instances/mmq-instance-q4_k.cu)
+              ${_strata_glm_mmq_instances})
   target_include_directories(strata_glm_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
                                                     ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_options(strata_glm_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
@@ -1264,8 +1267,9 @@ if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NO
   add_executable(glm_expert_parity src/glm/expert_parity.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu)
   target_include_directories(glm_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                        ${_strata_gpu_include_directories})
-  target_link_libraries(glm_expert_parity PRIVATE strata_kernels ggml-cpu ggml-base ${_strata_gpu_blas_target}
-                                                  ${_strata_gpu_runtime_target} Threads::Threads)
+  target_link_libraries(glm_expert_parity PRIVATE strata_glm_mmq strata_kernels ggml-cpu ggml-base
+                                                  ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
+                                                  Threads::Threads)
 endif()
 
 if(STRATA_BUILD_TESTS)

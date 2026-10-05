@@ -1,11 +1,14 @@
-// src/glm/expert_parity.cpp - a routed expert computed three ways, on the model's own weights.
+// src/glm/expert_parity.cpp - the engine's products on the model's own weights, against ggml's dequantized ones.
 //
 //   glm_expert_parity MODEL.gguf
 //
 // For a few experts of every tensor type the file uses, the GPU path (native_mmvq over the GGUF blocks) and the
-// CPU path (cpu_experts) are compared with a double-precision product over ggml's dequantized weights.  Both
-// quantize their input to 8 bits, so neither is exact; the test fails when one of them is far from the reference.
+// CPU path (cpu_experts) are compared with a double-precision product over ggml's dequantized weights.  Then
+// every kind of matrix in the file (a type and a shape) takes a batch of tokens through the two GPU products,
+// native_mmvq and MMQ.  All of them quantize their input to 8 bits, so none is exact; the test fails when one is
+// far from the reference.  A model in several files: give the file that holds the tensors to check.
 #include "cpu_experts.hpp"
+#include "mmq.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/glm/kernels.hpp"
@@ -20,7 +23,9 @@
 #include <cstdio>
 #include <map>
 #include <random>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -66,21 +71,22 @@ int main(int argc, char** argv) {
     }
     try {
         GgufFile g(argv[1]);
-        const auto meta = [&](const char* k) {
-            const MetaValue* v = g.get(std::string("glm5-next.") + k);
-            if (!v) throw std::runtime_error(std::string("the GGUF has no glm5-next.") + k);
-            return (int) v->u;
-        };
-        const int n_layer = meta("block_count"), n_embd = meta("embedding_length"),
-                  n_ff = meta("expert_feed_forward_length"), n_expert = meta("expert_count");
         const float limit = 10.f;
 
-        // the first layer of every (gate/up type, down type) pair
+        // the first layer of every (gate/up type, down type) pair; the experts' shape says the rest
         std::map<std::pair<uint32_t, uint32_t>, int> layers;
-        for (int il = 0; il < n_layer; ++il) {
-            const TensorInfo* tg = g.find("blk." + std::to_string(il) + ".ffn_gate_exps.weight");
-            const TensorInfo* td = g.find("blk." + std::to_string(il) + ".ffn_down_exps.weight");
-            if (tg && td) layers.emplace(std::make_pair(tg->type, td->type), il);
+        int n_embd = 0, n_ff = 0, n_expert = 0;
+        for (const TensorInfo& tg : g.tensors()) {
+            const size_t at = tg.name.find(".ffn_gate_exps.weight");
+            if (at == std::string::npos || tg.shape.size() != 3) continue;
+            const std::string b = tg.name.substr(0, at);
+            const TensorInfo* tu = g.find(b + ".ffn_up_exps.weight");
+            const TensorInfo* td = g.find(b + ".ffn_down_exps.weight");
+            if (!tu || !td || tu->type != tg.type) continue;
+            n_embd = (int) tg.shape[0];
+            n_ff = (int) tg.shape[1];
+            n_expert = (int) tg.shape[2];
+            layers.emplace(std::make_pair(tg.type, td->type), std::stoi(b.substr(4)));
         }
         if (layers.empty()) throw std::runtime_error("the GGUF has no routed experts");
 
@@ -158,6 +164,86 @@ int main(int argc, char** argv) {
                             pass ? "" : "  FAIL");
             }
             ck(cudaFree(d_w));
+        }
+
+        // Every kind of matrix: a type and a shape, a routed expert's being a matrix each.  The weights sit before
+        // a megabyte of 0xFF bytes, which a product that reads past its matrix turns into NaN.
+        constexpr int kBatch = 40;
+        constexpr size_t kTail = size_t(1) << 20;
+        std::map<std::tuple<uint32_t, uint64_t, uint64_t>, const TensorInfo*> kinds;
+        for (const TensorInfo& t : g.tensors())
+            if ((t.shape.size() == 2 || t.shape.size() == 3) && kernels::native_mmvq_supported((int) t.type))
+                kinds.emplace(std::make_tuple(t.type, t.shape[0], t.shape[1]), &t);
+        glm::Mmq mmq;
+        for (const auto& [key, t] : kinds) {
+            const int n_in = (int) t->shape[0], n_out = (int) t->shape[1];
+            const size_t bytes = tensor_payload_bytes(*t) / (t->shape.size() == 3 ? (size_t) t->shape[2] : 1);
+            const size_t row_bytes = bytes / (size_t) n_out;
+            const uint8_t* w = g.tensor_data(*t);
+
+            std::vector<float> xb((size_t) kBatch * n_in);
+            for (float& v : xb) v = small(rng);
+            for (size_t i = 0; i < xb.size(); i += 97) xb[i] *= 20.f;
+            // the first, the middle and the last rows: the last ones are where a tile runs out
+            std::set<int> rows;
+            for (int r = 0; r < std::min(n_out, 48); ++r) {
+                rows.insert(r);
+                rows.insert(n_out / 2 + r < n_out ? n_out / 2 + r : r);
+                rows.insert(n_out - 1 - r);
+            }
+            std::vector<double> want;
+            std::vector<float> wr((size_t) n_in);
+            for (int r : rows) {
+                ggml_get_type_traits((ggml_type) t->type)->to_float(w + (size_t) r * row_bytes, wr.data(), n_in);
+                for (int b = 0; b < kBatch; ++b) {
+                    double acc = 0.0;
+                    for (int i = 0; i < n_in; ++i) acc += (double) wr[(size_t) i] * xb[(size_t) b * n_in + i];
+                    want.push_back(acc);
+                }
+            }
+
+            uint8_t* d_w = nullptr;
+            float *d_xb, *d_y;
+            void *d_q, *d_mq;
+            const size_t token = kernels::native_q8_1_bytes(n_in);
+            ck(cudaMalloc(&d_w, bytes + kTail));
+            ck(cudaMemset(d_w + bytes, 0xFF, kTail));
+            ck(cudaMemcpy(d_w, w, bytes, cudaMemcpyHostToDevice));
+            ck(cudaMalloc(&d_xb, xb.size() * 4));
+            ck(cudaMalloc(&d_y, (size_t) kBatch * n_out * 4));
+            ck(cudaMalloc(&d_q, (size_t) kBatch * token));
+            ck(cudaMalloc(&d_mq, glm::Mmq::q8_bytes(kBatch, n_in)));
+            ck(cudaMemcpy(d_xb, xb.data(), xb.size() * 4, cudaMemcpyHostToDevice));
+
+            std::vector<float> y((size_t) kBatch * n_out), got(want.size());
+            auto error = [&]() {
+                ck(cudaMemcpyAsync(y.data(), d_y, y.size() * 4, cudaMemcpyDeviceToHost, st));
+                ck(cudaStreamSynchronize(st));
+                size_t k = 0;
+                for (int r : rows)
+                    for (int b = 0; b < kBatch; ++b) got[k++] = y[(size_t) b * n_out + r];
+                const double e = rel_error(got.data(), want);
+                return std::isfinite(e) ? e : 1e9;
+            };
+            kernels::native_quantize_q8_1(d_xb, d_q, n_in * kBatch, 1, st);
+            for (int at = 0; at < kBatch; at += 8)
+                kernels::native_mmvq((int) t->type, d_w, (const uint8_t*) d_q + (size_t) at * token,
+                                     d_y + (size_t) at * n_out, n_in, n_out, std::min(8, kBatch - at), st);
+            const double e_vec = error();
+            const bool tile = glm::Mmq::fits((int) t->type, n_out, n_in);
+            double e_mat = 0.0;
+            if (tile) {
+                ck(cudaMemsetAsync(d_y, 0, y.size() * 4, st));
+                glm::Mmq::quantize(d_xb, nullptr, d_mq, (int) t->type, n_in, n_in, kBatch, st);
+                mmq.mul(d_w, (int) t->type, n_out, n_in, 0, 1, d_mq, nullptr, nullptr, kBatch, kBatch, d_y, n_out, st);
+                e_mat = error();
+            }
+            const bool pass = e_vec < 0.05 && e_mat < 0.05;
+            ok = ok && pass;
+            std::printf("%-8s [%5d -> %6d]  relative error: vector %.4f, batch %s%s  (%s)\n", t->type_name(), n_in,
+                        n_out, e_vec, tile ? std::to_string(e_mat).c_str() : "(no tile)", pass ? "" : "  FAIL",
+                        t->name.c_str());
+            for (void* p : {(void*) d_w, (void*) d_xb, (void*) d_y, d_q, d_mq}) ck(cudaFree(p));
         }
         return ok ? 0 : 1;
     } catch (const std::exception& e) {

@@ -12,6 +12,11 @@
 namespace strata::glm {
 namespace {
 
+// The types with kernels in this build: one template instance each in CMakeLists.txt.
+#define STRATA_GLM_MMQ_TYPES(X)                                                                                \
+    X(Q4_0) X(Q4_1) X(Q5_0) X(Q5_1) X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K)                             \
+    X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS)
+
 int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 
 void ck(const char* what) {
@@ -26,10 +31,19 @@ Mmq::Mmq() { ctx_ = new ggml_backend_cuda_context(ggml_cuda_get_device()); }
 Mmq::~Mmq() { delete (ggml_backend_cuda_context*) ctx_; }
 
 // mul_mat_q_case's own choice: a tile size whose configuration exists for this card and fits its shared memory.
-// It aborts the process when there is none.
-bool Mmq::fits(int type, int64_t w_rows) {
+// It aborts the process when there is none.  The kernels step through a matrix MMQ_ITER_K columns at a time and
+// read a whole step: a matrix with part of one would have the next row's blocks, or what lies behind it, read as
+// its own.
+bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
     const ggml_type t = (ggml_type) type;
-    if (t != GGML_TYPE_Q2_K && t != GGML_TYPE_Q3_K && t != GGML_TYPE_Q4_K) return false;
+    if (w_cols % MMQ_ITER_K != 0) return false;
+    switch (t) {
+#define X(T) case GGML_TYPE_##T:
+        STRATA_GLM_MMQ_TYPES(X)
+#undef X
+        break;
+        default: return false;
+    }
     const bool fallback = w_rows % 128 != 0;
     const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
     for (int J = 8; J <= 128; J += 8) {
@@ -82,9 +96,9 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
     switch (t) {
-        case GGML_TYPE_Q2_K: mul_mat_q_case<GGML_TYPE_Q2_K>(ctx, a, s); break;
-        case GGML_TYPE_Q3_K: mul_mat_q_case<GGML_TYPE_Q3_K>(ctx, a, s); break;
-        case GGML_TYPE_Q4_K: mul_mat_q_case<GGML_TYPE_Q4_K>(ctx, a, s); break;
+#define X(T) case GGML_TYPE_##T: mul_mat_q_case<GGML_TYPE_##T>(ctx, a, s); break;
+        STRATA_GLM_MMQ_TYPES(X)
+#undef X
         default: throw std::runtime_error("mmq: tensor type " + std::to_string(type) + " is not built");
     }
     ck("mmq product");

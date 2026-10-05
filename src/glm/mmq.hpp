@@ -1,6 +1,6 @@
 // src/glm/mmq.hpp - llama.cpp's quantized matrix products (ggml-cuda mmq.cuh, MIT) for the prompt path: the rows
-// of many tokens against matrices that stay in their GGUF type.  Built for Q2_K, Q3_K and Q4_K, the types the
-// routed experts come in.
+// of many tokens against matrices that stay in their GGUF type.  Built for the types the model's GGUFs keep
+// their matrices in: the K-quants, the I-quants and the older Q4, Q5 and Q8.
 //
 // Every call enqueues on the given CUDA stream.  Pointers are device pointers.
 #pragma once
@@ -17,8 +17,8 @@ public:
     Mmq(const Mmq&) = delete;
     Mmq& operator=(const Mmq&) = delete;
 
-    /// This build multiplies ggml_type, and the card has a tile for a matrix of w_rows rows of it.
-    static bool fits(int ggml_type, int64_t w_rows);
+    /// This build multiplies ggml_type, and the card has a tile for a matrix of [w_rows, w_cols] of it.
+    static bool fits(int ggml_type, int64_t w_rows, int64_t w_cols);
     /// Bytes of `rows` rows of `cols` values as quantize() writes them.
     static size_t q8_bytes(int64_t rows, int64_t cols);
 

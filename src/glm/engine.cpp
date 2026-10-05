@@ -444,7 +444,8 @@ void Engine::alloc_state() {
     size_t one_expert = 0;
     for (const Layer& L : layers_) {
         if (!L.moe) continue;
-        tiles = tiles && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_) && Mmq::fits((int) L.d_type, n_embd_);
+        tiles = tiles && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
+                Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
         one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
     }
     if (tiles) mmq_ = std::make_unique<Mmq>();
@@ -710,7 +711,7 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
     if (w.type == kTypeBF16)
         return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
     // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens
-    if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out)) {
+    if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out, w.n_in)) {
         Mmq::quantize(x, nullptr, mqx_, (int) w.type, w.n_in, w.n_in, n, st_);
         return mmq_->mul(w.p, (int) w.type, w.n_out, w.n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, w.n_out, st_);
     }
