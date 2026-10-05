@@ -51,7 +51,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
+from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages, gemma_model_turn,  # noqa: E402
                             images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -1725,9 +1725,21 @@ class Service:
             special = getattr(tokenizer, "special_ids", None) or {}
             self.stop_ids = {special[k] for k in ("tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",
                                                   "tokenizer.ggml.eom_token_id") if k in special}
+        # the tokenizer's own tokens under the names a template knows them by (Gemma's starts with bos_token)
+        special = getattr(tokenizer, "special_ids", None) or {}
+        self.template_tokens = {name: tokenizer.decode([special[key]]) for name, key in (
+            ("bos_token", "tokenizer.ggml.bos_token_id"), ("eos_token", "tokenizer.ggml.eos_token_id"))
+            if key in special}
         # how the model writes a tool call (serve/frontend.py's OutputParser)
         pre = getattr(tokenizer, "pre", "")
         self.call_format = "glm" if pre in ("glm4", "glm5") else "gemma" if pre == "gemma4" else "function"
+        self.think_open_ids = []
+        if self.call_format == "gemma":
+            # after its calls Gemma opens the tools' answer, which is the client's to give: the reply ends there.
+            # Its template opens the reasoning for it after a tool's answer; run() looks for that at the prompt's end
+            answer = tokenizer.encode("<|tool_response>", parse_special=True)
+            self.stop_ids |= set(answer if len(answer) == 1 else [])
+            self.think_open_ids = tokenizer.encode("<|channel>thought\n", parse_special=True)
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -2234,8 +2246,14 @@ class Service:
         empty thinking block).  The engine (--tail-role-token) checkpoints in front of that turn."""
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
+        # said either way: Gemma's template thinks only when told to, the others unless told not to
+        kwargs = {**self.template_tokens, **kwargs, "enable_thinking": not off}
+        if self.call_format == "gemma" and tools:      # its template reads a tool as OpenAI sends it
+            tools = [{"type": "function", "function": t} for t in tools]
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             prompt = self.template.render(messages, tools=tools, **kwargs)
+            if self.call_format == "gemma":
+                return gemma_model_turn(prompt, not off)
             # GLM's template has no switch for thinking and always ends on an open <think>: closing it at once is
             # the empty thinking block the template itself writes into the history
             return prompt + "</think>" if off and prompt.endswith("<think>") else prompt
@@ -2364,7 +2382,9 @@ class Service:
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**defaults, **req_values}
-        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, call_format=self.call_format)
+        opened = bool(self.think_open_ids) and ids[-len(self.think_open_ids):] == self.think_open_ids
+        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, call_format=self.call_format,
+                              opened=opened)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)

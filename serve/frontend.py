@@ -491,6 +491,12 @@ ARG_KEY, ARG_KEY_END = "<arg_key>", "</arg_key>"
 ARG_VALUE, ARG_VALUE_END = "<arg_value>", "</arg_value>"
 
 
+def glm_call_name(text: str) -> str | None:
+    """A GLM call's name, or None while it is still arriving."""
+    at = [i for i in (text.find(ARG_KEY), text.find(CALL_END)) if i >= 0]
+    return text[:min(at)].strip() if at else None
+
+
 def glm_call_end(text: str) -> int:
     """Where a GLM tool call's body ends: the first `</tool_call>` right after the name or an `</arg_value>`, so an
     argument value may contain the tag.  -1: not complete yet."""
@@ -524,19 +530,112 @@ def parse_glm_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     return ToolCall(name=name.strip(), arguments=args)
 
 
+# Gemma 4 writes a call as <|tool_call>call:NAME{key:value,...}<tool_call|>.  A value is a string between two
+# <|"|> tokens, a number, true, false, null, a {key:value} mapping or a [value] list (its chat template's
+# format_argument; llama.cpp's common/parsers/gemma4.cpp reads the same).
+GEMMA_CALL, GEMMA_CALL_END, GEMMA_QUOTE = "<|tool_call>", "<tool_call|>", '<|"|>'
+
+
+def gemma_call_name(text: str) -> str | None:
+    """A Gemma call's name, or None while it is still arriving."""
+    at = [i for i in (text.find("{"), text.find(GEMMA_CALL_END)) if i >= 0]
+    return text[:min(at)].strip().removeprefix("call:") if at else None
+
+
+def gemma_call_end(text: str) -> int:
+    """Where a Gemma tool call's body ends: the first `<tool_call|>` that is not inside a string.  -1: not yet."""
+    pos = 0
+    while True:
+        quote, end = text.find(GEMMA_QUOTE, pos), text.find(GEMMA_CALL_END, pos)
+        if end >= 0 and (quote < 0 or end < quote):
+            return end
+        close = text.find(GEMMA_QUOTE, quote + len(GEMMA_QUOTE)) if quote >= 0 else -1
+        if close < 0:
+            return -1
+        pos = close + len(GEMMA_QUOTE)
+
+
+def _gemma_value(s: str, i: int):
+    """The value of Gemma's call notation that starts at s[i] -> (value, the index after it).  Text that ends
+    early (a call the output stopped in) gives what was there."""
+    while i < len(s) and s[i].isspace():
+        i += 1
+    if s.startswith(GEMMA_QUOTE, i):
+        i += len(GEMMA_QUOTE)
+        end = s.find(GEMMA_QUOTE, i)
+        return (s[i:], len(s)) if end < 0 else (s[i:end], end + len(GEMMA_QUOTE))
+    if s.startswith(("{", "["), i):
+        mapping, close = s[i] == "{", "}" if s[i] == "{" else "]"
+        out, i = ({} if mapping else []), i + 1
+        while True:
+            while i < len(s) and (s[i].isspace() or s[i] == ","):
+                i += 1
+            if i >= len(s) or s[i] == close:
+                return out, i + 1
+            if mapping:
+                colon = s.find(":", i)
+                if colon < 0:
+                    return out, len(s)
+                key, i = s[i:colon].strip().removeprefix(GEMMA_QUOTE).removesuffix(GEMMA_QUOTE), colon + 1
+                out[key], i = _gemma_value(s, i)
+            else:
+                value, i = _gemma_value(s, i)
+                out.append(value)
+    end = i
+    while end < len(s) and s[end] not in ",}]":
+        end += 1
+    word = s[i:end].strip()
+    try:
+        return json.loads(word), end
+    except ValueError:
+        return word, end
+
+
+def parse_gemma_tool_call(body: str, schema: dict | None = None) -> ToolCall:
+    """`call:NAME{key:value,...}` -> ToolCall.  A parameter the tool's schema declares a string stays one when the
+    model wrote it bare."""
+    brace = body.find("{")
+    args = _gemma_value(body, brace)[0] if brace >= 0 else {}
+    props = ((schema or {}).get("parameters") or {}).get("properties") or {}
+    for key, value in args.items():
+        if (props.get(key) or {}).get("type") == "string" and not isinstance(value, str):
+            args[key] = json.dumps(value, ensure_ascii=False)
+    return ToolCall(name=gemma_call_name(body + GEMMA_CALL_END), arguments=args)
+
+
+def gemma_model_turn(prompt: str, thinking: bool) -> str:
+    """Gemma's template opens no turn for the model after an answer that came with text, tool calls and their
+    results: the prompt ends on that closed turn and, with thinking on, on a thought opened outside any turn.  This
+    ends it as the template ends every other prompt.  (llama.cpp adds the turn too, in the case without thinking.)"""
+    thought = "<|channel>thought\n"
+    if prompt.endswith("<turn|>\n" + thought):
+        prompt = prompt[:-len(thought)]
+    if prompt.endswith("<turn|>\n"):
+        prompt += "<|turn>model\n" + ("" if thinking else thought + "<channel|>")
+    return prompt
+
+
 class OutputParser:
     """Incremental parser of the model's text. Feed deltas; get events. A tag split across deltas is held back
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 call_format: str = "function"):
-        self.glm = call_format == "glm"   # GLM's <arg_key>/<arg_value> calls instead of <function=...>
+                 call_format: str = "function", opened: bool = False):
+        # GLM's <arg_key>/<arg_value> calls and Gemma's call:NAME{...} instead of <function=...>: such a call is
+        # announced when its name is complete and its arguments follow whole.  (its name, its end, its parser)
+        self.whole = {"glm": (glm_call_name, glm_call_end, parse_glm_tool_call),
+                      "gemma": (gemma_call_name, gemma_call_end, parse_gemma_tool_call)}.get(call_format)
+        self.call_start, self.call_stop = (GEMMA_CALL, GEMMA_CALL_END) if call_format == "gemma" \
+            else (CALL_START, CALL_END)
         # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; the others' reasoning
-        # is opened by the prompt and ends with </think>
+        # is opened by the prompt and ends with </think>.  `opened`: this prompt ended on Gemma's opening (its
+        # template writes it after a tool's answer), so the reply starts inside the reasoning
         self.think_open, self.think_end = ("<|channel>thought\n", "<channel|>") if call_format == "gemma" \
             else ("", THINK_END)
-        self.opening = thinking and bool(self.think_open)   # the reply may still start with think_open
-        self.state = "reasoning" if thinking and not self.think_open else "content"
+        # the reply may still start with think_open.  Asked not to think, Gemma can still open with a thought
+        # (an empty one, after a tool's answer): it is read either way
+        self.opening = bool(self.think_open) and not opened
+        self.state = "reasoning" if thinking and (opened or not self.think_open) else "content"
         self.buf = ""
         self.lead = False
         self.schemas = {t.get("name"): t for t in tools or []}
@@ -697,11 +796,11 @@ class OutputParser:
                         self.buf = ""
                         return out
                     self.buf, self.lead = stripped, False
-                i = self.buf.find(CALL_START)
+                i = self.buf.find(self.call_start)
                 if i < 0:
                     # Hold a partial tag AND the newlines before it: if a tool call follows, they are dropped,
                     # so emitting them early would make streamed and whole outputs differ.
-                    j = len(self.buf) - self._hold(self.buf, (CALL_START,))
+                    j = len(self.buf) - self._hold(self.buf, (self.call_start,))
                     while j > 0 and self.buf[j - 1] == "\n":
                         j -= 1
                     if j > 0:
@@ -710,21 +809,22 @@ class OutputParser:
                     return out
                 if i and self.buf[:i].strip():
                     out.append(Event("content", self.buf[:i].rstrip("\n")))
-                self.buf = self.buf[i + len(CALL_START):]
+                self.buf = self.buf[i + len(self.call_start):]
                 self.state = "call"
-            elif self.glm:
+            elif self.whole:
                 # the call is announced when its name is complete; its arguments follow whole when it ends
+                name_of, end_of, parse = self.whole
                 if self.stream_tools and self.scall is None:
-                    named = [i for i in (self.buf.find(ARG_KEY), self.buf.find(CALL_END)) if i >= 0]
-                    if named:
-                        self.scall = ToolCall(name=self.buf[:min(named)].strip(), arguments={})
+                    name = name_of(self.buf)
+                    if name is not None:
+                        self.scall = ToolCall(name=name, arguments={})
                         out.append(Event("tool_start", call=self.scall))
-                i = glm_call_end(self.buf)
+                i = end_of(self.buf)
                 if i < 0:
                     return out
                 body = self.buf[:i]
-                self.buf = self.buf[i + len(CALL_END):]
-                call = parse_glm_tool_call(body, self.schemas.get(body.partition(ARG_KEY)[0].strip()))
+                self.buf = self.buf[i + len(self.call_stop):]
+                call = parse(body, self.schemas.get(name_of(body + self.call_stop)))
                 if self.scall is not None:
                     call.id = self.scall.id
                     out.append(Event("tool_args", json.dumps(call.arguments, ensure_ascii=False), call=self.scall))
@@ -766,7 +866,7 @@ class OutputParser:
             return out
         if self.buf:
             kind = {"reasoning": "reasoning", "content": "content"}.get(self.state, "content")
-            text = self.buf if self.state != "call" else CALL_START + self.buf
+            text = self.buf if self.state != "call" else self.call_start + self.buf
             out.append(Event(kind, text))
             self.buf = ""
         return out
