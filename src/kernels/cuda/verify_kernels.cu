@@ -958,30 +958,28 @@ namespace {
 // 7+ tokens lost its last entries)
 constexpr int kResidentPlanMax = 128;
 static_assert(kVerifyMaxT * 10 <= kResidentPlanMax, "resident_plan: one thread per entry");
+// the parallel scan keeps one partial sum per warp in s_wsum[4] and packs (entries << 16 | groups) in an int
+static_assert(kResidentPlanMax <= 128 && kResidentPlanMax % 32 == 0, "resident_plan: at most 4 warps");
+static_assert(kResidentPlanMax < 32768, "resident_plan: the packed entry count must stay below 2^15");
 __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const int32_t* __restrict__ ids, int n, int k, const int32_t* __restrict__ res,
                                      int n_expert, const uint8_t* cache_base, const unsigned long long* slot_off,
                                      long long blob, int32_t* __restrict__ pl, long long capx, uint32_t* skip,
                                      uint32_t ring, volatile uint32_t* plan_err) {
     __shared__ int32_t s_ids[kResidentPlanMax];
-    __shared__ unsigned long long s_ptr[kResidentPlanMax];
-    __shared__ int32_t s_first[kResidentPlanMax];
-    __shared__ int32_t s_cnt[kResidentPlanMax];
-    __shared__ int32_t s_gstart[kResidentPlanMax];
+    __shared__ int32_t s_excl[kResidentPlanMax];
+    __shared__ int32_t s_wsum[4];
     __shared__ int s_bad;
     const int tid = threadIdx.x;
     if (tid == 0) s_bad = 0;
     __syncthreads();
 
     int32_t eid = -1;
+    int32_t slot = -1;
     if (tid < n) {
         eid = ids[tid];
         s_ids[tid] = eid;
-        const int32_t slot = (eid >= 0 && eid < n_expert) ? res[eid] : -1;
-        if (slot < 0) {
-            atomicOr(&s_bad, 1);
-        } else {
-            s_ptr[tid] = (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob));
-        }
+        slot = (eid >= 0 && eid < n_expert) ? res[eid] : -1;
+        if (slot < 0) atomicOr(&s_bad, 1);
     }
     __syncthreads();
     if (s_bad) {
@@ -1004,9 +1002,21 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
                 ++count_same;
             }
         }
-        const bool is_first = (first_j == tid);
-        s_first[tid] = is_first ? 1 : 0;
-        s_cnt[tid] = is_first ? count_same : 0;
+    }
+    const bool is_first = (tid < n && first_j == tid && slot >= 0);
+    const int my_cnt = is_first ? count_same : 0;
+    const int my_pack = (my_cnt << 16) | (is_first ? 1 : 0);
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    int pref = my_pack;
+#pragma unroll
+    for (int d = 1; d < 32; d <<= 1) {
+        const int up = __shfl_up_sync(0xffffffffu, pref, d);
+        if (lane >= d) pref += up;
+    }
+    s_excl[tid] = pref - my_pack;
+    if (lane == 31) {
+        s_wsum[warp] = pref;
     }
     __syncthreads();
 
@@ -1018,27 +1028,30 @@ __global__ void __launch_bounds__(kResidentPlanMax) resident_plan_kernel(const i
     unsigned long long* ptr = (unsigned long long*) (pl + ptr_off);
     int32_t* start2 = pl + ptr_off + 4 * capx;
 
-    if (tid < n && first_j == tid) {
-        int grp_idx = 0;
-        int ent_start = 0;
-        for (int j = 0; j < tid; ++j) {
-            grp_idx += s_first[j];
-            ent_start += s_cnt[j];
+    if (is_first) {
+        int tot = s_excl[tid];
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            if (w < warp) tot += s_wsum[w];
         }
-        ptr[grp_idx] = s_ptr[tid];
+        const int grp_idx = tot & 0xffff;
+        const int ent_start = tot >> 16;
+        ptr[grp_idx] = (unsigned long long) (cache_base + (slot_off ? (size_t) slot_off[slot] : (size_t) slot * (size_t) blob));
         start[grp_idx] = ent_start;
-        s_gstart[tid] = ent_start;
     }
-    __syncthreads();
-
     if (tid < n) {
-        const int out_idx = s_gstart[first_j] + rank_in_group;
+        const int fj_warp = first_j >> 5;
+        int fj_tot = s_excl[first_j];
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            if (w < fj_warp) fj_tot += s_wsum[w];
+        }
+        const int out_idx = (fj_tot >> 16) + rank_in_group;
         dst[out_idx] = tid;
         tok[out_idx] = tid / k;
     }
     if (tid == 0) {
-        int groups = 0;
-        for (int j = 0; j < n; ++j) groups += s_first[j];
+        const int groups = (s_wsum[0] + s_wsum[1] + s_wsum[2] + s_wsum[3]) & 0xffff;
         start[groups] = n;
         start2[0] = n;
         counts[0] = groups;

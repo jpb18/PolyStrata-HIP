@@ -815,6 +815,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(kv_steps_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(kv_steps_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME kv_steps_parity COMMAND kv_steps_parity)
+  # #783 PR-e: the device-built expert plan (parallel grouping + prefix scan) against a host replay of its contract
+  add_executable(resident_plan_parity src/kernels/resident_plan_parity.cpp)
+  target_include_directories(resident_plan_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(resident_plan_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME resident_plan_parity COMMAND resident_plan_parity)
   if(STRATA_HIP_GFX906)
     # the S6 router (STRATA_HIP_ROUTER_FAST=1 on gfx906) against the portable kernel, bitwise, on wave64
     add_executable(hip_router_fast tests/hip/router_fast.cpp)
