@@ -14,8 +14,9 @@ large, smart AI model that usually needs a server. It chats, writes code, reads 
 and coding agents. Nothing leaves your PC.
 
 > **This fork** adds a second engine that runs **GLM 5.3 Flash** beside Qwen3.8-Flash-Next. On an RTX 5090 (32 GB)
-> it writes 27 tokens per second and reads prompts at 312 to 373. It is early, Linux and NVIDIA only, and set up by
-> hand: [docs/GLM.md](docs/GLM.md). The rest of this page is upstream [Strata](https://github.com/Niko1221/Strata)'s.
+> it writes 27 tokens per second and reads prompts at 312 to 373. It is early, Linux and NVIDIA only, and installed
+> with `./setup.sh --family glm`: [docs/GLM.md](docs/GLM.md). The rest of this page is upstream
+> [Strata](https://github.com/Niko1221/Strata)'s.
 
 ## How fast is it?
 

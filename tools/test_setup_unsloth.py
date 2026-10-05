@@ -448,7 +448,7 @@ class IQ4XS(Base):
         fam_line = next(ln for ln in out.splitlines() if ln.startswith("  4) "))
         self.assertIn("Qwen3.8-Flash-Next (Unsloth)", fam_line)
         self.assertIn("UD-IQ4_XS: a 94 GB download", fam_line)
-        self.assertNotIn("[experimental]", out)
+        self.assertNotIn("[experimental]", fam_line)   # (GLM 5.3 Flash's line has it)
         size_lines = [ln for ln in out.splitlines() if ln.startswith(("  1) UD-", "  2) UD-"))]
         self.assertEqual(len(size_lines), 2, out)
         self.assertTrue(size_lines[0].startswith("  1) UD-IQ4_XS ~4-bit"), size_lines[0])

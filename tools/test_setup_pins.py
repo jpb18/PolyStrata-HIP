@@ -53,6 +53,8 @@ class HuggingFacePins(unittest.TestCase):
     def test_every_model_url_is_pinned(self):
         for name, fam in setup.FAMILIES.items():
             for key in ("hf", "mmproj_hf"):
+                if key == "mmproj_hf" and "mmproj" not in fam:   # GLM 5.3 Flash: no image encoder
+                    continue
                 with self.subTest(family=name, key=key):
                     self.assertRegex(fam[key], SHA)
                     self.assertNotIn("/resolve/main/", fam[key])

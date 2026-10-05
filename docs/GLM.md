@@ -4,8 +4,7 @@ This fork adds a second engine, `strata-glm`, that runs GLM 5.3 Flash. It sits b
 Qwen3.8-Flash-Next as before. The server, the web app and the API are the same for both: a run config names the
 engine it starts.
 
-It is early. It has been built and run on one machine, with Linux and one NVIDIA card. Setup does not offer it yet,
-so the steps below are done by hand.
+It is early. It has been built and run on one machine, with Linux and one NVIDIA card.
 
 ## What it was measured on
 
@@ -14,6 +13,7 @@ so the steps below are done by hand.
 | Graphics card | RTX 5090, 32 GB |
 | CPU | Xeon Platinum 8470Q, 24 threads used |
 | RAM | 120 GiB |
+| Built with | CUDA 12.8 |
 | Model | `GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf`, 113.6 GB, from [neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) |
 | Context | 32K |
 
@@ -33,19 +33,46 @@ such a tie.
 
 ## What you need
 
-- Linux and an NVIDIA card with the CUDA toolkit. It has only run on 32 GB of VRAM.
-- RAM for the model file. The file is mapped, and the experts that are not in VRAM are read from it while the
-  model answers, so the 113.6 GB should fit in RAM beside everything else.
-- The GGUF above. It is one file of 113.6 GB.
+- Linux and an NVIDIA card, RTX 20 or newer. It has only run on 32 GB of VRAM. About 12 GB go to the weights, the
+  caches and the buffers before any expert, so setup stops and asks below 14 GB.
+- RAM for the experts the card does not hold. The file is mapped and they are read from it while the model answers,
+  so they should stay in the OS file cache: about 86 GB of the 107 GB on a 32 GB card. Setup's estimate for that card
+  is 96 GB of RAM. It has run with 120 GB only.
+- 114 GB of disk for the model file.
 
-## Build
+## Install
+
+```
+./setup.sh --family glm
+```
+
+Setup checks the PC and asks two things: the context, and whether to keep several conversations in RAM. Then it
+compiles the engine, downloads the model, checks its SHA-256 and starts it. The web app is at
+`http://127.0.0.1:8080`. After that, `./setup.sh` starts the model again without asking.
+
+- The compile needs g++ and the CUDA toolkit (12.8 or newer for an RTX 50 card). Setup offers to install what is
+  missing. No release ships `strata-glm` yet.
+- You already have the GGUF: `./setup.sh --family glm --gguf-dir /folder/with/the/file`.
+- The other options are the README's: `--context`, `--port`, `--host`, `--api-key`, `--gpu`, `--yes`, `--no-start`.
+  The ones for the Qwen engine (`--kv`, `--vision`, `--low-ram`, `--parallel`, ...) are named and left out.
+
+On the test machine, with the file already on the disk, this took about five minutes.
+
+Setup writes the run config `strata-glm-3.0bit.json` and `run-glm-3.0bit.sh` into the Strata folder, the engine into
+`engine-glm/`, and the tokenizer and the expert profile into the data folder. The profile starts as the counts in
+`data/expert-profile-glm.txt`, which come from the test runs here, and the engine updates it every time it stops.
+
+A 64K or 128K context starts and answers, with an expert cache 0.8 or 2.6 GiB smaller. No long prompt has been read
+at those sizes.
+
+## Without setup
+
+Build the engine:
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON
 cmake --build build --target strata-glm
 ```
-
-## Run
 
 Write the tokenizer out of the GGUF once:
 
@@ -144,8 +171,9 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 
 ## What is missing
 
-- Setup does not offer GLM, and there are no release builds of `strata-glm`.
-- Windows, AMD and Intel cards, and more than one card.
+- Release builds of `strata-glm`: setup compiles it.
+- Windows. Nothing has been compiled there, and setup asks before it tries.
+- AMD and Intel cards, and more than one card.
 - Pictures. The model's image input is not read.
 - Several requests decoded together (`"parallel"`). Requests wait their turn.
 - `--prompt-cache-root` and `--turn-token`. Checkpoints are taken by position.

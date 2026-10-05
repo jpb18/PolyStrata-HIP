@@ -20,6 +20,10 @@ What the first run does (each step is skipped when it is already done):
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
+GLM 5.3 Flash (--family glm, docs/GLM.md) is a second model with an engine of its own, compiled here: Linux, one
+NVIDIA card.  Its setup asks for the context and the conversation cache and has no steps for a pack, a draft layer or
+images.
+
 Options: --family qwen|swift, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
@@ -67,6 +71,7 @@ HF_REVISIONS = {
     "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF": "b22d729eae29b5796f76fb70f91aef549b9fc52c",   # 2026-09-24
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": "5348543e0147355ac9cbcb031184a3546350988e",  # 2026-09-29
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
+    "neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF": "7feedfeb5ee924bfbe0064c63b124728b443ddc0",  # 2026-09-26
 }
 
 
@@ -149,6 +154,12 @@ MODELS = {
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38),
                   "vision": True},
+    # GLM 5.3 Flash (docs/GLM.md): one GGUF, read in place by its own engine (glm_setup).  107 GB of the file are
+    # experts; the ones the GPU does not hold come through the OS file cache.  "ram_gb" is glm_ram_need() for a
+    # 32 GB card, an estimate: it has run with 120 GB of RAM only
+    "3.0BIT": {"about": "3-bit GSQ-RCO experts with Q4_K attention, the one size there is", "download_gb": 113.6,
+               "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",), "shards": 1,
+               "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"},
 }
 # The experimental Unsloth file's four shards at the pinned revision: name -> (bytes, sha256), checked after the
 # download (setup trusts no other model file by name and size alone either: check_shards reads their directories).
@@ -214,6 +225,16 @@ FAMILIES = {
                 "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-unsloth",
                 "vision": False, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
+    # GLM 5.3 Flash: another architecture (llama.cpp's glm5-next), run by strata-glm from its one GGUF - no pack,
+    # no draft layer, no image encoder.  "engine": its setup is glm_setup, not main()'s steps (docs/GLM.md)
+    "glm": {"title": "GLM 5.3 Flash", "by": "GSQ-RCO 3-bit file from neuralll",
+            "about": "another model, with its own engine: Linux, one NVIDIA card (run on 32 GB), ~128 GB of RAM",
+            "hf": hf("neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF"),
+            "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf", "shards": 1, "tag": "glm-",
+            "name": "glm-5.3-flash", "engine": "glm", "vision": False, "experimental": True,
+            "profile": "expert-profile-glm.txt",
+            "sha256": {"GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf":
+                       (113585695168, "5f03b74ffe7513479795ca60a0fd8c40cbb3101769672b2c91b3df01138d9f6d")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -225,6 +246,15 @@ VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
           "cpu": {"max_tokens": 300, "reserve_mib": 700}}
 EXE = "strata.exe" if WIN else "strata"
 VEXE = "strata-vision.exe" if WIN else "strata-vision"
+# GLM 5.3 Flash's engine.  No release ships it yet: it is compiled here, into a folder of its own like the CUDA 12
+# engine's, so the ready-made engine beside it stays as it was downloaded
+GEXE = "strata-glm.exe" if WIN else "strata-glm"
+ENGINE_GLM_DIR = "engine-glm"
+GLM_CONTEXTS = [8192, 32768, 65536, 131072]
+GLM_ROW_BYTES = 28160           # VRAM per context token: a row in each of the 11 sparse attention layers' caches
+GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve)
+GLM_RAM_BESIDE_GB = 10          # RAM beside the experts in the file cache: the OS, the server, the engine's buffers
+GLM_CONV_CACHE_MIB = 8192       # --conversation-cache-mib when setup turns it on
 
 
 # ------------------------------------------------------------------------------------------------ output
@@ -2146,8 +2176,9 @@ def install_build_tools(gpu, yes):
              (f"; found CUDA {cuda_v[0]}.{cuda_v[1]}" if nvcc else ""),
              "install CUDA 12.9 (it can sit next to a newer one) from https://developer.nvidia.com/cuda-toolkit-archive "
              "and run it again (STRATA_NVCC=<its nvcc> picks one toolkit)")
-    # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220)
-    need_cuda = need12 if old else (13, 0) if max(archs) >= 120 else (12, 0)
+    # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220).
+    # gpu["need_cuda"]: another engine's own floor (strata-glm, which is another prompt path: build_engine_glm)
+    need_cuda = need12 if old else gpu.get("need_cuda") or ((13, 0) if max(archs) >= 120 else (12, 0))
     vcvars = find_vcvars() if WIN else None
     have_cc = vcvars is not None if WIN else shutil.which("g++") is not None
     missing = []
@@ -3026,6 +3057,8 @@ def update_install(have: list, a) -> int:
         update_installed_engine(a.prebuilt)
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
+        if glm_config(cfg):
+            update_glm_engine(cfg)
         if "--mtp" in cfg["args"][:-1]:
             refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
         if cfg.get("backend") == "hip" and WIN:
@@ -3071,6 +3104,12 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
+    glm = glm_config(cfg)                              # GLM 5.3 Flash: one card, and an engine compiled here
+    if glm:
+        if isinstance(gpu, list):
+            warn(f"{cfg.get('model_name', 'this model')} runs on one GPU: GPU {gpu[0]} alone")
+            gpu = gpu[0]
+        update_glm_engine(cfg, yes)
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
     reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
     if reserve is not None:
@@ -3140,7 +3179,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     elif gpu is not None:                              # --gpu N: this start only, on that card
         check_gpus([gpu], found)
         cmd += ["--gpu", str(gpu)]
-    else:
+    elif not glm:
         cfg = offer_together(cfg_path, cfg, yes)
     use = gpu if gpu is not None else cfg.get("gpu")
     # #364 #384: a resident low-RAM config on several GPUs; #498: a UD-Q4_K_XL config with its RAM budget (by hand)
@@ -3157,22 +3196,28 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         g = next((x for x in found if x["index"] == use), None) if use is not None else max(
             found, key=lambda x: (round(x["vram_gb"]), -x["index"]))
         if g is not None:
-            cfg = ensure_engine_for([g], cfg_path, cfg, yes)
+            if not glm:
+                cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
     browser = open_browser and cfg.get("open_browser") is not False   # #609: "open_browser": false, --no-browser
     if browser:
         cmd.append("--open")
     gb = 0.0
-    if "--native" in cfg["args"]:
-        try:
-            gb = Path(cfg["args"][cfg["args"].index("--native") + 1]).stat().st_size / 1e9
-        except (OSError, IndexError):
-            pass
+    for flag in ("--native", "--model"):
+        if flag in cfg["args"]:
+            try:
+                gb = Path(cfg["args"][cfg["args"].index(flag) + 1]).stat().st_size / 1e9
+            except (OSError, IndexError):
+                pass
     say()
     say("  " + "-" * 100)
     size = f'about {gb:.0f} GB' if gb >= 1 else '34-55 GB'
     a_ = cfg["args"]
-    if "--mmap-experts" in a_ and "--resident-budget-gib" not in a_ and "--resident-experts" not in a_:
+    if glm:
+        say(f"  Starting {cfg.get('model_name', 'the model')}: it reads the model file ({size}) in place: the weights "
+            "go to the GPU,")
+        say("  and the OS file cache keeps the experts the GPU does not hold.")
+    elif "--mmap-experts" in a_ and "--resident-budget-gib" not in a_ and "--resident-experts" not in a_:
         # #505: the mapped low-RAM mode loads nothing into RAM up front (the server's narrator says the same)
         say(f"  Starting {cfg.get('model_name', 'the model')}: it maps {size} of experts from the model files (the OS "
             "file cache reads them).")
@@ -3503,6 +3548,286 @@ def resolve_rope(ctx: int, scaling, scale, trained: int = 262144):
     return scaling or "yarn", scale if scale is not None else derived_factor(ctx, trained)
 
 
+# ------------------------------------------------------------------------------------------------ GLM 5.3 Flash
+def glm_config(cfg: dict) -> bool:
+    """A run config of the GLM engine."""
+    return Path(str(cfg.get("exe", ""))).name == GEXE
+
+
+def glm_held_gb(model, vram_gb) -> float:
+    """About the GB of the model's experts a card with this much VRAM (GiB) holds at a 32K context."""
+    return min(MODELS[model]["arena_gb"], max(0.0, vram_gb - GLM_VRAM_BESIDE_GB) * 1.073741824)
+
+
+def glm_ram_need(model, vram_gb) -> float:
+    """About the GB of RAM the model wants on that card: the experts the card does not hold, in the OS file cache,
+    and room for the rest.  An estimate from one machine (32 GB of VRAM, 120 GB of RAM)."""
+    return MODELS[model]["arena_gb"] - glm_held_gb(model, vram_gb) + GLM_RAM_BESIDE_GB
+
+
+def glm_verdict(model, ram, vram_gb, hip) -> str:
+    """--check's line for GLM 5.3 Flash."""
+    if hip:
+        return "does not run on AMD cards (its engine is a CUDA program)"
+    if vram_gb < GLM_VRAM_BESIDE_GB + 2:
+        return f"does not fit: it takes about {GLM_VRAM_BESIDE_GB} GB of VRAM before any expert"
+    need = glm_ram_need(model, vram_gb)
+    return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN else "") + (
+        f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)" if ram >= need - 4 else
+        f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
+
+
+def glm_saved_conv(paths) -> int | None:
+    """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is), 0 when that
+    config has none; None without an earlier config: setup then asks."""
+    for p in paths:
+        if p is None or not p.is_file():
+            continue
+        try:
+            args = json.loads(p.read_text(encoding="utf-8-sig")).get("args")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(args, list):
+            v = str(args[args.index("--conversation-cache-mib") + 1]) if "--conversation-cache-mib" in args[:-1] else ""
+            return int(v) if v.isdigit() else 0
+    return None
+
+
+def build_engine_glm(gpu, yes, llama) -> Path:
+    """Compile strata-glm for this GPU; the result goes to engine-glm/.  It is compiled again when its source
+    changed (a `git pull`) or the card is one it has no code for."""
+    eng = ROOT / ENGINE_GLM_DIR
+    eng.mkdir(exist_ok=True)
+    stamp = eng / "BUILD.json"
+    meta = json.loads(stamp.read_text()) if stamp.exists() else {}
+    src = source_hash(ENGINE_SOURCES)
+    built = {int(x) for x in meta.get("archs", [])}
+    archs = sorted(built | {int(x) for x in gpu.get("archs", [gpu["arch"]])})
+    have = (eng / GEXE).exists()
+    if have and meta.get("src") == src and set(archs) == built:
+        ok("GLM engine already built for this PC")
+        return eng
+    # CUDA 12.8 is the toolkit it was written and measured with, on an RTX 5090: the Qwen engine's reason to want 13.0
+    # there (#220, its prompt path) is not this engine's
+    nvcc, vcvars = install_build_tools({**gpu, "archs": archs, "toolkit": 13,
+                                        "need_cuda": (12, 8) if max(archs) >= 120 else (12, 0)}, yes)
+    say("  The GLM engine's source changed: compiling it again (only what changed, a few minutes) ..."
+        if have and set(archs) == built else "  Compiling the GLM engine for your GPU (some minutes, once) ...")
+    bdir = ROOT / "build-glm"
+    cmake_build(ROOT, bdir, "strata-glm",
+                ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
+                 f"-DCMAKE_CUDA_ARCHITECTURES={';'.join(str(x) for x in archs)}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
+                 f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata-glm.bat")
+    shutil.copy2(bdir / GEXE, eng / GEXE)
+    bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
+    dirs = [str(x) for x in (bindir, bindir / "x64", bindir.parent / "lib64") if x.is_dir()]
+    stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs, "cuda_dirs": dirs,
+                                 "src": src}, indent=1))
+    ok(f"GLM engine compiled: {eng / GEXE}")
+    return eng
+
+
+def update_glm_engine(cfg: dict, yes=False) -> None:
+    """Before a GLM model starts: the engine setup compiled is compiled again when its source changed (a `git pull`)
+    or the card is another generation.  A compile that fails must not stop the start: the installed one runs."""
+    eng = Path(cfg["exe"]).parent
+    stamp = eng / "BUILD.json"
+    if eng != ROOT / ENGINE_GLM_DIR or not stamp.exists():   # an engine of the user's own
+        return
+    try:
+        meta = json.loads(stamp.read_text())
+        gpu = gpu_info(cfg["gpu"] if isinstance(cfg.get("gpu"), int) else None)
+        if gpu is None:
+            raise RuntimeError("no NVIDIA GPU found")
+        if meta.get("src") == source_hash(ENGINE_SOURCES) and int(gpu["arch"]) in [int(x) for x in meta.get("archs", [])]:
+            return
+        build_engine_glm(gpu, yes, get_llama_cpp())
+    except (Exception, SystemExit) as e:
+        warn(f"could not compile the updated GLM engine{'' if isinstance(e, SystemExit) else f' ({e})'}: "
+             "starting the installed one")
+
+
+def glm_setup(a, fam, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted) -> int:
+    """Steps 2 to 7 for GLM 5.3 Flash (docs/GLM.md): its questions, the Python packages, the engine (compiled here),
+    the model file, its tokenizer and expert profile, the run config and the start script."""
+    title = fam["title"]
+    if hip:
+        fail(f"{title} runs on NVIDIA cards only: its engine is a CUDA program",
+             "choose another model for the AMD card")
+    if cuda_tk == 12:
+        fail(f"{title}'s engine is built with CUDA 13: there is none for Pascal / Volta cards or --cuda 12",
+             "use an RTX 20 card or newer, without --cuda 12")
+    if WIN:
+        confirm_risk(f"{title}'s engine has been compiled and run on Linux only: on Windows the compile may fail",
+                     bool(a.family), a.yes, f"{title} has not been tried on Windows",
+                     "use Linux, or --family glm --yes to try it here")
+    if multi:
+        warn(f"{title} runs on one GPU: {gpu_name(gpu)} alone")
+    unused = [flag for flag, given in (
+        ("--vision", a.vision not in (None, "no", "none")), ("--vision-tokens", a.vision_tokens is not None),
+        ("--kv", a.kv), ("--kv-streaming", a.kv_streaming != "auto"), ("--rope-scaling", a.rope_scaling),
+        ("--rope-scale", a.rope_scale is not None), ("--low-ram", a.low_ram != "auto"),
+        ("--resident-budget-gib", a.resident_budget_gib is not None), ("--parallel", a.parallel is not None),
+        ("--draft-vocab", a.draft_vocab), ("--layer-split", a.layer_split), ("--calibrate", a.calibrate),
+        ("--experimental-speed-projection",
+         (a.experimental_speed_projection or "off").strip().lower() not in ("off", "no", "n", "0"))) if given]
+    if unused:
+        warn(f"not used with {title} (its engine has no such setting): " + ", ".join(unused))
+
+    names = [m for m in MODELS if "glm" in MODELS[m].get("families", ())]
+    if a.model and a.model not in names:
+        fail(f"{title} has no {a.model} model file", "choose one of: " + ", ".join(names))
+    model = a.model or names[0]
+    d = MODELS[model]
+    vram = gpu["vram_gb"]
+    held, need_ram = glm_held_gb(model, vram), glm_ram_need(model, vram)
+    say()
+    say(f"  {model}: {d['about']}; download {d['download_gb']:.0f} GB. The file is read in place: about {held:.0f} of")
+    say(f"  its {d['arena_gb']:.0f} GB of experts fit this card, the rest stay in RAM (the OS file cache).")
+    if vram < GLM_VRAM_BESIDE_GB + 2:
+        confirm_risk(f"{title} takes about {GLM_VRAM_BESIDE_GB} GB of VRAM before any expert (measured on a 32 GB "
+                     f"card at a 32K context); {gpu_name(gpu)} has less than it takes to start", bool(a.model), a.yes,
+                     f"{title} needs more VRAM than {vram:.0f} GB",
+                     f"--family glm --model {model} --yes installs it anyway")
+        warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
+    elif vram < 30:
+        warn(f"{title} has run on a 32 GB card only. On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of its "
+             "experts fit in VRAM (20% there): more of every answer is computed on the CPU, so it is slower")
+    if ram < need_ram - 4:
+        confirm_risk(f"RAM: {ram:.0f} GB. {title} wants about {need_ram:.0f} GB on this card by setup's estimate: the "
+                     f"{d['arena_gb'] - held:.0f} GB of experts the GPU does not hold are read through the OS file "
+                     "cache. With less RAM they come from the SSD while it answers: expect it to be much slower (not "
+                     "measured)", bool(a.model), a.yes,
+                     f"{title} wants about {need_ram:.0f} GB of RAM; this PC has {ram:.0f}",
+                     f"--family glm --model {model} --yes installs it anyway")
+        warn(f"going on with {ram:.0f} GB of RAM, as you chose")
+    ok(f"size: {model}")
+    tag = fam["tag"] + model                           # names of the config, the start script and the data folders
+
+    if a.context:
+        ctx = a.context
+        if not 16 <= ctx <= 1048576:
+            fail(f"--context {ctx}: {title} takes 16 to 1048576 tokens")
+    else:
+        say()
+        say("  Context length = how much text the model can see at once (your chat, files, tool output).")
+        say("  Longer takes VRAM from the expert cache:")
+        for i, c in enumerate(GLM_CONTEXTS, 1):
+            note = "   (recommended: the one it was measured with)" if c == 32768 else \
+                f"   ({(c - 32768) * GLM_ROW_BYTES / 1e9:.1f} GB more VRAM; started, no long prompt run)" if c > 32768 else ""
+            say(f"  {i}) {c // 1024}K tokens{note}")
+        ctx = GLM_CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(GLM_CONTEXTS) + 1)],
+                                   str(GLM_CONTEXTS.index(32768) + 1), a.yes)) - 1]
+    ok(f"context: {ctx} tokens")
+
+    # the conversation cache: asked once, then kept as the model's run config has it
+    cfg_path = ROOT / f"strata-{tag.lower()}.json"
+    conv = glm_saved_conv([cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None])
+    if conv is None:
+        say()
+        say("  Conversation cache: a coding agent sends several conversations in turn (the main one, its subagents,")
+        say("  short side requests). With the cache, one that makes room for another is kept in RAM and comes back")
+        say(f"  without being read again. It takes what it holds, up to {GLM_CONV_CACHE_MIB // 1024} GB of RAM.")
+        room = ram >= need_ram + GLM_CONV_CACHE_MIB / 1024
+        conv = GLM_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
+                                         a.yes) == "y" else 0
+    ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
+
+    models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
+    gguf = models_dir / fam["file"]
+    if a.gguf_dir and not gguf.exists():
+        fail(f"{models_dir} has no {gguf.name}",
+             "put the file there under that name, or leave out --gguf-dir and setup downloads it")
+    if not a.gguf_dir and not (gguf.exists() and done(gguf)):
+        for r in elsewhere:                            # already downloaded in a Strata folder on another drive
+            cand = r / "models" / tag / gguf.name
+            if cand.exists() and done(cand):
+                models_dir, gguf = cand.parent, cand
+                ok(f"model file found in {models_dir}")
+                break
+    if gguf.exists() and not done(gguf) and whole_shard(gguf):   # #173: a whole file copied in by hand
+        mark(gguf, "whole (checked against its own tensor directory)")
+    have_model = gguf.exists() and (done(gguf) or bool(a.gguf_dir))
+    on_disk = sum(f.stat().st_size for f in (gguf, gguf.with_name(gguf.name + ".part")) if f.is_file()) / 1e9
+    need = (0 if have_model else max(d["download_gb"] - on_disk, 0)) + 2
+    if free_gb(models_dir) < need:
+        fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
+             (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
+             "use --models-dir on a bigger drive")
+
+    step(3, "Python packages")
+    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
+                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+
+    step(4, "the GLM engine")
+    llama = get_llama_cpp()
+    ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml)")
+    eng = build_engine_glm(gpu, a.yes, llama)
+    lib_dirs = json.loads((eng / "BUILD.json").read_text()).get("cuda_dirs") or cuda_lib_dirs(13)
+    ok(f"engine: {eng / GEXE}")
+
+    step(5, f"downloading {title} {model}")
+    if not have_model:
+        say(f"  The model file goes in {models_dir}")
+        say(f"  A file you already have: put it there with its original name ({gguf.name}), or use --gguf-dir "
+            "<its folder>.")
+        if hf_endpoint() != HF_DEFAULT:
+            say(f"  Downloading from {hf_endpoint()} (HF_ENDPOINT)")
+        download(fam["hf"] + gguf.name, gguf)
+    check_shards([gguf])
+    verify_sha256(gguf, *fam["sha256"][gguf.name])
+    ok("model file present")
+
+    step(6, "preparing the model for Strata")
+    pack = find_in([data, *elsewhere], f"packs/{tag.lower()}") or data / "packs" / tag.lower()
+    if not (pack / "tokenizer" / "vocab.json").exists():
+        run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
+            env=dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py")))   # writes <pack>/tokenizer/
+    # The engine counts which experts are used and writes the counts back when it stops, so its profile is a file of
+    # this install's own: it starts as the counts the repository ships.
+    profile = pack / "expert-profile.txt"
+    if not profile.exists():
+        pack.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "data" / fam["profile"], profile)
+    ok(f"model prepared: {pack}")
+
+    step(7, "writing the start script")
+    args = ["--model", str(gguf), "--max-context", str(ctx), "--expert-profile", str(profile)]
+    if conv:
+        args += ["--conversation-cache-mib", str(conv)]
+    if a.vram_reserve_mib is not None:
+        args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
+        ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
+           "that much less)")
+    cfg = {"exe": str(eng / GEXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+           "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+           "lib_dirs": lib_dirs, "port": port}
+    if gpu["count"] > 1 or a.gpu is not None:
+        cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
+        cfg["gpus_asked"] = True
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    if a.browser is not None:
+        cfg["open_browser"] = a.browser
+    write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
+    script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
+    ok(f"start script: {script.name}")
+
+    say()
+    say("All set.")
+    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1   (any API key; model name: anything)")
+    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
+    if a.host and a.host not in ("127.0.0.1", "localhost"):
+        say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{port}/)"
+            + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
+    say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
+    if a.no_start:
+        return 0
+    return start(cfg_path, port)
+
+
 # ------------------------------------------------------------------------------------------------ main
 def sycl_setup(argv) -> int:
     """--backend sycl: the Intel Arc engine (the SYCL port in sycl/, PR #423), experimental. There is no ready-made
@@ -3532,7 +3857,8 @@ def sycl_setup(argv) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--family", choices=list(FAMILIES), help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5")
+    ap.add_argument("--family", choices=list(FAMILIES),
+                    help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, glm = GLM 5.3 Flash (docs/GLM.md)")
     ap.add_argument("--model", choices=list(MODELS))
     ap.add_argument("--context", type=int)
     ap.add_argument("--rope-scaling", choices=["none", "linear", "yarn"],
@@ -3688,7 +4014,10 @@ def main() -> int:
             for i, c in enumerate(have, 1):
                 say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        if not calibrate_config(pick_cfg):             # #447: said again where it is not lost above the start
+        if glm_config(json.loads(pick_cfg.read_text(encoding="utf-8-sig"))):
+            warn("--calibrate measures settings of the Qwen engine: GLM 5.3 Flash's engine has none of them, so "
+                 "nothing is tuned")
+        elif not calibrate_config(pick_cfg):           # #447: said again where it is not lost above the start
             say()
             warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
                  + ("keeps" if a.no_start else "starts with") + " the default settings")
@@ -3839,7 +4168,9 @@ def main() -> int:
         say()
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
-            if d.get("budget"):
+            if "glm" in d.get("families", ()):
+                verdict = glm_verdict(m, ram, gpu["vram_gb"], hip)
+            elif d.get("budget"):
                 verdict = (("EXPERIMENTAL, " if d.get("experimental") else "") +
                            f"fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
                            "read from the SSD" if ram >= d["ram_gb"] else "does not fit")
@@ -3867,6 +4198,8 @@ def main() -> int:
     ok(f"model: {fam['title']}")
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
+    if fam.get("engine") == "glm":                     # another engine: its own questions and steps
+        return glm_setup(a, fam, gpu, hip, cuda_tk, bool(multi), ram, data, elsewhere, port, adopted)
     say()
     names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
     names.sort(key=lambda m: bool(MODELS[m].get("experimental")))   # an experimental size last, never the default
