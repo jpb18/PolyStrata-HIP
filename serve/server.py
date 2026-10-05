@@ -36,6 +36,7 @@ import select
 import signal
 import socket
 import struct
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,66 @@ from serve.responses import ResponsesError, error_body as responses_error_body  
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
+
+
+def popen(what: str, args: list, **kw):
+    """#735: subprocess.Popen, but Windows' refusal to start a program (WinError 4551, or 1260 when a policy blocks it:
+    Smart App Control on a clean Windows 11 blocks an exe that is not signed) is said in words instead of a bare
+    OSError."""
+    try:
+        return subprocess.Popen(args, **kw)
+    except OSError as e:
+        if getattr(e, "winerror", None) in (4551, 1260):
+            raise OSError(f"Windows blocked {what} ({args[0]}): Smart App Control, or an application-control policy, does "
+                          "not let a program that is not signed run. Turn Smart App Control off (Windows Security > App "
+                          "& browser control > Smart App Control settings), or - for the image encoder only - run setup "
+                          "with --vision no (see docs/TROUBLESHOOTING.md)") from e
+        raise
+
+
+def listen_problem(host: str, port: int, e: OSError) -> str:
+    """#769: why the server cannot listen.  Only an address that is taken says "already in use"; anything else (a port
+    Windows keeps reserved, an address this PC does not have, no permission) says what the OS said."""
+    import errno
+    code = getattr(e, "winerror", None) or e.errno
+    if code in (errno.EADDRINUSE, 10048):
+        return (f"port {port} is already in use - is Strata (or another server) already running? "
+                f"Close it, or start this one with a different --port")
+    what = e.strerror or str(e)
+    if code in (10013, errno.EACCES):
+        hint = ("Windows may keep this port for itself (see `netsh int ipv4 show excludedportrange protocol=tcp`) "
+                "or a firewall rule forbids it: start this one with a different --port")
+    elif code in (10049, errno.EADDRNOTAVAIL):
+        hint = f"{host} is not an address of this PC: check \"host\" in the model's strata-<model>.json or --host"
+    else:
+        hint = "check --host and --port"
+    return f"cannot listen on {host}:{port}: {what} [{code}]. {hint}"
+
+
+def combined_embeddings_path(vision_dir: Path, nbytes: int) -> Path:
+    """#874: where one request's combined image-embeddings file goes.  Every request with images rewrites it (it is
+    deleted after the request), which on a disk is steady heavy writing: on Linux it goes to /dev/shm when that has
+    room (the engine reads it back at once), on Windows the file is opened short-lived (the cache is not forced out
+    to the drive).  Anywhere else, or when /dev/shm is too small (Docker's default is 64 MB), it stays in the encoder's
+    own directory, as before."""
+    name = f"req-{uuid.uuid4().hex[:12]}.sve"
+    shm = Path("/dev/shm")
+    if os.name != "nt" and shm.is_dir() and os.access(shm, os.W_OK):
+        try:
+            if shutil.disk_usage(shm).free > 2 * nbytes + (16 << 20):
+                return shm / f"strata-vision-{os.getpid()}-{name}"
+        except OSError:
+            pass
+    return Path(vision_dir) / name
+
+
+def write_temporary(path: Path, parts: list) -> None:
+    """#874: write `parts` (files) one after the other into `path`; on Windows with FILE_ATTRIBUTE_TEMPORARY
+    (os.O_SHORT_LIVED), so the file normally never reaches the drive before it is deleted."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0) | getattr(os, "O_SHORT_LIVED", 0)
+    with os.fdopen(os.open(path, flags, 0o600), "wb") as f:
+        for part in parts:
+            f.write(Path(part).read_bytes())
 # #458: the trailing effort turn ("effort_position": "end"); low is the template's own sentence, medium (which the
 # template says nothing for: no xhigh sentence is medium there) says it, since the xhigh one stays at the top
 EFFORT_TURN = "<|im_start|>system\n{}<|im_end|>\n"
@@ -513,8 +574,15 @@ class StrataEngine:
             if os.environ.get("STRATA_REQUEST_LINES") and os.path.abspath(log) not in _echoing:
                 _echoing.add(os.path.abspath(log))
                 threading.Thread(target=echo_requests, args=(log, os.path.getsize(log)), daemon=True).start()
-        self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
+        if log:                                          # #779: when an engine started (a crash report has the time)
+            try:
+                self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
+                               f"{' '.join(args)}\n")
+                self.log.flush()
+            except OSError:
+                pass
+        self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         contain(self.proc)                               # ends with the server, however it ends (Windows)
         self.max_context = 0
         for line in self.proc.stdout:
@@ -1368,6 +1436,26 @@ class Vision:
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
     sends the same picture again (every turn, with most clients) encodes it once."""
 
+    @staticmethod
+    def work_dir() -> Path:
+        """#480: the directory for the encoder's files.  The engine reads the embeddings file named in a `GENI` line
+        and the encoder the output named in an `ENC <image> <out>` line, both split at spaces, so a space in the path
+        (a %TEMP% under a user name with a space) broke every image.  The system temp directory is used while its path
+        has no space, then the working directory, then the system drive's root; the plain temp directory is the last
+        resort (the encoder's own files are then named relative to it, see `_start`)."""
+        for parent in (None, Path.cwd(), Path(os.environ.get("SystemDrive", "C:") + os.sep)):
+            try:
+                d = Path(tempfile.mkdtemp(prefix="strata-vision-", dir=parent))
+            except OSError:
+                continue                                       # not writable, or no such drive
+            if " " not in str(d):
+                return d
+            try:
+                d.rmdir()                                      # just created, so still empty
+            except OSError:
+                pass
+        return Path(tempfile.mkdtemp(prefix="strata-vision-"))
+
     def __init__(self, cfg: dict, log=None, env: dict | None = None):
         args = [cfg["exe"], "--mmproj", cfg["mmproj"], "--model", cfg["model"]]
         if cfg.get("gpu"):
@@ -1378,7 +1466,7 @@ class Vision:
             args += ["--max-tokens", str(cfg["max_tokens"])]
         if cfg.get("min_tokens"):                       # #767: mtmd's image_min_tokens (a hand-edited key)
             args += ["--min-tokens", str(cfg["min_tokens"])]
-        self.dir = Path(tempfile.mkdtemp(prefix="strata-vision-"))
+        self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.stopped = False
         self._start()
@@ -1387,8 +1475,10 @@ class Vision:
 
     def _start(self):
         args, log, env = self.spawn
-        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log or subprocess.DEVNULL,
-                                     text=True, encoding="utf-8", bufsize=1, env=env)
+        # cwd is the encoder's directory: the ENC lines name the files relative to it (#480: no space in the line)
+        self.proc = popen("the image encoder", args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1, env=env,
+                          cwd=self.dir)
         contain(self.proc)
         line = self.proc.stdout.readline()
         if not line.startswith("READY"):
@@ -1489,7 +1579,7 @@ class Vision:
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
             img.write_bytes(data)
             try:
-                self.proc.stdin.write(f"ENC {img} {out}\n")
+                self.proc.stdin.write(f"ENC {img.name} {out.name}\n")      # relative to the encoder's cwd (#480)
                 self.proc.stdin.flush()
                 line = self.proc.stdout.readline().strip()
             finally:                                                   # #352: also when the encoder's pipe is gone
@@ -2433,11 +2523,9 @@ class Service:
             # The request's images in one file for GENI (~10 MB a picture), written once nothing above refuses the
             # request: one refused after it (the engine starting, no room) left it in the vision directory for good,
             # one more for every retry of a 503.  run() deletes it; drop_embeddings() if run() never starts.
-            combined = self.vision.dir / f"req-{uuid.uuid4().hex[:12]}.sve"
+            combined = combined_embeddings_path(self.vision.dir, sum(Path(p).stat().st_size for p, _ in encoded))
             self.embeddings.path = combined             # first, so a half-written one is found as well
-            with open(combined, "wb") as f:
-                for path, _ in encoded:
-                    f.write(path.read_bytes())
+            write_temporary(combined, [p for p, _ in encoded])
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
     def drop_embeddings(self) -> None:
@@ -4404,9 +4492,8 @@ def main() -> int:
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
-    except OSError:
-        ap.error(f"port {a.port} is already in use - is Strata (or another server) already running? "
-                 f"Close it, or start this one with a different --port")
+    except OSError as e:
+        ap.error(listen_problem(a.host, a.port, e))
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()

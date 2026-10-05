@@ -453,6 +453,111 @@ class ImageMarkers(unittest.TestCase):
                     self.assertEqual(svc.encode_prompt(msgs, tools, {}), old(msgs, tools))
 
 
+class VisionTempFiles(unittest.TestCase):
+    """#480 (a TEMP path with a space), #874 (the per-request embeddings file), #735 (Smart App Control)."""
+
+    def test_work_dir_has_no_space_when_temp_has_one(self):
+        from serve.server import Vision
+        with tempfile.TemporaryDirectory() as base:
+            spaced = Path(base) / "John Smith"
+            spaced.mkdir()
+            with mock.patch.object(tempfile, "tempdir", str(spaced)):
+                d = Vision.work_dir()
+            try:
+                self.assertNotIn(" ", str(d))
+                self.assertTrue(d.is_dir())
+            finally:
+                d.rmdir()
+
+    def test_enc_line_names_files_relative_to_the_encoder_dir(self):
+        from serve.server import Vision
+
+        class Pipe:
+            def __init__(self):
+                self.lines = []
+
+            def write(self, s):
+                self.lines.append(s)
+
+            def flush(self):
+                pass
+
+        pipe = Pipe()
+        v = Vision.__new__(Vision)
+        v.dir, v.lock, v.cache = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}
+        v.proc = mock.Mock(stdin=pipe, stdout=mock.Mock(readline=lambda: "OK 7 1 1 1\n"))
+        try:
+            with mock.patch.object(Vision, "load", return_value=b""), \
+                    mock.patch.object(Vision, "normalize", return_value=b"png"):
+                out, n = v.encode("x")
+            self.assertEqual(n, 7)
+            self.assertEqual(out.parent, v.dir)                     # the cache keeps the full path
+            name = out.name
+            self.assertEqual(pipe.lines, [f"ENC {name[:-4]}.img {name}\n"])
+        finally:
+            shutil_rmtree(v.dir)
+
+    def test_combined_file_is_written_whole_and_removable(self):
+        from serve.server import combined_embeddings_path, write_temporary
+        with tempfile.TemporaryDirectory() as d:
+            a, b = Path(d) / "a.sve", Path(d) / "b.sve"
+            a.write_bytes(b"AAAA")
+            b.write_bytes(b"BB")
+            path = combined_embeddings_path(Path(d), 6)
+            try:
+                write_temporary(path, [a, b])
+                self.assertEqual(path.read_bytes(), b"AAAABB")
+            finally:
+                path.unlink(missing_ok=True)
+
+    def test_combined_file_stays_off_a_small_shm(self):
+        from serve.server import combined_embeddings_path
+        with tempfile.TemporaryDirectory() as d:
+            if os.name == "nt":
+                self.assertEqual(combined_embeddings_path(Path(d), 1).parent, Path(d))
+                return
+            with mock.patch("serve.server.shutil.disk_usage", return_value=SimpleNamespace(free=1 << 20)):
+                self.assertEqual(combined_embeddings_path(Path(d), 1 << 20).parent, Path(d))
+
+    def test_smart_app_control_is_said_in_words(self):
+        import subprocess
+        from serve.server import popen
+        for code in (4551, 1260):
+            err = OSError(22, "blocked")
+            err.winerror = code
+            with self.subTest(winerror=code), mock.patch.object(subprocess, "Popen", side_effect=err):
+                with self.assertRaises(OSError) as cm:
+                    popen("the image encoder", ["strata-vision.exe"])
+                self.assertIn("Smart App Control", str(cm.exception))
+                self.assertIn("--vision no", str(cm.exception))
+        with mock.patch.object(subprocess, "Popen", side_effect=FileNotFoundError("gone")):
+            with self.assertRaises(FileNotFoundError):
+                popen("x", ["x"])
+
+
+class ListenProblem(unittest.TestCase):
+    """#769: only an address that is taken is "already in use"."""
+
+    def test_messages(self):
+        import errno
+        from serve.server import listen_problem
+        self.assertIn("already in use", listen_problem("127.0.0.1", 8080, OSError(errno.EADDRINUSE, "in use")))
+        e = OSError(10013, "forbidden")
+        e.winerror = 10013
+        text = listen_problem("127.0.0.1", 8080, e)
+        self.assertNotIn("already in use", text)
+        self.assertIn("forbidden", text)
+        self.assertIn("different --port", text)
+        text = listen_problem("10.9.9.9", 8080, OSError(errno.EADDRNOTAVAIL, "cannot assign"))
+        self.assertIn("10.9.9.9 is not an address of this PC", text)
+        self.assertNotIn("already in use", text)
+
+
+def shutil_rmtree(path):
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class ThinkTokenizer(ByteTokenizer):
     """The byte tokenizer with the model's reasoning markers as specials that are matched even without parse_special,
     as the real tokenizer does (GGUF token type 4)."""
