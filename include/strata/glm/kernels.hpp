@@ -8,6 +8,7 @@
 // each row as long as the one-token case describes.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace strata::glm {
@@ -31,21 +32,23 @@ void hc_pre(const float* r, const float* fn, const float* scale, const float* ba
             float* cur, int n_embd, int rows, float norm_eps, float hc_eps, int sinkhorn_iters, void* stream);
 /// The hyper-connection write, in place on r: r[dst] = x * post[dst] + sum_src r[src] * comb[dst, src].
 void hc_post(const float* x, const float* hcw, float* r, int n_embd, int rows, void* stream);
-/// y = mean over the hc streams of one token.
-void hc_mean(const float* r, float* y, int n_embd, void* stream);
+/// y = mean over the hc streams, token by token.
+void hc_mean(const float* r, float* y, int n_embd, int rows, void* stream);
 
 /// The three causal convolutions of a KDA layer and their SiLU.  proj: the q projections of every row, then the k,
 /// then the v (3 * rows * d_inner); out has the same layout.  state: 3 * d_inner * (d_conv - 1) past inputs, oldest
 /// first per channel, advanced here by `rows` tokens.  w*: (d_conv, d_inner).
+/// With snap, the state as it is after each of the first n_snap tokens is also written there: the one after
+/// token i starts i * stride floats in.  That is what a window of guessed tokens goes back to (kda_step too).
 void kda_conv(const float* proj, float* state, const float* wq, const float* wk, const float* wv, float* out,
-              int d_inner, int rows, void* stream);
+              int d_inner, int rows, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 /// The delta-rule step of every head and the gated output, token after token.  qkv: the conv outputs.  g1:
 /// f_b(f_a(x)) + dt bias (d_inner); it gates the state's decay per key dimension, as in ggml's gated_delta_net op.
 /// a: per head.  beta: per head, before the sigmoid.  s: n_head * head_dim * head_dim, updated.  g2: g_b(g_a(x))
 /// (d_inner).  out = rms_norm(o) * o_norm * sigmoid(g2), d_inner values.
 void kda_step(const float* qkv, const float* g1, const float* a, const float* beta, float* s, const float* g2,
               const float* o_norm, float* out, int head_dim, int n_head, int rows, float gate_lower_bound,
-              float norm_eps, void* stream);
+              float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 
 /// Stores the tokens' MLA latents (n values each) as fp16 from row `pos` of the layer's cache.
 void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream);

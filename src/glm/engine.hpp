@@ -39,6 +39,7 @@ struct Options {
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
+    int window = 4;               ///< the most tokens window() takes: the known one and guesses after it; 1: none
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
@@ -117,6 +118,15 @@ public:
     void eval(const int32_t* tokens, int n, bool want_logits);
     const float* logits() const { return h_logits_; }
 
+    /// Guessed tokens.  window() feeds t tokens from pos(): the first is the one that is known, each of the others a
+    /// guess at what follows the one before it.  logits_of(i) then holds the scores of the token after the i-th, so
+    /// the guesses can be checked, and keep(n) makes the first n tokens part of the sequence and forgets the rest.
+    /// What a kept token computed is what eval() would have computed for it.
+    int max_window() const { return opt_.window; }
+    void window(const int32_t* tokens, int t);
+    const float* logits_of(int i) const { return h_wlogits_ + (size_t) i * n_vocab_; }
+    void keep(int n);
+
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
     size_t state_bytes() const { return state_n_ * sizeof(float); }
@@ -152,6 +162,7 @@ private:
     void dsa(Layer& L, int n);
     void dsa_select(Layer& L, int first, int n);
     void dense_ffn(Layer& L, int il, int n);
+    void run(const int32_t* tokens, int n);
     void layer_head(Layer& L, int il, int n);
     void moe_router(const Layer& L, int n);
     void moe_shared(const Layer& L, int il, int n);
@@ -208,6 +219,10 @@ private:
     size_t scratch_at_ = 0;
     float* state_ = nullptr;     ///< every KDA layer's conv and delta-rule state
     size_t state_n_ = 0;
+    float* snap_ = nullptr;      ///< window(): the state after each token but the last, state_n_ apart
+    int n_snap_ = 0;             ///< how many of those the eval under way leaves
+    int win_ = 0;                ///< the tokens of the window that keep() has not settled yet
+    float *wlogits_ = nullptr, *h_wlogits_ = nullptr;   ///< a window's logits, token after token: VRAM and pinned
     int cached_ = 0;
 
     // device scratch

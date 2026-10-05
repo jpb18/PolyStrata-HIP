@@ -204,15 +204,18 @@ __global__ void hc_post_kernel(const float* __restrict__ x, const float* __restr
 __global__ void hc_mean_kernel(const float* __restrict__ r, float* __restrict__ y, int n_embd) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_embd) return;
+    r += size_t(blockIdx.y) * HC * n_embd;
     float acc = r[i];
     for (int s = 1; s < HC; ++s) acc += r[size_t(s) * n_embd + i];
-    y[i] = acc * (1.0f / HC);
+    y[size_t(blockIdx.y) * n_embd + i] = acc * (1.0f / HC);
 }
 
 // d_conv is 4: three past inputs per channel, then the new one.  A thread is a channel and walks the tokens.
+// The state as it is after each of the first n_snap tokens goes to snap, a state `stride` floats after the other.
 __global__ void kda_conv_kernel(const float* __restrict__ proj, float* __restrict__ state,
                                 const float* __restrict__ wq, const float* __restrict__ wk,
-                                const float* __restrict__ wv, float* __restrict__ out, int d_inner, int rows) {
+                                const float* __restrict__ wv, float* __restrict__ out, int d_inner, int rows,
+                                float* __restrict__ snap, size_t stride, int n_snap) {
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= 3 * d_inner) return;
     const int m = t / d_inner, c = t % d_inner;
@@ -228,6 +231,12 @@ __global__ void kda_conv_kernel(const float* __restrict__ proj, float* __restric
         s1 = s2;
         s2 = x;
         out[at] = y * sigmoid(y);
+        if (row < n_snap) {
+            float* m = snap + size_t(row) * stride + size_t(t) * 3;
+            m[0] = s0;
+            m[1] = s1;
+            m[2] = s2;
+        }
     }
     st[0] = s0;
     st[1] = s1;
@@ -240,7 +249,7 @@ __global__ void kda_step_kernel(const float* __restrict__ qkv, const float* __re
                                 const float* __restrict__ a, const float* __restrict__ beta, float* __restrict__ s,
                                 const float* __restrict__ g2, const float* __restrict__ o_norm,
                                 float* __restrict__ out, int hd, int n_head, int rows, float lower_bound,
-                                float norm_eps) {
+                                float norm_eps, float* __restrict__ snap, size_t stride, int n_snap) {
     __shared__ float part[8];
     __shared__ float qn[256], kn[256], decay[256];
     const int h = blockIdx.x, j = threadIdx.x;
@@ -260,9 +269,11 @@ __global__ void kda_step_kernel(const float* __restrict__ qkv, const float* __re
         for (int i = 0; i < hd; ++i) sk += col[i] * decay[i] * kn[i];
         const float d = (v - sk) * sigmoid(beta[size_t(row) * n_head + h]);
         float o = 0.0f;
+        float* m = row < n_snap ? snap + size_t(row) * stride + (size_t(h) * hd + j) * hd : nullptr;
         for (int i = 0; i < hd; ++i) {
             const float n = col[i] * decay[i] + kn[i] * d;
             col[i] = n;
+            if (m) m[i] = n;
             o += n * qn[i];
         }
         // the sum's last barrier also ends this token's reads of qn, kn and decay
@@ -460,20 +471,22 @@ void hc_post(const float* x, const float* hcw, float* r, int n_embd, int rows, v
     hc_post_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(x, hcw, r, n_embd);
 }
 
-void hc_mean(const float* r, float* y, int n_embd, void* stream) {
-    hc_mean_kernel<<<grid(n_embd, 256), 256, 0, cs(stream)>>>(r, y, n_embd);
+void hc_mean(const float* r, float* y, int n_embd, int rows, void* stream) {
+    hc_mean_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, y, n_embd);
 }
 
 void kda_conv(const float* proj, float* state, const float* wq, const float* wk, const float* wv, float* out,
-              int d_inner, int rows, void* stream) {
-    kda_conv_kernel<<<grid(3 * d_inner, 256), 256, 0, cs(stream)>>>(proj, state, wq, wk, wv, out, d_inner, rows);
+              int d_inner, int rows, void* stream, float* snap, size_t stride, int n_snap) {
+    kda_conv_kernel<<<grid(3 * d_inner, 256), 256, 0, cs(stream)>>>(proj, state, wq, wk, wv, out, d_inner, rows,
+                                                                    snap, stride, snap ? n_snap : 0);
 }
 
 void kda_step(const float* qkv, const float* g1, const float* a, const float* beta, float* s, const float* g2,
               const float* o_norm, float* out, int head_dim, int n_head, int rows, float gate_lower_bound,
-              float norm_eps, void* stream) {
+              float norm_eps, void* stream, float* snap, size_t stride, int n_snap) {
     kda_step_kernel<<<n_head, head_dim, 0, cs(stream)>>>(qkv, g1, a, beta, s, g2, o_norm, out, head_dim, n_head,
-                                                        rows, gate_lower_bound, norm_eps);
+                                                        rows, gate_lower_bound, norm_eps, snap, stride,
+                                                        snap ? n_snap : 0);
 }
 
 void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream) {

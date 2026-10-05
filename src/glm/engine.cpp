@@ -681,6 +681,11 @@ void Engine::alloc_state() {
     const size_t conv_n = size_t(3) * d_inner_ * (kConv - 1), s_n = size_t(n_head_) * kda_dim_ * kda_dim_;
     state_n_ = size_t(n_kda_) * (conv_n + s_n);
     state_ = (float*) dmalloc(state_n_ * sizeof(float), "the recurrent state");
+    // window(): the state after each of its tokens but the last, for keep(), and every token's logits
+    if (opt_.window > 1)
+        snap_ = (float*) dmalloc(size_t(opt_.window - 1) * state_n_ * sizeof(float), "the recurrent state");
+    wlogits_ = (float*) dmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "scratch");
+    h_wlogits_ = (float*) hmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "pinned memory");
 
     const size_t ctx = (size_t) opt_.max_context, lat_n = ctx * kv_rank_, idx_n = ctx * 3 * idx_dim_;
     uint16_t* lat = (uint16_t*) dmalloc(n_dsa_ * lat_n * sizeof(uint16_t), "the attention cache");
@@ -954,6 +959,8 @@ void Engine::load(const Options& o) {
     if (opt_.stage_ahead < 0) throw std::runtime_error("the batch size to stage ahead from cannot be negative");
     if (opt_.expert_swaps < 0 || opt_.expert_swaps > 64)
         throw std::runtime_error("0 to 64 experts can be on their way into the cache at a time");
+    if (opt_.window < 1 || opt_.window > 8) throw std::runtime_error("a window is 1 to 8 tokens");
+    opt_.window = std::min(opt_.window, opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context));
     gg_ = std::make_unique<Shards>(opt_.model);
     load_geometry();
 
@@ -1139,7 +1146,8 @@ void Engine::kda(Layer& L, int n) {
     lin(L.wq, xn_, proj_, n, xq_);
     lin(L.wk, xn_, proj_ + d, n, xq_);
     lin(L.wv, xn_, proj_ + 2 * d, n, xq_);
-    kda_conv(proj_, L.conv, fp(L.conv_q), fp(L.conv_k), fp(L.conv_v), qkv_, d_inner_, n, st_);
+    kda_conv(proj_, L.conv, fp(L.conv_q), fp(L.conv_k), fp(L.conv_v), qkv_, d_inner_, n, st_,
+             n_snap_ > 0 ? snap_ + (L.conv - state_) : nullptr, state_n_, n_snap_);
 
     lin(L.f_a, xn_, fa_, n, xq_);
     lin(L.f_b, fa_, g1_, n);
@@ -1148,7 +1156,7 @@ void Engine::kda(Layer& L, int n) {
     lin(L.g_a, xn_, ga_, n, xq_);
     lin(L.g_b, ga_, g2_, n);
     kda_step(qkv_, g1_, fp(L.a), beta_, L.s, g2_, fp(L.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
-             st_);
+             st_, n_snap_ > 0 ? snap_ + (L.s - state_) : nullptr, state_n_, n_snap_);
     lin(L.wo, gated_, ao_, n);
 }
 
@@ -1205,8 +1213,12 @@ void Engine::dsa(Layer& L, int n) {
     const int64_t last_dense = (int64_t) idx_top_k_ + kpool_ - 2;
     const int dense = (int) std::clamp<int64_t>(last_dense - pos_ + 1, 0, n);
     if (dense < n) dsa_select(L, dense, n - dense);
+    // A prompt batch's tokens share their products, padded to the token with the most keys.  A few tokens get a
+    // product each: a token of a window must come out as it would alone, to the last bit, and cuBLAS rounds a
+    // product of another size another way.
+    const int together = n < kStageRows ? 1 : std::min(rows_, kAttnRows);
     dsa_attend(blas_, qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos_, n, dense, akeys_, ascore_,
-               std::min(rows_, kAttnRows), kqv_, kv_rank_, n_head_, 1.f / std::sqrt((float) mla_k_), st_);
+               together, kqv_, kv_rank_, n_head_, 1.f / std::sqrt((float) mla_k_), st_);
     lin(L.v_b, kqv_, vout_, n, nullptr, mla_v_);
     lin(L.wo, vout_, ao_, n);
 }
@@ -1530,7 +1542,8 @@ void Engine::layer_head(Layer& L, int il, int n) {
     }
 }
 
-void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
+// n tokens from pos() through every layer.  The sequence is not longer for it: the caller says by how much.
+void Engine::run(const int32_t* tokens, int n) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
     for (int t = 0; t < n; ++t)
         if (tokens[t] < 0 || tokens[t] >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
@@ -1576,10 +1589,15 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
         dbg("ffn", il, fo_, n_embd_);
         hc_post(fo_, hcw_, r_, n_embd_, n, st_);
     }
+}
 
+void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
+    run(tokens, n);
     if (want_logits) {
+        const bool replay = opt_.graphs && n == 1 && !opt_.dump;
+        const size_t r_row = (size_t) kHc * n_embd_;
         const auto logits = [&] {
-            hc_mean(r_ + (size_t) (n - 1) * r_row, cur_, n_embd_, st_);
+            hc_mean(r_ + (size_t) (n - 1) * r_row, cur_, n_embd_, 1, st_);
             rms_norm(cur_, fp(out_norm_), xn_, n_embd_, 1, rms_eps_, st_);
             dbg("out_norm", n_layer_, xn_, n_embd_);
             lin(output_, xn_, logits_, 1);
@@ -1597,6 +1615,39 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     }
     pos_ += n;
     stats_.tokens += n;
+}
+
+// The recurrent layers are the only ones a wrong guess would spoil: every other layer's row of a position is
+// written again when the position gets its real token.  So they leave the state as it was after each token but
+// the last (snap_), and keep() puts back the one after the last token that was right.
+void Engine::window(const int32_t* tokens, int t) {
+    if (t < 1 || t > opt_.window) throw std::logic_error("a window takes 1 to max_window() tokens");
+    n_snap_ = t - 1;
+    try {
+        run(tokens, t);
+    } catch (...) {
+        n_snap_ = 0;
+        throw;
+    }
+    n_snap_ = 0;
+    hc_mean(r_, cur_, n_embd_, t, st_);
+    rms_norm(cur_, fp(out_norm_), xn_, n_embd_, t, rms_eps_, st_);
+    lin(output_, xn_, wlogits_, t);
+    ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+       "logits");
+    ck(cudaStreamSynchronize(cs(st_)), "window");
+    win_ = t;
+}
+
+void Engine::keep(int n) {
+    if (n < 1 || n > win_) throw std::logic_error("keep takes 1 to the window's tokens");
+    if (n < win_)
+        ck(cudaMemcpyAsync(state_, snap_ + size_t(n - 1) * state_n_, state_n_ * sizeof(float),
+                           cudaMemcpyDeviceToDevice, cs(st_)),
+           "keep");
+    pos_ += n;
+    stats_.tokens += n;
+    win_ = 0;
 }
 
 }  // namespace strata::glm
