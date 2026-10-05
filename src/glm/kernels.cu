@@ -403,6 +403,23 @@ __global__ void swiglu_clamp_rows_kernel(const float* __restrict__ gate_up, floa
     out[size_t(blockIdx.y) * n + i] = g / (1.0f + expf(-g)) * u;
 }
 
+__device__ __forceinline__ float gelu(float x) {
+    return 0.5f * x * (1.0f + tanhf(0.79788456080286535587989211986876f * x * (1.0f + 0.044715f * x * x)));
+}
+
+__global__ void geglu_kernel(const float* __restrict__ gate, const float* __restrict__ up, float* __restrict__ out,
+                             int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = gelu(gate[i]) * up[i];
+}
+
+__global__ void geglu_rows_kernel(const float* __restrict__ gate_up, float* __restrict__ out, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* row = gate_up + size_t(blockIdx.y) * 2 * n;
+    out[size_t(blockIdx.y) * n + i] = gelu(row[i]) * row[n + i];
+}
+
 __global__ void moe_sum_kernel(const float* __restrict__ x, const float* __restrict__ w, float* __restrict__ acc,
                                int n, int n_used) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -703,6 +720,14 @@ void axpy(const float* x, float a, float* acc, int n, bool add, void* stream) {
 
 void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float limit, void* stream) {
     swiglu_clamp_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n, limit);
+}
+
+void geglu(const float* gate, const float* up, float* out, int n, void* stream) {
+    geglu_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(gate, up, out, n);
+}
+
+void geglu_rows(const float* gate_up, float* out, int n, int rows, void* stream) {
+    geglu_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n);
 }
 
 void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int rows, void* stream) {

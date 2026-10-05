@@ -110,7 +110,8 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
-                 int n_ff, const float* x, float limit, float* out, const std::function<void()>* meanwhile) {
+                 int n_ff, const float* x, float limit, bool gelu, float* out,
+                 const std::function<void()>* meanwhile) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
     const ggml_type_traits_cpu* td = traits(d_type);
@@ -160,6 +161,11 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 float g = 0.f, u = 0.f;
                 tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
                 tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
+                if (gelu) {
+                    hp[(size_t) j * n_ff + r] =
+                        0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
+                    continue;
+                }
                 g = std::min(g, limit);
                 u = std::clamp(u, -limit, limit);
                 hp[(size_t) j * n_ff + r] = g / (1.f + std::exp(-g)) * u;

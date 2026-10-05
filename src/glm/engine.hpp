@@ -74,6 +74,8 @@ struct Layer {
     const uint8_t* exp_down = nullptr;
     uint32_t gu_type = 0, d_type = 0;
     size_t gu_bytes = 0, d_bytes = 0;  ///< one expert's gate (or up), and its down
+    size_t gu_stride = 0;              ///< from an expert's gate to the next one's: twice gu_bytes in a file that
+                                       ///< keeps an expert's gate and up in one tensor
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
     int trade = -1;                    ///< layers with the same number can take each other's slots: same size
@@ -207,7 +209,7 @@ protected:
     int shape_i(const char* key) const;
     float shape_f(const char* key) const;
     void load_shape();
-    void load_moe(int il);
+    void load_moe(int il, bool shared = true);
     void alloc();
     void shared_scratch();
     float* draft_input(const int32_t* tokens, const float* h, int n);
@@ -250,6 +252,7 @@ protected:
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
     float rms_eps_ = 0;
+    bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block

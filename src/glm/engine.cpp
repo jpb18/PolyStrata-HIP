@@ -295,15 +295,18 @@ void Engine::load_shape() {
 }
 
 // A MoE layer: its router and shared expert to VRAM, and its routed experts' places in the file, where they
-// stay; fill_expert_cache() copies the ones VRAM has room for.
-void Engine::load_moe(int il) {
+// stay; fill_expert_cache() copies the ones VRAM has room for.  A file may keep an expert's gate and up in one
+// tensor, the gate's rows first.
+void Engine::load_moe(int il, bool shared) {
     Layer& L = layers_[(size_t) il];
     auto mat = [&](const char* n, int64_t a, int64_t b) { return upload(tensor(il, n), blk(il, n), a, b, kAnyMat); };
     L.moe = true;
     L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, n_expert_);
-    L.sh_gate = mat("ffn_gate_shexp.weight", n_embd_, n_ff_shexp_);
-    L.sh_up = mat("ffn_up_shexp.weight", n_embd_, n_ff_shexp_);
-    L.sh_down = mat("ffn_down_shexp.weight", n_ff_shexp_, n_embd_);
+    if (shared) {
+        L.sh_gate = mat("ffn_gate_shexp.weight", n_embd_, n_ff_shexp_);
+        L.sh_up = mat("ffn_up_shexp.weight", n_embd_, n_ff_shexp_);
+        L.sh_down = mat("ffn_down_shexp.weight", n_ff_shexp_, n_embd_);
+    }
 
     auto exps = [&](const char* n, int64_t n_in, int64_t rows) -> const TensorInfo& {
         const TensorInfo* t = tensor(il, n);
@@ -314,19 +317,29 @@ void Engine::load_moe(int il) {
                                      std::to_string(rows) + ", " + std::to_string(n_expert_) + "]");
         return *t;
     };
-    const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
-    const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
     const TensorInfo& td = exps("ffn_down_exps.weight", n_ff_exp_, n_embd_);
-    if (tg.type != tu.type)
-        throw std::runtime_error(tg.name + " and " + tu.name + " have different types, which this engine does not run");
-    L.gu_type = tg.type;
     L.d_type = td.type;
-    L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
     L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
-    home(tu).payload(tu);
-    L.exp_gate = home(tg).data(tg);
-    L.exp_up = home(tu).data(tu);
     L.exp_down = home(td).data(td);
+    if (tensor(il, "ffn_gate_up_exps.weight")) {
+        const TensorInfo& gu = exps("ffn_gate_up_exps.weight", n_embd_, 2 * n_ff_exp_);
+        L.gu_type = gu.type;
+        L.gu_stride = home(gu).payload(gu) / (size_t) n_expert_;
+        L.gu_bytes = L.gu_stride / 2;
+        L.exp_gate = home(gu).data(gu);
+        L.exp_up = L.exp_gate + L.gu_bytes;
+    } else {
+        const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
+        const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
+        if (tg.type != tu.type)
+            throw std::runtime_error(tg.name + " and " + tu.name +
+                                     " have different types, which this engine does not run");
+        L.gu_type = tg.type;
+        L.gu_stride = L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
+        home(tu).payload(tu);
+        L.exp_gate = home(tg).data(tg);
+        L.exp_up = home(tu).data(tu);
+    }
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
         throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
@@ -438,8 +451,8 @@ void Engine::fill_expert_cache() {
         uint8_t* s = exp_ + exp_at_;
         exp_at_ += c.bytes;
         const size_t e = (size_t) c.e;
-        ck(cudaMemcpy(s, L.exp_gate + e * L.gu_bytes, L.gu_bytes, cudaMemcpyHostToDevice), "expert upload");
-        ck(cudaMemcpy(s + L.gu_bytes, L.exp_up + e * L.gu_bytes, L.gu_bytes, cudaMemcpyHostToDevice),
+        ck(cudaMemcpy(s, L.exp_gate + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice), "expert upload");
+        ck(cudaMemcpy(s + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice),
            "expert upload");
         ck(cudaMemcpy(s + 2 * L.gu_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice),
            "expert upload");
@@ -476,8 +489,8 @@ void Engine::follow_loop() {
         lk.unlock();
         const Layer& L = layers_[(size_t) s->il];
         const size_t e = (size_t) s->e, gu = L.gu_bytes;
-        std::memcpy(s->pinned, L.exp_gate + e * gu, gu);
-        std::memcpy(s->pinned + gu, L.exp_up + e * gu, gu);
+        std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
+        std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
         std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
         cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, cs(swap_st_));
         if (err == cudaSuccess) err = cudaEventRecord(s->done, cs(swap_st_));
@@ -643,8 +656,8 @@ void Engine::load(const Options& o) {
         std::vector<std::pair<const uint8_t*, size_t>> spans;
         for (const Layer& L : layers_) {
             if (!L.moe) continue;
-            spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_bytes);
-            spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
+            spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
+            if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
             spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
         }
         std::vector<std::string> files = gg_->paths();
@@ -891,7 +904,7 @@ void Engine::moe(Layer& L, int il, int n) {
                 if (const uint8_t* s = L.slot[e])
                     cached[n_cached++] = {s, w[k], at + t};
                 else
-                    host[n_host++] = {L.exp_gate + e * L.gu_bytes, L.exp_up + e * L.gu_bytes,
+                    host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride,
                                       L.exp_down + e * L.d_bytes, w[k], t};
             }
         }
@@ -904,7 +917,8 @@ void Engine::moe(Layer& L, int il, int n) {
                 const Cached& c = cached[i];
                 const void* xq = (const uint8_t*) xq_ + (size_t) c.row * xq_row;
                 kernels::native_mmvq((int) L.gu_type, c.slot, xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
-                swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
+                if (gelu_) geglu(g_, g_ + n_ff_exp_, h_, n_ff_exp_, st_);
+                else swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
                 kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
                 kernels::native_mmvq((int) L.d_type, c.slot + 2 * L.gu_bytes, q8_, d_, n_ff_exp_, n_embd_, 1, st_);
                 axpy(d_, c.w, fo_ + (size_t) c.row * e_row, n_embd_, true, st_);
@@ -921,7 +935,7 @@ void Engine::moe(Layer& L, int il, int n) {
         any_host = true;
         t0 = Clock::now();
         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
-                    h_x_ + (size_t) at * e_row, limit, cpu, n_cached > 0 ? &launch : nullptr);
+                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, n_cached > 0 ? &launch : nullptr);
         stats_.cpu_ms += ms_since(t0);
     }
     if (!any_host) return;
@@ -943,8 +957,8 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream) 
         ck(cudaEventSynchronize(left), "expert staging");
         workers_->run((int) (3 * c), [&](int i) {
             const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
-            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_bytes, L.gu_bytes);
-            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_bytes, L.gu_bytes);
+            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
+            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
             else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
         });
         ck(cudaMemcpyAsync(stage_ + (size_t) j0 * gu2, h, c * gu2, cudaMemcpyHostToDevice, cs(stream)),
@@ -1059,7 +1073,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         mmq_->mul(L.slot[(size_t) group_[(size_t) g]], gt, ff2, n_embd_, gu2, 1, mq_, d_bounds + g, iota_, rr,
                   rows_of(g), gu_, ff2, st_);
     if (rc > 0) {
-        swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_);
+        if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_);
+        else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_);
         Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
     }
     for (int g = 0; g < n_cached; ++g)
@@ -1077,7 +1092,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         int most = 0;
         for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
         mmq_->mul(stage_, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rr, most, gu_, ff2, st_);
-        swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
+        if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_);
+        else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
         Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
         mmq_->mul(stage_ + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r), d_place + r0,
                   rows, most, dx_, n_embd_, st_);

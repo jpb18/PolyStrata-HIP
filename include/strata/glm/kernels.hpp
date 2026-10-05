@@ -84,6 +84,10 @@ void idx_score(const float* q, const float* w, const float* cache, float* score,
 void swiglu_clamp(const float* gate, const float* up, float* out, int n, float limit, void* stream);
 /// swiglu_clamp for rows that each hold n gate values and then n up values; out has n values a row.
 void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float limit, void* stream);
+/// out = gelu(gate) * up, with the tanh form of GELU that ggml's CUDA backend computes.
+void geglu(const float* gate, const float* up, float* out, int n, void* stream);
+/// geglu for rows that each hold n gate values and then n up values; out has n values a row.
+void geglu_rows(const float* gate_up, float* out, int n, int rows, void* stream);
 /// acc[t] += sum over k < n_used of w[t * n_used + k] * x[t * n_used + k], for rows of n values: a token's
 /// weighted experts added to its row.
 void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int rows, void* stream);
