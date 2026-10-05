@@ -439,7 +439,13 @@ int main(int argc, char** argv) {
         // `native_qsa_rms_norm_weighted` followed by `native_rope_apply` for both contiguous
         // (`in_stride == head_dim`) and strided Q/gate split (`in_stride == 2 * head_dim`) inputs,
         // across supported head_dims (128, 256) and both unscaled and YaRN scaling.
+        // The kernel is off by default on the HIP build until this check passes there (native_norm_rope_usable): the
+        // check then reports SKIPPED, and STRATA_NORM_ROPE=1 runs it (gfx1151, Aurora, 0.1.40: it does not pass).
+        const bool run6 = strata::kernels::native_norm_rope_usable(256, 64);
+        if (!run6)
+            std::printf("  native_qsa_rms_norm_rope                   SKIPPED (the fused kernel is not enabled on this build)\n");
         for (int hd6 : {128, 256}) {
+            if (!run6) break;
             const int nr6 = 64;
             const int rows6 = 96;
             std::vector<float> x6_strided((size_t) rows6 * 2 * hd6);
