@@ -5,16 +5,16 @@
 <p align="center"><b>Run large AI models on your own PC</b><br>
 Qwen3.8-Flash-Next and GLM 5.3 Flash · free and open source</p>
 
-<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
-<sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with Strata (IQ3_S, 128K context) ·
+<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden the model wrote, running in the browser"></a><br>
+<sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with <a href="https://github.com/Niko1221/Strata">Strata</a> (IQ3_S, 128K context) ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">full video (49 s)</a></sub></p>
 
 PolyStrata runs large AI models on a normal PC, models that usually need a server. It is built on
 [Strata](https://github.com/Niko1221/Strata) by Niko1221 and runs two models so far:
 
-- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**, the way Strata runs it: an NVIDIA or
-  AMD graphics card with 12 GB or more, Windows or Linux. It chats, writes code, reads pictures and works with your
-  apps and coding agents. This page from here on is about it, and it is Strata's work: the text still says Strata.
+- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**, with the Strata project's engine,
+  unchanged: an NVIDIA or AMD graphics card with 12 GB or more, Windows or Linux. It chats, writes code, reads
+  pictures and works with your apps and coding agents. Most of this page is about it.
 - **GLM 5.3 Flash**, with a second engine written for it: Linux and one NVIDIA card. On an RTX 5090 (32 GB) it
   writes 27 tokens per second and reads prompts at 312 to 373, and it keeps several conversations in RAM so that an
   agent and its subagents do not make it read their prompts again. It is early:
@@ -24,7 +24,7 @@ Nothing leaves your PC.
 
 ## How fast is it?
 
-We measured it on two ordinary gaming PCs. A token is about ¾ of a word.
+The Strata project measured Qwen3.8-Flash-Next on two ordinary gaming PCs. A token is about ¾ of a word.
 
 - **Writes answers:** how fast the reply appears in a short chat. 60 tokens per second is faster than you can read.
 - **Reads your prompt:** how fast it takes in what you send (here a 32K-token document, code or chat history).
@@ -57,8 +57,12 @@ NVIDIA: Q2_0 with engine 0.1.36, the other rows with 0.1.26 (4K answers, 32K pro
 about 100-140 tokens per second. Long chats and other cards: [speed of each model](docs/MODELS.md#how-fast-is-each-size),
 [community results](docs/COMMUNITY_BENCHMARKS.md).
 
+GLM 5.3 Flash was measured for PolyStrata on an RTX 5090 (32 GB) with a Xeon 8470Q and 120 GB of RAM. It writes 27
+tokens/s and reads prompts of 3K to 29K tokens at 312 to 373 tokens/s:
+[docs/GLM.md](docs/GLM.md#what-it-was-measured-on).
+
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
-<sub>Strata is free. If it runs well on your PC, a coffee keeps the work on it going.</sub></p>
+<sub>PolyStrata is free. The coffee goes to the author of <a href="https://github.com/Niko1221/Strata">Strata</a>, which PolyStrata is built on.</sub></p>
 
 ## What you need
 
@@ -70,6 +74,9 @@ about 100-140 tokens per second. Long chats and other cards: [speed of each mode
 | **System** | Windows 10 / 11 or Linux, and a current graphics driver from NVIDIA or AMD. |
 
 The installer sets up everything else. Two or three cards can share the model ([multi-GPU](docs/MULTI_GPU.md)).
+
+GLM 5.3 Flash needs more: Linux, one NVIDIA card with 32 GB, 96 GB of RAM or more and 114 GB of disk. It has run on
+one machine so far ([docs/GLM.md](docs/GLM.md#what-you-need)).
 
 Experimental, written and tested by community members on their own machines:
 
@@ -141,6 +148,9 @@ sizes are faster. Larger sizes are a bit smarter.
   model. But Strata reads most of it from the SSD while it answers, so it writes only 7-8.5 tokens/s on a 64 GB PC.
 - **[OrcaRouter's Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs):** you set it up by hand. It is
   not in the installer's menu.
+- **[GLM 5.3 Flash](docs/GLM.md)** (experimental): another model, with its own engine. Linux and one NVIDIA card
+  with 32 GB, a 114 GB download, no pictures yet. Take it in the installer's menu, or run
+  `./setup.sh --family glm`.
 
 Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). To add another model later, run
 `SETUP.bat` (Linux: `./setup.sh --setup`).
@@ -211,12 +221,14 @@ The model is [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next
 compressed by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5)
 and Unsloth. GLM 5.3 Flash's file is from
 [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF). PolyStrata is built on
-[Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors. Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
+[Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors, and uses parts of
+[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). Strata is open source under the [MIT License](LICENSE). A few
 parts and every model have their own licenses ([which ones](docs/HOW_IT_WORKS.md#license)).
 
-## Support Strata
+## Support
 
-Strata is free and open source. If it is useful to you, you can support its development:
+PolyStrata is free and open source. Most of it is the work of [Strata](https://github.com/Niko1221/Strata)'s author. If
+it is useful to you, you can support that work:
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>

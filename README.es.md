@@ -6,12 +6,16 @@
 Tarjeta gráfica NVIDIA o AMD (12 GB o más) · Windows o Linux · libre y de código abierto</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Un jardín con una pagoda de vóxeles que escribió el modelo de Strata, funcionando en el navegador"></a><br>
-<sub>Un jardín con una pagoda de vóxeles, hecho con un solo prompt en una RTX 5070 con Strata (IQ3_S, contexto de 128K) ·
+<sub>Un jardín con una pagoda de vóxeles, hecho con un solo prompt en una RTX 5070 con <a href="https://github.com/Niko1221/Strata">Strata</a> (IQ3_S, contexto de 128K) ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">vídeo completo (49 s)</a></sub></p>
 
 Strata ejecuta **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** en un PC normal. Es un
 modelo de IA grande e inteligente que normalmente necesita un servidor. Conversa, escribe código, entiende imágenes
 y funciona con tus aplicaciones y agentes de programación. Nada sale de tu PC.
+
+PolyStrata está hecho sobre [Strata](https://github.com/Niko1221/Strata) de Niko1221; las mediciones de esta página
+vienen de allí. También ejecuta GLM 5.3 Flash, con un motor propio (Linux, una tarjeta NVIDIA):
+[docs/GLM.md](docs/GLM.md) (en inglés).
 
 ## ¿Qué velocidad tiene?
 
@@ -49,7 +53,7 @@ RTX 3090 (24 GB) debería escribir unos 100-140 tokens por segundo. Chats largos
 [velocidad de cada modelo](docs/MODELS.md#how-fast-is-each-size), [resultados de la comunidad](docs/COMMUNITY_BENCHMARKS.md).
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
-<sub>Strata es gratis. Si funciona bien en tu PC, un café ayuda a seguir trabajando en él.</sub></p>
+<sub>PolyStrata es gratis. El café es para el autor de <a href="https://github.com/Niko1221/Strata">Strata</a>, sobre el que está hecho PolyStrata.</sub></p>
 
 ## Qué necesitas
 
@@ -208,8 +212,9 @@ y Unsloth. Strata usa partes de [llama.cpp / ggml](https://github.com/ggml-org/l
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). Strata es de código abierto con la [licencia MIT](LICENSE).
 Algunas partes y cada modelo tienen sus propias licencias ([cuáles](docs/HOW_IT_WORKS.md#license)).
 
-## Apoya a Strata
+## Apoyar
 
-Strata es libre y de código abierto. Si te resulta útil, puedes apoyar su desarrollo:
+PolyStrata es libre y de código abierto. La mayor parte es trabajo del autor de
+[Strata](https://github.com/Niko1221/Strata). Si te resulta útil, puedes apoyar ese trabajo:
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>

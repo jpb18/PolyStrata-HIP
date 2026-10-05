@@ -59,6 +59,10 @@ The [details](DETAILS.md#how-it-works) explain every part and its numbers, and t
 
 ## Credits
 
+- PolyStrata is built on [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors. The Qwen
+  engine, the installer, the server and the web app are that project's work. PolyStrata adds the engine for GLM 5.3
+  Flash ([GLM.md](GLM.md)), whose file is from
+  [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF).
 - Model: [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team; compressed versions by
   [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF);
   [Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) by UkisAI; the experimental

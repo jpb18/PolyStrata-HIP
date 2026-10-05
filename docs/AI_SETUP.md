@@ -78,6 +78,10 @@ By the PC's RAM (ask the user whether they mainly want it for code - then the Co
 `--family swift` (Swift 1.5, a fine-tune that thinks shorter; sizes Q2_0, IQ2_XS, IQ3_XXS) is the alternative to
 `qwen`. With `--yes` and no `--model`, setup picks the recommended size for the RAM itself. More: [MODELS.md](MODELS.md).
 
+`--family glm` (GLM 5.3 Flash) is another model with its own engine, and experimental: Linux, one NVIDIA card with
+32 GB, 96 GB of RAM or more, a 114 GB download, no images. Take it only when the user asks for it, and read
+[GLM.md](GLM.md) first.
+
 ## 4. Run setup without questions
 
 From the Strata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell):
@@ -92,7 +96,7 @@ The flags (all of them: `START-HERE.bat --help`):
 | Flag | Meaning |
 | --- | --- |
 | `--yes` | take the recommended answer to every question (no prompts) |
-| `--family qwen\|swift\|coder\|unsloth` | the model version |
+| `--family qwen\|swift\|coder\|unsloth\|glm` | the model version |
 | `--model Q2_0\|IQ2_XS\|IQ3_XXS\|IQ3_S\|IQ1_M\|UD-IQ4_XS\|UD-Q4_K_XL` | the size (the Coder is IQ1_M, Unsloth UD-IQ4_XS or UD-Q4_K_XL) |
 | `--context N` | context in tokens; default by VRAM: 32768 under 14 GB, 65536 under 20 GB, else 131072 |
 | `--vision yes\|no\|gpu\|cpu` | read pictures; `--yes` leaves images off. AMD cards: `cpu` |

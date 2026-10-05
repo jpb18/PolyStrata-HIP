@@ -103,7 +103,7 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 # "https://github.com/<you>/Strata/releases/latest/download/" (or pass --prebuilt / set STRATA_PREBUILT_URL).
 # With the default, the release of this checkout's own version (PREBUILT_TAG_URL, CMakeLists.txt's version) is
 # tried first and the latest release is the fallback (#214): an older checkout keeps the engine it shipped with.
-# PolyStrata: the Qwen engine is Strata's, unchanged, so its ready-made build is still Strata's release.
+# The Qwen engine is the Strata project's, unchanged, so its ready-made build comes from that project's releases.
 PREBUILT_URL = "https://github.com/Niko1221/Strata/releases/latest/download/"
 PREBUILT_TAG_URL = "https://github.com/Niko1221/Strata/releases/download/v{version}/"
 PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"

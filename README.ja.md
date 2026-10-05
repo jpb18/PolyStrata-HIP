@@ -6,12 +6,15 @@
 NVIDIA または AMD のグラフィックカード（12 GB 以上） · Windows または Linux · 無料のオープンソース</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Strata のモデルが書いたボクセルの五重塔の庭。ブラウザで動いている様子"></a><br>
-<sub>ボクセルの五重塔の庭。1 回のプロンプトで作成し、RTX 5070 上の Strata（IQ3_S、128K コンテキスト）で実行 ·
+<sub>ボクセルの五重塔の庭。1 回のプロンプトで作成し、RTX 5070 上の <a href="https://github.com/Niko1221/Strata">Strata</a>（IQ3_S、128K コンテキスト）で実行 ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">動画全体（49 秒）</a></sub></p>
 
 Strata は **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** を普通の PC で動かします。
 これは大きくて賢い AI モデルで、ふつうはサーバーが必要です。チャットをしたり、コードを書いたり、画像を読んだりできます。
 アプリやコーディングエージェントとも連携します。データが PC の外に出ることはありません。
+
+PolyStrata は Niko1221 の [Strata](https://github.com/Niko1221/Strata) をもとにしており、このページの測定値もそこからのものです。
+専用のエンジンで GLM 5.3 Flash も動かせます（Linux、NVIDIA カード 1 枚）：[docs/GLM.md](docs/GLM.md)（英語）。
 
 ## どのくらい速い？
 
@@ -49,7 +52,7 @@ NVIDIA：Q2_0 はエンジン 0.1.36、ほかの行は 0.1.26 で測定（回答
 [コミュニティの測定結果](docs/COMMUNITY_BENCHMARKS.md)。
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
-<sub>Strata は無料です。あなたの PC でうまく動いたら、コーヒー 1 杯の支援が開発を続ける力になります。</sub></p>
+<sub>PolyStrata は無料です。コーヒーは、PolyStrata のもとになった <a href="https://github.com/Niko1221/Strata">Strata</a> の作者に届きます。</sub></p>
 
 ## 必要なもの
 
@@ -203,8 +206,9 @@ Unsloth によるものです。Strata は [llama.cpp / ggml](https://github.com
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits)。Strata は [MIT License](LICENSE) のオープンソースです。一部のパーツと
 すべてのモデルには、それぞれ独自のライセンスがあります（[どれか](docs/HOW_IT_WORKS.md#license)）。
 
-## Strata を支援する
+## 支援する
 
-Strata は無料のオープンソースです。役に立ったら、開発を支援していただけます：
+PolyStrata は無料のオープンソースです。その大部分は [Strata](https://github.com/Niko1221/Strata) の作者の仕事です。
+役に立ったら、その開発を支援していただけます：
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>

@@ -5,25 +5,24 @@
 <p align="center"><b>在你自己的电脑上运行大型 AI 模型</b><br>
 Qwen3.8-Flash-Next 和 GLM 5.3 Flash · 免费开源</p>
 
-<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Strata 的模型写出的体素宝塔花园，在浏览器中运行"></a><br>
-<sub>体素宝塔花园，一次提示生成，在 RTX 5070 上用 Strata 运行（IQ3_S，128K 上下文）·
+<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="模型写出的体素宝塔花园，在浏览器中运行"></a><br>
+<sub>体素宝塔花园，一次提示生成，在 RTX 5070 上用 <a href="https://github.com/Niko1221/Strata">Strata</a> 运行（IQ3_S，128K 上下文）·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">完整视频（49 秒）</a></sub></p>
 
 PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它基于 Niko1221 的
 [Strata](https://github.com/Niko1221/Strata)，目前能跑两个模型：
 
-- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**，跑法和 Strata 一样：12 GB 及以上的 NVIDIA 或
-  AMD 显卡，Windows 或 Linux。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。本页下面讲的都是它，这部分是
-  Strata 的成果，文字里仍然写作 Strata。
+- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**，用的是 Strata 项目的引擎，没有改动：12 GB
+  及以上的 NVIDIA 或 AMD 显卡，Windows 或 Linux。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。本页大部分内容讲的是它。
 - **GLM 5.3 Flash**，用专门为它写的第二个引擎：Linux 加一张 NVIDIA 显卡。在 RTX 5090（32 GB）上写回答每秒 27 个
-  token，读 prompt 每秒 312 到 373 个；它能把多个对话留在内存里，智能体和子代理轮流请求时不用重读 prompt。目前还早，见
+  token，读提示每秒 312 到 373 个；它能把多个对话留在内存里，智能体和子代理轮流请求时不用重读提示。目前还早，见
   [docs/GLM.md](docs/GLM.md)。
 
 所有数据都留在你的电脑上。
 
 ## 速度有多快？
 
-我们在两台普通的游戏电脑上做了测试。一个 token 大约相当于 ¾ 个英文单词。
+下面是 Strata 项目在两台普通游戏电脑上测得的 Qwen3.8-Flash-Next 速度。一个 token 大约相当于 ¾ 个英文单词。
 
 - **写回答：** 短对话中回复出现的速度。每秒 60 个 token 已经比你的阅读速度还快。
 - **读提示：** 读入你发送内容的速度（这里是一份 32K token 的文档、代码或聊天记录）。
@@ -56,8 +55,11 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 100-140 个 token。长对话和其他显卡的数据：[各模型的速度](docs/MODELS.md#how-fast-is-each-size)、
 [社区测试结果](docs/COMMUNITY_BENCHMARKS.md)。
 
+GLM 5.3 Flash 是 PolyStrata 自己测的：RTX 5090（32 GB）、Xeon 8470Q、120 GB 内存，写回答每秒 27 个 token，读 3K 到 29K
+token 的提示每秒 312 到 373 个：[docs/GLM.md](docs/GLM.md#what-it-was-measured-on)。
+
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="请我喝杯咖啡" height="50"></a><br>
-<sub>Strata 是免费的。如果它在你的电脑上跑得不错，请我喝杯咖啡，让这个项目继续下去。</sub></p>
+<sub>PolyStrata 是免费的。这杯咖啡请的是 <a href="https://github.com/Niko1221/Strata">Strata</a> 的作者，PolyStrata 就是在它的基础上做的。</sub></p>
 
 ## 你需要什么
 
@@ -69,6 +71,9 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 | **系统** | Windows 10 / 11 或 Linux，以及 NVIDIA 或 AMD 的最新显卡驱动。 |
 
 其他的都由安装程序搞定。两到三张显卡可以分担同一个模型（[多 GPU](docs/MULTI_GPU.md)）。
+
+GLM 5.3 Flash 要求更高：Linux、一张 32 GB 的 NVIDIA 显卡、96 GB 或以上内存、114 GB 硬盘。目前只在一台机器上跑过
+（[docs/GLM.md](docs/GLM.md#what-you-need)）。
 
 实验性支持，由社区成员在自己的机器上编写和测试：
 
@@ -133,6 +138,8 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 - **[Unsloth UD-Q4_K_XL](docs/MODELS.md#unsloth-ud-q4_k_xl-experimental)**（实验性）：最接近完整模型。但 Strata
   回答时要从 SSD 读取其中大部分内容，所以在 64 GB 的电脑上每秒只能写 7-8.5 个 token。
 - **[OrcaRouter 的 Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)：** 需要手动设置，不在安装程序的菜单里。
+- **[GLM 5.3 Flash](docs/GLM.md)**（实验性）：另一个模型，有自己的引擎。需要 Linux 和一张 32 GB 的 NVIDIA 显卡，下载 114 GB，
+  暂时不能看图片。在安装程序的菜单里选它，或者运行 `./setup.sh --family glm`。
 
 规格、下载以及各配置能装下什么：[docs/MODELS.md](docs/MODELS.md)。以后想再添加模型，运行
 `SETUP.bat`（Linux：`./setup.sh --setup`）。
@@ -197,12 +204,15 @@ NVIDIA 和 AMD 的步骤完全一样。安装程序会识别你的显卡，并�
 
 模型是 Qwen 团队的 [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)。它由
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)、UkisAI（Swift 1.5）
-和 Unsloth 压缩。Strata 使用了 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) 的部分代码。完整致谢：
+和 Unsloth 压缩。GLM 5.3 Flash 的文件来自
+[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF)。PolyStrata 基于 Niko1221
+和各位贡献者的 [Strata](https://github.com/Niko1221/Strata)，并使用了
+[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) 的部分代码。完整致谢：
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits)。Strata 以 [MIT 许可证](LICENSE)开源。少数部分和每个模型
 有各自的许可证（[具体是哪些](docs/HOW_IT_WORKS.md#license)）。
 
-## 支持 Strata
+## 支持
 
-Strata 免费且开源。如果它对你有用，欢迎支持它的开发：
+PolyStrata 免费且开源，其中大部分是 [Strata](https://github.com/Niko1221/Strata) 作者的成果。如果它对你有用，欢迎支持上游的开发：
 
 <p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="请我喝杯咖啡" height="50"></a></p>
