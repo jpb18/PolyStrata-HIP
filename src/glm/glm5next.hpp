@@ -27,19 +27,40 @@ protected:
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
-    void route(const Layer& L, const float* logits, int* ids, float* w) override;
+    void route(int il, const float* logits, int* ids, float* w) override;
     void moe_shared(const Layer& L, int il, int n) override;
     void draft_rows(const int32_t* tokens, int first, int n) override;
     const Names* tensor_alias(const char* name) const override;
     const Names* meta_alias(const char* key) const override;
 
 private:
-    void kda(Layer& L, int n);
-    void dsa(Layer& L, int64_t pos, int n);
-    void dsa_store(Layer& L, int64_t pos, int n);
-    void dsa_select(Layer& L, int64_t pos, int first, int n);
-    void dense_ffn(Layer& L, int il, int n);
+    /// A layer's weights beside the ones every architecture has (Layer), and its places in the state and caches.
+    struct Block {
+        bool dsa = false;
+        Dev hc_attn_fn, hc_attn_scale, hc_attn_base, hc_ffn_fn, hc_ffn_scale, hc_ffn_base;
+        Dev wo;
+        // KDA
+        Dev wq, wk, wv, conv_q, conv_k, conv_v, f_a, f_b, dt_b, beta, a, g_a, g_b, o_norm;
+        float* conv = nullptr;  ///< 3 * d_inner * (d_conv - 1)
+        float* s = nullptr;     ///< n_head * head_dim * head_dim
+        // DSA
+        Dev q_a, q_a_norm, q_b, kv_a, kv_a_norm, k_b, v_b;
+        Dev idx_k, idx_k_norm, idx_k_norm_b, idx_q_b, idx_proj, idx_gate, idx_ape;
+        uint16_t* lat = nullptr;  ///< max_context * kv_rank, fp16
+        float* idx = nullptr;     ///< max_context * 3 * idx_dim
+        // dense FFN
+        Dev ffn_gate, ffn_up, ffn_down;
+        std::vector<float> probs_b;   ///< what the routing adds to each expert's gate before it picks
+    };
+
+    void kda(Block& B, int n);
+    void dsa(Block& B, int64_t pos, int n);
+    void dsa_store(Block& B, int64_t pos, int n);
+    void dsa_select(Block& B, int64_t pos, int first, int n);
+    void dense_ffn(Block& B, int il, int n);
     float* draft_input(const int32_t* tokens, const float* h, int n);
+
+    std::vector<Block> blocks_;   ///< one a layer of layers_
 
     int n_head_ = 0, kda_dim_ = 0, d_inner_ = 0, n_ff_dense_ = 0, n_kda_ = 0, n_dsa_ = 0;
     int q_rank_ = 0, kv_rank_ = 0, mla_k_ = 0, mla_v_ = 0;

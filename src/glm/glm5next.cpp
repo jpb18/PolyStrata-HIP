@@ -69,13 +69,13 @@ const Names* Glm5Next::tensor_alias(const char* name) const { return names_of(kT
 const Names* Glm5Next::meta_alias(const char* key) const { return names_of(kMetaNames, key); }
 
 void Glm5Next::begin_pass() {
+    blocks_.assign(layers_.size(), Block{});
     n_dsa_ = n_kda_ = 0;
     gate_rank_ = 0;
 }
 
 void Glm5Next::check_draft_block() {
-    const Layer& D = layers_[(size_t) n_layer_];
-    if (!D.dsa || !D.moe)
+    if (!blocks_[(size_t) n_layer_].dsa || !layers_[(size_t) n_layer_].moe)
         throw std::runtime_error("the block that guesses ahead is not one this engine runs; --no-draft loads "
                                  "the model without it");
 }
@@ -190,6 +190,7 @@ void Glm5Next::load_geometry() {
 
 void Glm5Next::load_layer(int il) {
     Layer& L = layers_[(size_t) il];
+    Block& B = blocks_[(size_t) il];
     auto f32 = [&](const char* n, int64_t a, int64_t b = 1) { return upload(tensor(il, n), blk(il, n), a, b, kF32); };
     auto mat = [&](const char* n, int64_t a, int64_t b, Want w = kAnyMat) {
         return upload(tensor(il, n), blk(il, n), a, b, w);
@@ -206,47 +207,47 @@ void Glm5Next::load_layer(int il) {
     L.attn_norm = f32("attn_norm.weight", n_embd_);
     L.ffn_norm = f32("ffn_norm.weight", n_embd_);
     if (il < n_layer_) {   // the draft block has one residual stream and adds to it
-        L.hc_attn_fn = f32("hc_attn_fn.weight", kHc * n_embd_, n_mix);
-        L.hc_attn_scale = f32("hc_attn_scale.weight", 3);
-        L.hc_attn_base = f32("hc_attn_base.weight", n_mix);
-        L.hc_ffn_fn = f32("hc_ffn_fn.weight", kHc * n_embd_, n_mix);
-        L.hc_ffn_scale = f32("hc_ffn_scale.weight", 3);
-        L.hc_ffn_base = f32("hc_ffn_base.weight", n_mix);
+        B.hc_attn_fn = f32("hc_attn_fn.weight", kHc * n_embd_, n_mix);
+        B.hc_attn_scale = f32("hc_attn_scale.weight", 3);
+        B.hc_attn_base = f32("hc_attn_base.weight", n_mix);
+        B.hc_ffn_fn = f32("hc_ffn_fn.weight", kHc * n_embd_, n_mix);
+        B.hc_ffn_scale = f32("hc_ffn_scale.weight", 3);
+        B.hc_ffn_base = f32("hc_ffn_base.weight", n_mix);
     }
 
-    L.dsa = has("attn_q_a.weight");
-    L.fixed = !L.dsa;   // the sparse attention's launches take the position
-    if (L.dsa) {
-        L.q_a = mat("attn_q_a.weight", n_embd_, q_rank_);
-        L.q_a_norm = f32("attn_q_a_norm.weight", q_rank_);
-        L.q_b = mat("attn_q_b.weight", q_rank_, (int64_t) n_head_ * mla_k_);
-        L.kv_a = mat("attn_kv_a_mqa.weight", n_embd_, kv_rank_);
-        L.kv_a_norm = f32("attn_kv_a_norm.weight", kv_rank_);
-        L.k_b = mat("attn_k_b.weight", mla_k_, (int64_t) kv_rank_ * n_head_, kFloatMat);
-        L.v_b = mat("attn_v_b.weight", kv_rank_, (int64_t) mla_v_ * n_head_, kFloatMat);
-        L.wo = mat("attn_output.weight", (int64_t) n_head_ * mla_v_, n_embd_);
-        L.idx_k = mat("indexer.attn_k.weight", n_embd_, idx_dim_);
-        L.idx_k_norm = f32("indexer.k_norm.weight", idx_dim_);
-        L.idx_k_norm_b = f32("indexer.k_norm.bias", idx_dim_);
-        L.idx_q_b = mat("indexer.attn_q_b.weight", q_rank_, (int64_t) idx_dim_ * idx_heads_);
-        L.idx_proj = mat("indexer.proj.weight", n_embd_, idx_heads_);
-        L.idx_gate = mat("indexer_compressor_gate.weight", n_embd_, idx_dim_);
-        L.idx_ape = f32("indexer_compressor_ape.weight", idx_dim_, kpool_);
+    B.dsa = has("attn_q_a.weight");
+    L.fixed = !B.dsa;   // the sparse attention's launches take the position
+    if (B.dsa) {
+        B.q_a = mat("attn_q_a.weight", n_embd_, q_rank_);
+        B.q_a_norm = f32("attn_q_a_norm.weight", q_rank_);
+        B.q_b = mat("attn_q_b.weight", q_rank_, (int64_t) n_head_ * mla_k_);
+        B.kv_a = mat("attn_kv_a_mqa.weight", n_embd_, kv_rank_);
+        B.kv_a_norm = f32("attn_kv_a_norm.weight", kv_rank_);
+        B.k_b = mat("attn_k_b.weight", mla_k_, (int64_t) kv_rank_ * n_head_, kFloatMat);
+        B.v_b = mat("attn_v_b.weight", kv_rank_, (int64_t) mla_v_ * n_head_, kFloatMat);
+        B.wo = mat("attn_output.weight", (int64_t) n_head_ * mla_v_, n_embd_);
+        B.idx_k = mat("indexer.attn_k.weight", n_embd_, idx_dim_);
+        B.idx_k_norm = f32("indexer.k_norm.weight", idx_dim_);
+        B.idx_k_norm_b = f32("indexer.k_norm.bias", idx_dim_);
+        B.idx_q_b = mat("indexer.attn_q_b.weight", q_rank_, (int64_t) idx_dim_ * idx_heads_);
+        B.idx_proj = mat("indexer.proj.weight", n_embd_, idx_heads_);
+        B.idx_gate = mat("indexer_compressor_gate.weight", n_embd_, idx_dim_);
+        B.idx_ape = f32("indexer_compressor_ape.weight", idx_dim_, kpool_);
         ++n_dsa_;
     } else {
         const int64_t fr = rank("ssm_f_a.weight"), gr = rank("ssm_g_a.weight");
         gate_rank_ = std::max<int64_t>({gate_rank_, fr, gr});
-        L.wq = mat("attn_q.weight", n_embd_, d_inner_);
-        L.wk = mat("attn_k.weight", n_embd_, d_inner_);
-        L.wv = mat("attn_v.weight", n_embd_, d_inner_);
-        L.wo = mat("attn_output.weight", d_inner_, n_embd_);
-        L.conv_q = f32("ssm_conv1d_q.weight", kConv, d_inner_);
-        L.conv_k = f32("ssm_conv1d_k.weight", kConv, d_inner_);
-        L.conv_v = f32("ssm_conv1d_v.weight", kConv, d_inner_);
-        L.f_a = mat("ssm_f_a.weight", n_embd_, fr);
-        L.f_b = mat("ssm_f_b.weight", fr, d_inner_);
-        L.dt_b = f32("ssm_dt.bias", d_inner_);
-        L.beta = mat("ssm_beta.weight", n_embd_, n_head_);
+        B.wq = mat("attn_q.weight", n_embd_, d_inner_);
+        B.wk = mat("attn_k.weight", n_embd_, d_inner_);
+        B.wv = mat("attn_v.weight", n_embd_, d_inner_);
+        B.wo = mat("attn_output.weight", d_inner_, n_embd_);
+        B.conv_q = f32("ssm_conv1d_q.weight", kConv, d_inner_);
+        B.conv_k = f32("ssm_conv1d_k.weight", kConv, d_inner_);
+        B.conv_v = f32("ssm_conv1d_v.weight", kConv, d_inner_);
+        B.f_a = mat("ssm_f_a.weight", n_embd_, fr);
+        B.f_b = mat("ssm_f_b.weight", fr, d_inner_);
+        B.dt_b = f32("ssm_dt.bias", d_inner_);
+        B.beta = mat("ssm_beta.weight", n_embd_, n_head_);
         // kda_step() takes -exp(A_log), which is what one converter stores.  Another stores exp(A_log), and the
         // sign tells those two apart.  The third stores A_log, under a name that says so.
         const TensorInfo* a = tensor(il, "ssm_a");
@@ -256,18 +257,18 @@ void Glm5Next::load_layer(int il) {
         float (*fix)(float) = nullptr;
         if (a && a->name.find("a_log") != std::string::npos) fix = [](float v) { return -std::exp(v); };
         else if (first > 0.f) fix = [](float v) { return -v; };
-        L.a = upload(a, blk(il, "ssm_a"), n_head_, 1, kF32, fix);
-        L.g_a = mat("ssm_g_a.weight", n_embd_, gr);
-        L.g_b = mat("ssm_g_b.weight", gr, d_inner_);
-        L.o_norm = f32("ssm_norm.weight", kda_dim_);
+        B.a = upload(a, blk(il, "ssm_a"), n_head_, 1, kF32, fix);
+        B.g_a = mat("ssm_g_a.weight", n_embd_, gr);
+        B.g_b = mat("ssm_g_b.weight", gr, d_inner_);
+        B.o_norm = f32("ssm_norm.weight", kda_dim_);
         ++n_kda_;
     }
 
     L.moe = has("ffn_gate_inp.weight");
     if (!L.moe) {
-        L.ffn_gate = mat("ffn_gate.weight", n_embd_, n_ff_dense_);
-        L.ffn_up = mat("ffn_up.weight", n_embd_, n_ff_dense_);
-        L.ffn_down = mat("ffn_down.weight", n_ff_dense_, n_embd_);
+        B.ffn_gate = mat("ffn_gate.weight", n_embd_, n_ff_dense_);
+        B.ffn_up = mat("ffn_up.weight", n_embd_, n_ff_dense_);
+        B.ffn_down = mat("ffn_down.weight", n_ff_dense_, n_embd_);
         return;
     }
     L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, n_expert_);
@@ -275,13 +276,13 @@ void Glm5Next::load_layer(int il) {
     L.sh_up = mat("ffn_up_shexp.weight", n_embd_, n_ff_exp_);
     L.sh_down = mat("ffn_down_shexp.weight", n_ff_exp_, n_embd_);
 
-    L.probs_b.assign((size_t) n_expert_, 0.f);
+    B.probs_b.assign((size_t) n_expert_, 0.f);
     if (const TensorInfo* b = tensor(il, "exp_probs_b.bias")) {
         if (b->type != kTypeF32 || (int64_t) b->elements() != n_expert_)
             throw std::runtime_error(b->name + " is " + shape_of(*b) + ", expected F32 [" +
                                      std::to_string(n_expert_) + "]");
         home(*b).payload(*b);
-        std::memcpy(L.probs_b.data(), home(*b).data(*b), (size_t) n_expert_ * sizeof(float));
+        std::memcpy(B.probs_b.data(), home(*b).data(*b), (size_t) n_expert_ * sizeof(float));
     }
 
     // the routed experts stay in the file; fill_expert_cache() copies the ones VRAM has room for
@@ -391,16 +392,16 @@ void Glm5Next::alloc_state() {
     uint16_t* lat = (uint16_t*) dmalloc(n_dsa_ * lat_n * sizeof(uint16_t), "the attention cache");
     float* idx = (float*) dmalloc(n_dsa_ * idx_n * sizeof(float), "the indexer cache");
     float* st = state_;
-    for (Layer& L : layers_) {
-        if (L.dsa) {
-            L.lat = lat;
+    for (Block& B : blocks_) {
+        if (B.dsa) {
+            B.lat = lat;
             lat += lat_n;
-            L.idx = idx;
+            B.idx = idx;
             idx += idx_n;
         } else {
-            L.conv = st;
+            B.conv = st;
             st += conv_n;
-            L.s = st;
+            B.s = st;
             st += s_n;
         }
     }
@@ -484,11 +485,11 @@ void Glm5Next::save_rows(int64_t first, int64_t n, uint8_t* dst) {
     ck(cudaStreamSynchronize(cs(st_)), "save rows");
     const size_t lat = (size_t) kv_rank_ * sizeof(uint16_t), idx = (size_t) 3 * idx_dim_ * sizeof(float);
     const size_t at = (size_t) first, rows = (size_t) n;
-    for (const Layer& L : layers_) {
-        if (!L.dsa || rows == 0) continue;
-        ck(cudaMemcpy(dst, (const uint8_t*) L.lat + at * lat, rows * lat, cudaMemcpyDeviceToHost), "save rows");
+    for (const Block& B : blocks_) {
+        if (!B.dsa || rows == 0) continue;
+        ck(cudaMemcpy(dst, (const uint8_t*) B.lat + at * lat, rows * lat, cudaMemcpyDeviceToHost), "save rows");
         dst += rows * lat;
-        ck(cudaMemcpy(dst, (const uint8_t*) L.idx + at * idx, rows * idx, cudaMemcpyDeviceToHost), "save rows");
+        ck(cudaMemcpy(dst, (const uint8_t*) B.idx + at * idx, rows * idx, cudaMemcpyDeviceToHost), "save rows");
         dst += rows * idx;
     }
 }
@@ -499,44 +500,44 @@ void Glm5Next::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_
     ck(cudaStreamSynchronize(cs(st_)), "load rows");
     const size_t lat = (size_t) kv_rank_ * sizeof(uint16_t), idx = (size_t) 3 * idx_dim_ * sizeof(float);
     const size_t at = (size_t) first, rows = (size_t) n, skip = (size_t) (first - from), all = (size_t) count;
-    for (const Layer& L : layers_) {
-        if (!L.dsa || rows == 0) continue;
-        ck(cudaMemcpy((uint8_t*) L.lat + at * lat, src + skip * lat, rows * lat, cudaMemcpyHostToDevice), "load rows");
+    for (const Block& B : blocks_) {
+        if (!B.dsa || rows == 0) continue;
+        ck(cudaMemcpy((uint8_t*) B.lat + at * lat, src + skip * lat, rows * lat, cudaMemcpyHostToDevice), "load rows");
         src += all * lat;
-        ck(cudaMemcpy((uint8_t*) L.idx + at * idx, src + skip * idx, rows * idx, cudaMemcpyHostToDevice), "load rows");
+        ck(cudaMemcpy((uint8_t*) B.idx + at * idx, src + skip * idx, rows * idx, cudaMemcpyHostToDevice), "load rows");
         src += all * idx;
     }
 }
 
-void Glm5Next::kda(Layer& L, int n) {
+void Glm5Next::kda(Block& B, int n) {
     const size_t d = (size_t) n * d_inner_;
-    lin(L.wq, xn_, proj_, n, xq_);
-    lin(L.wk, xn_, proj_ + d, n, xq_);
-    lin(L.wv, xn_, proj_ + 2 * d, n, xq_);
-    kda_conv(proj_, L.conv, fp(L.conv_q), fp(L.conv_k), fp(L.conv_v), qkv_, d_inner_, n, st_,
-             n_snap_ > 0 ? snap_ + (L.conv - state_) : nullptr, kda_n_, n_snap_);
+    lin(B.wq, xn_, proj_, n, xq_);
+    lin(B.wk, xn_, proj_ + d, n, xq_);
+    lin(B.wv, xn_, proj_ + 2 * d, n, xq_);
+    kda_conv(proj_, B.conv, fp(B.conv_q), fp(B.conv_k), fp(B.conv_v), qkv_, d_inner_, n, st_,
+             n_snap_ > 0 ? snap_ + (B.conv - state_) : nullptr, kda_n_, n_snap_);
 
-    lin(L.f_a, xn_, fa_, n, xq_);
-    lin(L.f_b, fa_, g1_, n);
-    add_bias(fp(L.dt_b), g1_, d_inner_, n, st_);
-    lin(L.beta, xn_, beta_, n, xq_);
-    lin(L.g_a, xn_, ga_, n, xq_);
-    lin(L.g_b, ga_, g2_, n);
-    kda_step(qkv_, g1_, fp(L.a), beta_, L.s, g2_, fp(L.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
-             st_, n_snap_ > 0 ? snap_ + (L.s - state_) : nullptr, kda_n_, n_snap_);
-    lin(L.wo, gated_, ao_, n);
+    lin(B.f_a, xn_, fa_, n, xq_);
+    lin(B.f_b, fa_, g1_, n);
+    add_bias(fp(B.dt_b), g1_, d_inner_, n, st_);
+    lin(B.beta, xn_, beta_, n, xq_);
+    lin(B.g_a, xn_, ga_, n, xq_);
+    lin(B.g_b, ga_, g2_, n);
+    kda_step(qkv_, g1_, fp(B.a), beta_, B.s, g2_, fp(B.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
+             st_, n_snap_ > 0 ? snap_ + (B.s - state_) : nullptr, kda_n_, n_snap_);
+    lin(B.wo, gated_, ao_, n);
 }
 
 // For the n tokens from row `first` of a call whose first token is at `at`: the n_top pools with the highest
 // indexer score, expanded to their rows, then the tail that is in no pool yet.  The scores come to the host for
 // the selection, which costs a wait per layer; it only runs past top_k tokens.
-void Glm5Next::dsa_select(Layer& L, int64_t at, int first, int n) {
+void Glm5Next::dsa_select(Block& B, int64_t at, int first, int n) {
     const int64_t pos = at + first;
     const int n_top = idx_top_k_ / kpool_;
-    lin(L.idx_q_b, qr_ + (size_t) first * q_rank_, iq_, n);
-    lin(L.idx_proj, xn_ + (size_t) first * n_embd_, iw_, n,
+    lin(B.idx_q_b, qr_ + (size_t) first * q_rank_, iq_, n);
+    lin(B.idx_proj, xn_ + (size_t) first * n_embd_, iw_, n,
         (const uint8_t*) xq_ + (size_t) first * kernels::native_q8_1_bytes(n_embd_));
-    idx_score(iq_, iw_, L.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
+    idx_score(iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
     ck(cudaMemcpyAsync(h_score_, score_, (size_t) n * score_stride_ * sizeof(float), cudaMemcpyDeviceToHost,
                        cs(st_)),
        "indexer scores");
@@ -561,54 +562,55 @@ void Glm5Next::dsa_select(Layer& L, int64_t at, int first, int n) {
 
 // The rows n tokens from position `pos` leave in a sparse-attention layer's caches: the latent the attention
 // reads, and the indexer's key and gate.  xn_ and xq_ hold the layer's input.
-void Glm5Next::dsa_store(Layer& L, int64_t pos, int n) {
-    lin(L.kv_a, xn_, t2_, n, xq_);
-    rms_norm(t2_, fp(L.kv_a_norm), kv_, kv_rank_, n, rms_eps_, st_);
-    store_f16(kv_, L.lat, kv_rank_, pos, n, st_);
+void Glm5Next::dsa_store(Block& B, int64_t pos, int n) {
+    lin(B.kv_a, xn_, t2_, n, xq_);
+    rms_norm(t2_, fp(B.kv_a_norm), kv_, kv_rank_, n, rms_eps_, st_);
+    store_f16(kv_, B.lat, kv_rank_, pos, n, st_);
 
-    lin(L.idx_k, xn_, ikr_, n, xq_);
-    layer_norm(ikr_, fp(L.idx_k_norm), fp(L.idx_k_norm_b), ik_, idx_dim_, n, norm_eps_, st_);
-    lin(L.idx_gate, xn_, ig_, n, xq_);
-    idx_store(ik_, ig_, L.idx, idx_dim_, pos, n, st_);
-    idx_pool(L.idx, fp(L.idx_ape), idx_dim_, kpool_, pos, n, st_);
+    lin(B.idx_k, xn_, ikr_, n, xq_);
+    layer_norm(ikr_, fp(B.idx_k_norm), fp(B.idx_k_norm_b), ik_, idx_dim_, n, norm_eps_, st_);
+    lin(B.idx_gate, xn_, ig_, n, xq_);
+    idx_store(ik_, ig_, B.idx, idx_dim_, pos, n, st_);
+    idx_pool(B.idx, fp(B.idx_ape), idx_dim_, kpool_, pos, n, st_);
 }
 
-void Glm5Next::dsa(Layer& L, int64_t pos, int n) {
-    lin(L.q_a, xn_, t1_, n, xq_);
-    rms_norm(t1_, fp(L.q_a_norm), qr_, q_rank_, n, rms_eps_, st_);
-    lin(L.q_b, qr_, q_, n);
-    lin(L.k_b, q_, qabs_, n, nullptr, kv_rank_);   // the key projection, absorbed into the query: per head
+void Glm5Next::dsa(Block& B, int64_t pos, int n) {
+    lin(B.q_a, xn_, t1_, n, xq_);
+    rms_norm(t1_, fp(B.q_a_norm), qr_, q_rank_, n, rms_eps_, st_);
+    lin(B.q_b, qr_, q_, n);
+    lin(B.k_b, q_, qabs_, n, nullptr, kv_rank_);   // the key projection, absorbed into the query: per head
 
-    dsa_store(L, pos, n);
+    dsa_store(B, pos, n);
 
     // While a token's pools all fit in top_k, every one is selected and its attention is plain causal attention.
     // That holds up to a position, so the tokens of a call are dense first and sparse after.
     const int64_t last_dense = (int64_t) idx_top_k_ + kpool_ - 2;
     const int dense = (int) std::clamp<int64_t>(last_dense - pos + 1, 0, n);
-    if (dense < n) dsa_select(L, pos, dense, n - dense);
+    if (dense < n) dsa_select(B, pos, dense, n - dense);
     // A prompt batch's tokens share their products, padded to the token with the most keys.  A few tokens get a
     // product each: a token of a window must come out as it would alone, to the last bit, and cuBLAS rounds a
     // product of another size another way.
     const int together = n < kStageRows ? 1 : std::min(rows_, kAttnRows);
-    dsa_attend(blas_, qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos, n, dense, akeys_, ascore_,
+    dsa_attend(blas_, qabs_, B.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos, n, dense, akeys_, ascore_,
                together, kqv_, kv_rank_, n_head_, 1.f / std::sqrt((float) mla_k_), st_);
-    lin(L.v_b, kqv_, vout_, n, nullptr, mla_v_);
-    lin(L.wo, vout_, ao_, n);
+    lin(B.v_b, kqv_, vout_, n, nullptr, mla_v_);
+    lin(B.wo, vout_, ao_, n);
 }
 
-void Glm5Next::dense_ffn(Layer& L, int il, int n) {
-    lin(L.ffn_gate, xn_, g_, n, xq_);
-    lin(L.ffn_up, xn_, u_, n, xq_);
+void Glm5Next::dense_ffn(Block& B, int il, int n) {
+    lin(B.ffn_gate, xn_, g_, n, xq_);
+    lin(B.ffn_up, xn_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_dense_, clamp_shexp_[(size_t) il], st_);
-    lin(L.ffn_down, h_, fo_, n);
+    lin(B.ffn_down, h_, fo_, n);
 }
 
 // What ggml's MoE graph does for this model: sigmoid gates, the n_used largest of gate + bias, and weights from
 // the bare gates.
-void Glm5Next::route(const Layer& L, const float* logits, int* ids, float* w) {
+void Glm5Next::route(int il, const float* logits, int* ids, float* w) {
+    const std::vector<float>& bias = blocks_[(size_t) il].probs_b;
     for (int e = 0; e < n_expert_; ++e) {
         probs_[(size_t) e] = 1.f / (1.f + std::exp(-logits[e]));
-        pick_[(size_t) e] = probs_[(size_t) e] + L.probs_b[(size_t) e];
+        pick_[(size_t) e] = probs_[(size_t) e] + bias[(size_t) e];
     }
     float sum = 0.f;
     for (int k = 0; k < n_used_; ++k) {
@@ -638,23 +640,24 @@ void Glm5Next::moe_shared(const Layer& L, int il, int n) {
 // A layer from its input to its router's copy (a dense layer: to its end).  A prompt batch's MoE (moe_rows) does
 // its own routing.
 void Glm5Next::layer_head(Layer& L, int il, int n) {
-    hc_pre(r_, fp(L.hc_attn_fn), fp(L.hc_attn_scale), fp(L.hc_attn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
+    Block& B = blocks_[(size_t) il];
+    hc_pre(r_, fp(B.hc_attn_fn), fp(B.hc_attn_scale), fp(B.hc_attn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
            hc_eps_, sinkhorn_, st_);
     rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
     dbg("attn_in", il, xn_, n_embd_);
-    if (L.dsa) dsa(L, pos_, n);
-    else kda(L, n);
+    if (B.dsa) dsa(B, pos_, n);
+    else kda(B, n);
     dbg("attn", il, ao_, n_embd_);
     hc_post(ao_, hcw_, r_, n_embd_, n, st_);
 
-    hc_pre(r_, fp(L.hc_ffn_fn), fp(L.hc_ffn_scale), fp(L.hc_ffn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
+    hc_pre(r_, fp(B.hc_ffn_fn), fp(B.hc_ffn_scale), fp(B.hc_ffn_base), mix_, hcw_, cur_, n_embd_, n, rms_eps_,
            hc_eps_, sinkhorn_, st_);
     rms_norm(cur_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
     dbg("ffn_in", il, xn_, n_embd_);
     if (!L.moe) {
-        dense_ffn(L, il, n);
+        dense_ffn(B, il, n);
         dbg("ffn", il, fo_, n_embd_);
         hc_post(fo_, hcw_, r_, n_embd_, n, st_);
     } else if (!(mmq_ && n >= kStageRows)) {
@@ -688,7 +691,7 @@ void Glm5Next::draft_rows(const int32_t* tokens, int first, int n) {
     const size_t e = (size_t) n_embd_;
     if (first < n) {
         draft_input(tokens + first, hn_ + (size_t) first * e, n - first);
-        dsa_store(layers_[(size_t) n_layer_], pos_ + first, n - first);
+        dsa_store(blocks_[(size_t) n_layer_], pos_ + first, n - first);
     }
     ck(cudaMemcpyAsync(hn_, hn_ + (size_t) n * e, e * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)), "draft");
     ahead_pos_ = -1;
@@ -705,7 +708,7 @@ int32_t Glm5Next::draft(int32_t token, int i, float* prob) {
     Layer& L = layers_[(size_t) n_layer_];
     float* own = hn_ + n_embd_;   // the block's output, which stands in for the model's from the second guess on
     float* x = draft_input(&token, i == 0 ? hn_ : own, 1);
-    dsa(L, pos_ + i, 1);
+    dsa(blocks_[(size_t) n_layer_], pos_ + i, 1);
     axpy(ao_, 1.f, x, n_embd_, true, st_);
     rms_norm(x, fp(L.ffn_norm), xn_, n_embd_, 1, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_, 1, st_);

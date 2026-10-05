@@ -62,26 +62,13 @@ struct Dev {
     int n_in = 0, n_out = 0;
 };
 
+/// What a layer has in every architecture.  Its attention's weights, and a dense FFN's, are the architecture's.
 struct Layer {
-    bool dsa = false, moe = false;
+    bool moe = false;
     bool fixed = false;   ///< its launches are the same for every token, so one token's can be recorded (eval())
-    Dev attn_norm, ffn_norm;
-    Dev hc_attn_fn, hc_attn_scale, hc_attn_base, hc_ffn_fn, hc_ffn_scale, hc_ffn_base;
-    Dev wo;
-    // KDA
-    Dev wq, wk, wv, conv_q, conv_k, conv_v, f_a, f_b, dt_b, beta, a, g_a, g_b, o_norm;
-    float* conv = nullptr;  ///< 3 * d_inner * (d_conv - 1)
-    float* s = nullptr;     ///< n_head * head_dim * head_dim
-    // DSA
-    Dev q_a, q_a_norm, q_b, kv_a, kv_a_norm, k_b, v_b;
-    Dev idx_k, idx_k_norm, idx_k_norm_b, idx_q_b, idx_proj, idx_gate, idx_ape;
-    uint16_t* lat = nullptr;  ///< max_context * kv_rank, fp16
-    float* idx = nullptr;     ///< max_context * 3 * idx_dim
-    // dense FFN
-    Dev ffn_gate, ffn_up, ffn_down;
+    Dev attn_norm, ffn_norm;   ///< the norms ahead of the attention and of the FFN
     // MoE
     Dev gate_inp, sh_gate, sh_up, sh_down;
-    std::vector<float> probs_b;
     const uint8_t* exp_gate = nullptr;  ///< n_expert experts back to back, in the mapped file
     const uint8_t* exp_up = nullptr;
     const uint8_t* exp_down = nullptr;
@@ -192,8 +179,8 @@ protected:
     virtual void layer_tail(Layer& L, int il, int n) = 0;
     /// The model's output for `rows` tokens from row `first` of the call, normed: what the output matrix takes.
     virtual void output_rows(int first, int rows, float* h) = 0;
-    /// A token's experts and their weights from its router scores.
-    virtual void route(const Layer& L, const float* logits, int* ids, float* w) = 0;
+    /// A token's experts and their weights from its scores at layer il's router.
+    virtual void route(int il, const float* logits, int* ids, float* w) = 0;
     /// The shared expert, into fo_.  It runs on the GPU while the host routes.
     virtual void moe_shared(const Layer& L, int il, int n) = 0;
     /// The draft block's rows for tokens [first, n) of a call that has run (draft()).

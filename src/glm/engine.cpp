@@ -681,7 +681,7 @@ void Engine::moe(Layer& L, int il, int n) {
         for (int t = 0; t < m; ++t) {
             int ids[kMaxUsed];
             float w[kMaxUsed];
-            route(L, h_rl_ + (size_t) (at + t) * n_expert_, ids, w);
+            route(il, h_rl_ + (size_t) (at + t) * n_expert_, ids, w);
             for (int k = 0; k < n_used_; ++k) {
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];
@@ -799,7 +799,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     count_.assign((size_t) n_expert_, 0);
     for (int t = 0; t < n; ++t) {
         int32_t* ids = ids_.data() + (size_t) t * n_used_;
-        route(L, h_rl_ + (size_t) t * n_expert_, ids, w + (size_t) t * n_used_);
+        route(il, h_rl_ + (size_t) t * n_expert_, ids, w + (size_t) t * n_used_);
         for (int k = 0; k < n_used_; ++k) {
             ++count_[(size_t) ids[k]];
             ++use_[(size_t) il * n_expert_ + (size_t) ids[k]];
