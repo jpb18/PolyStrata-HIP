@@ -1612,7 +1612,7 @@ def engine_args(cfg: dict) -> list[str]:
     return learned_profile_args(cfg, args)
 
 
-PARALLEL_MAX = 8      # normal batch mode; grouped MTP waves more slots through eight-row windows
+PARALLEL_MAX = 8      # the engine's batch window holds at most 8 rows (kVerifyMaxT); --batch-mtp waves more through it
 
 
 def parallel_args(cfg: dict, args: list[str]) -> list[str]:
@@ -1630,7 +1630,7 @@ def parallel_args(cfg: dict, args: list[str]) -> list[str]:
         return []
     if n <= 1:
         return []
-    if n > PARALLEL_MAX and os.environ.get("MULTI_CONCURRENCY") != "TRUE":
+    if n > PARALLEL_MAX and "--batch-mtp" not in args and os.environ.get("STRATA_BATCH_MTP", "0") in ("", "0"):
         print(f'[strata] "parallel": {n} - the engine runs at most {PARALLEL_MAX} requests together; it will use '
               f"{PARALLEL_MAX}", flush=True)
     return ["--batch", str(n)]

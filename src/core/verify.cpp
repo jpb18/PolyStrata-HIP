@@ -1890,7 +1890,8 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
                                         beta_L_ + (size_t) gdn_index * MT * HV + (size_t) first * HV,
                                         z_ + (size_t) first * ZV, (const float*) wnm->data, EPS,
                                         y_dummy_ + (size_t) first * ZV, (int) g.ssm_k_heads,
-                                        (int) HV, t - first, keep, cs_, t - first);
+                                        (int) HV, t - first, keep, cs_,
+                                        t - first > 1 ? t - first : 0);   // a 1-row group keeps the 0.1.39 kernel
                 }
                 ++gdn_index;
             } else {
@@ -1973,23 +1974,33 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
             return false;
         }
     refresh_ar();
-    // Slot rotation creates new layouts; bound the captured graph pairs.
-    const auto key = bkey(rows, S, hbase);
-    constexpr size_t graph_limit = 32;
-    if (exec_bm_.find(key) == exec_bm_.end() && exec_bm_.size() >= graph_limit) {
-        if (cudaStreamSynchronize(cs_) != cudaSuccess) {
-            err = "verify: synchronizing before batch graph eviction failed";
-            return false;
+    // --batch-mtp only (limit 0 = 0.1.39: no eviction): slot rotation creates new layouts; bound the captured graph
+    // pairs, evicting the least recently used layout.
+    if (batch_graph_limit_ > 0) {
+        const auto key = bkey(rows, S, hbase);
+        if (exec_bm_.find(key) == exec_bm_.end() && exec_bm_.size() >= batch_graph_limit_) {
+            if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+                err = "verify: synchronizing before batch graph eviction failed";
+                return false;
+            }
+            auto old = exec_bm_.begin();
+            uint64_t oldest = UINT64_MAX;
+            for (auto it = exec_bm_.begin(); it != exec_bm_.end(); ++it) {
+                const auto u = bm_used_.find(it->first);
+                const uint64_t t = u == bm_used_.end() ? 0 : u->second;
+                if (t < oldest) { oldest = t; old = it; }
+            }
+            const auto old_key = old->first;
+            if (old->second) cudaGraphExecDestroy(old->second);
+            exec_bm_.erase(old);
+            bm_used_.erase(old_key);
+            auto commit_old = commit_bm_.find(old_key);
+            if (commit_old != commit_bm_.end()) {
+                if (commit_old->second) cudaGraphExecDestroy(commit_old->second);
+                commit_bm_.erase(commit_old);
+            }
         }
-        auto old = exec_bm_.begin();
-        const auto old_key = old->first;
-        if (old->second) cudaGraphExecDestroy(old->second);
-        exec_bm_.erase(old);
-        auto commit_old = commit_bm_.find(old_key);
-        if (commit_old != commit_bm_.end()) {
-            if (commit_old->second) cudaGraphExecDestroy(commit_old->second);
-            commit_bm_.erase(commit_old);
-        }
+        bm_used_[key] = ++bm_tick_;
     }
     if (!capture_batch(rows, S, hbase, err) || !capture_commit_batch(rows, S, hbase, err)) return false;
     const Clock::time_point t0 = Clock::now();

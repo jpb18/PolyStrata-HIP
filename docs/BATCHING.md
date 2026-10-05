@@ -19,12 +19,12 @@ asked, with a note when it is more than setup would recommend.
 "parallel": 2
 ```
 
-On one GPU with MTP enabled, set `MULTI_CONCURRENCY=TRUE` in the server's
-environment to let batch slots use one MTP proposal each. It is opt-in; without
-it, the batch behavior described below is unchanged. The grouped path has only
-been tested on an AMD R9700. It needs additional VRAM per slot for draft state
-and buffers, so check the engine's free-memory log before using it on a smaller
-card. It has not been validated on NVIDIA or with a layer split.
+On one GPU with MTP (`--mtp` and `--spec`), `--batch-mtp` (in the config's `args`, or `STRATA_BATCH_MTP=1` in the
+server's environment) lets each batch slot verify one MTP proposal per window. It is opt-in; without it the batch
+behaviour described below is exactly the one without MTP. It needs VRAM per slot for the draft state and buffers, so
+check the engine's free-memory log before using it on a smaller card. If it cannot run (one slot, no `--mtp`, a layer
+split or helper GPU) the engine says so and batches as usual. RTX PRO 5000 owners measured +31% to +39% total
+throughput with 2 to 4 clients (a RX R9700 run too); it has not been validated with a layer split.
 
 With a layer split, the engine options go into the config's `args`:
 
@@ -65,7 +65,7 @@ about 10-25% speed per request on this card". `--parallel N` is honoured as aske
 - **When a second request arrives**, the first is stopped (`STOP`) and continues in a batch slot with its prompt
   plus what it generated so far - the engine's prompt cache holds exactly that, so nothing is read again - and the
   new request is admitted next to it. By default, a request in a slot decodes **without MTP drafts** (one token per window).
-  With `MULTI_CONCURRENCY=TRUE`, each slot verifies one MTP proposal alongside its current token.
+  With `--batch-mtp`, each slot verifies one MTP proposal alongside its current token.
 - **A request left alone in a slot** (the others finished, nobody waits) goes back to the solo path: the slot is
   stopped, the engine copies its sessions back and decodes with MTP drafts again (at most twice per request; with
   `--prompt-cache 0` it stays in the slot; `STRATA_PARALLEL_SOLO=0` turns it off). The draft layer's own K/V was
