@@ -1644,8 +1644,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
     s.idx_dim = g.idx_key_dim;
-    const char* kv_env = std::getenv("STRATA_KV_PREFETCH");
-    const bool kv_prefetch = kv_env && std::atoi(kv_env) != 0;
+    // read once (STRATA_KV_PREFETCH=1/0: the next streamed layer's KV prefix is staged on its own stream)
+    static const bool kv_prefetch_on = [] {
+        const char* e = std::getenv("STRATA_KV_PREFETCH");
+        return e ? std::atoi(e) != 0 : false;
+    }();
+    const bool kv_prefetch = kv_prefetch_on;
     if (kv_prefetch) {
         if ((!m.kv_copy && cudaStreamCreateWithFlags(&m.kv_copy, cudaStreamNonBlocking) != cudaSuccess) ||
             (!m.kv_released && cudaEventCreateWithFlags(&m.kv_released, cudaEventDisableTiming) != cudaSuccess) ||
@@ -1829,6 +1833,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         int64_t kv_pending = -1;
         auto kv_prefetch_after = [&](int64_t layer, int64_t ordinal) -> bool {
             if (!kv_prefetch || p0 <= 0) return true;
+            if (kv_pending >= 0) return true;   // one staging pool: the pending prefetch has not been consumed yet
             for (int64_t l = layer; l < LE; ++l) {
                 if (!core::is_qsa_layer(g, l)) continue;
                 const core::QsaState& state = ss.qsa_states[ordinal];
