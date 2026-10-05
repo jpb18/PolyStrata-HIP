@@ -1253,6 +1253,9 @@ if(STRATA_NATIVE_EXPERTS)
       # q4_0/q4_0 and q4_0/q4_1: a plain llama-quantize Q4_0 file (bartowski's Qwen3.8-Flash-Next-Q4_0: gate/up Q4_0,
       # down Q4_0 on 42 layers and Q4_1 on 6)
       foreach(_pair q4_K/q5_1 q4_K/q8_0 q5_K/q8_0 q8_0/q8_0 q4_K/q5_0 q5_0/q8_0 q4_0/q4_0 q4_0/q4_1)
+
+      # q6_K/q8_0: Unsloth UD-Q6_K_XL gate/up Q6_K with Q8_0 down (docs/UNSLOTH_Q6.md). Layer 2 is q8_0/q8_0, already listed.
+      foreach(_pair q4_K/q5_1 q4_K/q8_0 q5_K/q8_0 q8_0/q8_0 q4_K/q5_0 q5_0/q8_0 q6_K/q8_0)
         string(REPLACE "/" "_" _name "${_pair}")
         add_test(NAME native_expert_parity_${_name} COMMAND native_expert_parity --synthetic ${_pair})
         set_tests_properties(native_expert_parity_${_name} PROPERTIES TIMEOUT 120)
@@ -1260,9 +1263,6 @@ if(STRATA_NATIVE_EXPERTS)
       add_test(NAME native_expert_parity_q5_1_min COMMAND native_expert_parity --q5_1-min)
       # #290: the BF16 token embedding (--embd-gguf) gathered and dequantized bit for bit
       add_test(NAME native_expert_parity_bf16_embd COMMAND native_expert_parity --bf16-embd)
-      # a pair without GPU kernels (Q6_K gate/up) is refused by native_expert_supported, not run
-      add_test(NAME native_expert_parity_refuses_q6_K COMMAND native_expert_parity --synthetic q6_K/q8_0)
-      set_tests_properties(native_expert_parity_refuses_q6_K PROPERTIES WILL_FAIL TRUE)
     endif()
   endif()
   # #296's real-weight checks (OrcaRouter Q4_K_S files; docs/ORCA_Q4_K_S.md) - test programs, not part of a release
