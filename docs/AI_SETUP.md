@@ -82,6 +82,11 @@ By the PC's RAM (ask the user whether they mainly want it for code - then the Co
 32 GB, 96 GB of RAM or more, a 114 GB download, no images. Take it only when the user asks for it, and read
 [GLM.md](GLM.md) first.
 
+`--family qwen36`, `--family ornith` and `--family gemma4` (Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B) are
+smaller models on GLM's engine, and experimental too: Linux, one NVIDIA card, a 13 to 17 GB download, about 17 to
+22 GB of RAM beside an 8 GB card by setup's estimate, no images. Each has one size, so leave `--model` out. Take one
+only when the user asks for it; [BACKENDS.md](BACKENDS.md#install) has what was measured.
+
 ## 4. Run setup without questions
 
 From the PolyStrata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell):

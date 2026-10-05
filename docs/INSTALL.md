@@ -12,7 +12,8 @@ this for you with [AI_SETUP.md](AI_SETUP.md).
 ## What you need
 
 This is for Qwen3.8-Flash-Next. GLM 5.3 Flash needs Linux, one NVIDIA card and far more RAM:
-[GLM.md](GLM.md#what-you-need).
+[GLM.md](GLM.md#what-you-need). The three smaller models (Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B) need Linux,
+one NVIDIA card and less of everything: [BACKENDS.md](BACKENDS.md#install).
 
 | | |
 | --- | --- |

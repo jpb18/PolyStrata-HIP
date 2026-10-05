@@ -19,9 +19,10 @@ It runs two models, each with its own engine:
 - **[GLM 5.3 Flash](docs/GLM.md)** on Linux with one NVIDIA card. Its engine was written for PolyStrata. It is
   experimental: it has run on one PC, with a 32 GB card.
 
-That second engine also runs Qwen3.6-35B-A3B, Ornith 1.5 and Gemma 4 26B-A4B from their GGUF files, and the server
-can change between installed models while it runs. Setup does not install these three yet:
-[Models and backends](docs/BACKENDS.md) says what was measured and how to add one.
+That second engine also runs Qwen3.6-35B-A3B, Ornith 1.5 and Gemma 4 26B-A4B, files of 13 to 17 GB, and the server
+can change between installed models while it runs. They are in the installer's list of models;
+`./setup.sh --family qwen36`, `ornith` or `gemma4` goes straight to one.
+[Models and backends](docs/BACKENDS.md) says what was measured.
 
 PolyStrata is built on [Strata](https://github.com/Niko1221/Strata) by Niko1221.
 

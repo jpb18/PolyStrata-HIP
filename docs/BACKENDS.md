@@ -20,8 +20,41 @@ card with 8 GB was not there: [one table](#with-8-gb-of-vram) holds the 5090 to 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-glm` is the engine that reads a
 GGUF in place, and it now has three architectures. Its name is from its first model and will change.
 
-Setup installs Qwen3.8 and GLM. The three new models have no setup step yet: see
-[Adding a model](#adding-a-model-of-an-architecture-that-is-there).
+## Install
+
+Setup installs all five. The three new models are in its list of models, and each has a family name that goes
+straight to it:
+
+```bash
+./setup.sh --family qwen36
+```
+
+```bash
+./setup.sh --family ornith
+```
+
+```bash
+./setup.sh --family gemma4
+```
+
+| Family | Model | File | Download | RAM beside an 8 GB card (estimate) |
+| --- | --- | --- | --- | --- |
+| `qwen36` | Qwen3.6-35B-A3B | Unsloth UD-Q3_K_M | 17.1 GB | about 21 GB |
+| `ornith` | Ornith 1.5 35B-A3B | APEX-MTP-I-Compact | 17.4 GB | about 22 GB |
+| `gemma4` | Gemma 4 26B-A4B | Unsloth UD-Q3_K_M | 12.7 GB | about 17 GB |
+
+The steps are GLM's ([GLM.md](GLM.md#install)). Setup asks the context and whether to keep several conversations in
+RAM, compiles `strata-glm`, downloads the one file from a pinned revision, checks its SHA-256, writes the tokenizer
+directory, the run config and a start script, and starts the model. `--gguf-dir /folder/with/the/file` takes a file
+you already have. The engine is compiled once for all of them. On the test machine, with the files on the disk,
+the first install took a minute, most of it the compile, and the other two 17 seconds each.
+
+Each install is a model of its own: `--list-models`, `/model` and the web page's list show all of them, and
+`./setup.sh --check` has a line for each with what this PC's card and RAM make of it.
+
+The RAM column is the experts an 8 GB card does not hold, plus 10 GB for the rest. It is setup's estimate and was
+not checked on such a PC. Setup does not stop a PC below the 32 GB that Qwen3.8 needs when one of these families is
+named.
 
 ## How a backend works
 
@@ -90,7 +123,7 @@ files describe the same layout with other weights.
 | Field | From |
 | --- | --- |
 | `id` | the config's `model_name` |
-| `display_name` | the GGUF's `general.name` |
+| `display_name` | the config's `display_name` (setup writes it), else the GGUF's `general.name` |
 | `backend` | the GGUF's architecture (`qwen4exp` for a pack) |
 | `path` | the config's `--model` |
 | `quantization` | the file's name (`UD-Q3_K_M`, `3.0bit`), else its most common tensor type |
@@ -105,7 +138,7 @@ files describe the same layout with other weights.
 `models.json` in the same folder may add to an entry or correct it:
 
 ```json
-{"qwen3.6-35b-a3b": {"display_name": "Qwen3.6 35B-A3B", "notes": "the daily one"}}
+{"qwen3.6-35b-a3b-ud-q3_k_m": {"display_name": "Qwen3.6 35B-A3B", "notes": "the daily one"}}
 ```
 
 The estimates are rough. `least` leaves out the attention caches, which grow with the context.
@@ -258,6 +291,8 @@ All three are in the shared kernels, so every architecture with that kind of att
 
 ## Adding a model of an architecture that is there
 
+Setup knows the files in the table above. Another file of one of these architectures runs after these steps:
+
 1. Get its GGUF. Check `general.architecture` is one of the table above.
 2. Write its tokenizer directory:
 
@@ -277,6 +312,9 @@ All three are in the shared kernels, so every architecture with that kind of att
    should answer.
 5. Check it against llama.cpp before trusting it: the same prompt's token ids into both, greedy, and compare the
    tokens that come out.
+6. To have setup install it, give it a family in `FAMILIES` in `setup.py`, next to `qwen36`: the repository at a
+   pinned revision, the file's name, size and SHA-256, the size of its routed experts and the VRAM it takes before
+   any expert. Steps 2 and 3 are then setup's.
 
 ## Adding an architecture
 
@@ -294,7 +332,9 @@ All three are in the shared kernels, so every architecture with that kind of att
 - Linux and one NVIDIA card. Built and run on one machine.
 - The three new models have run with all their experts in VRAM and with the card held to 8 GB, not on a card
   that has 8 GB, nor on a PC with 32 GB of RAM. The target of 8 GB of VRAM with 32 GB of RAM is not measured.
-- Setup does not install the new models. Their files, tokenizer directories and run configs are made by hand.
+- Setup installed the three new models from files that were already on the disk. Its download of them was not
+  run: the three addresses were asked for their headers only, and each states the pinned size.
+- Setup's RAM figures for them are estimates.
 - Gemma 4: its draft model (a separate small GGUF that shares the caches) is not run, so it guesses from repeats
   only; its tool calls are not parsed; images are not read.
 - Qwen3.6 and Ornith: images are not read.
