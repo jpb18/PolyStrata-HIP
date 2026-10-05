@@ -24,8 +24,11 @@ There is **no ready-made Intel engine** in the release zips. You build it from s
 | Strata maintainers | no Arc | compile check and kernel tests on a CPU device only (below) | this release |
 
 The 0.1.39 port re-migrates 0.1.38's port onto the 0.1.39 engine sources (the #606 NaN fix, the #649 verify
-trace, the new prompt paths). It compiles and its kernel tests run, but **nobody has run the 0.1.39 port on an Arc
-yet**. The numbers in the table were measured on earlier versions.
+trace, the new prompt paths). 0.1.39's `sycl/` did not compile against 0.1.39's own engine sources (#784: the
+`ThreadAffinity` type of #626 and the layer range of `NativeDense::load` from #559), and its ring waits never saw a
+slow layer as still running (#866, #867). Both are fixed in 0.1.40, and the two B60 reports below were measured with
+exactly those two fixes on top of 0.1.39. **No one has run an unpatched 0.1.39 port on an Arc**, and the other rows were
+measured on earlier versions.
 
 The two B60 rows ran `6f32ec0` plus two small `sycl/` fixes (the compile fix and the ring-wait fix), AOT `bmg-g21`, on Ubuntu 24.04 with
 `xe`, Level Zero V2, NEO 26.09.37435.12 and oneAPI 2026.1.1, without Docker. Host: Ryzen 5 5600, 64 GB RAM, PCIe 3.0 x8 per card.
