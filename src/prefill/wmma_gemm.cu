@@ -554,6 +554,82 @@ __global__ void __launch_bounds__(256) kernel_hcdown(const uint16_t* __restrict_
         }
 #endif
 }
+
+// S23/S (STRATA_HCD_EXACT=1): the HC down projection (N 320, K 10240, BF16 in, FP32 out) bitwise equal to hipBLASLt
+// solution 1176 / 1177 (MT32x96 / MT96x96, StaggerU 32, stride 256 B): every output is the k tiles of 32 accumulated in
+// order, 16 per WMMA, starting at k tile 4 * (token tile of 96 % 32) and wrapping (hcd_bit / hcd_perm probes: 0 of
+// 5.2 M outputs differ at T 16384).  96 x 160 blocks (two per token tile), 6 waves of 32 x 80.
+typedef uint32_t hx_u4 __attribute__((ext_vector_type(4)));
+constexpr int HX_N = 320, HX_BN = 160, HX_BM = 96, HX_BK = 64, HX_LDK = HX_BK + 8, HX_NT = 192, HX_K = 10240;
+__device__ __forceinline__ hb16 hx_frag(const uint16_t* p) {
+    const hx_u4 a = *reinterpret_cast<const hx_u4*>(p), b = *reinterpret_cast<const hx_u4*>(p + 8);
+    const uint32_t w[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+    return __builtin_bit_cast(hb16, w);
+}
+__global__ void __launch_bounds__(HX_NT) kernel_hcd_exact(const uint16_t* __restrict__ X, int ldx,
+                                                          const uint16_t* __restrict__ W, float* __restrict__ Y, int M) {
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__)
+    constexpr int K = HX_K, BN = HX_BN, BMT = HX_BM, BK = HX_BK, NT = HX_NT;
+    __shared__ __align__(16) uint16_t sA[BMT][HX_LDK];
+    __shared__ __align__(16) uint16_t sB[BN][HX_LDK];
+    const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, l16 = lane & 15, hi = lane >> 4;
+    const int wm = wave % 3, wn = wave / 3, nbase = BN * (blockIdx.x & 1);
+    const int tt = blockIdx.x >> 1, m0 = tt * BMT;
+    constexpr int nslab = K / BK;
+    const int rot = (2 * (tt & 31)) % nslab;   // 4 k tiles of 32 = 2 slabs of 64
+    hx_u4 ra0, ra1, ra2, ra3, rb0, rb1, rb2, rb3, rb4, rb5, rb6;
+#define HX_LDA(v, i) { const int idx = tid + NT * (i), r = idx >> 3, q = idx & 7; v = *reinterpret_cast<const hx_u4*>(X + (size_t) min(m0 + r, M - 1) * ldx + k0 + 8 * q); }
+#define HX_LDB(v, i) { const int idx = min(tid + NT * (i), BN * 8 - 1), r = idx >> 3, q = idx & 7; v = *reinterpret_cast<const hx_u4*>(W + (size_t) (nbase + r) * K + k0 + 8 * q); }
+#define HX_STA(v, i) { const int idx = tid + NT * (i); *reinterpret_cast<hx_u4*>(&sA[idx >> 3][8 * (idx & 7)]) = v; }
+#define HX_STB(v, i) { const int idx = tid + NT * (i); if (idx < BN * 8) *reinterpret_cast<hx_u4*>(&sB[idx >> 3][8 * (idx & 7)]) = v; }
+#define HX_LOAD(k0v) { const int k0 = (k0v); HX_LDA(ra0, 0) HX_LDA(ra1, 1) HX_LDA(ra2, 2) HX_LDA(ra3, 3) HX_LDB(rb0, 0) HX_LDB(rb1, 1) HX_LDB(rb2, 2) HX_LDB(rb3, 3) HX_LDB(rb4, 4) HX_LDB(rb5, 5) HX_LDB(rb6, 6) }
+#define HX_STORE() { HX_STA(ra0, 0) HX_STA(ra1, 1) HX_STA(ra2, 2) HX_STA(ra3, 3) HX_STB(rb0, 0) HX_STB(rb1, 1) HX_STB(rb2, 2) HX_STB(rb3, 3) HX_STB(rb4, 4) HX_STB(rb5, 5) HX_STB(rb6, 6) }
+    f8 acc[2][5];
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int j = 0; j < 5; ++j) acc[i][j] = f8{0, 0, 0, 0, 0, 0, 0, 0};
+    HX_LOAD(rot * BK);
+    HX_STORE();
+    __syncthreads();
+    const int ar = 32 * wm + l16, br = 80 * wn + l16;
+    for (int s = 0; s < nslab; ++s) {
+        const bool more = s + 1 < nslab;
+        if (more) HX_LOAD(((s + 1 + rot) % nslab) * BK);
+#pragma unroll
+        for (int ks = 0; ks < BK; ks += 16) {
+            const hb16 a0 = hx_frag(&sA[ar][ks]), a1 = hx_frag(&sA[ar + 16][ks]);
+            const hb16 b0 = hx_frag(&sB[br][ks]), b1 = hx_frag(&sB[br + 16][ks]), b2 = hx_frag(&sB[br + 32][ks]),
+                       b3 = hx_frag(&sB[br + 48][ks]), b4 = hx_frag(&sB[br + 64][ks]);
+#define HX_W2(j, bj) acc[0][j] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a0, bj, acc[0][j]); acc[1][j] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a1, bj, acc[1][j]);
+            HX_W2(0, b0) HX_W2(1, b1) HX_W2(2, b2) HX_W2(3, b3) HX_W2(4, b4)
+#undef HX_W2
+        }
+        if (more) {
+            __syncthreads();
+            HX_STORE();
+            __syncthreads();
+        }
+    }
+#undef HX_LDA
+#undef HX_LDB
+#undef HX_STA
+#undef HX_STB
+#undef HX_LOAD
+#undef HX_STORE
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int j = 0; j < 5; ++j) {
+            const int n = nbase + 80 * wn + 16 * j + l16;
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int m = m0 + 32 * wm + 16 * i + 2 * e + hi;
+                if (m < M) Y[(size_t) m * HX_N + n] = acc[i][j][e];
+            }
+        }
+#endif
+}
 }  // namespace pfg
 
 bool strata_pf_hcdown_bf16(const uint16_t* X, int64_t ldx, const uint16_t* Wd, const uint16_t* Wi, int64_t nd,
@@ -571,6 +647,23 @@ bool strata_pf_hcdown_bf16(const uint16_t* X, int64_t ldx, const uint16_t* Wd, c
     const unsigned grid = (unsigned) (mt * ((nd + ni + 127) / 128));
     pfg::kernel_hcdown<<<grid, 256, 0, static_cast<hipStream_t>(stream)>>>(X, (int) ldx, Wd, Wi, (int) nd, (int) ni,
                                                                             lo, inj, (int) T, (int) K);
+    return hipGetLastError() == hipSuccess;
+}
+
+bool strata_pf_hcdown_exact_bf16(const uint16_t* X, int64_t ldx, const uint16_t* W, float* Y, int64_t T, int64_t N,
+                                 int64_t K, void* stream) {
+    if (!X || !W || !Y || T < 1 || N != pfg::HX_N || K != pfg::HX_K || ldx < K || ldx % 8 != 0 || ldx > (1LL << 30) ||
+        T > (1LL << 30))
+        return false;
+    static const bool gfx11 = [] {
+        int dev = 0;
+        hipDeviceProp_t prop{};
+        if (hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&prop, dev) != hipSuccess) return false;
+        return std::strncmp(prop.gcnArchName, "gfx11", 5) == 0;
+    }();
+    if (!gfx11) return false;
+    const unsigned grid = (unsigned) (2 * ((T + pfg::HX_BM - 1) / pfg::HX_BM));
+    pfg::kernel_hcd_exact<<<grid, pfg::HX_NT, 0, static_cast<hipStream_t>(stream)>>>(X, (int) ldx, W, Y, (int) T);
     return hipGetLastError() == hipSuccess;
 }
 
@@ -625,6 +718,9 @@ bool strata_pf_gemm_f16_ld(const uint16_t*, int64_t, const uint16_t*, int64_t, f
 }
 bool strata_pf_hcdown_bf16(const uint16_t*, int64_t, const uint16_t*, const uint16_t*, int64_t, int64_t, float*, float*,
                            int64_t, int64_t, void*) {
+    return false;
+}
+bool strata_pf_hcdown_exact_bf16(const uint16_t*, int64_t, const uint16_t*, float*, int64_t, int64_t, int64_t, void*) {
     return false;
 }
 bool strata_wmma_gemm_f16(const uint16_t*, const uint16_t*, float*,
