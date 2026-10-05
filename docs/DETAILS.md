@@ -517,6 +517,20 @@ print(r.choices[0].message.content)
   server ends it there with `finish_reason` `"length"` and says so in its window: a model in a loop, or a broken
   state that answers one token forever (#606 saw 36,689 tokens of `!`). `"repeat_stop_tokens": N` in
   `strata-<model>.json` sets the run length; `0` turns it off (for a request that really wants one token many times).
+- **Repeated reasoning (opt-in, #728).** The single-token guard above does not see a model that repeats whole
+  passages. `"reasoning_loop_recovery"` in `strata-<model>.json` is `false` (the default), `"stop"` or `"recover"`
+  (`true` means `"recover"`). Every 512 output tokens, at a complete character and parser boundary, the reasoning is
+  measured over its last 2,000 words and punctuation marks (counting passages over the last 30,000 words). If at
+  least 25% belong to 12-word passages seen three times, `"stop"` ends the reply there as `"length"` and says so in
+  the server window. `"recover"` stops and drains that generation, then goes on once from all its generated token
+  ids with the template's low-effort sentence in place of the xhigh one in the first system message (a splice of
+  token ids: the rest of the prompt is not decoded or re-encoded). The task stays the same; no answer or `</think>`
+  is inserted, and both passes share the original output limit. On recovery only, temperature is raised to at least
+  1.0 and presence penalty to at least 1.5; a client's top-p, top-k and seed are never changed. `/metrics` records
+  `reasoning_recoveries` and the coverage. This is a policy, not a numerical engine fix or a guarantee of an answer.
+  `"recover"` needs the exact xhigh sentence in the first system message and skips requests with images; re-reading
+  the changed prefix costs prompt time. Either mode can mistake repeated useful code or checks for a loop, so keep
+  the recorded answer quality alongside the completion rate when testing it.
 - **Changing the effort without re-reading the prompt (opt-in, 0.1.39, #458).** The effort's instruction is the
   first thing in the prompt, so a request that only changes the effort (an agent's "think harder" switch, `none` for
   a quick tool step) reads the whole conversation again. `"effort_position": "end"` in `strata-<model>.json` renders
