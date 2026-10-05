@@ -100,32 +100,31 @@ __global__ void quantize_q8_0_kernel(const float* __restrict__ x, uint8_t* __res
 #if defined(__HIPCC__)   // AMD keeps the thread-a-block kernel
 __global__ void quantize_q8_0_scaled_kernel(const float* __restrict__ x, uint8_t* __restrict__ blocks,
                                             float* __restrict__ scales, long long n_blocks) {
-    const long long b = ((long long) blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const long long b = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_blocks) return;
-    const int lane = threadIdx.x & 31;
-    const float xv = x[b * QK8_0 + lane];
+    const float* xb = x + b * QK8_0;
     uint8_t* out = blocks + b * 34;
 
-    float amax = fabsf(xv);
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    float amax = 0.0f;
+    for (int i = 0; i < QK8_0; ++i) amax = fmaxf(amax, fabsf(xb[i]));
     // VERBATIM from `cpu/expert.cpp:144-145`, including the `amax > 0` guard, so the fp32 value written here
     // is bit-identical to the `s` the CPU path used.
     const float s = amax > 0.f ? amax / 127.f : 0.f;
     const float inv = s > 0.f ? 1.f / s : 0.f;
-    if (lane == 0) {
-        scales[b] = s;
-        const uint16_t d16bits = f16_from_f32(s);
-        out[0] = (uint8_t) (d16bits & 0xFF);
-        out[1] = (uint8_t) (d16bits >> 8);
+    scales[b] = s;
+
+    const uint16_t d16bits = f16_from_f32(s);
+    out[0] = (uint8_t) (d16bits & 0xFF);
+    out[1] = (uint8_t) (d16bits >> 8);
+    for (int i = 0; i < QK8_0; ++i) {
+        // VERBATIM from `cpu/expert.cpp:159-162`: reciprocal multiply, then `t + copysign(0.5, t)` truncated
+        // toward zero, which is `lround`'s rule - round half away from zero.
+        const float t = xb[i] * inv;
+        const float r = t + (t >= 0.f ? 0.5f : -0.5f);
+        int v = (int) r;
+        v = v < -127 ? -127 : (v > 127 ? 127 : v);
+        out[2 + i] = (uint8_t) (int8_t) v;
     }
-    // VERBATIM from `cpu/expert.cpp:159-162`: reciprocal multiply, then `t + copysign(0.5, t)` truncated
-    // toward zero, which is `lround`'s rule - round half away from zero.
-    const float t = xv * inv;
-    const float r = t + (t >= 0.f ? 0.5f : -0.5f);
-    int v = (int) r;
-    v = v < -127 ? -127 : (v > 127 ? 127 : v);
-    out[2 + lane] = (uint8_t) (int8_t) v;
 }
 
 #else
