@@ -1,8 +1,12 @@
-// src/glm/engine.hpp - GLM 5.3 Flash (llama.cpp architecture "glm5-next").
+// src/glm/engine.hpp - the engine that runs a model from its GGUF.
 //
 // The engine reads the GGUF in place, in one file or in the numbered files of a split one.  Everything but the
 // routed experts goes to VRAM; as many routed experts as fit go there too, and the rest are computed on the CPU
 // from the mapped file while the GPU does its share.
+//
+// Engine is what every architecture shares.  An architecture is a class derived from it (glm5next.hpp) that reads
+// the model's shape, loads a layer's weights and composes a layer from the kernels; Engine::open() picks it by the
+// file's general.architecture.
 #pragma once
 
 #include "cpu_experts.hpp"
@@ -14,6 +18,7 @@
 
 namespace strata {
 struct TensorInfo;
+struct MetaValue;
 }
 
 namespace strata::glm {
@@ -44,6 +49,12 @@ struct Options {
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none
 };
 
+/// A thing a model's file may call by other names than the engine does: converters differ.
+struct Names {
+    const char* name;
+    const char* other[2];
+};
+
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
 struct Dev {
     void* p = nullptr;
@@ -53,6 +64,7 @@ struct Dev {
 
 struct Layer {
     bool dsa = false, moe = false;
+    bool fixed = false;   ///< its launches are the same for every token, so one token's can be recorded (eval())
     Dev attn_norm, ffn_norm;
     Dev hc_attn_fn, hc_attn_scale, hc_attn_base, hc_ffn_fn, hc_ffn_scale, hc_ffn_base;
     Dev wo;
@@ -95,11 +107,13 @@ class Mmq;
 class Engine {
 public:
     Engine();
-    ~Engine();
+    virtual ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
-    // load, eval and the other calls that touch the device throw std::runtime_error.
+    /// The engine of the architecture the model file names, loaded.  Throws std::runtime_error, as do eval and
+    /// the other calls that touch the device.
+    static std::unique_ptr<Engine> open(const Options& o);
     void load(const Options& o);
 
     int n_vocab() const { return n_vocab_; }
@@ -136,20 +150,20 @@ public:
     /// in the model's place.  p is the probability the block gives what it returns.  pos() + i must be inside the
     /// context.  logits() is left alone.
     bool drafts() const { return draft_; }
-    int32_t draft(int32_t token, int i, float* prob);
+    virtual int32_t draft(int32_t token, int i, float* prob);
 
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
     size_t state_bytes() const { return state_n_ * sizeof(float); }
-    size_t row_bytes() const;
+    virtual size_t row_bytes() const = 0;
     /// The recurrent state at pos(), state_bytes() long.
     void save_state(uint8_t* dst);
     /// Back to position `pos` with the recurrent state it had there.  The rows before pos must be the sequence's.
     void load_state(const uint8_t* src, int64_t pos);
     /// The rows of positions [first, first + n), n * row_bytes() long: layer after layer, a layer's rows together.
-    void save_rows(int64_t first, int64_t n, uint8_t* dst);
+    virtual void save_rows(int64_t first, int64_t n, uint8_t* dst) = 0;
     /// Rows [first, first + n) out of what save_rows wrote for [from, from + count).
-    void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
+    virtual void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) = 0;
 
     const Stats& stats() const { return stats_; }
     int cached_experts() const { return cached_; }
@@ -157,30 +171,49 @@ public:
     double cached_gib() const { return double(exp_at_) / double(1ull << 30); }
     void save_profile() const;
 
-private:
+protected:
+    // ---- what an architecture supplies ----
+    /// The model's shape from its metadata, and whether it has a draft block (block_, draft_).
+    virtual void load_geometry() = 0;
+    /// A layer's weights, to VRAM (upload()) or as places in the mapped file (the routed experts).  load() runs
+    /// the layers through twice: begin_pass() is called before each.
+    virtual void load_layer(int il) = 0;
+    virtual void begin_pass() {}
+    /// Throws when the draft block is not one the architecture runs.
+    virtual void check_draft_block() {}
+    /// The sequence's state, the caches and every buffer, once the weights are known.
+    virtual void alloc_state() = 0;
+    virtual void assign_scratch() = 0;
+    /// The copies of a token's embedding a layer's input starts from.
+    virtual int streams() const = 0;
+    /// A layer from its input to its router's copy (a layer without routed experts: to its end).
+    virtual void layer_head(Layer& L, int il, int n) = 0;
+    /// The routed experts' sum (fo_) into the layer's output.
+    virtual void layer_tail(Layer& L, int il, int n) = 0;
+    /// The model's output for `rows` tokens from row `first` of the call, normed: what the output matrix takes.
+    virtual void output_rows(int first, int rows, float* h) = 0;
+    /// A token's experts and their weights from its router scores.
+    virtual void route(const Layer& L, const float* logits, int* ids, float* w) = 0;
+    /// The shared expert, into fo_.  It runs on the GPU while the host routes.
+    virtual void moe_shared(const Layer& L, int il, int n) = 0;
+    /// The draft block's rows for tokens [first, n) of a call that has run (draft()).
+    virtual void draft_rows(const int32_t* tokens, int first, int n) { (void) tokens, (void) first, (void) n; }
+    /// The other names of a tensor or a metadata key in the files of this architecture, or null.
+    virtual const Names* tensor_alias(const char* name) const { (void) name; return nullptr; }
+    virtual const Names* meta_alias(const char* key) const { (void) key; return nullptr; }
+
+    // ---- what it builds on ----
     enum Want { kF32, kFloatMat, kAnyMat };
     Dev upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
                float (*fix)(float) = nullptr);
     const TensorInfo* tensor(int il, const char* name) const;
     const Shards& home(const TensorInfo& t) const;
+    const MetaValue* meta_in(const Shards& g, const char* key) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
-    void load_geometry();
-    void load_layer(int il);
-    void alloc_state();
-    void assign_scratch();
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);
-    void kda(Layer& L, int n);
-    void dsa(Layer& L, int64_t pos, int n);
-    void dsa_store(Layer& L, int64_t pos, int n);
-    void dsa_select(Layer& L, int64_t pos, int first, int n);
-    float* draft_input(const int32_t* tokens, const float* h, int n);
-    void draft_rows(const int32_t* tokens, int first, int n);
-    void dense_ffn(Layer& L, int il, int n);
     void run(const int32_t* tokens, int n);
-    void layer_head(Layer& L, int il, int n);
     void moe_router(const Layer& L, int n);
-    void moe_shared(const Layer& L, int il, int n);
     void moe(Layer& L, int il, int n);
     template <class F>
     void* record(F&& work);
@@ -188,7 +221,6 @@ private:
     void stage(const Layer& L, const int32_t* experts, int m, void* stream);
     void follow(int written);
     void follow_loop();
-    void route(const Layer& L, const float* logits, int* ids, float* w);
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
@@ -203,24 +235,18 @@ private:
     int node_ = -1;
     double node_share_ = 0;
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
-    void* blas_ = nullptr; ///< cuBLAS on st_, for the sparse attention
+    void* blas_ = nullptr; ///< cuBLAS on st_
     void* ev_ = nullptr;   ///< marks the router's copy to the host
     std::vector<void*> dev_allocs_, host_allocs_;
     std::vector<void*> graphs_;   ///< every recorded graph, to destroy
     void* tail_ = nullptr;        ///< one token's launches from the last layer to the logits, recorded
 
     // geometry
-    int n_embd_ = 0, n_layer_ = 0, n_head_ = 0, kda_dim_ = 0, d_inner_ = 0, n_vocab_ = 0;
-    int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_dense_ = 0, n_moe_ = 0, n_kda_ = 0, n_dsa_ = 0;
-    int q_rank_ = 0, kv_rank_ = 0, mla_k_ = 0, mla_v_ = 0;
-    int idx_heads_ = 0, idx_dim_ = 0, idx_top_k_ = 0, kpool_ = 0;
-    int sinkhorn_ = 0;
+    int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
+    int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
-    int score_stride_ = 0, sel_stride_ = 0;   ///< one token's indexer scores, and its selected cache rows
-    int64_t gate_rank_ = 0;   ///< the widest low-rank gate projection of the KDA layers
-    float hc_eps_ = 0, rms_eps_ = 0, norm_eps_ = 0, kda_lb_ = 0, w_scale_ = 1;
-    bool w_norm_ = false;
-    std::vector<float> clamp_exp_, clamp_shexp_;
+    float rms_eps_ = 0;
+    std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block
     Dev out_norm_, output_;
@@ -251,23 +277,14 @@ private:
     float *wlogits_ = nullptr, *h_wlogits_ = nullptr;   ///< a window's logits, token after token: VRAM and pinned
     int cached_ = 0;
 
-    // device scratch
-    float *r_ = nullptr, *cur_ = nullptr, *xn_ = nullptr, *ao_ = nullptr, *fo_ = nullptr, *mix_ = nullptr,
-          *hcw_ = nullptr;
-    float *proj_ = nullptr, *qkv_ = nullptr, *fa_ = nullptr, *g1_ = nullptr, *ga_ = nullptr, *g2_ = nullptr,
-          *beta_ = nullptr, *gated_ = nullptr;
-    float *t1_ = nullptr, *qr_ = nullptr, *q_ = nullptr, *t2_ = nullptr, *kv_ = nullptr, *qabs_ = nullptr,
-          *kqv_ = nullptr, *vout_ = nullptr, *ikr_ = nullptr, *ik_ = nullptr, *ig_ = nullptr, *iq_ = nullptr,
-          *iw_ = nullptr, *score_ = nullptr, *akeys_ = nullptr, *ascore_ = nullptr;
+    // device scratch: a layer's input streams, one stream, the normed input, the attention's and the FFN's output
+    float *r_ = nullptr, *cur_ = nullptr, *xn_ = nullptr, *ao_ = nullptr, *fo_ = nullptr;
     float *g_ = nullptr, *u_ = nullptr, *h_ = nullptr, *d_ = nullptr, *cpu_ = nullptr, *rl_ = nullptr,
           *logits_ = nullptr;
     void *xq_ = nullptr, *q8_ = nullptr;
-    int32_t* sel_ = nullptr;
 
     // pinned host buffers
-    float *h_r_ = nullptr, *h_rl_ = nullptr, *h_x_ = nullptr, *h_cpu_ = nullptr, *h_logits_ = nullptr,
-          *h_score_ = nullptr;
-    int32_t* h_sel_ = nullptr;
+    float *h_r_ = nullptr, *h_rl_ = nullptr, *h_x_ = nullptr, *h_cpu_ = nullptr, *h_logits_ = nullptr;
 
     // A prompt batch's MoE (moe_rows).  A row is a token and one of the experts it routes to.
     std::unique_ptr<Mmq> mmq_;   ///< null when the card has no MMQ tile for the experts' types
@@ -310,7 +327,6 @@ private:
     std::vector<Pick> in_, out_;     ///< per trade number: the expert to bring in, and the one to give up
 
     int64_t pos_ = 0;
-    std::vector<float> probs_, pick_;
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     Stats stats_;
 };

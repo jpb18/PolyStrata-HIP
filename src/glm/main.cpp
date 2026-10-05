@@ -616,10 +616,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    Engine engine;
+    std::unique_ptr<Engine> loaded;
     try {
         const Clock::time_point t0 = Clock::now();
-        engine.load(o);
+        loaded = Engine::open(o);
+        Engine& engine = *loaded;
         std::fprintf(stderr, "strata-glm: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
