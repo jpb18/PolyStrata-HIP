@@ -878,14 +878,22 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         } else {
             shared_rows();
         }
+        static const bool no_multi_gr = [] {   // #783 PR-g: STRATA_NO_MULTI_GR=1 keeps the per-token GR calls
+            const char* v = std::getenv("STRATA_NO_MULTI_GR");
+            return v != nullptr && v[0] != ' ' && v[0] != '0';
+        }();
         for (int t = 0; t < T; ++t) {
            if (native_moe_combine_enabled())
                 native_moe_combine(parts_ + (size_t) t * K * N, w_ + t * K, shared_ + t * N, y_ + t * N, N, K, cs);
             else
                 moe_combine(parts_ + (size_t) t * K * N, w_ + t * K, shared_ + t * N, y_ + t * N, N, K, cs);
-            if (!fuse_head_gr)
+            if (!fuse_head_gr && no_multi_gr)
                 gr_write(R_ + (size_t) t * HC * N, y_ + t * N, inj2_ + t * HC, gs, R_ + (size_t) t * HC * N, cs);
         }
+        // #783 PR-g (stuchapin909): the T residual writes in one launch (each token's R, block output and injection are
+        // its own, so doing them after the loop changes nothing)
+        if (!fuse_head_gr && !no_multi_gr)
+            gr_write_multi(R_, y_, inj2_, gs, R_, T, cs);
         // ---- the final mixer and the main model's head
         if (fuse_head_gr) {
             FusedGrArgs fa[kFusedGrMaxT];

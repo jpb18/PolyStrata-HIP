@@ -820,6 +820,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(resident_plan_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(resident_plan_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME resident_plan_parity COMMAND resident_plan_parity)
+  # #783 PR-g: the multi-token hyper-connection read/write (exact-T projections under them) against the single-token calls
+  add_executable(gr_multi_parity src/kernels/gr_multi_parity.cpp)
+  target_include_directories(gr_multi_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(gr_multi_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME gr_multi_parity COMMAND gr_multi_parity)
   if(STRATA_HIP_GFX906)
     # the S6 router (STRATA_HIP_ROUTER_FAST=1 on gfx906) against the portable kernel, bitwise, on wave64
     add_executable(hip_router_fast tests/hip/router_fast.cpp)

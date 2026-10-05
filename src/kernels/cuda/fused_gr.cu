@@ -36,16 +36,36 @@ __device__ __forceinline__ float warp_sum(float v) {
 }
 __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + __expf(-x)); }
 
-// 8 bf16 packed in a uint4 against 8 floats.
-__device__ __forceinline__ float dot8(const uint4 w, const float* x) {
+// 8 bf16 packed in a uint4, unpacked to two float4 once when reused across tokens.
+struct Bf16x8 { float4 a, b; };
+__device__ __forceinline__ Bf16x8 unpack8(const uint4 w) {
+    return {
+        make_float4(__uint_as_float(w.x << 16), __uint_as_float(w.x & 0xffff0000u),
+                    __uint_as_float(w.y << 16), __uint_as_float(w.y & 0xffff0000u)),
+        make_float4(__uint_as_float(w.z << 16), __uint_as_float(w.z & 0xffff0000u),
+                    __uint_as_float(w.w << 16), __uint_as_float(w.w & 0xffff0000u))
+    };
+}
+__device__ __forceinline__ float dot8u(const Bf16x8& w, const float4 x0, const float4 x1) {
     float acc = 0.0f;
-    const uint32_t v[4] = {w.x, w.y, w.z, w.w};
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        acc = fmaf(__uint_as_float(v[j] << 16), x[2 * j], acc);
-        acc = fmaf(__uint_as_float(v[j] & 0xffff0000u), x[2 * j + 1], acc);
-    }
+    acc = fmaf(w.a.x, x0.x, acc);
+    acc = fmaf(w.a.y, x0.y, acc);
+    acc = fmaf(w.a.z, x0.z, acc);
+    acc = fmaf(w.a.w, x0.w, acc);
+    acc = fmaf(w.b.x, x1.x, acc);
+    acc = fmaf(w.b.y, x1.y, acc);
+    acc = fmaf(w.b.z, x1.z, acc);
+    acc = fmaf(w.b.w, x1.w, acc);
     return acc;
+}
+__device__ __forceinline__ float dot8u_ptr(const Bf16x8& w, const float* x) {
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+    return dot8u(w, x4[0], x4[1]);
+}
+
+// 8 bf16 packed in a uint4 against 8 16-byte-aligned floats (same 8-FMA order).
+__device__ __forceinline__ float dot8(const uint4 w, const float* x) {
+    return dot8u_ptr(unpack8(w), x);
 }
 
 __global__ void __launch_bounds__(THREADS) gr_down_kernel(FusedGrArgs a) {
@@ -292,19 +312,20 @@ constexpr int UPM_BLOCKS = N / UPM_COLS;          // 160
 
 // `gr_up_kernel` for T tokens: each row of w_up read once; the T dots reduced by xor so every lane holds every
 // sum, and lane k runs token k's epilogue - the T epilogues in parallel instead of one after another.
+template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false>
 __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
-    __shared__ __align__(16) float lo[kFusedGrMaxT][LR];
-    __shared__ float g[kFusedGrMaxT][HC][UPM_COLS];
+    __shared__ __align__(16) float lo[MAX_T][LR];
+    __shared__ float g[MAX_T][HC][UPM_COLS];
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
-    const int T = m.T;
+    const int T = EXACT_T ? MAX_T : m.T;
     const int d0 = blockIdx.x * UPM_COLS;
     for (int i = t; i < T * LR; i += THREADS) lo[i / LR][i % LR] = m.a[i / LR].lo[i % LR];
     __syncthreads();
     for (int r = warp; r < HC * UPM_COLS; r += WARPS) {
         const int c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
         const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
-        const uint4 wa = __ldg(w4 + lane);
-        const uint4 wb = lane < LR / 8 - 32 ? __ldg(w4 + 32 + lane) : make_uint4(0, 0, 0, 0);
+        const Bf16x8 wa = unpack8(__ldg(w4 + lane));
+        const Bf16x8 wb = unpack8(lane < LR / 8 - 32 ? __ldg(w4 + 32 + lane) : make_uint4(0, 0, 0, 0));
         // the epilogue inputs of this lane's token, fetched while the dots run
         float rv = 0.0f, wn = 0.0f, rsc = 0.0f, bo = 0.0f, ip = 0.0f;
         bool apply = false;
@@ -318,10 +339,10 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
         }
         float mine = 0.0f;
 #pragma unroll
-        for (int k = 0; k < kFusedGrMaxT; ++k) {
-            if (k >= T) break;
-            float acc = dot8(wa, lo[k] + lane * 8);
-            if (lane < LR / 8 - 32) acc += dot8(wb, lo[k] + (32 + lane) * 8);
+        for (int k = 0; k < MAX_T; ++k) {
+            if (!EXACT_T && k >= T) break;
+            float acc = dot8u_ptr(wa, lo[k] + lane * 8);
+            if (lane < LR / 8 - 32) acc += dot8u_ptr(wb, lo[k] + (32 + lane) * 8);
             acc = warp_sum(acc);
             if (lane == k) mine = acc;
         }
@@ -421,10 +442,10 @@ __global__ void __launch_bounds__(THREADS) gr_down_v3_kernel(GrMulti m, float* _
 #pragma unroll
         for (int q = 0; q < TQS; ++q) {
             const int j = lane + 32 * q;
-            const uint4 wvq = __ldg(w4 + j);
+            const Bf16x8 wvq = unpack8(__ldg(w4 + j));
 #pragma unroll
             for (int k = 0; k < MAX_T; ++k)
-                if (EXACT_T || k < T) acc[k] += dot8(wvq, xs + (size_t) k * SL + j * 8);
+                if (EXACT_T || k < T) acc[k] += dot8u_ptr(wvq, xs + (size_t) k * SL + j * 8);
         }
         const int prow = inject_block ? LR + warp : row0 + r;
 #pragma unroll
@@ -489,8 +510,8 @@ __global__ void __launch_bounds__(THREADS) gr_up_v3_kernel(GrMulti m, const floa
         const int r = warp + q * WARPS;
         const int c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
         const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
-        const uint4 wa = __ldg(w4 + lane);
-        const uint4 wb = lane < LR / 8 - 32 ? __ldg(w4 + 32 + lane) : make_uint4(0, 0, 0, 0);
+        const Bf16x8 wa = unpack8(__ldg(w4 + lane));
+        const Bf16x8 wb = unpack8(lane < LR / 8 - 32 ? __ldg(w4 + 32 + lane) : make_uint4(0, 0, 0, 0));
         float rv = 0.0f, wn = 0.0f, bo = 0.0f, ip = 0.0f;
         bool apply = false;
         if (lane < T) {
@@ -504,8 +525,8 @@ __global__ void __launch_bounds__(THREADS) gr_up_v3_kernel(GrMulti m, const floa
 #pragma unroll
         for (int k = 0; k < MAX_T; ++k) {
             if (!EXACT_T && k >= T) break;
-            float acc = dot8(wa, lo[k] + lane * 8);
-            if (lane < LR / 8 - 32) acc += dot8(wb, lo[k] + (32 + lane) * 8);
+            float acc = dot8u_ptr(wa, lo[k] + lane * 8);
+            if (lane < LR / 8 - 32) acc += dot8u_ptr(wb, lo[k] + (32 + lane) * 8);
             acc = warp_sum(acc);
             if (lane == k) mine = acc;
         }
@@ -648,11 +669,11 @@ __device__ __forceinline__ void stage_htile(const GrMulti& m, int T, int h, floa
     }
 }
 
-template <int MAX_T = kFusedGrMaxT>
+template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false>
 __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
     extern __shared__ __align__(16) float4 hbuf[];      // 2 buffers x [T][2][160] float4
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
-    const int T = m.T;
+    const int T = EXACT_T ? MAX_T : m.T;
     const bool inject_block = blockIdx.x == DOWN_BLOCKS;
     const int row = inject_block ? warp : blockIdx.x * WARPS + warp;
     const bool active = !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
@@ -685,11 +706,12 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
 #pragma unroll
             for (int q = 0; q < HQ; ++q) {
                 const int j = lane + 32 * q;
+                const Bf16x8 wvq = unpack8(wv[q]);
 #pragma unroll
                 for (int k = 0; k < MAX_T; ++k) {
-                    if (k < T) {
+                    if (EXACT_T || k < T) {
                         const float4* pk = cur + (size_t) k * (H_TILE / 4);
-                        acc[k] += dot8v(wv[q], pk[j], pk[H_TILE / 8 + j]);
+                        acc[k] += dot8u(wvq, pk[j], pk[H_TILE / 8 + j]);
                     }
                 }
             }
@@ -705,11 +727,11 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
     if (!active) return;
     float s[MAX_T];
 #pragma unroll
-    for (int k = 0; k < MAX_T; ++k) s[k] = k < T ? warp_sum(acc[k]) : 0.0f;
+    for (int k = 0; k < MAX_T; ++k) s[k] = (EXACT_T || k < T) ? warp_sum(acc[k]) : 0.0f;
     // lane k writes token k (every lane holds every sum after the xor reduction)
 #pragma unroll
     for (int k = 0; k < MAX_T; ++k) {
-        if (k >= T || lane != k) continue;
+        if ((!EXACT_T && k >= T) || lane != k) continue;
         if (inject_block) {
             m.a[k].inject_out[row] = s[k];
         } else {
@@ -764,9 +786,21 @@ int down_chunk(bool staged, int* tile_out) {
         } else {
             cudaFuncSetAttribute(gr_down_multi_kernel<2560>, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
         }
-        int want_staged = (int) (2 * kFusedGrMaxT * H_TILE * sizeof(float));
-        if (optin > 0 && want_staged > optin) want_staged = optin;
-        cudaFuncSetAttribute(gr_down_staged_kernel<>, cudaFuncAttributeMaxDynamicSharedMemorySize, want_staged);
+        auto set_staged_attr = [&](auto kernel, int max_t) {
+            int ws = (int) (2 * max_t * H_TILE * sizeof(float));
+            if (optin > 0 && ws > optin) ws = optin;
+            if (ws > 48 * 1024)
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, ws);
+            cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+        };
+        set_staged_attr(gr_down_staged_kernel<1, true>, 1);
+        set_staged_attr(gr_down_staged_kernel<2, true>, 2);
+        set_staged_attr(gr_down_staged_kernel<3, true>, 3);
+        set_staged_attr(gr_down_staged_kernel<4, true>, 4);
+        set_staged_attr(gr_down_staged_kernel<5, true>, 5);
+        set_staged_attr(gr_down_staged_kernel<6, true>, 6);
+        set_staged_attr(gr_down_staged_kernel<4, false>, 4);
+        set_staged_attr(gr_down_staged_kernel<kFusedGrMaxT, false>, kFusedGrMaxT);
         cudaGetLastError();      // drop any error the attempt left behind
         // The opt-in is a promise a pre-Volta card does not keep: an sm_60 answers 65536 and accepts the
         // cudaFuncSetAttribute for 61440 B, then fails the LAUNCH with "invalid argument".  What such a card
@@ -848,6 +882,11 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     int tv = 2560;
     const int chunk_tok = down_chunk(staged, &tv);
     const size_t per_tok = (staged ? (size_t) 2 * H_TILE : (size_t) tv) * sizeof(float);
+    static const bool no_multi_gr = [] {
+        const char* no = std::getenv("STRATA_NO_MULTI_GR");
+        return no != nullptr && no[0] != '\0' && no[0] != '0';
+    }();
+    const bool exact_t = !no_multi_gr;
     for (int c0 = 0; c0 < n_tok; c0 += chunk_tok) {
         const int ct = n_tok - c0 < chunk_tok ? n_tok - c0 : chunk_tok;
         GrMulti c{};
@@ -864,7 +903,15 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         // (decided once per device: this runs per layer when decode is not captured)
         const bool max4 = ct <= 4 && gr_down_max4();
         if (staged) {
-            if (max4) gr_down_staged_kernel<4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            // #783 PR-g (stuchapin909): a launch of exactly ct <= 6 tokens is its own instantiation, the loop bounds
+            // are compile-time (the same sums in the same order); STRATA_NO_MULTI_GR=1 keeps the generic kernels
+            if (exact_t && ct == 1) gr_down_staged_kernel<1, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 2) gr_down_staged_kernel<2, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 3) gr_down_staged_kernel<3, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 4) gr_down_staged_kernel<4, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 5) gr_down_staged_kernel<5, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 6) gr_down_staged_kernel<6, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
+            else if (max4) gr_down_staged_kernel<4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
             else gr_down_staged_kernel<><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
         } else if (tv == 1280) {
             if (max4) gr_down_multi_kernel<1280, 4><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
@@ -879,7 +926,15 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
     if (fast) gr_up_fast_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
     else
 #endif
-    gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
+        case 1: gr_up_multi_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 2: gr_up_multi_kernel<2, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 3: gr_up_multi_kernel<3, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 4: gr_up_multi_kernel<4, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 5: gr_up_multi_kernel<5, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        case 6: gr_up_multi_kernel<6, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        default: gr_up_multi_kernel<kFusedGrMaxT, false><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+    }
 }
 
 /// STRATA_HC_SPLIT: unset or 2 = the newest the check accepts (staged), 1 = at most split, 0 = the plain read
@@ -1625,14 +1680,21 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             int optin = 0;
             cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev3);
             const int limit = optin > 0 ? optin : 48 * 1024;
-            const int need1 = (int) (kFusedGrMaxT * N * sizeof(float)), need6 = (int) (6 * N * sizeof(float)), need2 = need1 / 2;
+            const int need1 = (int) (kFusedGrMaxT * N * sizeof(float)), need6 = (int) (6 * N * sizeof(float)),
+                      need5 = (int) (5 * N * sizeof(float)), need2 = need1 / 2;
             int split = -1;
             if (need1 <= limit &&
                 cudaFuncSetAttribute(gr_down_v3_kernel<1, kFusedGrMaxT, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, need1) == cudaSuccess &&
-                cudaFuncSetAttribute(gr_down_v3_kernel<1, 6, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, need6) == cudaSuccess) {
-                cudaFuncSetAttribute(gr_down_v3_kernel<1, 4, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-                cudaFuncSetAttribute(gr_down_v3_kernel<1, 4, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 6, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, need6) == cudaSuccess &&
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 5, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, need5) == cudaSuccess) {
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 1, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
                 cudaFuncSetAttribute(gr_down_v3_kernel<1, 2, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 3, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 4, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 5, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 6, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, 4, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+                cudaFuncSetAttribute(gr_down_v3_kernel<1, kFusedGrMaxT, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
                 split = 1;
             } else if (need2 <= limit)
                 // #375 (kenh0u): the S = 2 split (a 64 KB opt-in card: Turing) disagrees with itself in gr_parity
@@ -1650,17 +1712,21 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         const size_t sm = (size_t) n_tok * (N / split) * sizeof(float);
         if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, stream);
         if (split == 2) gr_down_v3_kernel<2><<<dim3(LR / WARPS + 1, HC * 2), THREADS, sm, st>>>(m, part, ssg);
+        else if (n_tok == 1) gr_down_v3_kernel<1, 1, true><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
         else if (n_tok == 2) gr_down_v3_kernel<1, 2, true><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
+        else if (n_tok == 3) gr_down_v3_kernel<1, 3, true><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
         else if (n_tok == 4) gr_down_v3_kernel<1, 4, true><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
+        else if (n_tok == 5) gr_down_v3_kernel<1, 5, true><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
         else if (n_tok == 6) gr_down_v3_kernel<1, 6, true><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
-        else if (n_tok < 4) gr_down_v3_kernel<1, 4, false><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
         else gr_down_v3_kernel<1, kFusedGrMaxT, false><<<dim3(LR / WARPS + 1, HC), THREADS, sm, st>>>(m, part, ssg);
         if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, stream);
         if (split == 2) gr_up_v3_kernel<2><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
+        else if (n_tok == 1) gr_up_v3_kernel<1, 1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
         else if (n_tok == 2) gr_up_v3_kernel<1, 2, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
+        else if (n_tok == 3) gr_up_v3_kernel<1, 3, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
         else if (n_tok == 4) gr_up_v3_kernel<1, 4, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
+        else if (n_tok == 5) gr_up_v3_kernel<1, 5, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
         else if (n_tok == 6) gr_up_v3_kernel<1, 6, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
-        else if (n_tok < 4) gr_up_v3_kernel<1, 4, false><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
         else gr_up_v3_kernel<1, kFusedGrMaxT, false><<<UPM_BLOCKS, THREADS, 0, st>>>(m, part, ssg);
         const cudaError_t e3 = cudaGetLastError();
         if (e3 != cudaSuccess) {
