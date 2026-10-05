@@ -1097,11 +1097,11 @@ if(STRATA_NATIVE_EXPERTS)
     add_library(strata_mmq STATIC src/prefill/moe_mmq.cu src/prefill/moe_fused.cu src/prefill/moe_fused_iq.cu
                 src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu)
     # q8_0: the drafter's matrices (E-9); STRATA_ORCA_Q4KS_MMQ adds q5_0 (#296, in _strata_mmq_types), and
-    # STRATA_MMQ_KQUANTS q4_k q5_k q5_1 q6_k: the experts of Unsloth's UD-Q4_K_XL (docs/UNSLOTH_Q4.md; the dispatch
-    # follows eddoursul/Strata 7706c1b), q6_k also the usual attention weight of the plain i-quant GGUFs
+    # STRATA_MMQ_KQUANTS q4_k q5_k q5_1, the experts of Unsloth's UD-Q4_K_XL (docs/UNSLOTH_Q4.md; the dispatch
+    # follows eddoursul/Strata 7706c1b); q6_k is HIP only
     set(_strata_mmq_cuda_types ${_strata_mmq_types})
     if(STRATA_MMQ_KQUANTS)
-      list(APPEND _strata_mmq_cuda_types q4_k q5_k q5_1 q6_k)
+      list(APPEND _strata_mmq_cuda_types q4_k q5_k q5_1)
     endif()
     foreach(_t IN LISTS _strata_mmq_cuda_types)
       target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
