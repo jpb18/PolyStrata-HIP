@@ -421,8 +421,8 @@ class StrataEngine:
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False):
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
-        paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
-        self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
+        paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack", "--model")}
+        self.model_path = paths.get("--native") or paths.get("--model") or paths.get("--pack", "pack/full")
         self.log_path = log
         self.proc, self.pump, self.log = None, None, None
         self.ended, self.unloaded = True, True
@@ -1706,8 +1706,15 @@ class Service:
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
-        self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
-                            tokenizer.encode("<|endoftext|>", parse_special=True))
+        im_end = tokenizer.encode(IM_END, parse_special=True)
+        if len(im_end) == 1:
+            self.stop_ids = set(im_end + tokenizer.encode("<|endoftext|>", parse_special=True))
+        else:   # not a ChatML model (GLM): the ids its GGUF names for the end of the text, the turn and the message
+            special = getattr(tokenizer, "special_ids", None) or {}
+            self.stop_ids = {special[k] for k in ("tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",
+                                                  "tokenizer.ggml.eom_token_id") if k in special}
+        # how the model writes a tool call (serve/frontend.py's OutputParser)
+        self.call_format = "glm" if getattr(tokenizer, "pre", "") in ("glm4", "glm5") else "function"
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -2122,7 +2129,10 @@ class Service:
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
-            return self.template.render(messages, tools=tools, **kwargs)
+            prompt = self.template.render(messages, tools=tools, **kwargs)
+            # GLM's template has no switch for thinking and always ends on an open <think>: closing it at once is
+            # the empty thinking block the template itself writes into the history
+            return prompt + "</think>" if off and prompt.endswith("<think>") else prompt
         base = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
         history = self.template.render(messages, tools=tools, add_generation_prompt=False, **base)
         full = self.template.render(messages, tools=tools, add_generation_prompt=True, **kwargs)
@@ -2248,7 +2258,7 @@ class Service:
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**defaults, **req_values}
-        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
+        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, call_format=self.call_format)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -3957,7 +3967,10 @@ def main() -> int:
             tokens[i] = t
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
-        tok = ST.Tokenizer(tokens, merges, types)
+        # the pre-tokenizer's name and the GGUF's special ids (a directory from before they mattered has neither)
+        meta = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8")) \
+            if (tpath / "tokenizer.json").exists() else {}
+        tok = ST.Tokenizer(tokens, merges, types, pre=meta.get("pre", "qwen35"), special_ids=meta.get("special_ids"))
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not cfg:

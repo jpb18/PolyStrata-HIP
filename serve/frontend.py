@@ -461,11 +461,50 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     return ToolCall(name=name, arguments=args)
 
 
+ARG_KEY, ARG_KEY_END = "<arg_key>", "</arg_key>"
+ARG_VALUE, ARG_VALUE_END = "<arg_value>", "</arg_value>"
+
+
+def glm_call_end(text: str) -> int:
+    """Where a GLM tool call's body ends: the first `</tool_call>` right after the name or an `</arg_value>`, so an
+    argument value may contain the tag.  -1: not complete yet."""
+    at = text.find(CALL_END)
+    while at >= 0:
+        before = text[:at].rstrip()
+        if before.endswith(ARG_VALUE_END) or ARG_KEY not in before:
+            return at
+        at = text.find(CALL_END, at + 1)
+    return -1
+
+
+def parse_glm_tool_call(body: str, schema: dict | None = None) -> ToolCall:
+    """`NAME<arg_key>K</arg_key><arg_value>V</arg_value>...` -> ToolCall (GLM's chat template writes calls this
+    way).  Values are typed as in parse_tool_call."""
+    name, _, rest = body.partition(ARG_KEY)
+    props = ((schema or {}).get("parameters") or {}).get("properties") or {}
+    args = {}
+    for part in rest.split(ARG_KEY) if rest else []:
+        key, _, tail = part.partition(ARG_KEY_END)
+        value = tail.partition(ARG_VALUE)[2]
+        end = value.rfind(ARG_VALUE_END)        # the last one: a value may quote the tag
+        value = value[:end] if end >= 0 else value
+        if (props.get(key.strip()) or {}).get("type") == "string":
+            args[key.strip()] = value
+        else:
+            try:
+                args[key.strip()] = json.loads(value)
+            except ValueError:
+                args[key.strip()] = value
+    return ToolCall(name=name.strip(), arguments=args)
+
+
 class OutputParser:
     """Incremental parser of the model's text. Feed deltas; get events. A tag split across deltas is held back
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
-    def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False):
+    def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
+                 call_format: str = "function"):
+        self.glm = call_format == "glm"   # GLM's <arg_key>/<arg_value> calls instead of <function=...>
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False
@@ -635,6 +674,25 @@ class OutputParser:
                     out.append(Event("content", self.buf[:i].rstrip("\n")))
                 self.buf = self.buf[i + len(CALL_START):]
                 self.state = "call"
+            elif self.glm:
+                # the call is announced when its name is complete; its arguments follow whole when it ends
+                if self.stream_tools and self.scall is None:
+                    named = [i for i in (self.buf.find(ARG_KEY), self.buf.find(CALL_END)) if i >= 0]
+                    if named:
+                        self.scall = ToolCall(name=self.buf[:min(named)].strip(), arguments={})
+                        out.append(Event("tool_start", call=self.scall))
+                i = glm_call_end(self.buf)
+                if i < 0:
+                    return out
+                body = self.buf[:i]
+                self.buf = self.buf[i + len(CALL_END):]
+                call = parse_glm_tool_call(body, self.schemas.get(body.partition(ARG_KEY)[0].strip()))
+                if self.scall is not None:
+                    call.id = self.scall.id
+                    out.append(Event("tool_args", json.dumps(call.arguments, ensure_ascii=False), call=self.scall))
+                out.append(Event("tool_call", call=call))
+                self._reset_scan()
+                self.state, self.lead = "content", True
             else:
                 i = call_end(self.buf)
                 if self.stream_tools:
