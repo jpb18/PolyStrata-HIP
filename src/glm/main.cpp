@@ -372,8 +372,9 @@ int serve(Session& ss) {
         // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused>
         //      <experts from VRAM> <experts> <RAM blobs> <file blobs> <file MB> <prompt tokens read> <offloaded>
         const strata::glm::Stats& now = engine.stats();
+        // the cache's share of the experts looked up while answering: a prompt batch's go through VRAM either way
         const long long hits = now.gpu_experts - before.gpu_experts;
-        const long long misses = (now.cpu_experts - before.cpu_experts) + (now.staged_experts - before.staged_experts);
+        const long long misses = now.cpu_experts - before.cpu_experts;
         std::printf("DONE %lld %lld %.1f %.1f %s 0 0 %lld %lld %lld 0 0 0.0 %lld 0\n", (long long) r.produced, n,
                     r.prompt_ms, r.decode_ms, r.finish, (long long) r.resume, hits, hits + misses,
                     (long long) r.read);
@@ -415,7 +416,7 @@ int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const 
         [](int64_t, int64_t, double, bool) {});
     std::printf("%s\n", out.c_str());
     const strata::glm::Stats& st = ss.engine.stats();
-    const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts + st.staged_experts, 1);
+    const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
     std::fprintf(stderr,
                  "prompt %lld tokens %.1f tok/s, generated %lld tokens %.2f tok/s (%s); experts from VRAM %.1f%%, "
                  "CPU experts %.1f ms/token, router wait %.1f ms/token\n",

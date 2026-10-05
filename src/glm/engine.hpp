@@ -72,9 +72,10 @@ struct Layer {
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
 };
 
-/// A routed expert is run from the VRAM cache, on the CPU, or (in a prompt batch) from the staging buffer.
+/// A routed expert is run from the VRAM cache or on the CPU when tokens come a few at a time, as an answer's do
+/// (gpu_experts, cpu_experts), and in a prompt batch from the cache or the staging buffer (batch_*).
 struct Stats {
-    int64_t tokens = 0, gpu_experts = 0, cpu_experts = 0, staged_experts = 0;
+    int64_t tokens = 0, gpu_experts = 0, cpu_experts = 0, batch_cached = 0, batch_staged = 0;
     double cpu_ms = 0, route_wait_ms = 0;
 };
 

@@ -1178,8 +1178,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
        "expert rows");
 
     const int rc = bounds[n_cached];   // the rows of the cached experts
-    stats_.gpu_experts += rc;
-    stats_.staged_experts += rr - rc;
+    stats_.batch_cached += rc;
+    stats_.batch_staged += rr - rc;
 
     const float limit = clamp_exp_[(size_t) il];
     const int gt = (int) L.gu_type, dt = (int) L.d_type;
