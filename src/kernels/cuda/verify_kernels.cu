@@ -74,7 +74,7 @@ __global__ void gdn_conv_commit_kernel(float* __restrict__ hist, const float* __
     hist[c * 3 + 2] = seq[2];
 }
 
-template <int MAX_T = kVerifyMaxT>
+template <int MAX_T = kVerifyMaxT, bool EXACT_T = false>
 __global__ void __launch_bounds__(64) gdn_ab_multi_kernel(const float* __restrict__ x, const uint16_t* __restrict__ wa,
                                                           const uint16_t* __restrict__ wb,
                                                           const float* __restrict__ dt,
@@ -90,24 +90,29 @@ __global__ void __launch_bounds__(64) gdn_ab_multi_kernel(const float* __restric
     for (int t = 0; t < MAX_T; ++t) acc[t] = 0.0f;
     for (int j = lane; j < n / 8; j += 32) {
         const uint4 wv = __ldg(w4 + j);
+        const float w0 = __uint_as_float(wv.x << 16), w1 = __uint_as_float(wv.x & 0xffff0000u);
+        const float w2 = __uint_as_float(wv.y << 16), w3 = __uint_as_float(wv.y & 0xffff0000u);
+        const float w4f = __uint_as_float(wv.z << 16), w5 = __uint_as_float(wv.z & 0xffff0000u);
+        const float w6 = __uint_as_float(wv.w << 16), w7 = __uint_as_float(wv.w & 0xffff0000u);
 #pragma unroll
         for (int t = 0; t < MAX_T; ++t) {
-            if (t >= T) break;
+            if (!EXACT_T && t >= T) break;
             const float* xt = x + (size_t) t * n;
-            const float4 xa = *reinterpret_cast<const float4*>(xt + j * 8);
-            const float4 xb = *reinterpret_cast<const float4*>(xt + j * 8 + 4);
+            const float4 xa = __ldg(reinterpret_cast<const float4*>(xt + j * 8));
+            const float4 xb = __ldg(reinterpret_cast<const float4*>(xt + j * 8 + 4));
             float a = acc[t];
-            a = fmaf(__uint_as_float(wv.x << 16), xa.x, a); a = fmaf(__uint_as_float(wv.x & 0xffff0000u), xa.y, a);
-            a = fmaf(__uint_as_float(wv.y << 16), xa.z, a); a = fmaf(__uint_as_float(wv.y & 0xffff0000u), xa.w, a);
-            a = fmaf(__uint_as_float(wv.z << 16), xb.x, a); a = fmaf(__uint_as_float(wv.z & 0xffff0000u), xb.y, a);
-            a = fmaf(__uint_as_float(wv.w << 16), xb.z, a); a = fmaf(__uint_as_float(wv.w & 0xffff0000u), xb.w, a);
+            a = fmaf(w0, xa.x, a); a = fmaf(w1, xa.y, a);
+            a = fmaf(w2, xa.z, a); a = fmaf(w3, xa.w, a);
+            a = fmaf(w4f, xb.x, a); a = fmaf(w5, xb.y, a);
+            a = fmaf(w6, xb.z, a); a = fmaf(w7, xb.w, a);
             acc[t] = a;
         }
     }
 #pragma unroll
     for (int t = 0; t < MAX_T; ++t) {
-        if (t >= T) break;
+        if (!EXACT_T && t >= T) break;
         float a = acc[t];
+#pragma unroll
         for (int o = 16; o > 0; o >>= 1) a += __shfl_xor_sync(0xffffffffu, a, o);
         if (lane != 0) continue;
         if (is_beta) {
@@ -182,7 +187,7 @@ __device__ __forceinline__ void gdn_q8_1_store(GdnQ81* __restrict__ xq, size_t i
     if (idx % 32 == 0) xq[idx / 32].ds = make_half2(d, sum);
 }
 
-template<bool Q>
+template <bool ALL_OUT, bool Q>
 __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __restrict__ state,
                                                                      const float* __restrict__ hbuf, int C,
                                                                      const float* __restrict__ gate,
@@ -192,75 +197,78 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
                                                                      float* __restrict__ y, int h_k, int h_v, int T,
                                                                      const int32_t* __restrict__ n_keep, int t_out_begin,
                                                                      GdnQ81* __restrict__ xq) {
-    __shared__ float sk[S], sq[S];
-    __shared__ float red[RG][S];
-    __shared__ float wsum[S * RG / 32];
+    __shared__ float sk[2][S], sq[2][S];
+    __shared__ float red_kv[RG][S];
+    __shared__ float red_o[RG][S];
+    __shared__ float wsum[S / 32];
     const int head = blockIdx.x;
     const int col = threadIdx.x;
     const int rg = threadIdx.y;
-    const int tid = rg * S + col;
     const int qh = head % h_k;
     const int qk = S * h_k;             // q at [0, qk), k at [qk, 2qk), v at [2qk, ...)
     const int value_dim = S * h_v;
-    const int n = n_keep ? *n_keep : T;
+    const int n = ALL_OUT ? T : (n_keep ? *n_keep : T);
+    if (n > 0) {
+        if (rg == 0) sk[0][col] = hbuf[qk + qh * S + col];
+        else if (rg == 1 && (ALL_OUT || 0 >= t_out_begin)) sq[0][col] = hbuf[qh * S + col];
+    }
+    const float gam = (rg == 0) ? gamma[col] : 0.0f;
     float s[RPG];
     float* base = state + ((size_t) (rg * RPG) * h_v + head) * S + col;
     const size_t row_stride = (size_t) h_v * S;
 #pragma unroll
-    for (int r = 0; r < RPG; ++r) s[r] = base[r * row_stride];
+    for (int r = 0; r < RPG; ++r) s[r] = ALL_OUT ? __ldg(&base[r * row_stride]) : base[r * row_stride];
     for (int t = 0; t < n; ++t) {
+        const int cur = t & 1, nxt = (t + 1) & 1;
         const float* ht = hbuf + (size_t) t * C;
-        const bool need_out = (t >= t_out_begin);
-        __syncthreads();                // the previous token is done with sk/sq/red/wsum
-        if (tid < S) {
-            sk[tid] = ht[qk + qh * S + tid];
-            if (need_out) sq[tid] = ht[qh * S + tid];
-        }
+        const bool need_out = ALL_OUT || (t >= t_out_begin);
         __syncthreads();
+        if (t + 1 < n) {
+            const float* ht_next = ht + C;
+            const bool need_next = ALL_OUT || (t + 1 >= t_out_begin);
+            if (rg == 0) sk[nxt][col] = ht_next[qk + qh * S + col];
+            else if (rg == 1 && need_next) sq[nxt][col] = ht_next[qh * S + col];
+        }
         const float g = __expf(gate[(size_t) t * h_v + head]);
         float kv = 0.0f;
 #pragma unroll
-        for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], sk[rg * RPG + r], kv);
-        red[rg][col] = kv;
+        for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], sk[cur][rg * RPG + r], kv);
+        red_kv[rg][col] = kv;
         __syncthreads();
-        const float kv_col = red[0][col] + red[1][col] + red[2][col] + red[3][col];
+        const float kv_col = red_kv[0][col] + red_kv[1][col] + red_kv[2][col] + red_kv[3][col];
         const float delta = (ht[2 * qk + head * S + col] - g * kv_col) * beta[(size_t) t * h_v + head];
         if (!need_out) {
 #pragma unroll
-            for (int r = 0; r < RPG; ++r) s[r] = fmaf(g, s[r], sk[rg * RPG + r] * delta);
+            for (int r = 0; r < RPG; ++r) s[r] = fmaf(g, s[r], sk[cur][rg * RPG + r] * delta);
             continue;
         }
         float o = 0.0f;
 #pragma unroll
         for (int r = 0; r < RPG; ++r) {
-            s[r] = fmaf(g, s[r], sk[rg * RPG + r] * delta);
-            o = fmaf(s[r], sq[rg * RPG + r], o);
+            s[r] = fmaf(g, s[r], sk[cur][rg * RPG + r] * delta);
+            o = fmaf(s[r], sq[cur][rg * RPG + r], o);
         }
+        red_o[rg][col] = o;
         __syncthreads();
-        red[rg][col] = o;
-        __syncthreads();
-        float oc = 0.0f, sq_part = 0.0f;
+        float oc = 0.0f;
         if (rg == 0) {
-            oc = (red[0][col] + red[1][col] + red[2][col] + red[3][col]) * rsqrtf((float) S);
-            sq_part = oc * oc;
+            oc = (red_o[0][col] + red_o[1][col] + red_o[2][col] + red_o[3][col]) * rsqrtf((float) S);
+            float sq_part = oc * oc;
+#pragma unroll
+            for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
+            if ((col & 31) == 0) wsum[col >> 5] = sq_part;
         }
-        for (int o2 = 16; o2 > 0; o2 >>= 1) sq_part += __shfl_xor_sync(0xffffffffu, sq_part, o2);
-        if ((tid & 31) == 0) wsum[tid >> 5] = sq_part;
         __syncthreads();
         if (rg == 0) {
             const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
             const float scale = rsqrtf(ss / (float) S + eps);
             const float zz = z[(size_t) t * value_dim + head * S + col];
-            if constexpr (Q) {
-                const float yv = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
-                y[(size_t) t * value_dim + head * S + col] = yv;
-                gdn_q8_1_store(xq, (size_t) (t - t_out_begin) * value_dim + head * S + col, yv);
-            } else {
-                y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
-            }
+            const float yv = oc * scale * gam * (1.0f / (1.0f + __expf(-zz)));
+            y[(size_t) t * value_dim + head * S + col] = yv;
+            if constexpr (Q) gdn_q8_1_store(xq, (size_t) (t - t_out_begin) * value_dim + head * S + col, yv);
         }
     }
-    if (n_keep != nullptr && n > 0) {
+    if (!ALL_OUT && n_keep != nullptr && n > 0) {
 #pragma unroll
         for (int r = 0; r < RPG; ++r) base[r * row_stride] = s[r];
     }
@@ -871,12 +879,15 @@ void gdn_ab_multi(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
         std::exit(1);
     }
     const unsigned blocks = (unsigned) ((2 * h_v + 1) / 2);
-    if (n_tok <= 4) {
-        gdn_ab_multi_kernel<4><<<blocks, 64, 0, (cudaStream_t) stream>>>(
-            x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
-    } else {
-        gdn_ab_multi_kernel<kVerifyMaxT><<<blocks, 64, 0, (cudaStream_t) stream>>>(
-            x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
+    cudaStream_t st = (cudaStream_t) stream;
+    switch (n_tok) {
+        case 1: gdn_ab_multi_kernel<1, true><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
+        case 2: gdn_ab_multi_kernel<2, true><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
+        case 3: gdn_ab_multi_kernel<3, true><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
+        case 4: gdn_ab_multi_kernel<4, true><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
+        case 5: gdn_ab_multi_kernel<5, true><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
+        case 6: gdn_ab_multi_kernel<6, true><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
+        default: gdn_ab_multi_kernel<kVerifyMaxT, false><<<blocks, 64, 0, st>>>(x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok); break;
     }
     check("gdn_ab_multi");
 }
@@ -918,12 +929,20 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         check("gdn_step_commit");
         return;
     }
-    if (xq && t_out_begin < n_tok)
-        gdn_step_norm_multi_kernel<true><<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(
+    const dim3 g1((unsigned) h_v), b1(S, RG);
+    const bool all_out = n_keep == nullptr && t_out_begin <= 0;
+    if (xq && t_out_begin < n_tok) {
+        if (all_out) gdn_step_norm_multi_kernel<true, true><<<g1, b1, 0, (cudaStream_t) stream>>>(
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, nullptr, 0, xq);
+        else gdn_step_norm_multi_kernel<false, true><<<g1, b1, 0, (cudaStream_t) stream>>>(
             state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, xq);
-    else
-        gdn_step_norm_multi_kernel<false><<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(
+    } else if (all_out) {
+        gdn_step_norm_multi_kernel<true, false><<<g1, b1, 0, (cudaStream_t) stream>>>(
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, nullptr, 0, nullptr);
+    } else {
+        gdn_step_norm_multi_kernel<false, false><<<g1, b1, 0, (cudaStream_t) stream>>>(
             state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, nullptr);
+    }
     check("gdn_step_norm_multi");
 }
 
