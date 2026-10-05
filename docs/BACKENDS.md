@@ -4,8 +4,8 @@ PolyStrata runs more than one model family. This page says which, how the engine
 how a model is recognized, how to add one, and how to change the model that answers.
 
 One model is in memory at a time. The measurements below are from one machine: an RTX 5090 (32 GB), 24 threads of
-a Xeon Platinum 8470Q, 120 GiB of RAM, Linux, CUDA 12.8. On that card the three new models fit in VRAM whole, so
-the numbers say nothing yet about a card with 8 GB.
+a Xeon Platinum 8470Q, 120 GiB of RAM, Linux, CUDA 12.8. On that card the three new models fit in VRAM whole. A
+card with 8 GB was not there: [one table](#with-8-gb-of-vram) holds the 5090 to 8 GB instead.
 
 ## What runs
 
@@ -202,6 +202,25 @@ llama.cpp (Unsloth's fork at 86ebfef) with every layer on the same card writes a
 and Ornith and 165 with Gemma 4, and reads prompts at 6000 to 9000. It cannot do that on a card the model does
 not fit, which is the case this engine is for; that case has not been measured for the new models yet.
 
+### With 8 GB of VRAM
+
+The same card with 24.4 GB kept free (`--vram-reserve-mib 24400`), so the engine has about 8 GB: the dense
+weights, the caches and as many experts as fit. The rest of the experts are computed on the CPU, and the cache
+follows what the answer uses. This is not an 8 GB PC: the CPU, the RAM and the card's speed are the machine's
+above. 300-token answers, tokens per second; the two numbers are without and with guessed tokens.
+
+| Model | Experts from VRAM | Writes after a short prompt | after about 2,100 tokens | after about 7,700 | Reads a long prompt |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-35B-A3B | 46% to 60% | 86, 102 | 92, 102 | 73, 78 | 840 to 1,040 |
+| Ornith 1.5 | 50% to 61% | 90, 78 | 97, 95 | 79, 73 | 830 to 1,030 |
+| Gemma 4 26B-A4B | 58% to 61% | 81, 103 | 78 | 68, 73 | 1,570 to 2,870 |
+
+With part of the experts on the CPU, two runs of a prompt no longer write the same tokens: which experts are
+cached changes while the answer is written, and an expert on the CPU differs from the same one on the card in the
+last bits. One of the fifteen runs behind this table was ended by a kill signal while it read its prompt (Gemma 4,
+2,212 tokens); four runs of the same command afterwards finished and wrote the reference's 64 tokens. The pod's
+memory was at its limit then (file cache); the cause was not found.
+
 ## How each backend was checked
 
 Against llama.cpp on the same file: greedy, 64 tokens after five chat prompts of about 25 to 8000 tokens, the
@@ -273,9 +292,8 @@ All three are in the shared kernels, so every architecture with that kind of att
 ## Limits
 
 - Linux and one NVIDIA card. Built and run on one machine.
-- The three new models have only run with all their experts in VRAM. The expert cache, the CPU experts and the
-  staging buffer are the ones GLM uses with 45% of its experts in VRAM, but for these models a small card is
-  untested, and so is the target of 8 GB of VRAM with 32 GB of RAM.
+- The three new models have run with all their experts in VRAM and with the card held to 8 GB, not on a card
+  that has 8 GB, nor on a PC with 32 GB of RAM. The target of 8 GB of VRAM with 32 GB of RAM is not measured.
 - Setup does not install the new models. Their files, tokenizer directories and run configs are made by hand.
 - Gemma 4: its draft model (a separate small GGUF that shares the caches) is not run, so it guesses from repeats
   only; its tool calls are not parsed; images are not read.
