@@ -3,8 +3,8 @@
 Validated on Linux with an RTX 5090 (32 GB), Ryzen 9 9950X3D and 128 GB RAM on 2026-09-27.
 
 The target is `orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF`, **IQ3_XXS** (two shards, 85.20 GB total).
-It has Strata's Qwen4Exp geometry, but ordinary quantization also compresses the hyperconnection,
-small attention and PLE projections which Strata's kernels read as BF16.
+It has PolyStrata's Qwen4Exp geometry, but ordinary quantization also compresses the hyperconnection,
+small attention and PLE projections which PolyStrata's kernels read as BF16.
 
 `tools/iq_pack.py --compat-bf16` expands only those projections, rounding to BF16 using nearest-even.
 This adds rounding relative to the GGUF's dequantized weights; it does not recover the original BF16
@@ -18,7 +18,7 @@ finish downloading before packing. Pass the snapshot filename, not its hash-name
 
 ## Preparation
 
-Build Strata normally using the pinned llama.cpp dependency. Python needs numpy, regex and gguf-py
+Build PolyStrata normally using the pinned llama.cpp dependency. Python needs numpy, regex and gguf-py
 from that dependency (`STRATA_GGUF_PY` can point to its `gguf-py` directory).
 
 ```sh
@@ -30,7 +30,7 @@ from that dependency (`STRATA_GGUF_PY` can point to its `gguf-py` directory).
 Use this model's own tokenizer exported into the pack. Do not share another model's `dense.bin`,
 and do not rename the Orca files to impersonate one of setup's GSQ-RCO models.
 
-Strata's persistent server also requires the MTP runtime, prepared by the existing tools:
+PolyStrata's persistent server also requires the MTP runtime, prepared by the existing tools:
 
 ```sh
 .venv/bin/python tools/mtp_fetch.py fetch --out mtp

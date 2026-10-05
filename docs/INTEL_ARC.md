@@ -1,6 +1,6 @@
 # Intel Arc (experimental)
 
-Strata 0.1.39 includes an **experimental Intel Arc engine**: Strata's own engine ported to SYCL (Intel oneAPI).
+PolyStrata 0.1.39 includes an **experimental Intel Arc engine**: PolyStrata's own engine ported to SYCL (Intel oneAPI).
 maxfridbe wrote it in [#423](https://github.com/Niko1221/Strata/pull/423), with fixes from the people testing it.
 The code is in `sycl/`, and the port's own notes, measurements and maintenance procedure are in
 [docs/INTEL.md](INTEL.md). This page covers what you need, how to build it, and what has been tested.
@@ -53,7 +53,7 @@ images (not wired on Intel).
   Python 3.
 - For `setup --backend sycl` today: **Docker**. `sycl/setup_intel.py` runs the engine in the `strata-sycl-dev`
   image built from `sycl/tools/Dockerfile`. Note that the Dockerfile starts from a community llama.cpp SYCL image
-  (`ghcr.io/snailium/...`), not an Intel or Strata image.
+  (`ghcr.io/snailium/...`), not an Intel or PolyStrata image.
 - VRAM: the port keeps the experts on the card (`--stream-experts`). A 32 GB card holds the Coder IQ1_M or IQ2_XS.
   Smaller cards mirror part of the experts in RAM and are slower.
 

@@ -1243,7 +1243,7 @@ class StrataEngine:
             try:
                 self.proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
-                raise EngineStuck("Strata is still releasing GPU/RAM; retry unloading after it exits") from None
+                raise EngineStuck("PolyStrata is still releasing GPU/RAM; retry unloading after it exits") from None
         except OSError:
             pass
         finally:
@@ -1669,7 +1669,7 @@ class Service:
         # #321: browser pages of these origins may call /v1/* (CORS; "*" = any page - only with an api_key that
         # matters); empty = no CORS headers at all, as before
         self.cors_origins: list[str] = []
-        # #321: origins that count as Strata's own page for /settings and MCP tools, e.g. the web app reached through a
+        # #321: origins that count as PolyStrata's own page for /settings and MCP tools, e.g. the web app reached through a
         # reverse proxy or tunnel whose Host differs ("https://strata.example.com"); never a wildcard
         self.trusted_origins: list[str] = []
         # DNS rebinding: extra Host names this server answers to (the config's allowed_hosts, $STRATA_ALLOWED_HOSTS;
@@ -2855,7 +2855,7 @@ def make_handler(svc: Service):
                   f"answers to (add it to \"allowed_hosts\" in the config or STRATA_ALLOWED_HOSTS, or set an API key)",
                   flush=True)
             self._json(403, {"error": {"type": "forbidden", "message":
-                             f"Host {host!r} is not allowed (DNS rebinding protection). Reaching Strata under this "
+                             f"Host {host!r} is not allowed (DNS rebinding protection). Reaching PolyStrata under this "
                              f"name on purpose? Add it to \"allowed_hosts\" in the config (strata-<model>.json) or to "
                              f"the STRATA_ALLOWED_HOSTS environment variable, or set an API key (\"api_key\"), which "
                              f"turns this check off"}})
@@ -3099,7 +3099,7 @@ def make_handler(svc: Service):
                 return
             if path in ("/unload", "/load") and not self._control_body():
                 return
-            # JSON from Strata's own page only, as /settings: else a plain form POST from any site unloads the model
+            # JSON from PolyStrata's own page only, as /settings: else a plain form POST from any site unloads the model
             if path in ("/unload", "/load") and not self._own_page("the model can be loaded or unloaded"):
                 return
             if path == "/unload":                            # give the GPU back now (between requests)
@@ -3225,7 +3225,7 @@ def make_handler(svc: Service):
                 props["model_path"] = svc.engine.model_path
             version = getattr(svc.engine, "info", {}).get("version")
             if version:
-                props["build_info"] = "Strata " + str(version)
+                props["build_info"] = "PolyStrata " + str(version)
             self._json(200, props)
 
         def _control_body(self) -> bool:
@@ -3262,7 +3262,7 @@ def make_handler(svc: Service):
             origin = (self.headers.get("Origin") or "").rstrip("/")
             if origin and origin.split("://", 1)[-1] != self.headers.get("Host", "") and \
                     origin not in svc.trusted_origins:
-                self._json(403, {"error": {"message": f"{what} only from Strata's own page (or an origin in the "
+                self._json(403, {"error": {"message": f"{what} only from PolyStrata's own page (or an origin in the "
                                                       f"config's trusted_origins)"}})
                 return False
             return True
@@ -3279,7 +3279,7 @@ def make_handler(svc: Service):
             self._json(200, runconfig.view(cfg, svc.config_path))
 
         def _config_post(self):
-            """#564: change a few documented keys of the run config - JSON from Strata's own page only, as
+            """#564: change a few documented keys of the run config - JSON from PolyStrata's own page only, as
             /settings (the key is checked before); every other key of the file stays as it is."""
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             if not self._own_page("the run config can be changed"):
@@ -3951,7 +3951,7 @@ def main() -> int:
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
     except OSError:
-        ap.error(f"port {a.port} is already in use - is Strata (or another server) already running? "
+        ap.error(f"port {a.port} is already in use - is PolyStrata (or another server) already running? "
                  f"Close it, or start this one with a different --port")
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
@@ -4102,7 +4102,7 @@ def main() -> int:
         print(f"[strata] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
               f"chat: {', '.join(hub.servers)}", flush=True)
         hub.start()
-        atexit.register(hub.close)                      # the servers Strata started end with it
+        atexit.register(hub.close)                      # the servers PolyStrata started end with it
     httpd = serve(svc, host=a.host, port=a.port)
     svc.start_idle_unload()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
@@ -4122,7 +4122,7 @@ def main() -> int:
                   "to the config (clients send it as their API key; the web page asks for it)", flush=True)
         if os.name == "nt":
             print("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for Python, or run "
-                  "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Strata " + str(a.port) + "\" "
+                  "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"PolyStrata " + str(a.port) + "\" "
                   "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
                   "       (and set this network to Private in Windows' network settings)", flush=True)
     if a.open and cfg.get("open_browser") is not False:   # #609: the config's "open_browser": false wins (an older

@@ -5,8 +5,8 @@ error messages, with the older engine fixes, is in the [details](DETAILS.md#trou
 
 ## While installing or starting
 
-**My PC froze, or got very slow, the first time Strata started.**
-That's normal while it starts, most of all the first time. Strata loads 35-55 GB into your RAM, locks part of it for
+**My PC froze, or got very slow, the first time PolyStrata started.**
+That's normal while it starts, most of all the first time. PolyStrata loads 35-55 GB into your RAM, locks part of it for
 the graphics card, and works out how much of the model fits on your GPU. The mouse can freeze for a few minutes.
 **Wait, and don't close the window.** The next starts are much faster. Still frozen after 10 minutes? Restart the
 PC, close other programs (browsers use a lot of RAM) and try again. If it keeps happening, pick a smaller size (Q2_0
@@ -20,7 +20,7 @@ Update it (NVIDIA App or [nvidia.com/drivers](https://www.nvidia.com/drivers)), 
 `START-HERE.bat` again.
 
 **It says port 8080 is already in use.**
-Strata is already running. Look for its window. Or another program uses the port: `START-HERE.bat --port 8081`.
+PolyStrata is already running. Look for its window. Or another program uses the port: `START-HERE.bat --port 8081`.
 
 **Python or the build tools could not be installed.**
 Install what it names (links are printed), then run it again. Everything already done is kept.
@@ -43,7 +43,7 @@ Scheduler, it can be 24x slower: see [Running it at startup](DETAILS.md#running-
 Your PC is out of free RAM. Close other programs, or pick a smaller size (Q2_0 or IQ2_XS).
 
 **An answer stopped with "the engine stopped unexpectedly".**
-Usually not enough RAM (on Linux the system then stops the engine). Just send your message again: Strata starts the
+Usually not enough RAM (on Linux the system then stops the engine). Just send your message again: PolyStrata starts the
 engine by itself. If it keeps happening, close other programs or pick a smaller size.
 
 **It says the prompt exceeds the context.**
@@ -63,10 +63,10 @@ its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half.
 
 **"No AMD GPU found (the amdgpu driver's KFD topology is empty)" on Linux.**
 The kernel's amdgpu driver is not loaded for the card. Integrated Radeon GPUs are listed as not supported; setup
-lists every card it found and whether Strata can use it.
+lists every card it found and whether PolyStrata can use it.
 
 **The engine stops at start with the card's name, its architecture and the build's list.**
-The engine was compiled for another card (for example after moving the Strata folder to another PC). Run
+The engine was compiled for another card (for example after moving the PolyStrata folder to another PC). Run
 `./setup.sh --setup --backend hip`: it compiles the engine for this card's architecture.
 
 **Large pinned host allocations fail on ROCm although RAM is free.**
@@ -75,4 +75,4 @@ See [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration): the mapped expert 
 ## Still stuck?
 
 Look in the [full troubleshooting table](DETAILS.md#troubleshooting), or open an
-[issue](https://github.com/VecSzn/PolyStrata/issues) and attach `strata-<model>.log` from the Strata folder.
+[issue](https://github.com/VecSzn/PolyStrata/issues) and attach `strata-<model>.log` from the PolyStrata folder.

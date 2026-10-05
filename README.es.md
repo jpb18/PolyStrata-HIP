@@ -1,15 +1,15 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">PolyStrata</h1>
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · **Español** · [Português](README.pt-BR.md)
 
 <p align="center"><b>Ejecuta un modelo de IA de 125 mil millones de parámetros en tu propio PC gaming</b><br>
 Tarjeta gráfica NVIDIA o AMD (12 GB o más) · Windows o Linux · libre y de código abierto</p>
 
-<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Un jardín con una pagoda de vóxeles que escribió el modelo de Strata, funcionando en el navegador"></a><br>
+<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Un jardín con una pagoda de vóxeles que escribió el modelo de PolyStrata, funcionando en el navegador"></a><br>
 <sub>Un jardín con una pagoda de vóxeles, hecho con un solo prompt en una RTX 5070 con <a href="https://github.com/Niko1221/Strata">Strata</a> (IQ3_S, contexto de 128K) ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">vídeo completo (49 s)</a></sub></p>
 
-Strata ejecuta **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** en un PC normal. Es un
+PolyStrata ejecuta **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** en un PC normal. Es un
 modelo de IA grande e inteligente que normalmente necesita un servidor. Conversa, escribe código, entiende imágenes
 y funciona con tus aplicaciones y agentes de programación. Nada sale de tu PC.
 
@@ -85,13 +85,13 @@ Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - foll
 ```
 
 Revisa tu tarjeta gráfica, tu RAM y tu disco, y elige el modelo que cabe. Luego lo instala, lo arranca y te explica
-cómo conectar tus aplicaciones. Las herramientas de IA también pueden instalar, arrancar y detener Strata con su
+cómo conectar tus aplicaciones. Las herramientas de IA también pueden instalar, arrancar y detener PolyStrata con su
 [servidor MCP](docs/MCP_SERVER.md).
 
 ### O hazlo tú mismo
 
 [Descarga PolyStrata](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) y descomprímelo (o usa `git clone`).
-**Windows:** haz doble clic en **`START-HERE.bat`**. **Linux:** ejecuta **`./setup.sh`** en la carpeta de Strata.
+**Windows:** haz doble clic en **`START-HERE.bat`**. **Linux:** ejecuta **`./setup.sh`** en la carpeta de PolyStrata.
 
 Los pasos son los mismos para NVIDIA y AMD. El instalador detecta tu tarjeta y prepara el motor adecuado para ella.
 Te hace unas pocas preguntas:
@@ -101,15 +101,15 @@ Te hace unas pocas preguntas:
 - si debe entender imágenes.
 
 Pulsa Enter cada vez para usar la respuesta recomendada. Después descarga el modelo (unos 70 GB) y lo arranca. Si la
-descarga se detiene, vuelve a ejecutarlo: sigue donde lo dejó. Tu navegador abre la aplicación de Strata en
+descarga se detiene, vuelve a ejecutarlo: sigue donde lo dejó. Tu navegador abre la aplicación de PolyStrata en
 `http://127.0.0.1:8080`.
 
 > **Mientras el modelo arranca, tu PC puede ir lento o dejar de responder durante 1-3 minutos** (más la primera vez).
-> Strata carga 35-55 GB en tu RAM y reserva una parte para la tarjeta gráfica. Es normal. Espera y no cierres la
-> ventana. La ventana muestra lo que está haciendo Strata.
+> PolyStrata carga 35-55 GB en tu RAM y reserva una parte para la tarjeta gráfica. Es normal. Espera y no cierres la
+> ventana. La ventana muestra lo que está haciendo PolyStrata.
 
 **La próxima vez**, vuelve a ejecutar `START-HERE.bat` (o `./setup.sh`). Arranca enseguida y no descarga nada dos
-veces. Cierra su ventana para detener el modelo. `UPDATE.bat` (`./update.sh`) actualiza Strata sin arrancarlo.
+veces. Cierra su ventana para detener el modelo. `UPDATE.bat` (`./update.sh`) actualiza PolyStrata sin arrancarlo.
 Actualizaciones, Docker, varias tarjetas, dónde se guardan los archivos y todas las opciones: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## ¿Qué modelo elijo?
@@ -131,10 +131,10 @@ tamaños pequeños son más rápidos. Los grandes son algo más inteligentes.
 - **[Swift 1.5](docs/MODELS.md#swift-15):** un ajuste fino que piensa mucho menos tiempo antes de responder. Recibes
   la respuesta antes, con más o menos la misma calidad.
 - **[Unsloth UD-IQ4_XS](docs/MODELS.md#unsloth-ud-iq4_xs):** la versión de ~4 bits de Unsloth, entre IQ3_S y
-  UD-Q4_K_XL en calidad. Una descarga de 94 GB. Con menos de ~80 GB de RAM, Strata lee una parte desde el SSD
+  UD-Q4_K_XL en calidad. Una descarga de 94 GB. Con menos de ~80 GB de RAM, PolyStrata lee una parte desde el SSD
   mientras responde, así que ahí es más lento (un SSD NVMe ayuda).
 - **[Unsloth UD-Q4_K_XL](docs/MODELS.md#unsloth-ud-q4_k_xl-experimental)** (experimental): el más parecido al modelo
-  completo. Pero Strata lee la mayor parte desde el SSD mientras responde, así que solo escribe 7-8.5 tokens/s en un
+  completo. Pero PolyStrata lee la mayor parte desde el SSD mientras responde, así que solo escribe 7-8.5 tokens/s en un
   PC con 64 GB.
 - **[OrcaRouter's Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs):** se instala a mano. No está en
   el menú del instalador.
@@ -144,8 +144,8 @@ Tamaños, descargas y qué cabe dónde: [docs/MODELS.md](docs/MODELS.md). Para a
 
 ## Cómo usarlo
 
-<p align="center"><img src="docs/media/runpagoda.png" width="900" alt="La pestaña Monitor de la aplicación de Strata junto a un agente de programación"><br>
-<sub>El <b>Monitor</b> de la aplicación de Strata (izquierda) mientras un agente de programación escribe el jardín de la pagoda del vídeo (derecha)</sub></p>
+<p align="center"><img src="docs/media/runpagoda.png" width="900" alt="La pestaña Monitor de la aplicación de PolyStrata junto a un agente de programación"><br>
+<sub>El <b>Monitor</b> de la aplicación de PolyStrata (izquierda) mientras un agente de programación escribe el jardín de la pagoda del vídeo (derecha)</sub></p>
 
 - **En el navegador:** abre `http://127.0.0.1:8080`. Tiene **Chat**, un **Monitor** en vivo del modelo y de tu
   GPU/CPU/RAM, y **About** con los ajustes y las direcciones.
@@ -160,16 +160,16 @@ Tamaños, descargas y qué cabe dónde: [docs/MODELS.md](docs/MODELS.md). Para a
 - **Imágenes:** responde que sí a "Images?" en la instalación. Luego haz clic en **Picture** en el chat, o adjunta
   imágenes en tu aplicación. Las tarjetas AMD leen imágenes en Linux a través del procesador; en Windows todavía no.
 - **Desde tu móvil u otro PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Pon siempre una clave.
-- **Una petición cada vez:** por defecto Strata responde una petición y las demás esperan. Para responder varias a la
+- **Una petición cada vez:** por defecto PolyStrata responde una petición y las demás esperan. Para responder varias a la
   vez, pon `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). En una tarjeta de 12 GB, cada respuesta va más lenta.
-- **Prompts largos:** Strata lee entero el primer mensaje de un chat, más o menos 1 minuto por cada 30,000 tokens. Los
+- **Prompts largos:** PolyStrata lee entero el primer mensaje de un chat, más o menos 1 minuto por cada 30,000 tokens. Los
   mensajes siguientes empiezan en segundos.
 
 Más: [dónde se guardan tus chats](docs/INSTALL.md#where-things-are-stored), [la API](docs/DETAILS.md#using-it).
 
 ## ¿Algo salió mal?
 
-- **Mi PC se congeló la primera vez que arrancó Strata.** Es normal mientras carga el modelo. Espera y no cierres la
+- **Mi PC se congeló la primera vez que arrancó PolyStrata.** Es normal mientras carga el modelo. Espera y no cierres la
   ventana. ¿Sigue congelado después de 10 minutos? Reinicia el PC, cierra otros programas y vuelve a intentarlo, o
   elige un tamaño más pequeño.
 - **Se detuvo durante la descarga o la instalación.** Vuelve a ejecutar `START-HERE.bat` (o `./setup.sh`). Sigue
@@ -177,16 +177,16 @@ Más: [dónde se guardan tus chats](docs/INSTALL.md#where-things-are-stored), [l
 - **Va muy lento y la luz del disco no deja de parpadear, o dice "the engine stopped unexpectedly".** Tu PC no tiene
   suficiente RAM libre. Cierra otros programas (los navegadores usan mucha), o elige un tamaño más pequeño (Q2_0 o
   IQ2_XS).
-- **Dice que el puerto 8080 ya está en uso.** Strata ya está en marcha. Busca su ventana.
+- **Dice que el puerto 8080 ya está en uso.** PolyStrata ya está en marcha. Busca su ventana.
 
 Más problemas y sus soluciones: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). ¿Sigues atascado? Abre un
-[issue](https://github.com/VecSzn/PolyStrata/issues) y adjunta `strata-<model>.log` de la carpeta de Strata. ¿Has
+[issue](https://github.com/VecSzn/PolyStrata/issues) y adjunta `strata-<model>.log` de la carpeta de PolyStrata. ¿Has
 encontrado un problema de seguridad? Infórmalo en privado: [SECURITY.md](SECURITY.md).
 
 ## ¿Cómo funciona?
 
 Los modelos como este suelen funcionar en servidores con cientos de gigabytes de memoria gráfica. Tu tarjeta gráfica
-tiene 12-24 GB. Strata hace que el modelo quepa **repartiendo el trabajo por todo tu PC**. Piensa en una cocina: lo
+tiene 12-24 GB. PolyStrata hace que el modelo quepa **repartiendo el trabajo por todo tu PC**. Piensa en una cocina: lo
 que usas todo el rato se queda en la encimera, y el resto espera en la despensa.
 
 <p align="center"><img src="docs/media/how-it-works.svg" width="860" alt="Los 24,576 expertos del modelo: los más usados en la tarjeta gráfica, todos en la RAM y una tabla de consulta en el SSD"></p>
@@ -208,8 +208,8 @@ La explicación larga: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Cada parte 
 
 El modelo es [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), del equipo de Qwen. Lo
 comprimieron [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5)
-y Unsloth. Strata usa partes de [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Todos los créditos:
-[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). Strata es de código abierto con la [licencia MIT](LICENSE).
+y Unsloth. PolyStrata usa partes de [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Todos los créditos:
+[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). PolyStrata es de código abierto con la [licencia MIT](LICENSE).
 Algunas partes y cada modelo tienen sus propias licencias ([cuáles](docs/HOW_IT_WORKS.md#license)).
 
 ## Apoyar

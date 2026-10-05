@@ -1,8 +1,8 @@
-"""tools/test_strata_mcp.py - tests for tools/strata_mcp.py (Strata's MCP server), standard library only.
+"""tools/test_strata_mcp.py - tests for tools/strata_mcp.py (PolyStrata's MCP server), standard library only.
 
     python -m unittest tools/test_strata_mcp.py -v
 
-Setup and the model server are fakes (a temporary Strata folder with a stand-in setup.py and serve/server.py), so
+Setup and the model server are fakes (a temporary PolyStrata folder with a stand-in setup.py and serve/server.py), so
 nothing is downloaded and no GPU is used: the JSON-RPC handshake, argument checks, install / start / stop with real
 background processes, status against a fake HTTP server, and that the built-in model table still matches setup.py.
 """
@@ -31,7 +31,7 @@ from pathlib import Path
 def main():
     root = Path(__file__).resolve().parent
     (root / "setup-args.json").write_text(json.dumps(sys.argv[1:]))
-    print("Strata - fake setup", flush=True)
+    print("PolyStrata - fake setup", flush=True)
     print("\n=== Step 1: checking your PC ===", flush=True)
     print("  [ok] GPU: fake", flush=True)
     print("\n=== Step 5: downloading Qwen3.8-Flash-Next Q2_0 ===", flush=True)
@@ -145,12 +145,12 @@ FAKE_HW = {"os": "TestOS 1", "ram_gb": 64.0, "cpu": {"name": "Fake CPU", "cores"
 
 
 class FakeRoot(unittest.TestCase):
-    """A temporary Strata folder: fake setup.py and serve/server.py, its own settings file (data folder)."""
+    """A temporary PolyStrata folder: fake setup.py and serve/server.py, its own settings file (data folder)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
-        self.root = base / "Strata"
+        self.root = base / "PolyStrata"
         (self.root / "serve").mkdir(parents=True)
         (self.root / "setup.py").write_text(FAKE_SETUP)
         (self.root / "serve" / "server.py").write_text(FAKE_SERVER)
@@ -306,14 +306,14 @@ class Validation(FakeRoot):
 
     def test_data_dir_paths(self):
         self.assertRejected("strata_install", {"data_dir": "models"}, "absolute")
-        self.assertRejected("strata_install", {"data_dir": str(self.root.parent / "x" / ".." / "Strata-x")}, "'..'")
-        self.assertRejected("strata_install", {"data_dir": str(self.root.parent / "Documents")}, "named Strata")
-        self.assertRejected("strata_install", {"data_dir": str(self.root.parent / "nope" / "Strata-data")},
+        self.assertRejected("strata_install", {"data_dir": str(self.root.parent / "x" / ".." / "PolyStrata-x")}, "'..'")
+        self.assertRejected("strata_install", {"data_dir": str(self.root.parent / "Documents")}, "named PolyStrata")
+        self.assertRejected("strata_install", {"data_dir": str(self.root.parent / "nope" / "PolyStrata-data")},
                             "does not exist")
-        self.assertRejected("strata_install", {"data_dir": "\\\\server\\share\\Strata-data"}, "network")
-        sysdir = (os.environ.get("SystemRoot", "C:\\Windows") + "\\Strata-data") if M.WIN else "/etc/Strata-data"
+        self.assertRejected("strata_install", {"data_dir": "\\\\server\\share\\PolyStrata-data"}, "network")
+        sysdir = (os.environ.get("SystemRoot", "C:\\Windows") + "\\PolyStrata-data") if M.WIN else "/etc/PolyStrata-data"
         self.assertRejected("strata_install", {"data_dir": sysdir}, "system folder")
-        ok = [self.root.parent / "Strata-data", self.root / "models-here", self.root.parent / "Strata-big"]
+        ok = [self.root.parent / "PolyStrata-data", self.root / "models-here", self.root.parent / "PolyStrata-big"]
         for d in ok:
             self.assertEqual(M.norm(self.tools.check_data_dir(str(d))), M.norm(d))
 
@@ -332,7 +332,7 @@ class Validation(FakeRoot):
         self.write_config("q2_0", log=str(Path(self.tmp.name).parent / "elsewhere.log"))
         res, err = self.call("strata_logs", {"source": "engine", "model": "q2_0"})
         self.assertTrue(err)
-        self.assertIn("outside the Strata folder", res["error"])
+        self.assertIn("outside the PolyStrata folder", res["error"])
         self.write_config("q2_0")
         res, err = self.call("strata_logs", {"source": "engine"})
         self.assertFalse(err)
@@ -423,7 +423,7 @@ class StartStop(FakeRoot):
         self.write_config("q2_0", port=port, delay=1.5)
         res, err = self.call("strata_start", {"wait_seconds": 30})
         self.assertFalse(err, res)
-        self.assertIn("Strata is running", res["summary"])
+        self.assertIn("PolyStrata is running", res["summary"])
         pid = res["server"]["pid"]
 
         st, _ = self.call("strata_status", {"hardware": False})
@@ -450,7 +450,7 @@ class StartStop(FakeRoot):
 
         res, err = self.call("strata_stop", {})
         self.assertFalse(err, res)
-        self.assertIn("Strata stopped", res["summary"])
+        self.assertIn("PolyStrata stopped", res["summary"])
         self.assertEqual(res["engine_unloaded"], "unloaded")
         self.assertEqual((self.root / "unloaded.txt").read_text().split(), [str(port)])
         ident = M.proc_identity(pid)
@@ -458,7 +458,7 @@ class StartStop(FakeRoot):
         st, _ = self.call("strata_status", {"hardware": False})
         self.assertEqual(st["running"], [])
         res, _ = self.call("strata_stop", {})
-        self.assertEqual(res["summary"], "Strata is not running")
+        self.assertEqual(res["summary"], "PolyStrata is not running")
 
     def test_start_reports_a_crash(self):
         self.write_config("q2_0", port=free_port(), crash=True)
@@ -511,7 +511,7 @@ class StartStop(FakeRoot):
         self.strata.save_state("server", {"pid": other.pid, "ident": "win:1" if M.WIN else "linux:1",
                                           "port": free_port(), "model": "q2_0"})
         res, _ = self.call("strata_stop", {})
-        self.assertEqual(res["summary"], "Strata is not running")
+        self.assertEqual(res["summary"], "PolyStrata is not running")
         self.assertFalse(M.proc_terminate(other.pid, "linux:1"))
         time.sleep(0.3)
         self.assertIsNone(other.poll())
@@ -545,7 +545,7 @@ class Helpers(unittest.TestCase):
     def test_progress_from_setup_output(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "setup.log"
-            f.write_text("=== Step 4: the Strata engine ===\n  [ok] engine\n=== Step 5: downloading X ===\n"
+            f.write_text("=== Step 4: the PolyStrata engine ===\n  [ok] engine\n=== Step 5: downloading X ===\n"
                          "\r  a.gguf:   1.00 / 50.00 GB (2%)   \r  a.gguf:  25.00 / 50.00 GB (50%)   \n")
             p = M.install_progress(M.read_tail(f, 50))
         self.assertEqual(p["step"], "5/7: downloading X")

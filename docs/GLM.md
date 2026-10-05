@@ -58,7 +58,7 @@ compiles the engine, downloads the model, checks its SHA-256 and starts it. The 
 
 On the test machine, with the file already on the disk, this took about five minutes.
 
-Setup writes the run config `strata-glm-3.0bit.json` and `run-glm-3.0bit.sh` into the Strata folder, the engine into
+Setup writes the run config `strata-glm-3.0bit.json` and `run-glm-3.0bit.sh` into the PolyStrata folder, the engine into
 `engine-glm/`, and the tokenizer and the expert profile into the data folder. The profile starts as the counts in
 `data/expert-profile-glm.txt`, which come from the test runs here, and the engine updates it every time it stops.
 
@@ -85,7 +85,7 @@ Then write a run config, `glm.json`:
 ```json
 {
   "exe": "build/strata-glm",
-  "cwd": "/path/to/Strata",
+  "cwd": "/path/to/PolyStrata",
   "args": ["--model", "/models/GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf",
            "--max-context", "32768",
            "--expert-profile", "glm.profile",

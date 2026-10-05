@@ -1,4 +1,4 @@
-"""docs/media/make_figures.py - the README's "How does it work?" illustrations, in the Strata app's style: its colors
+"""docs/media/make_figures.py - the README's "How does it work?" illustrations, in the PolyStrata app's style: its colors
 (serve/web/tokens.css), its icons (serve/web/sprite.svg) and its font (Outfit, embedded, SIL OFL 1.1).  Light and dark
 follow the reader's system setting.
 
@@ -85,7 +85,7 @@ def how_it_works():
     b.append(rect(24, 24, W - 48, 92))
     b.append(icon("i-chat", 48, 50, 36))
     b.append(text(100, 62, "The model is made of 24,576 small specialists - “experts”.", 19, 600))
-    b.append(text(100, 88, "For each word it writes, it asks only 10 of them. Strata keeps the busy ones",
+    b.append(text(100, 88, "For each word it writes, it asks only 10 of them. PolyStrata keeps the busy ones",
                   15, 400, "muted"))
     b.append(text(100, 106, "on your graphics card and the rest in RAM - so it runs on a normal PC.", 15, 400, "muted"))
     b.append(dots(W - 262, 46, 28, 4, 7.6, 10, seed=3))
@@ -120,7 +120,7 @@ def how_it_works():
                 yy = cy + 190 + r * 17
                 b.append(rect(x + 20, yy, cw - 40, 11, 4, "warn" if r in (1, 4) else "soft"))
             b.append(text(x + 20, cy + 306, "a few rows per word", 12, 500, "muted"))
-    return svg(W, H, "".join(b), "How Strata splits the model between your graphics card, RAM and SSD")
+    return svg(W, H, "".join(b), "How PolyStrata splits the model between your graphics card, RAM and SSD")
 
 
 def guess_and_check():

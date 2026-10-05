@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""tools/strata_mcp.py - an MCP server that lets an AI assistant install, start, check and stop Strata.
+"""tools/strata_mcp.py - an MCP server that lets an AI assistant install, start, check and stop PolyStrata.
 
-    claude mcp add strata -- python /path/to/Strata/tools/strata_mcp.py
+    claude mcp add strata -- python /path/to/PolyStrata/tools/strata_mcp.py
 
 Add it to Claude Code, Claude Desktop, Cursor, VS Code, Codex ... (docs/MCP_SERVER.md has every client's snippet) and
-ask your AI "install Strata for this PC", "start Strata", "is Strata running?".  It speaks MCP (JSON-RPC 2.0, one
+ask your AI "install PolyStrata for this PC", "start PolyStrata", "is PolyStrata running?".  It speaks MCP (JSON-RPC 2.0, one
 message per line) over stdin/stdout, uses the Python standard library only (it runs before setup made .venv; Python
 3.10 or newer), and offers a fixed set of tools: strata_status, strata_models, strata_install, strata_start,
 strata_stop, strata_logs, strata_benchmark, strata_connect_info.
 
 Safety: no tool takes a shell command or a free path.  Every argument is checked against setup.py's own choices
-(models, families, contexts ...); the only path argument (install's data_dir) must be the Strata data folder, a folder
-inside the Strata folder, or a new folder named Strata* outside the system folders.  Setup and the model run as
+(models, families, contexts ...); the only path argument (install's data_dir) must be the PolyStrata data folder, a folder
+inside the PolyStrata folder, or a new folder named PolyStrata* outside the system folders.  Setup and the model run as
 background processes this server starts itself; it keeps their process id and start time in .strata-mcp/ and only
-ever stops a process it started (a Strata started elsewhere, e.g. from its own window, is only asked over its API to
+ever stops a process it started (a PolyStrata started elsewhere, e.g. from its own window, is only asked over its API to
 unload the model).
 
-Not to be confused with serve/mcp.py: that is Strata's MCP *client* (the model calling your tools from the chat page).
+Not to be confused with serve/mcp.py: that is PolyStrata's MCP *client* (the model calling your tools from the chat page).
 This file is an MCP *server* for the AI assistant you already use.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ VERSION = "0.1.0"
 WIN = os.name == "nt"
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 8080
-STATE_DIR = ".strata-mcp"                             # in the Strata folder (git-ignored)
+STATE_DIR = ".strata-mcp"                             # in the PolyStrata folder (git-ignored)
 
 # What setup.py offers, used only when setup.py cannot be imported (the numbers are setup's MODELS / FAMILIES /
 # CONTEXTS; tools/test_strata_mcp.py checks they still match).
@@ -387,9 +387,9 @@ def system_folders() -> list[Path]:
                               "/sys", "/usr", "/var", "/snap")]
 
 
-# ------------------------------------------------------------------------------------------------ Strata
+# ------------------------------------------------------------------------------------------------ PolyStrata
 class Strata:
-    """One Strata folder: what is installed there, the PC, and the processes this server started."""
+    """One PolyStrata folder: what is installed there, the PC, and the processes this server started."""
 
     def __init__(self, root: Path | str = DEFAULT_ROOT):
         self.root = Path(root).resolve()
@@ -439,8 +439,8 @@ class Strata:
     # ---- paths
     def settings_path(self) -> Path:
         if WIN:
-            return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
-        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "settings.json"
+            return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "PolyStrata" / "settings.json"
+        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "polystrata" / "settings.json"
 
     def data_dir(self) -> Path:
         try:
@@ -448,7 +448,7 @@ class Strata:
         except (OSError, ValueError):
             s = {}
         d = s.get("data_dir") if isinstance(s, dict) else None
-        return Path(d) if d else self.root.parent / "Strata-data"
+        return Path(d) if d else self.root.parent / "PolyStrata-data"
 
     def allowed_roots(self) -> list[Path]:
         return [norm(self.root), norm(self.data_dir())]
@@ -682,7 +682,7 @@ class Strata:
             fam, model, why = "coder", "IQ1_M", (f"{ram:.0f} GB of RAM is below the Coder's 32 GB, but the GPU's "
                                                  f"{vram:.0f} GB make up for it (setup's low-RAM mode: slower)")
         else:
-            return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Strata needs 32 GB or more "
+            return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: PolyStrata needs 32 GB or more "
                                                           "(the smallest model, the Coder, keeps ~23 GB of experts in "
                                                           "RAM)"}
         ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
@@ -754,14 +754,14 @@ class Strata:
         return None
 
     def probe(self, port: int, deep=True) -> dict | None:
-        """What answers on 127.0.0.1:port: a Strata server's facts, {"other": True} for something else, None for
+        """What answers on 127.0.0.1:port: a PolyStrata server's facts, {"other": True} for something else, None for
         nothing."""
         base = f"http://127.0.0.1:{port}"
         st, health = http_json(base + "/health", timeout=self.health_timeout)
         if st == 0:
             return None
         if st != 200 or not isinstance(health, dict) or health.get("service") != "strata":
-            return {"port": port, "other": True, "note": "something else answers on this port (not a Strata server)"}
+            return {"port": port, "other": True, "note": "something else answers on this port (not a PolyStrata server)"}
         info = {"port": port, "url": base, "model": health.get("model"), "context": health.get("max_context"),
                 "images": health.get("images"), "loaded": health.get("loaded"),
                 "api_key_required": bool(health.get("api_key"))}
@@ -935,8 +935,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                       "'coder-iq1_m', 'swift-iq3_xxs'); default: the most recently used one"}
     ro = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
     return [
-        {"name": "strata_status", "title": "Strata status",
-         "description": "Is Strata (the local AI model server) running, and what is installed? Reports the running "
+        {"name": "strata_status", "title": "PolyStrata status",
+         "description": "Is PolyStrata (the local AI model server) running, and what is installed? Reports the running "
                         "server (model, engine version, context, busy or idle, VRAM/RAM in use), the installed models "
                         "and data folder, an install in progress, this PC's hardware (OS, CPU, RAM, GPUs, free disk) "
                         "and the model size setup recommends for this PC. Read-only; call it first.",
@@ -945,16 +945,16 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
              "hardware": {"type": "boolean", "description": "include the hardware check and the recommendation "
                                                             "(default true; takes a second or two)"}}},
          "annotations": ro},
-        {"name": "strata_models", "title": "Strata models",
-         "description": "The models and sizes Strata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
+        {"name": "strata_models", "title": "PolyStrata models",
+         "description": "The models and sizes PolyStrata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
                         "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit, glm = GLM 5.3 Flash, another "
                         "model with its own engine), with download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
                         "Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
          "annotations": ro},
-        {"name": "strata_install", "title": "Install Strata",
-         "description": "Install a Strata model on this PC by running Strata's setup non-interactively in the "
+        {"name": "strata_install", "title": "Install PolyStrata",
+         "description": "Install a PolyStrata model on this PC by running PolyStrata's setup non-interactively in the "
                         "background (Python packages, the engine, a 58-114 GB model download, preparation, start "
                         "script). Without confirm=true it only returns the plan (what would be downloaded, disk "
                         "space): show it to the user and call again with confirm=true once they agree. Returns at "
@@ -988,17 +988,17 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                          "description": "setup's low-RAM mode (default auto)"},
              "port": {**port, "description": "the port the model will listen on (default 8080)"},
              "data_dir": {"type": "string", "maxLength": 260,
-                          "description": "where the model files go (default: the Strata-data folder next to the "
-                                         "Strata folder). Only the current data folder, a folder inside the Strata "
-                                         "folder, or a new absolute path whose last folder is named Strata... "
-                                         "(e.g. D:\\Strata-data) outside system folders"},
+                          "description": "where the model files go (default: the PolyStrata-data folder next to the "
+                                         "PolyStrata folder). Only the current data folder, a folder inside the PolyStrata "
+                                         "folder, or a new absolute path whose last folder is named PolyStrata... "
+                                         "(e.g. D:\\PolyStrata-data) outside system folders"},
              "confirm": {"type": "boolean", "description": "true = really start the install (after the user agreed "
                                                            "to the plan and the download size)"},
              "cancel": {"type": "boolean", "description": "true = stop the install in progress"}}},
          "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,
                          "openWorldHint": True}},
-        {"name": "strata_start", "title": "Start Strata",
-         "description": "Start an installed Strata model in the background (as its start script does, without "
+        {"name": "strata_start", "title": "Start PolyStrata",
+         "description": "Start an installed PolyStrata model in the background (as its start script does, without "
                         "opening a browser) and wait until it answers. Loading takes 1-3 minutes and the PC can be "
                         "slow meanwhile; if it is not ready within wait_seconds this returns 'loading' - check again "
                         "with strata_status. The model keeps running until strata_stop.",
@@ -1011,9 +1011,9 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                              "a tool call after 60 s)"}}},
          "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,
                          "openWorldHint": False}},
-        {"name": "strata_stop", "title": "Stop Strata",
-         "description": "Stop the Strata model: the engine is unloaded through the server's own API (it frees its "
-                        "VRAM and RAM itself), then the server this tool started is ended. A Strata started "
+        {"name": "strata_stop", "title": "Stop PolyStrata",
+         "description": "Stop the PolyStrata model: the engine is unloaded through the server's own API (it frees its "
+                        "VRAM and RAM itself), then the server this tool started is ended. A PolyStrata started "
                         "elsewhere (e.g. its own window) is only unloaded - close its window to end it. Refuses while "
                         "a request is running unless force=true.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
@@ -1021,8 +1021,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
              "force": {"type": "boolean", "description": "stop even while a request is running"}}},
          "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True,
                          "openWorldHint": False}},
-        {"name": "strata_logs", "title": "Strata logs",
-         "description": "The last lines of a Strata log: 'server' (the model server this tool started: loading, "
+        {"name": "strata_logs", "title": "PolyStrata logs",
+         "description": "The last lines of a PolyStrata log: 'server' (the model server this tool started: loading, "
                         "requests, errors), 'engine' (the engine's own log for a model), 'setup' (the install). "
                         "Default: the setup log while an install runs, else the server log. Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
@@ -1030,16 +1030,16 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
              "model": installed_model,
              "lines": {"type": "integer", "minimum": 1, "maximum": 500, "description": "default 80"}}},
          "annotations": ro},
-        {"name": "strata_benchmark", "title": "Strata speed test",
-         "description": "A short fixed request (greedy, thinking off) through the running Strata server; reports "
+        {"name": "strata_benchmark", "title": "PolyStrata speed test",
+         "description": "A short fixed request (greedy, thinking off) through the running PolyStrata server; reports "
                         "the output speed (tokens/s) and prompt speed. Takes 10-60 s. Refuses while the model is "
                         "busy.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
              "port": port,
              "max_tokens": {"type": "integer", "minimum": 16, "maximum": 512, "description": "default 200"}}},
          "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}},
-        {"name": "strata_connect_info", "title": "Connect to Strata",
-         "description": "How to point other apps at the local Strata server: the OpenAI and Anthropic base URLs, "
+        {"name": "strata_connect_info", "title": "Connect to PolyStrata",
+         "description": "How to point other apps at the local PolyStrata server: the OpenAI and Anthropic base URLs, "
                         "the model id, whether an API key is needed, and ready-to-paste settings for Claude Code, "
                         "Codex CLI, the OpenAI SDK, curl, Cursor/Continue/Open WebUI. Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {"port": port}},
@@ -1092,13 +1092,13 @@ class Tools:
             out["ports_used_by_other_programs"] = others
         if running:
             r = running[0]
-            summary = (f"Strata is running on port {r['port']}: {r.get('model')}"
+            summary = (f"PolyStrata is running on port {r['port']}: {r.get('model')}"
                        + (", busy" if r.get("busy") else ", idle")
                        + ("" if r.get("loaded", True) else " (model unloaded; the next request loads it)"))
         elif "loading" in out:
-            summary = f"Strata is loading {out['loading']['model']} (port {out['loading']['port']})"
+            summary = f"PolyStrata is loading {out['loading']['model']} (port {out['loading']['port']})"
         else:
-            summary = "Strata is not running"
+            summary = "PolyStrata is not running"
         inst = s.installed()
         job = s.install_job()
         if job:
@@ -1140,17 +1140,17 @@ class Tools:
             raise ToolError("data_dir: network (UNC) paths are not allowed; use a local drive")
         p = Path(os.path.expandvars(raw)).expanduser()
         if not p.is_absolute():
-            raise ToolError("data_dir must be an absolute path (e.g. D:\\Strata-data or /mnt/big/Strata-data)")
+            raise ToolError("data_dir must be an absolute path (e.g. D:\\PolyStrata-data or /mnt/big/PolyStrata-data)")
         if ".." in p.parts:
             raise ToolError("data_dir must not contain '..'")
         n = norm(p)
         current = norm(s.data_dir())
-        if n == current or is_inside(n, norm(s.root)) or n == norm(s.root.parent / "Strata-data"):
+        if n == current or is_inside(n, norm(s.root)) or n == norm(s.root.parent / "PolyStrata-data"):
             pass
         else:
-            if not p.name.lower().startswith("strata"):
-                raise ToolError(f"data_dir {raw!r}: a new data folder must be named Strata... (e.g. "
-                                f"{Path(p.anchor or '/') / 'Strata-data'}), so that no other folder is filled with "
+            if not p.name.lower().startswith("polystrata"):
+                raise ToolError(f"data_dir {raw!r}: a new data folder must be named PolyStrata... (e.g. "
+                                f"{Path(p.anchor or '/') / 'PolyStrata-data'}), so that no other folder is filled with "
                                 "model files")
             if not p.parent.is_dir():
                 raise ToolError(f"data_dir {raw!r}: its parent folder {p.parent} does not exist")
@@ -1195,7 +1195,7 @@ class Tools:
                                            data_dir)
             tracked = s.tracked_server()
             if tracked and not tracked.get("ended"):
-                raise ToolError("Strata is running (started by strata_start): stop it first with strata_stop - setup "
+                raise ToolError("PolyStrata is running (started by strata_start): stop it first with strata_stop - setup "
                                 "may update the engine files it uses")
             if not confirm:
                 return {"summary": f"Plan: install {plan['title']} ({plan['download_gb']:.0f} GB download"
@@ -1212,10 +1212,10 @@ class Tools:
         if gpu is not None and gpus is not None:
             raise ToolError("give gpu (one card) or gpus (several), not both")
         if backend == "hip" and WIN:
-            raise ToolError("the AMD (hip) backend runs on Linux only; on Windows Strata needs an NVIDIA RTX 20 "
+            raise ToolError("the AMD (hip) backend runs on Linux only; on Windows PolyStrata needs an NVIDIA RTX 20 "
                             "series or newer card")
         if sys.version_info < (3, 10) or (WIN and sys.maxsize <= 2**32):
-            raise ToolError("this Python is too old or 32-bit: Strata's setup needs 64-bit Python 3.10+; run "
+            raise ToolError("this Python is too old or 32-bit: PolyStrata's setup needs 64-bit Python 3.10+; run "
                             + ("START-HERE.bat" if WIN else "./setup.sh") + " once instead (it installs Python)")
         hw = s.hardware()
         rec = s.recommend(hw)
@@ -1255,7 +1255,7 @@ class Tools:
         short = None
         if free is not None and free < need:
             short = (f"not enough free disk space for {model}: about {need:.0f} GB needed at {target}, "
-                     f"{free:.0f} GB free; free some space or choose data_dir on a bigger drive (e.g. D:\\Strata-data)")
+                     f"{free:.0f} GB free; free some space or choose data_dir on a bigger drive (e.g. D:\\PolyStrata-data)")
         args = ["--yes", "--no-start", "--family", family, "--model", model, "--context", str(context),
                 "--vision", vision or "no"]
         if family in ("qwen", "coder"):
@@ -1334,21 +1334,21 @@ class Tools:
             tracked = s.tracked_server()
             if tracked and not tracked.get("ended"):
                 info = s.probe(tracked["port"])
-                return {"summary": f"Strata is already {'running' if info else 'loading'} ({tracked.get('model')}, "
+                return {"summary": f"PolyStrata is already {'running' if info else 'loading'} ({tracked.get('model')}, "
                                    f"port {tracked['port']}, started by this MCP server)"
                                    + ("" if tracked.get("model") == desc["model"] else
                                       ": stop it first (strata_stop) to start another model"),
                         "server": info}
             info = s.probe(port, deep=False)
             if info and not info.get("other"):
-                return {"summary": f"a Strata server already runs on port {port} ({info.get('model')}), started "
+                return {"summary": f"a PolyStrata server already runs on port {port} ({info.get('model')}), started "
                                    "outside this MCP server; stop it (close its window) or use another port",
                         "server": info}
             if info or not port_free(port):
                 raise ToolError(f"port {port} is used by another program; choose another port (port=...)")
             py = s.run_python()
             if not Path(py).exists():
-                raise ToolError("Strata's Python environment (.venv) is missing: run the install again")
+                raise ToolError("PolyStrata's Python environment (.venv) is missing: run the install again")
             cmd = [py, str(s.root / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
                    "--port", str(port)]
             if gpu is not None:
@@ -1380,15 +1380,15 @@ class Tools:
                 tail = read_tail(log_path, 15)
                 end_group_leftovers(p.pid)
                 s.save_state("server", None)
-                raise ToolError(f"Strata stopped while starting (exit code {p.poll()}). Its last output:\n"
+                raise ToolError(f"PolyStrata stopped while starting (exit code {p.poll()}). Its last output:\n"
                                 + "\n".join(tail))
             info = s.probe(port)
             if info and not info.get("other"):
-                return {"summary": f"Strata is running: {info.get('model')} on http://127.0.0.1:{port}/v1 "
+                return {"summary": f"PolyStrata is running: {info.get('model')} on http://127.0.0.1:{port}/v1 "
                                    "(OpenAI and Anthropic APIs; chat page at http://127.0.0.1:" + str(port) + "/)",
                         "server": {**info, "pid": p.pid}}
             if time.time() >= end:
-                return {"summary": f"Strata is loading {desc['model']} (this takes 1-3 minutes; the PC may be slow "
+                return {"summary": f"PolyStrata is loading {desc['model']} (this takes 1-3 minutes; the PC may be slow "
                                    "meanwhile). Check with strata_status in a minute.",
                         "loading": {"pid": p.pid, "port": port,
                                     "last_log_line": (read_tail(log_path, 1) or [None])[-1]}}
@@ -1407,12 +1407,12 @@ class Tools:
                 key = s.api_key_for(port)
                 st, body = http_json(f"http://127.0.0.1:{port}/status", api_key=key, timeout=3)
                 if st == 200 and isinstance(body, dict) and body.get("busy") and not force:
-                    raise ToolError("a request is running on Strata right now; wait for it, or call strata_stop "
+                    raise ToolError("a request is running on PolyStrata right now; wait for it, or call strata_stop "
                                     "with force=true to stop anyway")
                 st, body = http_json(f"http://127.0.0.1:{port}/unload", "POST", api_key=key, timeout=120)
                 unloaded = (body or {}).get("status") if isinstance(body, dict) else None
                 if st == 409 and not force:
-                    raise ToolError("Strata is busy (a request is running or queued); call again with force=true "
+                    raise ToolError("PolyStrata is busy (a request is running or queued); call again with force=true "
                                     "to stop anyway")
                 proc_terminate(tracked["pid"], tracked["ident"])   # POSIX: SIGTERM = the server's own Ctrl+C path
                 clean = wait_gone(tracked["pid"], tracked["ident"], 30)
@@ -1424,7 +1424,7 @@ class Tools:
                 if gone:
                     end_group_leftovers(tracked["pid"])
                     s.save_state("server", None)
-                return {"summary": "Strata stopped" + ("" if gone else " - but its process still runs; see strata_logs")
+                return {"summary": "PolyStrata stopped" + ("" if gone else " - but its process still runs; see strata_logs")
                                    + (" (the engine unloaded itself first)" if unloaded == "unloaded" else ""),
                         "model": tracked.get("model"), "port": port, "engine_unloaded": unloaded,
                         "ended_cleanly": clean}
@@ -1435,16 +1435,16 @@ class Tools:
                     st, body = http_json(f"http://127.0.0.1:{p}/unload", "POST", api_key=key, timeout=120)
                     r = body.get("status") if isinstance(body, dict) else None
                     if st == 409:
-                        raise ToolError("Strata is busy (a request is running); try again when it is done")
+                        raise ToolError("PolyStrata is busy (a request is running); try again when it is done")
                     if st == 401:
-                        raise ToolError("Strata (started outside this MCP server) wants an API key this folder's "
+                        raise ToolError("PolyStrata (started outside this MCP server) wants an API key this folder's "
                                         "configs do not have; close its window to stop it")
-                    return {"summary": f"Strata on port {p} was started outside this MCP server (its own window or a "
+                    return {"summary": f"PolyStrata on port {p} was started outside this MCP server (its own window or a "
                                        f"service), so only its model was unloaded ({r}): its VRAM and RAM are free, "
                                        "but the server still listens and loads the model again on the next request. "
                                        "Close its window to end it completely.",
                             "port": p, "engine_unloaded": r}
-            return {"summary": "Strata is not running"}
+            return {"summary": "PolyStrata is not running"}
 
     # ---- strata_logs
     def strata_logs(self, source=None, model=None, lines=80) -> dict:
@@ -1463,7 +1463,7 @@ class Tools:
                 raise ToolError(f"{cfg.name} names no engine log")
             path = Path(raw)
             if not s.allowed(path):
-                raise ToolError(f"{cfg.name}'s log {raw} is outside the Strata folder and its data folder: not shown")
+                raise ToolError(f"{cfg.name}'s log {raw} is outside the PolyStrata folder and its data folder: not shown")
         if not path.exists():
             return {"summary": f"no {source} log yet ({path})", "log": str(path), "lines": []}
         tail = read_tail(path, lines)
@@ -1479,12 +1479,12 @@ class Tools:
                 target = info
                 break
         if target is None:
-            raise ToolError("Strata is not running: start it first (strata_start)")
+            raise ToolError("PolyStrata is not running: start it first (strata_start)")
         p = target["port"]
         key = s.api_key_for(p)
         st, stat = http_json(f"http://127.0.0.1:{p}/status", api_key=key, timeout=3)
         if st == 200 and isinstance(stat, dict) and (stat.get("busy") or stat.get("queued")):
-            raise ToolError("Strata is busy with a request; run the speed test when it is idle")
+            raise ToolError("PolyStrata is busy with a request; run the speed test when it is idle")
         body = {"model": target.get("model") or "strata", "max_tokens": max_tokens, "temperature": 0,
                 "reasoning_effort": "none", "stream": False,
                 "messages": [{"role": "user", "content": BENCH_PROMPT}]}
@@ -1530,19 +1530,19 @@ class Tools:
         key = "<your api_key from strata-<model>.json>" if key_needed else "none"
         base = f"http://127.0.0.1:{port}"
         return {
-            "summary": (f"Strata {'runs' if target else 'will run'} at {base}: OpenAI base URL {base}/v1, Anthropic "
+            "summary": (f"PolyStrata {'runs' if target else 'will run'} at {base}: OpenAI base URL {base}/v1, Anthropic "
                         f"base URL {base}" + (" (an API key is required)" if key_needed else " (any API key works)")),
             "running": bool(target), "openai_base_url": f"{base}/v1", "anthropic_base_url": base,
             "anthropic_messages_endpoint": f"{base}/v1/messages", "chat_page": base + "/", "model": model,
-            "api_key": ("required: the \"api_key\" value in the Strata folder's strata-<model>.json"
+            "api_key": ("required: the \"api_key\" value in the PolyStrata folder's strata-<model>.json"
                         if key_needed else "not required (send any value)"),
             "examples": {
                 "claude_code": {"env": {"ANTHROPIC_BASE_URL": base, "ANTHROPIC_AUTH_TOKEN": key,
                                         "ANTHROPIC_MODEL": "claude-sonnet-4-5"},
-                                "note": "Claude Code needs a Claude model name it knows; Strata ignores the name"},
+                                "note": "Claude Code needs a Claude model name it knows; PolyStrata ignores the name"},
                 "codex_cli": {"file": "~/.codex/config.toml",
                               "toml": f'model = "{model}"\nmodel_provider = "strata"\n\n[model_providers.strata]\n'
-                                      f'name = "Strata"\nbase_url = "{base}/v1"\nwire_api = "chat"'},
+                                      f'name = "PolyStrata"\nbase_url = "{base}/v1"\nwire_api = "chat"'},
                 "openai_python": (f'from openai import OpenAI\nclient = OpenAI(base_url="{base}/v1", api_key="{key}")\n'
                                   f'r = client.chat.completions.create(model="{model}", messages=[{{"role": "user", '
                                   f'"content": "Hello!"}}])\nprint(r.choices[0].message.content)'),
@@ -1559,7 +1559,7 @@ class Tools:
 
 
 # ------------------------------------------------------------------------------------------------ MCP over stdio
-INSTRUCTIONS = ("Strata runs a large AI model (Qwen3.8-Flash-Next, a mixture of experts) locally on this PC's GPU and "
+INSTRUCTIONS = ("PolyStrata runs a large AI model (Qwen3.8-Flash-Next, a mixture of experts) locally on this PC's GPU and "
                 "RAM, with an OpenAI- and Anthropic-compatible server on http://127.0.0.1:8080. Call strata_status "
                 "first. To install: strata_install (it returns a plan; get the user's OK for the 58-111 GB download, "
                 "then call it with confirm=true; it runs in the background - call it again for progress). Then "
@@ -1604,7 +1604,7 @@ class McpServer:
             self.protocol = asked if asked in PROTOCOLS else PROTOCOL
             return self.result(rid, {"protocolVersion": self.protocol,
                                      "capabilities": {"tools": {"listChanged": False}},
-                                     "serverInfo": {"name": "strata", "title": "Strata", "version": VERSION},
+                                     "serverInfo": {"name": "strata", "title": "PolyStrata", "version": VERSION},
                                      "instructions": INSTRUCTIONS})
         if method == "ping":
             return self.result(rid, {})
@@ -1696,7 +1696,7 @@ def install_job(spec_path: str) -> int:
                 print("strata-mcp: .venv has no pip (an earlier run stopped half-way): making it again", flush=True)
                 shutil.rmtree(venv, ignore_errors=True)
             if not py.exists():
-                print(f"strata-mcp: creating Strata's Python environment in {venv} ...", flush=True)
+                print(f"strata-mcp: creating PolyStrata's Python environment in {venv} ...", flush=True)
                 r = subprocess.run([spec["base_python"], "-m", "venv", str(venv)])
                 if r.returncode or not py.exists():
                     print("\n  [X]  could not create the Python environment (.venv)", flush=True)
@@ -1719,9 +1719,9 @@ def install_job(spec_path: str) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Strata's MCP server (stdio): install, start, check and stop Strata "
+    ap = argparse.ArgumentParser(description="PolyStrata's MCP server (stdio): install, start, check and stop PolyStrata "
                                              "from an AI assistant. See docs/MCP_SERVER.md.")
-    ap.add_argument("--root", help="the Strata folder (default: the one this file is in)")
+    ap.add_argument("--root", help="the PolyStrata folder (default: the one this file is in)")
     ap.add_argument("--install-job", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     if a.install_job:
@@ -1731,12 +1731,12 @@ def main(argv=None) -> int:
         return 2
     root = Path(a.root).expanduser().resolve() if a.root else DEFAULT_ROOT
     if not (root / "setup.py").is_file() or not (root / "serve" / "server.py").is_file():
-        log(f"{root} is not a Strata folder (no setup.py / serve/server.py)")
+        log(f"{root} is not a PolyStrata folder (no setup.py / serve/server.py)")
         return 2
     out = sys.stdout.buffer
     sys.stdout = sys.stderr                             # stray prints must never corrupt the protocol stream
     server = McpServer(Strata(root), out)
-    log(f"ready (Strata folder {root})")
+    log(f"ready (PolyStrata folder {root})")
     try:
         server.serve(sys.stdin.buffer)
     except KeyboardInterrupt:

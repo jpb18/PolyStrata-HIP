@@ -1,6 +1,6 @@
 # Which model? Sizes, versions and what fits
 
-Strata runs one model, [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), in several **sizes**
+PolyStrata runs one model, [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), in several **sizes**
 (the same model, compressed more or less) and several **versions** (the original, a coding version, a fine-tune).
 The installer recommends one for your PC; this page explains the choice. Back to the [README](../README.md).
 
@@ -51,7 +51,7 @@ A card with more VRAM is faster, because more of the model fits on the GPU: an R
 RX 9060 XT, RX 6900 XT) are in [AMD_HIP.md](AMD_HIP.md#rdna4-gfx1201).
 
 Every PC is different: `START-HERE.bat --calibrate` measures a few engine settings on yours and keeps the fastest
-(about 5-10 minutes; on the PC above it made the Coder 7% faster; NVIDIA cards for now). Measured Strata on your own
+(about 5-10 minutes; on the PC above it made the Coder 7% faster; NVIDIA cards for now). Measured PolyStrata on your own
 PC? See [Community benchmark results](COMMUNITY_BENCHMARKS.md) for a report template and how to share your results
 in a pull request.
 
@@ -121,7 +121,7 @@ START-HERE.bat --setup --family swift --model IQ2_XS
 
 **Unsloth's UD-IQ4_XS** (~4-bit) is the fourth version in setup's menu (`--family unsloth`, its first size), a
 regular choice from 0.1.39: a 94 GB download with 59.5 GB of experts (IQ3_S and IQ4_NL), between IQ3_S and UD-Q4_K_XL
-in quality. Strata keeps your RAM minus 24 GB of the experts in RAM and reads the rest from the SSD while it answers:
+in quality. PolyStrata keeps your RAM minus 24 GB of the experts in RAM and reads the rest from the SSD while it answers:
 on a 64 GB PC part of them come from the SSD (slower; an NVMe SSD helps), from ~80 GB of RAM all of them stay in RAM.
 It needs 48 GB of RAM or more and engine 0.1.38 or newer; images are an option, as with the other models.
 Details: [UD-IQ4_XS](UNSLOTH_Q4.md#ud-iq4_xs-setup-from-0139-621).
@@ -133,7 +133,7 @@ START-HERE.bat --setup --family unsloth --model UD-IQ4_XS
 ### Unsloth UD-Q4_K_XL (experimental)
 
 **Unsloth's 4-bit UD-Q4_K_XL** (experimental) is the second size of the same family (`--family unsloth`): the closest
-to the full model, but a 111 GB download whose 77 GB of experts do not fit in RAM. Strata keeps your RAM minus 24 GB
+to the full model, but a 111 GB download whose 77 GB of experts do not fit in RAM. PolyStrata keeps your RAM minus 24 GB
 of them in RAM and reads the rest from the SSD while it answers: 7-8.5 tokens/s on a 64 GB PC with a 12 GB GPU, several
 times slower than the sizes above, and long prompts are slow. It needs 48 GB of RAM or more, an NVMe SSD and one
 NVIDIA GPU (no images yet). Details and measurements: [UD-Q4_K_XL](UNSLOTH_Q4.md).
