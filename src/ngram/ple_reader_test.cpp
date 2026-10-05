@@ -75,6 +75,30 @@ bool check_rows(ng::PleReader& rd, const std::vector<uint32_t>& rows, uint32_t n
     return true;
 }
 
+/// THE BF16 TABLE, and the claim it rests on.  A bfloat16 is literally the top half of a float32, so widening
+/// one is a shift: exact for every value, normal or not, with no rounding to hide behind.  These patterns are
+/// the ones a lossy path would break on - the subnormals and the NaN/inf encodings a saturating cast to FP8
+/// would collapse - so a table that came back through the FP8 route would not reproduce all of them.
+void bf16_widening_is_exact() {
+    const uint16_t bits[] = {0x0000, 0x8000, 0x3f80, 0xbf80, 0x7f7f, 0xff7f,  // 0, -0, 1, -1, max, -max
+                             0x0001, 0x8001, 0x007f, 0x7f80, 0xff80,          // smallest subnormals, +-inf
+                             0x7fc0, 0x7f81, 0x4049, 0xc249, 0x3c75};        // NaN, signalling NaN, 3.14, -3.14
+    for (uint16_t b : bits) {
+        uint8_t row[2 * k::PLE_HEAD_DIM];
+        std::memset(row, 0, sizeof row);
+        row[0] = (uint8_t) b;                       // little-endian: the low byte first
+        row[1] = (uint8_t) (b >> 8);
+        float out[k::PLE_HEAD_DIM];
+        k::bf16_dequant_row(row, out);
+        uint32_t want = (uint32_t) b << 16, got;
+        std::memcpy(&got, &out[0], sizeof got);
+        CHECK(got == want, "bf16 0x%04x widened to 0x%08x, not 0x%08x", b, got, want);
+        bool tail_zero = true;                      // one element under test must not have shifted the rest
+        for (int j = 1; j < k::PLE_HEAD_DIM; ++j) tail_zero = tail_zero && out[j] == 0.0f;
+        CHECK(tail_zero, "bf16 0x%04x: the rest of the row is not zero", b);
+    }
+}
+
 /// EVERY FORMAT OF THE TABLE, END TO END (table-driven: one entry in `k::ple_formats()` is one run here). A minimal
 /// PLE-only GGUF holds `rows` rows of that format's row size, each filled with bytes that encode the row, and both I/O
 /// modes must return exactly what the format's own dequantizer makes of those bytes - so the row width, the offset
@@ -198,6 +222,7 @@ void bad_sizes_are_refused(const std::string& dir) {
 }
 
 void all_formats_round_trip(const std::string& dir) {
+    bf16_widening_is_exact();                      // BF16's own claim: a shift, exact for every pattern
     bad_sizes_are_refused(dir);
     CHECK(k::ple_format_count() > 0, "no formats");
     for (int i = 0; i < k::ple_format_count(); ++i) {

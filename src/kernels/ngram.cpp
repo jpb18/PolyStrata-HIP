@@ -138,6 +138,19 @@ void fp8_e4m3_dequant_row(const uint8_t* row, float scale, float* out160) {
     for (int j = 0; j < PLE_HEAD_DIM; ++j) out160[j] = kFp8.v[row[j]] * scale;
 }
 
+void bf16_dequant_row(const uint8_t* row, float* out160) {
+    // bfloat16 IS the top 16 bits of a float32, so widening is exact for every value, normal or not - no rounding,
+    // no clamp, no scale. Bytes are assembled little-endian explicitly rather than reinterpreted, so this is the
+    // same on a big-endian host.
+    for (int j = 0; j < PLE_HEAD_DIM; ++j) {
+        const uint32_t bits = (uint32_t) row[2 * j] | ((uint32_t) row[2 * j + 1] << 8);
+        const uint32_t wide = bits << 16;
+        float v;
+        std::memcpy(&v, &wide, sizeof v);
+        out160[j] = v;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // THE FORMAT TABLE (see PleFormatInfo). One entry per table type; the block formats decode 5 blocks of 32.
 namespace {
@@ -147,6 +160,7 @@ void dequant_blocks(const uint8_t* row, float /*scale*/, float* out160) {
 }
 void dequant_iq4_nl(const uint8_t* row, float, float* out160) { iq4nl_dequant_row(row, out160); }
 void dequant_fp8(const uint8_t* row, float scale, float* out160) { fp8_e4m3_dequant_row(row, scale, out160); }
+void dequant_bf16(const uint8_t* row, float, float* out160) { bf16_dequant_row(row, out160); }
 
 const PleFormatInfo kPleFormats[] = {
     {PleFormat::IQ4_NL, "IQ4_NL", "IQ4_NL", PLE_ROW_BYTES, false, dequant_iq4_nl},
@@ -157,6 +171,9 @@ const PleFormatInfo kPleFormats[] = {
     {PleFormat::Q8_0, "Q8_0", "Q8_0", PLE_ROW_BYTES_Q8_0, false, dequant_blocks<strata::dequantize_q8_0, 34>},
     // Q4_0 (plain llama-quantize Q4_0 files, #599): 90-byte rows like IQ4_NL (18-byte blocks), a linear 4-bit grid
     {PleFormat::Q4_0, "Q4_0", "Q4_0", PLE_ROW_BYTES, false, dequant_blocks<strata::dequantize_q4_0, 18>},
+    // BF16 (#586): the checkpoint's own table at full precision, 320-byte rows; self-describing, so no scale and no
+    // metadata to trust (tools/ple_fp8_pack.py writes the FP8 form of the same table)
+    {PleFormat::BF16, "BF16", "BF16", PLE_ROW_BYTES_BF16, false, dequant_bf16},
 };
 constexpr int kPleFormatCount = (int) (sizeof kPleFormats / sizeof kPleFormats[0]);
 }  // namespace
