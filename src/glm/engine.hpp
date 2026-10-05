@@ -59,6 +59,7 @@ struct Layer {
     uint32_t gu_type = 0, d_type = 0;
     size_t gu_bytes = 0, d_bytes = 0;  ///< one expert's gate (or up), and its down
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
+    std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
 };
 
 /// A routed expert is run from the VRAM cache, on the CPU, or (in a prompt batch) from the staging buffer.
@@ -115,12 +116,14 @@ private:
     void alloc_state();
     void assign_scratch();
     void fill_expert_cache();
+    void plan_staging();
     void kda(Layer& L, int n);
     void dsa(Layer& L, int n);
     void dsa_select(Layer& L, int first, int n);
     void dense_ffn(Layer& L, int il, int n);
     void moe(Layer& L, int il, int n);
     void moe_rows(Layer& L, int il, int n);
+    void stage(const Layer& L, const int32_t* experts, int m, void* stream);
     void route(const Layer& L, const float* logits, int* ids, float* w);
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
@@ -131,7 +134,7 @@ private:
     Options opt_;
     std::unique_ptr<GgufFile> gg_;
     std::unique_ptr<Workers> workers_;
-    void* st_ = nullptr;   ///< the one CUDA stream
+    void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     void* ev_ = nullptr;   ///< marks the router's copy to the host
     std::vector<void*> dev_allocs_, host_allocs_;
 
@@ -191,9 +194,13 @@ private:
     uint8_t* stage_ = nullptr;                    ///< experts that are not cached, on their way through VRAM
     uint8_t* h_stage_[2] = {};                    ///< pinned; filled in turn
     void* ev_stage_[2] = {};                      ///< marks the upload out of each
-    size_t stage_bytes_ = 0;
+    void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
+    void* ev_ahead_ = nullptr;                    ///< marks the last of them
+    void* ev_free_ = nullptr;                     ///< marks a layer's last read of the staging buffer
+    size_t stage_bytes_ = 0, chunk_bytes_ = 0;
     int stage_turn_ = 0;
-    std::vector<int32_t> ids_, count_, first_, group_;
+    std::vector<int32_t> ids_, count_, first_, group_, round_;
+    std::vector<uint8_t> sent_;
 
     int64_t pos_ = 0, ck_pos_ = -1;
     std::vector<float> probs_, pick_;

@@ -32,7 +32,12 @@ constexpr int kRows = 512;          // prompt tokens one eval() takes; the scrat
 // From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
 constexpr int kStageRows = 32;
-constexpr size_t kStageBytes = size_t(512) << 20;
+// From this many tokens, a call routes to most of a layer's experts, and the ones that are not cached start their
+// copy before the layer has routed.  The staging buffer holds about what a layer of Q2_K experts leaves out of
+// the cache; the VRAM it takes is cache that decoding does without.
+constexpr int kAheadRows = 256;
+constexpr size_t kStageBytes = size_t(2) << 30;
+constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 
 using Clock = std::chrono::steady_clock;
@@ -136,14 +141,15 @@ void read_profile(const std::string& path, int n_layer, int n_expert, std::vecto
 Engine::Engine() = default;
 
 Engine::~Engine() {
+    if (up_) cudaStreamSynchronize(cs(up_));
     if (st_) cudaStreamSynchronize(cs(st_));
     workers_.reset();
     mmq_.reset();
     for (void* p : dev_allocs_) cudaFree(p);
     for (void* p : host_allocs_) cudaFreeHost(p);
-    for (void* e : ev_stage_)
+    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_})
         if (e) cudaEventDestroy((cudaEvent_t) e);
-    if (ev_) cudaEventDestroy((cudaEvent_t) ev_);
+    if (up_) cudaStreamDestroy(cs(up_));
     if (st_) cudaStreamDestroy(cs(st_));
 }
 
@@ -477,13 +483,17 @@ void Engine::alloc_state() {
         ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
 
         stage_bytes_ = std::max(kStageBytes, one_expert);
+        chunk_bytes_ = std::max(kChunkBytes, one_expert);
         stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256, "the expert staging buffer");
-        for (int b = 0; b < 2; ++b) {
-            h_stage_[b] = (uint8_t*) hmalloc(stage_bytes_ + 256, "pinned memory");
+        for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
+        for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
             cudaEvent_t ev = nullptr;
             ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
-            ev_stage_[b] = ev;
+            *e = ev;
         }
+        cudaStream_t up = nullptr;
+        ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
+        up_ = up;
         ids_.resize(rr);
         first_.resize((size_t) n_expert_);
     }
@@ -542,6 +552,23 @@ void Engine::fill_expert_cache() {
     }
 }
 
+// What a layer copies to the staging buffer ahead of its routing: the experts the cache left out, the most used
+// first, as many as the buffer holds.
+void Engine::plan_staging() {
+    if (!mmq_) return;
+    for (int il = 0; il < n_layer_; ++il) {
+        Layer& L = layers_[(size_t) il];
+        if (!L.moe) continue;
+        for (int e = 0; e < n_expert_; ++e)
+            if (!L.slot[(size_t) e]) L.ahead.push_back(e);
+        if (!prior_.empty()) {
+            const int64_t* used = prior_.data() + (size_t) il * n_expert_;
+            std::stable_sort(L.ahead.begin(), L.ahead.end(), [used](int32_t a, int32_t b) { return used[a] > used[b]; });
+        }
+        L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (2 * L.gu_bytes + L.d_bytes)));
+    }
+}
+
 void Engine::load(const Options& o) {
     opt_ = o;
     if (opt_.max_context < 16) throw std::runtime_error("the context must be at least 16 tokens");
@@ -576,7 +603,8 @@ void Engine::load(const Options& o) {
     alloc_state();
     if (!opt_.profile.empty()) read_profile(opt_.profile, n_layer_, n_expert_, prior_);
     fill_expert_cache();
-    workers_ = std::make_unique<Workers>(opt_.threads > 0 ? opt_.threads : usable_cpus());
+    plan_staging();
+    workers_ =std::make_unique<Workers>(opt_.threads > 0 ? opt_.threads : usable_cpus());
     reset();
 }
 
@@ -835,9 +863,36 @@ void Engine::moe(Layer& L, int il, int n) {
     axpy(cpu_, 1.f, fo_, n * n_embd_, true, st_);
 }
 
+// m experts from the mapped file into the staging buffer: gate and up of each back to back from the start, the
+// downs after them.  The two pinned buffers take turns, so the workers fill one while the other uploads.
+void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream) {
+    const size_t gu2 = 2 * L.gu_bytes, down_at = pad((size_t) m * gu2);
+    const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
+    for (int j0 = 0; j0 < m; j0 += per) {
+        const size_t c = (size_t) std::min(per, m - j0);
+        stage_turn_ ^= 1;
+        uint8_t* h = h_stage_[stage_turn_];
+        const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
+        ck(cudaEventSynchronize(left), "expert staging");
+        workers_->run((int) (3 * c), [&](int i) {
+            const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
+            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_bytes, L.gu_bytes);
+            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_bytes, L.gu_bytes);
+            else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
+        });
+        ck(cudaMemcpyAsync(stage_ + (size_t) j0 * gu2, h, c * gu2, cudaMemcpyHostToDevice, cs(stream)),
+           "expert staging");
+        ck(cudaMemcpyAsync(stage_ + down_at + (size_t) j0 * L.d_bytes, h + c * gu2, c * L.d_bytes,
+                           cudaMemcpyHostToDevice, cs(stream)),
+           "expert staging");
+        ck(cudaEventRecord(left, cs(stream)), "expert staging");
+    }
+}
+
 // A MoE layer for a prompt batch: every token's experts on the GPU, by llama.cpp's MMQ.  A row is a token and one
 // of the experts it routes to.  The rows are sorted by expert, the experts of the VRAM cache first; the other
-// experts pass through the staging buffer, as many at a time as it holds.
+// experts pass through the staging buffer, as many at a time as it holds.  A full batch starts the copy of
+// L.ahead before it knows the routing, on a stream of its own, so the upload runs under the layer's attention.
 void Engine::moe_rows(Layer& L, int il, int n) {
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
@@ -850,6 +905,14 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     lin(L.sh_up, xn_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_exp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
+
+    const int n_ahead = n >= kAheadRows ? (int) L.ahead.size() : 0;
+    if (n_ahead > 0) {
+        // the buffer is free once the layer before has read it
+        ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
+        stage(L, L.ahead.data(), n_ahead, up_);
+        ck(cudaEventRecord((cudaEvent_t) ev_ahead_, cs(up_)), "expert staging");
+    }
 
     const Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
@@ -878,12 +941,16 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ++use_[(size_t) il * n_expert_ + (size_t) ids[k]];
         }
     }
+    // the cached experts that have rows, the experts already on their way, then the others that have rows
     group_.clear();
     for (int e = 0; e < n_expert_; ++e)
         if (count_[(size_t) e] > 0 && L.slot[(size_t) e]) group_.push_back(e);
     const int n_cached = (int) group_.size();
+    group_.insert(group_.end(), L.ahead.begin(), L.ahead.begin() + n_ahead);
+    sent_.assign((size_t) n_expert_, 0);
+    for (int j = 0; j < n_ahead; ++j) sent_[(size_t) L.ahead[(size_t) j]] = 1;
     for (int e = 0; e < n_expert_; ++e)
-        if (count_[(size_t) e] > 0 && !L.slot[(size_t) e]) group_.push_back(e);
+        if (count_[(size_t) e] > 0 && !L.slot[(size_t) e] && !sent_[(size_t) e]) group_.push_back(e);
     const int n_group = (int) group_.size();
     auto rows_of = [&](int g) { return count_[(size_t) group_[(size_t) g]]; };
 
@@ -900,9 +967,15 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         place[row] = i;
     }
     const size_t gu2 = 2 * L.gu_bytes;
+    // a round is what the staging buffer holds at a time; round_ has the first group of each, and the end
     const int per_round = (int) (stage_bytes_ / (gu2 + L.d_bytes));
-    for (int g0 = n_cached, r = 0; g0 < n_group; g0 += per_round, ++r)
-        for (int g = g0; g <= std::min(g0 + per_round, n_group); ++g) rel[g - n_cached + r] = bounds[g] - bounds[g0];
+    round_.assign(1, n_cached);
+    if (n_ahead > 0) round_.push_back(n_cached + n_ahead);
+    while (round_.back() < n_group) round_.push_back(std::min(round_.back() + per_round, n_group));
+    const int n_round = (int) round_.size() - 1;
+    for (int r = 0; r < n_round; ++r)
+        for (int g = round_[(size_t) r]; g <= round_[(size_t) r + 1]; ++g)
+            rel[g - n_cached + r] = bounds[g] - bounds[round_[(size_t) r]];
     ck(cudaMemcpyAsync(tab_, h_tab_, (3 * cap + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t),
                        cudaMemcpyHostToDevice, cs(st_)),
        "expert rows");
@@ -927,25 +1000,14 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         mmq_->mul(L.slot[(size_t) group_[(size_t) g]] + gu2, dt, n_embd_, ff, L.d_bytes, 1, mq2_, d_bounds + g,
                   d_place, rc, rows_of(g), dx_, n_embd_, st_);
 
-    for (int g0 = n_cached, r = 0; g0 < n_group; g0 += per_round, ++r) {
-        const int m = std::min(per_round, n_group - g0);
+    for (int r = 0; r < n_round; ++r) {
+        const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
         const size_t down_at = pad((size_t) m * gu2);
-        // The two pinned buffers take turns, so the workers fill one while the other's upload and products run.
-        stage_turn_ ^= 1;
-        uint8_t* h = h_stage_[stage_turn_];
-        const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
-        ck(cudaEventSynchronize(left), "expert staging");
-        workers_->run(3 * m, [&](int i) {
-            const size_t j = (size_t) i / 3, e = (size_t) group_[(size_t) g0 + j];
-            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_bytes, L.gu_bytes);
-            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_bytes, L.gu_bytes);
-            else std::memcpy(h + down_at + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
-        });
-        ck(cudaMemcpyAsync(stage_, h, down_at + (size_t) m * L.d_bytes, cudaMemcpyHostToDevice, cs(st_)),
-           "expert staging");
-        ck(cudaEventRecord(left, cs(st_)), "expert staging");
+        if (r == 0 && n_ahead > 0) ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_ahead_, 0), "expert staging");
+        else stage(L, group_.data() + g0, m, st_);
 
         const int r0 = bounds[g0], rows = bounds[g0 + m] - r0;
+        if (rows == 0) continue;   // nothing routed to the experts that went ahead
         int most = 0;
         for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
         mmq_->mul(stage_, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rr, most, gu_, ff2, st_);
@@ -954,6 +1016,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         mmq_->mul(stage_ + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r), d_place + r0,
                   rows, most, dx_, n_embd_, st_);
     }
+    ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
     moe_sum(dx_, d_w, fo_, n_embd_, n_used_, n, st_);
 }
 
