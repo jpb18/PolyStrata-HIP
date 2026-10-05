@@ -89,6 +89,13 @@ class Context(unittest.TestCase):
         self.assertEqual(setup.ram_ctx("IQ3_XXS", 95.8), 524288)      # 43 + 7.2 + 24 GB fits 96
         self.assertEqual(setup.ram_ctx("IQ3_S", 76.5), 131072)
         self.assertEqual(setup.ram_ctx("IQ3_S", 78.5), 262144)
+        # #608: where the 200K estimate fits and the 256K one does not, the rule stays at 128K (200K is a menu step)
+        self.assertLessEqual(setup.ctx_ram_need("IQ3_S", 204800), 78.5)
+        self.assertGreater(setup.ctx_ram_need("IQ3_S", 262144), 77.5)
+        self.assertEqual(setup.ram_ctx("IQ3_S", 77.5), 131072)
+        for ram in range(16, 200):
+            for model in ("IQ3_S", "IQ3_XXS", "Q2_0"):
+                self.assertNotEqual(setup.ram_ctx(model, float(ram)), 204800)
         self.assertEqual(setup.ram_ctx("Q2_0", 31.9), 524288)          # other sizes: no RAM rule
         self.assertEqual(setup.ram_ctx("IQ3_XXS", 31.9, low_ram=True), 524288)   # the KV cache is in VRAM there
         self.assertIsNone(setup.ctx_ram_need("IQ3_XXS", 262144, low_ram=True))

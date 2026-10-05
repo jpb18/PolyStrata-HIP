@@ -2677,8 +2677,10 @@ def ctx_ram_need(model, ctx, low_ram=False):
 
 def ram_ctx(model, ram, low_ram=False) -> int:
     """#406: the longest context the RAM rule recommends: 128K, or longer where the estimate fits this PC's RAM.  It
-    is part of the recommended default (the smaller of it and the GPU's rule); a longer choice is kept, with a note."""
-    return max(c for c in CONTEXTS if c <= 131072 or (ctx_ram_need(model, c, low_ram) or 0) <= ram)
+    is part of the recommended default (the smaller of it and the GPU's rule); a longer choice is kept, with a note.
+    The 200K menu step is never the recommendation (#608)."""
+    # 204800 (#608) is a menu step between 128K and 256K, never the recommendation: where 256K does not fit, 128K stays
+    return max(c for c in CONTEXTS if c <= 131072 or (c != 204800 and (ctx_ram_need(model, c, low_ram) or 0) <= ram))
 
 
 def settings_path() -> Path:
