@@ -191,16 +191,19 @@ struct Session {
     Sampler sampler;
     std::mt19937_64 rng{std::random_device{}()};
     long long asked = 0, reused = 0;   // prompt tokens of every request, and those of them not read again
-    // Guesses at the tokens to come, checked a window at a time (Engine::window).  When the last tokens repeat an
-    // earlier stretch of the conversation, what followed there is the guess; the policy learns from the windows
-    // so far, their hits and their time, whether one pays.  Both are the other engine's (strata/spec).
+    // Guesses at the tokens to come, checked a window at a time (Engine::window).  They come from the block some
+    // files carry for it (Engine::draft), and from the conversation: when the last tokens repeat an earlier stretch
+    // of it, what followed there is the guess.  The policy learns from the windows so far, their hits and their
+    // time, which of the two pays.  It and the repeats are the other engine's (strata/spec).
     int most;                             // the tokens of a window at most; 1: no guesses
+    bool look;                            // guess from repeats
     strata::spec::SuffixDrafter repeats;
     strata::spec::DraftPolicy policy;
 
     Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
         : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
-          most(lookup > 0 ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
+          most(lookup > 0 || e.drafts() ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
+          look(lookup > 0 && most > 1),
           repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most) {}
 
     static CacheOptions with_floor(const CacheFlags& f) {
@@ -259,7 +262,7 @@ struct Session {
 
         t0 = Clock::now();
         std::vector<int32_t> history = kept.seq();
-        if (most > 1) {
+        if (look) {
             repeats.reset();
             repeats.append(history.data(), history.size());
         }
@@ -271,23 +274,45 @@ struct Session {
             on_token(t);
             ++r.produced;
             history.push_back(t);
-            if (most > 1) repeats.append(t);
+            if (look) repeats.append(t);
             if (is_eos(t)) r.finish = "stop";
             else if (stop.load()) r.finish = "cancel";
             else return r.produced < max_new;
             return false;
         };
         if (max_new > 0) {
-            int32_t w[strata::spec::DraftPolicy::kMaxT];
+            int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
             int32_t t = pick(engine.logits());   // picked, and not shown yet
             while (show(t)) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
                 const bool room = engine.pos() + most <= engine.max_context();
-                const int k = most > 1 && room ? repeats.propose(most - 1, w + 1) : 0;
+                const int k = look && room ? repeats.propose(most - 1, w + 1) : 0;
                 const int match = repeats.last_match();
-                const strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
-                if (!use.lookup) {
+                // A repeat that fills the window, from a match of a length that has been right nine times in ten,
+                // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
+                // block guesses, each guess from the one before.  A guess joins the window while the window is then
+                // expected to write more tokens a millisecond.  The chance that the guesses up to it are all right
+                // is the product of the block's own.  What one more token costs is what the windows so far have
+                // measured, held to 0.2 to 0.8 of a token alone: one slow window must not end the guessing.
+                const bool ask = engine.drafts() && room && !(k == most - 1 && policy.lookup_rate(match) >= 0.9);
+                strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
+                if (ask) {
+                    const double one = policy.cost_ms(1);
+                    double sure = 1.0, tokens = 1.0;
+                    int n_d = 0;
+                    for (int32_t from = t; n_d < most - 1; from = d[n_d++]) {
+                        float p = 0.f;
+                        d[n_d] = engine.draft(from, n_d, &p);
+                        sure *= p;
+                        const double more =
+                            std::clamp((policy.cost_ms(n_d + 2) - policy.cost_ms(n_d + 1)) / one, 0.2, 0.8);
+                        if (sure * policy.cost_ms(n_d + 1) <= tokens * more * one) break;
+                        tokens += sure;
+                    }
+                    use = policy.choose(1 + n_d, k, match);
+                }
+                if (use.t == 1) {
                     engine.eval(&t, 1, true);
                     kept.read(&t, 1);
                     t = pick(engine.logits());
@@ -295,6 +320,7 @@ struct Session {
                     continue;
                 }
                 w[0] = t;
+                if (!use.lookup) std::copy(d, d + use.t - 1, w + 1);
                 engine.window(w, use.t);
                 // logits_of(i) is what follows w[i].  A guess that is what was picked has been through the model
                 // already; the token an answer ends with is shown and never fed, as without guesses.
@@ -306,7 +332,7 @@ struct Session {
                 kept.read(w, right + 1);
                 r.guessed += use.t - 1;
                 r.guessed_right += right + (more ? 0 : 1);
-                policy.observe(true, use.t, right, match, ms_since(round));
+                policy.observe(use.lookup, use.t, right, match, ms_since(round));
                 if (!more) break;
             }
         }
@@ -489,6 +515,7 @@ void usage() {
                  "                         count when they turn out right (default 4, 1 = no guesses)\n"
                  "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
                  "                         (default 3, 0 = never)\n"
+                 "  --no-draft             do not run the block that guesses ahead, in a file that has one\n"
                  "  --no-graphs            launch a token's kernels one by one (default: a layer's are recorded once\n"
                  "                         as a CUDA graph and replayed)\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
@@ -545,6 +572,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-graphs") o.graphs = false;
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
+        else if (a == "--no-draft") o.draft = false;
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());

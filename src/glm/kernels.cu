@@ -73,10 +73,10 @@ void gemv(const W* w, const float* x, float* y, int n_in, int n_out, int rows_pe
 }
 
 __global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, float* y, int n,
-                                float eps) {
+                                float eps, int y_stride) {
     __shared__ float part[8];
     const float* xr = x + size_t(blockIdx.x) * n;
-    float* yr = y + size_t(blockIdx.x) * n;
+    float* yr = y + size_t(blockIdx.x) * y_stride;
     float ss = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) ss += xr[i] * xr[i];
     ss = block_sum(ss, part);
@@ -451,8 +451,8 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
     gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
 }
 
-void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream) {
-    rms_norm_kernel<<<rows, n >= 1024 ? 256 : 128, 0, cs(stream)>>>(x, w, y, n, eps);
+void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream, int y_stride) {
+    rms_norm_kernel<<<rows, n >= 1024 ? 256 : 128, 0, cs(stream)>>>(x, w, y, n, eps, y_stride ? y_stride : n);
 }
 
 void layer_norm(const float* x, const float* w, const float* b, float* y, int n, int rows, float eps, void* stream) {

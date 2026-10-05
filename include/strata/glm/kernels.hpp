@@ -21,8 +21,9 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
                void* stream);
 
 /// RMS norm over each of `rows` groups of n values: y = x / sqrt(mean(x^2) + eps) * w.  `w` (n values, shared by the
-/// rows) may be null.
-void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream);
+/// rows) may be null.  A row of y starts y_stride values after the one before it (0: n), so two calls can fill
+/// the two halves of rows twice as long.
+void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream, int y_stride = 0);
 /// y = (x - mean) / sqrt(var + eps) * w + b.
 void layer_norm(const float* x, const float* w, const float* b, float* y, int n, int rows, float eps, void* stream);
 

@@ -406,9 +406,12 @@ void Engine::load_geometry() {
     auto meta_i = [&](const char* key) { return (int) meta(key).u; };
     auto meta_f = [&](const char* key) { return (float) meta(key).f; };
 
-    // a file can carry the block that predicts a second token after the model's own; it is not run here
+    // A file can carry the block that guesses a second token after the model's own, as one more block after the
+    // model's.  One file has it with a token table or an output matrix of its own, which this engine does not run.
     const MetaValue* nextn = find("nextn_predict_layers");
     n_layer_ = meta_i("block_count") - (nextn ? (int) nextn->u : 0);
+    draft_ = opt_.draft && opt_.window > 1 && nextn && nextn->u == 1 && tensor(n_layer_, "nextn.eh_proj.weight") &&
+             !tensor(n_layer_, "nextn.embed_tokens.weight") && !tensor(n_layer_, "nextn.shared_head_head.weight");
     n_embd_ = meta_i("embedding_length");
     n_ff_dense_ = meta_i("feed_forward_length");
     n_head_ = meta_i("attention.head_count");
@@ -454,8 +457,9 @@ void Engine::load_geometry() {
     need(n_used_ >= 1 && n_used_ <= kMaxUsed && n_used_ <= n_expert_, "bad expert_used_count");
     need(kpool_ > 1 && idx_top_k_ > 0 && idx_top_k_ % kpool_ == 0, "indexer.top_k is not whole pools");
 
-    clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_layer_);
-    clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_layer_) : clamp_exp_;
+    const int n_all = n_layer_ + (draft_ ? 1 : 0);
+    clamp_exp_ = clamp_limits(find("swiglu_clamp_exp"), n_all);
+    clamp_shexp_ = find("swiglu_clamp_shexp") ? clamp_limits(find("swiglu_clamp_shexp"), n_all) : clamp_exp_;
 }
 
 // A tensor to VRAM.  It goes as the file has it when the kernels compute with that type.  Otherwise it is
@@ -517,12 +521,14 @@ void Engine::load_layer(int il) {
 
     L.attn_norm = f32("attn_norm.weight", n_embd_);
     L.ffn_norm = f32("ffn_norm.weight", n_embd_);
-    L.hc_attn_fn = f32("hc_attn_fn.weight", kHc * n_embd_, n_mix);
-    L.hc_attn_scale = f32("hc_attn_scale.weight", 3);
-    L.hc_attn_base = f32("hc_attn_base.weight", n_mix);
-    L.hc_ffn_fn = f32("hc_ffn_fn.weight", kHc * n_embd_, n_mix);
-    L.hc_ffn_scale = f32("hc_ffn_scale.weight", 3);
-    L.hc_ffn_base = f32("hc_ffn_base.weight", n_mix);
+    if (il < n_layer_) {   // the draft block has one residual stream and adds to it
+        L.hc_attn_fn = f32("hc_attn_fn.weight", kHc * n_embd_, n_mix);
+        L.hc_attn_scale = f32("hc_attn_scale.weight", 3);
+        L.hc_attn_base = f32("hc_attn_base.weight", n_mix);
+        L.hc_ffn_fn = f32("hc_ffn_fn.weight", kHc * n_embd_, n_mix);
+        L.hc_ffn_scale = f32("hc_ffn_scale.weight", 3);
+        L.hc_ffn_base = f32("hc_ffn_base.weight", n_mix);
+    }
 
     L.dsa = has("attn_q_a.weight");
     if (L.dsa) {
@@ -679,12 +685,20 @@ void Engine::assign_scratch() {
 }
 
 void Engine::alloc_state() {
+    // --dump-layers prints one token's stages
+    rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
     const size_t conv_n = size_t(3) * d_inner_ * (kConv - 1), s_n = size_t(n_head_) * kda_dim_ * kda_dim_;
-    state_n_ = size_t(n_kda_) * (conv_n + s_n);
-    state_ = (float*) dmalloc(state_n_ * sizeof(float), "the recurrent state");
+    kda_n_ = size_t(n_kda_) * (conv_n + s_n);
+    state_n_ = kda_n_ + (draft_ ? (size_t) n_embd_ : 0);
+    state_ = (float*) dmalloc((state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0)) * sizeof(float),
+                              "the recurrent state");
+    if (draft_) {
+        hn_ = state_ + kda_n_;
+        h_dlogits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
+    }
     // window(): the state after each of its tokens but the last, for keep(), and every token's logits
     if (opt_.window > 1)
-        snap_ = (float*) dmalloc(size_t(opt_.window - 1) * state_n_ * sizeof(float), "the recurrent state");
+        snap_ = (float*) dmalloc(size_t(opt_.window - 1) * kda_n_ * sizeof(float), "the recurrent state");
     wlogits_ = (float*) dmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "scratch");
     h_wlogits_ = (float*) hmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "pinned memory");
 
@@ -706,8 +720,6 @@ void Engine::alloc_state() {
         }
     }
 
-    // --dump-layers prints one token's stages
-    rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
     score_stride_ = opt_.max_context / kpool_ + 1;
     sel_stride_ = idx_top_k_ + kpool_;
     const size_t n = (size_t) rows_;
@@ -772,7 +784,7 @@ void Engine::alloc_state() {
 
     probs_.resize((size_t) n_expert_);
     pick_.resize((size_t) n_expert_);
-    use_.assign((size_t) n_layer_ * n_expert_, 0);
+    use_.assign(layers_.size() * n_expert_, 0);
 }
 
 // Experts go to VRAM by use per byte when a profile has counts, and otherwise the same number from every layer.
@@ -791,7 +803,7 @@ void Engine::fill_expert_cache() {
     std::vector<Cand> cands;
     std::vector<size_t> sizes;   // the slot sizes there are; a layer's place among them is its trade number
     size_t all = 0;
-    for (int il = 0; il < n_layer_; ++il) {
+    for (int il = 0; il < (int) layers_.size(); ++il) {
         Layer& L = layers_[(size_t) il];
         if (!L.moe || !kernels::native_mmvq_supported((int) L.gu_type) ||
             !kernels::native_mmvq_supported((int) L.d_type))
@@ -906,7 +918,7 @@ void Engine::follow(int written) {
     for (; n_free > 0; --n_free) {
         in_.assign((size_t) n_trade_, Pick{});
         out_.assign((size_t) n_trade_, Pick{});
-        for (int il = 0; il < n_layer_; ++il) {
+        for (int il = 0; il < (int) layers_.size(); ++il) {
             const Layer& L = layers_[(size_t) il];
             if (L.trade < 0) continue;
             Pick& in = in_[(size_t) L.trade];
@@ -987,13 +999,30 @@ void Engine::load(const Options& o) {
 
     // twice: the first pass adds up the arena, the second fills it
     for (int pass = 0; pass < 2; ++pass) {
-        layers_.assign((size_t) n_layer_, Layer{});
+        const int n_all = n_layer_ + (draft_ ? 1 : 0);
+        layers_.assign((size_t) n_all, Layer{});
         n_dsa_ = n_kda_ = n_moe_ = 0;
         gate_rank_ = 0;
         dense_at_ = 0;
-        for (int il = 0; il < n_layer_; ++il) load_layer(il);
+        for (int il = 0; il < n_all; ++il) load_layer(il);
         out_norm_ = upload(gg_->find("output_norm.weight"), "output_norm.weight", n_embd_, 1, kF32);
         output_ = upload(gg_->find("output.weight"), "output.weight", n_embd_, n_vocab_, kAnyMat);
+        if (draft_) {
+            const Layer& D = layers_[(size_t) n_layer_];
+            if (!D.dsa || !D.moe)
+                throw std::runtime_error("the block that guesses ahead is not one this engine runs; --no-draft loads "
+                                         "the model without it");
+            auto part = [&](const char* n, int64_t a, int64_t b, Want w) {
+                return upload(tensor(n_layer_, n), blk(n_layer_, n), a, b, w);
+            };
+            d_proj_ = part("nextn.eh_proj.weight", 2 * n_embd_, n_embd_, kAnyMat);
+            d_enorm_ = part("nextn.enorm.weight", n_embd_, 1, kF32);
+            d_hnorm_ = part("nextn.hnorm.weight", n_embd_, 1, kF32);
+            // without a norm of its own, the block's output goes through the model's
+            d_head_ = tensor(n_layer_, "nextn.shared_head_norm.weight")
+                          ? part("nextn.shared_head_norm.weight", n_embd_, 1, kF32)
+                          : out_norm_;
+        }
         if (pass == 0) {
             dense_bytes_ = dense_at_;
             dense_ = (uint8_t*) dmalloc(dense_bytes_ + 256, "the dense weights");
@@ -1001,7 +1030,7 @@ void Engine::load(const Options& o) {
     }
 
     alloc_state();
-    if (!opt_.profile.empty()) read_profile(opt_.profile, n_layer_, n_expert_, prior_);
+    if (!opt_.profile.empty()) read_profile(opt_.profile, (int) layers_.size(), n_expert_, prior_);
     fill_expert_cache();
     const int threads = opt_.threads > 0 ? opt_.threads : usable_cpus();
     if (opt_.stay_near) {   // before any thread that reads the experts is started
@@ -1050,6 +1079,7 @@ void Engine::save_profile() const {
 void Engine::reset() {
     ck(cudaMemsetAsync(state_, 0, state_n_ * sizeof(float), cs(st_)), "reset");
     pos_ = 0;
+    ahead_pos_ = -1;
 }
 
 size_t Engine::row_bytes() const {
@@ -1066,6 +1096,7 @@ void Engine::load_state(const uint8_t* src, int64_t pos) {
     ck(cudaStreamSynchronize(cs(st_)), "load state");
     ck(cudaMemcpy(state_, src, state_bytes(), cudaMemcpyHostToDevice), "load state");
     pos_ = pos;
+    ahead_pos_ = -1;
 }
 
 void Engine::save_rows(int64_t first, int64_t n, uint8_t* dst) {
@@ -1148,7 +1179,7 @@ void Engine::kda(Layer& L, int n) {
     lin(L.wk, xn_, proj_ + d, n, xq_);
     lin(L.wv, xn_, proj_ + 2 * d, n, xq_);
     kda_conv(proj_, L.conv, fp(L.conv_q), fp(L.conv_k), fp(L.conv_v), qkv_, d_inner_, n, st_,
-             n_snap_ > 0 ? snap_ + (L.conv - state_) : nullptr, state_n_, n_snap_);
+             n_snap_ > 0 ? snap_ + (L.conv - state_) : nullptr, kda_n_, n_snap_);
 
     lin(L.f_a, xn_, fa_, n, xq_);
     lin(L.f_b, fa_, g1_, n);
@@ -1157,15 +1188,15 @@ void Engine::kda(Layer& L, int n) {
     lin(L.g_a, xn_, ga_, n, xq_);
     lin(L.g_b, ga_, g2_, n);
     kda_step(qkv_, g1_, fp(L.a), beta_, L.s, g2_, fp(L.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
-             st_, n_snap_ > 0 ? snap_ + (L.s - state_) : nullptr, state_n_, n_snap_);
+             st_, n_snap_ > 0 ? snap_ + (L.s - state_) : nullptr, kda_n_, n_snap_);
     lin(L.wo, gated_, ao_, n);
 }
 
-// For the n tokens from row `first` of the call: the n_top pools with the highest indexer score, expanded to
-// their rows, then the tail that is in no pool yet.  The scores come to the host for the selection, which costs
-// a wait per layer; it only runs past top_k tokens.
-void Engine::dsa_select(Layer& L, int first, int n) {
-    const int64_t pos = pos_ + first;
+// For the n tokens from row `first` of a call whose first token is at `at`: the n_top pools with the highest
+// indexer score, expanded to their rows, then the tail that is in no pool yet.  The scores come to the host for
+// the selection, which costs a wait per layer; it only runs past top_k tokens.
+void Engine::dsa_select(Layer& L, int64_t at, int first, int n) {
+    const int64_t pos = at + first;
     const int n_top = idx_top_k_ / kpool_;
     lin(L.idx_q_b, qr_ + (size_t) first * q_rank_, iq_, n);
     lin(L.idx_proj, xn_ + (size_t) first * n_embd_, iw_, n,
@@ -1193,32 +1224,38 @@ void Engine::dsa_select(Layer& L, int first, int n) {
        "indexer selection");
 }
 
-void Engine::dsa(Layer& L, int n) {
+// The rows n tokens from position `pos` leave in a sparse-attention layer's caches: the latent the attention
+// reads, and the indexer's key and gate.  xn_ and xq_ hold the layer's input.
+void Engine::dsa_store(Layer& L, int64_t pos, int n) {
+    lin(L.kv_a, xn_, t2_, n, xq_);
+    rms_norm(t2_, fp(L.kv_a_norm), kv_, kv_rank_, n, rms_eps_, st_);
+    store_f16(kv_, L.lat, kv_rank_, pos, n, st_);
+
+    lin(L.idx_k, xn_, ikr_, n, xq_);
+    layer_norm(ikr_, fp(L.idx_k_norm), fp(L.idx_k_norm_b), ik_, idx_dim_, n, norm_eps_, st_);
+    lin(L.idx_gate, xn_, ig_, n, xq_);
+    idx_store(ik_, ig_, L.idx, idx_dim_, pos, n, st_);
+    idx_pool(L.idx, fp(L.idx_ape), idx_dim_, kpool_, pos, n, st_);
+}
+
+void Engine::dsa(Layer& L, int64_t pos, int n) {
     lin(L.q_a, xn_, t1_, n, xq_);
     rms_norm(t1_, fp(L.q_a_norm), qr_, q_rank_, n, rms_eps_, st_);
     lin(L.q_b, qr_, q_, n);
     lin(L.k_b, q_, qabs_, n, nullptr, kv_rank_);   // the key projection, absorbed into the query: per head
 
-    lin(L.kv_a, xn_, t2_, n, xq_);
-    rms_norm(t2_, fp(L.kv_a_norm), kv_, kv_rank_, n, rms_eps_, st_);
-    store_f16(kv_, L.lat, kv_rank_, pos_, n, st_);
-
-    lin(L.idx_k, xn_, ikr_, n, xq_);
-    layer_norm(ikr_, fp(L.idx_k_norm), fp(L.idx_k_norm_b), ik_, idx_dim_, n, norm_eps_, st_);
-    lin(L.idx_gate, xn_, ig_, n, xq_);
-    idx_store(ik_, ig_, L.idx, idx_dim_, pos_, n, st_);
-    idx_pool(L.idx, fp(L.idx_ape), idx_dim_, kpool_, pos_, n, st_);
+    dsa_store(L, pos, n);
 
     // While a token's pools all fit in top_k, every one is selected and its attention is plain causal attention.
     // That holds up to a position, so the tokens of a call are dense first and sparse after.
     const int64_t last_dense = (int64_t) idx_top_k_ + kpool_ - 2;
-    const int dense = (int) std::clamp<int64_t>(last_dense - pos_ + 1, 0, n);
-    if (dense < n) dsa_select(L, dense, n - dense);
+    const int dense = (int) std::clamp<int64_t>(last_dense - pos + 1, 0, n);
+    if (dense < n) dsa_select(L, pos, dense, n - dense);
     // A prompt batch's tokens share their products, padded to the token with the most keys.  A few tokens get a
     // product each: a token of a window must come out as it would alone, to the last bit, and cuBLAS rounds a
     // product of another size another way.
     const int together = n < kStageRows ? 1 : std::min(rows_, kAttnRows);
-    dsa_attend(blas_, qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos_, n, dense, akeys_, ascore_,
+    dsa_attend(blas_, qabs_, L.lat, sel_, sel_stride_, idx_top_k_, kpool_, pos, n, dense, akeys_, ascore_,
                together, kqv_, kv_rank_, n_head_, 1.f / std::sqrt((float) mla_k_), st_);
     lin(L.v_b, kqv_, vout_, n, nullptr, mla_v_);
     lin(L.wo, vout_, ao_, n);
@@ -1529,7 +1566,7 @@ void Engine::layer_head(Layer& L, int il, int n) {
     rms_norm(cur_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
     dbg("attn_in", il, xn_, n_embd_);
-    if (L.dsa) dsa(L, n);
+    if (L.dsa) dsa(L, pos_, n);
     else kda(L, n);
     dbg("attn", il, ao_, n_embd_);
     hc_post(ao_, hcw_, r_, n_embd_, n, st_);
@@ -1599,26 +1636,32 @@ void Engine::run(const int32_t* tokens, int n) {
 
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     run(tokens, n);
-    if (want_logits) {
-        const bool replay = opt_.graphs && n == 1 && !opt_.dump;
+    // The model's output: the last token's for the logits, and every token's for the draft block.
+    if (want_logits || draft_) {
+        const bool replay = opt_.graphs && n == 1 && want_logits && !opt_.dump;
         const size_t r_row = (size_t) kHc * n_embd_;
-        const auto logits = [&] {
-            hc_mean(r_ + (size_t) (n - 1) * r_row, cur_, n_embd_, 1, st_);
-            rms_norm(cur_, fp(out_norm_), xn_, n_embd_, 1, rms_eps_, st_);
-            dbg("out_norm", n_layer_, xn_, n_embd_);
-            lin(output_, xn_, logits_, 1);
+        const int m = draft_ ? n : 1;
+        float* h = draft_ ? hn_ + n_embd_ : xn_;
+        const auto tail = [&] {
+            hc_mean(r_ + (size_t) (n - m) * r_row, cur_, n_embd_, m, st_);
+            rms_norm(cur_, fp(out_norm_), h, n_embd_, m, rms_eps_, st_);
+            dbg("out_norm", n_layer_, h, n_embd_);
+            if (!want_logits) return;
+            lin(output_, h + (size_t) (m - 1) * n_embd_, logits_, 1);
             ck(cudaMemcpyAsync(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost,
                                cs(st_)),
                "logits");
         };
         if (replay) {
-            if (!tail_) tail_ = record(logits);
+            if (!tail_) tail_ = record(tail);
             ck(cudaGraphLaunch((cudaGraphExec_t) tail_, cs(st_)), "logits graph");
         } else {
-            logits();
+            tail();
         }
-        ck(cudaStreamSynchronize(cs(st_)), "eval");
+        if (want_logits) ck(cudaStreamSynchronize(cs(st_)), "eval");
     }
+    // behind the logits: the caller has them while the card does this
+    if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
     pos_ += n;
     stats_.tokens += n;
 }
@@ -1636,24 +1679,101 @@ void Engine::window(const int32_t* tokens, int t) {
         throw;
     }
     n_snap_ = 0;
+    float* h = draft_ ? hn_ + n_embd_ : xn_;
     hc_mean(r_, cur_, n_embd_, t, st_);
-    rms_norm(cur_, fp(out_norm_), xn_, n_embd_, t, rms_eps_, st_);
-    lin(output_, xn_, wlogits_, t);
+    rms_norm(cur_, fp(out_norm_), h, n_embd_, t, rms_eps_, st_);
+    lin(output_, h, wlogits_, t);
     ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "logits");
     ck(cudaStreamSynchronize(cs(st_)), "window");
+    std::copy(tokens, tokens + t, win_tok_);
     win_ = t;
 }
 
 void Engine::keep(int n) {
     if (n < 1 || n > win_) throw std::logic_error("keep takes 1 to the window's tokens");
     if (n < win_)
-        ck(cudaMemcpyAsync(state_, snap_ + size_t(n - 1) * state_n_, state_n_ * sizeof(float),
-                           cudaMemcpyDeviceToDevice, cs(st_)),
+        ck(cudaMemcpyAsync(state_, snap_ + size_t(n - 1) * kda_n_, kda_n_ * sizeof(float), cudaMemcpyDeviceToDevice,
+                           cs(st_)),
            "keep");
+    if (draft_) draft_rows(win_tok_, ahead_pos_ == pos_ && win_tok_[0] == ahead_tok_ ? 1 : 0, n);
     pos_ += n;
     stats_.tokens += n;
     win_ = 0;
+}
+
+// The draft block's input for n tokens: each token's embedding and the model's output for the token before it
+// (h, a row a token), each normed, the two side by side through the block's projection.  Returns the block's
+// residual, and leaves its normed attention input in xn_ and xq_.  r_ is free between the model's calls, and the
+// block works in it: n rows of the two halves, then the residual.
+//
+// h_r_ is free to write: every call that copied out of it has waited for the card since.
+float* Engine::draft_input(const int32_t* tokens, const float* h, int n) {
+    const size_t e = (size_t) n_embd_, rows = (size_t) n;
+    for (int t = 0; t < n; ++t) embed(tokens[t], h_r_ + (size_t) t * e);
+    ck(cudaMemcpyAsync(cur_, h_r_, rows * e * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
+    rms_norm(cur_, fp(d_enorm_), r_, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
+    rms_norm(h, fp(d_hnorm_), r_ + e, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
+    float* x = r_ + 2 * rows * e;
+    lin(d_proj_, r_, x, n);
+    rms_norm(x, fp(layers_[(size_t) n_layer_].attn_norm), xn_, n_embd_, n, rms_eps_, st_);
+    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    return x;
+}
+
+// The rows the draft block's attention keeps for tokens [first, n) of a call that has run: token i is at pos() + i,
+// and hn_'s row i is the model's output for the token before it.  A row is all a later guess reads of a token, so
+// the rest of the block is not computed for it.  Then the call's last output is the one the next token pairs with.
+void Engine::draft_rows(const int32_t* tokens, int first, int n) {
+    const size_t e = (size_t) n_embd_;
+    if (first < n) {
+        draft_input(tokens + first, hn_ + (size_t) first * e, n - first);
+        dsa_store(layers_[(size_t) n_layer_], pos_ + first, n - first);
+    }
+    ck(cudaMemcpyAsync(hn_, hn_ + (size_t) n * e, e * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)), "draft");
+    ahead_pos_ = -1;
+}
+
+// One token through the draft block, at pos() + i.  The first token's row is then what draft_rows() would leave
+// for it, and eval() and keep() skip it; the rows of the guesses after it are written again when the positions get
+// their real tokens.
+int32_t Engine::draft(int32_t token, int i, float* prob) {
+    if (!draft_) throw std::logic_error("draft: this model has no block that guesses ahead");
+    if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
+    if (i < 0 || pos_ + i >= opt_.max_context) throw std::logic_error("draft: the position is outside the context");
+    ck(cudaStreamSynchronize(cs(st_)), "draft");
+    Layer& L = layers_[(size_t) n_layer_];
+    float* own = hn_ + n_embd_;   // the block's output, which stands in for the model's from the second guess on
+    float* x = draft_input(&token, i == 0 ? hn_ : own, 1);
+    dsa(L, pos_ + i, 1);
+    axpy(ao_, 1.f, x, n_embd_, true, st_);
+    rms_norm(x, fp(L.ffn_norm), xn_, n_embd_, 1, rms_eps_, st_);
+    kernels::native_quantize_q8_1(xn_, xq_, n_embd_, 1, st_);
+    moe_router(L, 1);
+    ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+    moe_shared(L, n_layer_, 1);
+    moe(L, n_layer_, 1);
+    axpy(fo_, 1.f, x, n_embd_, true, st_);
+    rms_norm(x, fp(d_head_), own, n_embd_, 1, rms_eps_, st_);
+    lin(output_, own, logits_, 1);
+    ck(cudaMemcpyAsync(h_dlogits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+       "draft");
+    ck(cudaStreamSynchronize(cs(st_)), "draft");
+    if (i == 0) {
+        ahead_pos_ = pos_;
+        ahead_tok_ = token;
+    }
+
+    const float* l = h_dlogits_;
+    int best = 0;
+    for (int v = 1; v < n_vocab_; ++v)
+        if (l[v] > l[best]) best = v;
+    // the softmax's sum without the tokens too unlikely to change it
+    double sum = 0.0;
+    for (int v = 0; v < n_vocab_; ++v)
+        if (l[v] > l[best] - 20.f) sum += std::exp((double) (l[v] - l[best]));
+    *prob = (float) (1.0 / sum);
+    return best;
 }
 
 }  // namespace strata::glm

@@ -144,14 +144,20 @@ of the file. The rest of the weights are always in VRAM.
   such an expert from memory, and on a PC with more than one NUMA node that memory is on the node whose CPU first
   read the file. The engine looks where the experts' pages are and keeps its CPU threads on that node: from the
   other node the same work took 30% longer on the machine above. `--any-node` turns that off.
-- **Guessing ahead.** An answer often repeats text the conversation already has: code it was asked to change, a
-  passage it quotes. When the last few tokens match an earlier place, the engine guesses that what followed there
-  comes next, and puts the token it knows and up to three guesses through the model together. A guess counts only
-  when it is the token the model picks itself, so the answer is the same with guessing and without. A right guess
-  saves less than a whole token, because its experts outside VRAM still run on the CPU. An answer that gave a
-  670-token file back with one name changed went from 41.2 to 44.8 tokens/s, with 231 of 238 guesses right. One
-  that quoted from a document went from 41.1 to 45.5. An answer with nothing to repeat stayed where it was, at 39
-  to 40. `--lookup 0` turns the guessing off.
+- **Guessing ahead.** While an answer is written, the engine guesses the next few tokens and puts the token it
+  knows and up to three guesses through the model together. A guess counts only when it is the token the model
+  picks itself, so the answer is the same with guessing and without. The guesses come from two places. An answer
+  often repeats text the conversation already has, code it was asked to change or a passage it quotes: when the
+  last few tokens match an earlier place, what followed there is the guess. And some files carry a block made for
+  guessing, one more layer that takes a token and what the model made of the token before it, and says what is
+  likely to come next. The REAP50 files and Unsloth's have it, 3.0BIT does not. A right guess saves less than a
+  whole token, because its experts outside VRAM still run on the CPU: four tokens together take about three times
+  as long as one. Measured with REAP50-Q3_K_M on the 32 GB card, 600-token answers, twice each: plain text went
+  from 41 to between 44 and 46 tokens/s, an answer that quoted from a document from 41 to between 48 and 51, and
+  one that gave a 670-token file back with one name changed from 42 to between 50 and 59. The block's first guess
+  was right 80 to 99% of the time. 3.0BIT has only the repeats to guess from: there the file went from 41.2 to
+  45.0 and the quotes from 41.1 to 47.5, and plain text stayed where it was. `--no-draft` and `--lookup 0` turn
+  the two off.
 - **Reading a prompt.** The prompt goes in up to 1,024 tokens at a time. For each layer the experts outside the
   cache are copied through a buffer in VRAM and run there. A larger batch reads faster and leaves less VRAM for the
   expert cache, so answers get slower: 4,096 at a time read the 11,673-token prompt at 396 tokens/s and wrote 18.5
@@ -197,6 +203,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--expert-swaps N` | 16 | while an answer is written, experts on their way into VRAM at a time, each in place of a cached one the answer uses less; 0 = the cache stays as it was loaded |
 | `--window N` | 4 | the most tokens that go through the model together while an answer is written: the known one and guesses after it; 1 = no guesses |
 | `--lookup N` | 3 | guess what followed an earlier repeat of the last N or more tokens; 0 = never |
+| `--no-draft` | | do not run the block that guesses ahead, in a file that has one |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
 | `--stage-ahead N` | 256 | from N tokens, a batch copies those experts before the layer has chosen; 0 = never |

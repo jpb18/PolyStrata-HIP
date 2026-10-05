@@ -40,6 +40,7 @@ struct Options {
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     int window = 4;               ///< the most tokens window() takes: the known one and guesses after it; 1: none
+    bool draft = true;            ///< run the block that guesses ahead, when the file has it and window is above 1
 };
 
 /// A tensor in VRAM in its GGUF form.  n_in is the contiguous axis.
@@ -127,6 +128,15 @@ public:
     const float* logits_of(int i) const { return h_wlogits_ + (size_t) i * n_vocab_; }
     void keep(int n);
 
+    /// Some files carry a block that guesses ahead: one layer that takes a token and the model's output for the
+    /// token before it, and gives what the model would likely say after the token.  drafts(): it is there and runs.
+    /// draft(token, 0, &p) takes the token at pos(), picked and not fed yet, and returns the guess at the one after
+    /// it; draft(guess, i, &p) for i = 1, 2, ... then guesses on from the i-th guess, with the block's own output
+    /// in the model's place.  p is the probability the block gives what it returns.  pos() + i must be inside the
+    /// context.  logits() is left alone.
+    bool drafts() const { return draft_; }
+    int32_t draft(int32_t token, int i, float* prob);
+
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
     size_t state_bytes() const { return state_n_ * sizeof(float); }
@@ -159,8 +169,11 @@ private:
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);
     void kda(Layer& L, int n);
-    void dsa(Layer& L, int n);
-    void dsa_select(Layer& L, int first, int n);
+    void dsa(Layer& L, int64_t pos, int n);
+    void dsa_store(Layer& L, int64_t pos, int n);
+    void dsa_select(Layer& L, int64_t pos, int first, int n);
+    float* draft_input(const int32_t* tokens, const float* h, int n);
+    void draft_rows(const int32_t* tokens, int first, int n);
     void dense_ffn(Layer& L, int il, int n);
     void run(const int32_t* tokens, int n);
     void layer_head(Layer& L, int il, int n);
@@ -205,8 +218,10 @@ private:
     bool w_norm_ = false;
     std::vector<float> clamp_exp_, clamp_shexp_;
 
-    std::vector<Layer> layers_;
+    std::vector<Layer> layers_;   ///< the model's, and after them the draft block
     Dev out_norm_, output_;
+    bool draft_ = false;
+    Dev d_proj_, d_enorm_, d_hnorm_, d_head_;   ///< the draft block's input projection and norms, and its output norm
     const uint8_t* tok_embd_ = nullptr;   ///< the token table in the mapped file, tok_row_ bytes a token
     size_t tok_row_ = 0;
     uint32_t tok_type_ = 0;
@@ -217,9 +232,16 @@ private:
     size_t exp_at_ = 0;
     float* scratch_ = nullptr;
     size_t scratch_at_ = 0;
-    float* state_ = nullptr;     ///< every KDA layer's conv and delta-rule state
-    size_t state_n_ = 0;
-    float* snap_ = nullptr;      ///< window(): the state after each token but the last, state_n_ apart
+    float* state_ = nullptr;     ///< every KDA layer's conv and delta-rule state; with a draft block, hn_'s first row
+    size_t state_n_ = 0, kda_n_ = 0;   ///< all of it, and the KDA layers' part
+    // The draft block reads the model's output for the token before each of its tokens.  Row 0 is the output of
+    // the last token of the sequence, and the outputs of the tokens of the call under way follow it.
+    float* hn_ = nullptr;
+    float* h_dlogits_ = nullptr;        ///< a guess's logits, pinned
+    int32_t win_tok_[8] = {};           ///< the window's tokens, for keep()
+    int64_t ahead_pos_ = -1;            ///< draft() has left the block's row of this position as its token leaves it,
+    int32_t ahead_tok_ = 0;             ///< which is this one
+    float* snap_ = nullptr;      ///< window(): the KDA state after each token but the last, kda_n_ apart
     int n_snap_ = 0;             ///< how many of those the eval under way leaves
     int win_ = 0;                ///< the tokens of the window that keep() has not settled yet
     float *wlogits_ = nullptr, *h_wlogits_ = nullptr;   ///< a window's logits, token after token: VRAM and pinned
