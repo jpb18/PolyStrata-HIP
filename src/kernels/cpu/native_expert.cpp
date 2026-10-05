@@ -89,7 +89,8 @@ int native_gu_mt_min(int gu_type) {
     // of the window.  So IQ3_S takes it for every group, and those rows no longer depend on the drafting.  A machine-
     // wide rule, not a per-core one: every core rounds an expert the same.  Every probe here is in expert_layout.cpp
     // and cpu_avx2_ok() comes first, so no AVX2 code runs before the check.  STRATA_IQ_MT_MIN set keeps its rule.
-    static const bool iq3s_one = env == nullptr && cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr &&
+    // Opt-in (STRATA_IQ3S_MT1=1): it changes a lone token's IQ3_S rounding on those CPUs, so the default stays 0.1.39's.
+    static const bool iq3s_one = env == nullptr && std::getenv("STRATA_IQ3S_MT1") != nullptr && cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr &&
                                  !cpu_avx512_ok() && iq256_gather_setting() != 0 && cpu_gather_fast();
     return iq3s_one && gu_type == 21 ? 1 : mt_min;
 }
