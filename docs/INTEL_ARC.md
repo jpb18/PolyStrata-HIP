@@ -28,7 +28,7 @@ trace, the new prompt paths). It compiles and its kernel tests run, but **nobody
 yet**. The numbers in the table were measured on earlier versions.
 
 The two B60 rows ran `6f32ec0` plus two small `sycl/` fixes (the compile fix and the ring-wait fix), AOT `bmg-g21`, on Ubuntu 24.04 with
-`xe`, Level Zero V2, NEO 26.09.37435.12 and oneAPI 2026.1.1, without Docker. Host: Ryzen 5 5600, 62 GB RAM, PCIe 3.0 x8 per card.
+`xe`, Level Zero V2, NEO 26.09.37435.12 and oneAPI 2026.1.1, without Docker. Host: Ryzen 5 5600, 64 GB RAM, PCIe 3.0 x8 per card.
 Full flags, per-request timings and engine logs are in the report linked in the table.
 
 ## What was tested here (0.1.39)

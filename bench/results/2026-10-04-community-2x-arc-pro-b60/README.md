@@ -4,7 +4,7 @@ Measured on 2026-10-04 by LocalXPU. This is the SYCL port (`sycl/`) on two Arc P
 
 ## Hardware and software
 
-- 2x Intel Arc Pro B60 24 GB (`8086:e211`, 456 GB/s each), PCIe 3.0 x8 per card; Ryzen 5 5600; 62 GB DDR4; storage type not recorded
+- 2x Intel Arc Pro B60 24 GB (`8086:e211`, 456 GB/s each), PCIe 3.0 x8 per card; Ryzen 5 5600; 64 GB DDR4; storage type not recorded
 - Ubuntu 24.04, kernel 6.17 (`xe` driver), Level Zero V2, compute runtime NEO 26.09.37435.12, oneAPI DPC++ 2026.1.1, oneMKL 2026.1.0
 - Strata `6f32ec0` plus two `sycl/` fixes (the build fix for #559/#626 and the `cudaStreamQuery` fix in the ring wait); engine reports `0.1.39-sycl`; AOT `-DSTRATA_SYCL_AOT=bmg-g21`; source build, no Docker
 - Nothing else ran on the GPUs. The kernel log was watched for `xe` resets during every run: none.
