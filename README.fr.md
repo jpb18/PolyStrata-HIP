@@ -2,27 +2,36 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · **Français** · [Español](README.es.md) · [Português](README.pt-BR.md)
 
-<p align="center"><b>Faites tourner un modèle d'IA de 125 milliards de paramètres sur votre propre PC de jeu</b><br>
-Carte graphique NVIDIA ou AMD (12 Go ou plus) · Windows ou Linux · gratuit et open source</p>
+<p align="center"><b>Faites tourner de grands modèles d'IA sur votre propre PC</b><br>
+Qwen3.8-Flash-Next et GLM 5.3 Flash · gratuit et open source</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Un jardin de pagode en voxels écrit par le modèle de PolyStrata, qui tourne dans le navigateur"></a><br>
-<sub>Un jardin de pagode en voxels, généré en une seule requête sur une RTX 5070 avec <a href="https://github.com/Niko1221/Strata">Strata</a> (IQ3_S, contexte de 128K) ·
+<sub>Un jardin de pagode en voxels, généré en une seule requête sur une RTX 5070 avec <a href="https://github.com/Niko1221/Strata">Strata</a> (Qwen3.8-Flash-Next IQ3_S, contexte de 128K) ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">vidéo complète (49 s)</a></sub></p>
 
-PolyStrata fait tourner **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** sur un PC normal. C'est
-un grand modèle d'IA, très capable, qui demande d'habitude un serveur. Il discute, écrit du code, lit des images et
-fonctionne avec vos applications et vos agents de code. Rien ne quitte votre PC.
+PolyStrata fait tourner de grands modèles d'IA sur un PC normal, des modèles qui demandent d'habitude un serveur.
+Ils discutent, écrivent du code et fonctionnent avec vos applications et vos agents de code. Rien ne quitte votre PC.
 
-PolyStrata est construit sur [Strata](https://github.com/Niko1221/Strata) de Niko1221 ; les mesures de cette page
-viennent de là. Il fait aussi tourner GLM 5.3 Flash, avec un moteur écrit pour lui (Linux, une carte NVIDIA) :
-[docs/GLM.md](docs/GLM.md) (en anglais).
+Il fait tourner deux modèles, chacun avec son propre moteur :
+
+- **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** sur une carte graphique NVIDIA ou AMD
+  de 12 Go ou plus, sous Windows ou Linux. Il lit aussi les images. Son moteur est celui de
+  [Strata](https://github.com/Niko1221/Strata), inchangé.
+- **[GLM 5.3 Flash](docs/GLM.md)** sous Linux avec une carte NVIDIA. Son moteur a été écrit pour PolyStrata. Il
+  est expérimental : il n'a tourné que sur un seul PC, avec une carte de 32 Go.
+
+PolyStrata est construit sur [Strata](https://github.com/Niko1221/Strata) de Niko1221.
 
 ## Quelle est sa vitesse ?
 
-Nous l'avons mesurée sur deux PC de jeu ordinaires. Un token correspond à environ ¾ d'un mot.
+Un token correspond à environ ¾ d'un mot.
 
 - **Écrit les réponses :** la vitesse à laquelle la réponse s'affiche dans une courte discussion. 60 tokens par seconde, c'est plus rapide que votre lecture.
 - **Lit votre prompt :** la vitesse à laquelle il absorbe ce que vous envoyez (ici un document, du code ou un historique de discussion de 32K tokens).
+
+### Qwen3.8-Flash-Next
+
+Mesuré par [Strata](https://github.com/Niko1221/Strata) sur deux PC de jeu ordinaires, avec un prompt de 32K tokens.
 
 <table>
 <tr><th>NVIDIA : RTX 5070 (12 Go), Ryzen 5 7600, 64 Go de RAM</th><th>AMD : RX 9070 XT (16 Go), Ryzen 9 3900X, 47 Go de RAM</th></tr>
@@ -52,10 +61,29 @@ complets sont dans [DETAILS.md](docs/DETAILS.md#speed-measured). Une carte avec 
 RTX 3090 (24 Go) devrait écrire environ 100-140 tokens par seconde. Longues discussions et autres cartes :
 [vitesse de chaque modèle](docs/MODELS.md#how-fast-is-each-size), [résultats de la communauté](docs/COMMUNITY_BENCHMARKS.md).
 
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
-<sub>PolyStrata est gratuit. Le café va à l'auteur de <a href="https://github.com/Niko1221/Strata">Strata</a>, sur lequel PolyStrata est construit.</sub></p>
+### GLM 5.3 Flash
+
+Mesuré pour PolyStrata sur une station de travail, avec un prompt de 29K tokens.
+
+<table>
+<tr><th>NVIDIA : RTX 5090 (32 Go), Xeon Platinum 8470Q (25 vCPU), 120 Go de RAM</th></tr>
+<tr><td>
+
+| Taille | Écrit les réponses | Lit votre prompt |
+| --- | ---: | ---: |
+| **3.0BIT** | 27 tokens/s | 312 tokens/s |
+| **REAP50-Q3_K_M** | 27 tokens/s | 384 tokens/s |
+
+</td></tr>
+</table>
+
+Sur le même PC, llama.cpp a écrit 26 tokens/s avec le fichier 3.0BIT et en a lu environ 265. GLM 5.3 Flash est un modèle
+bien plus grand que Qwen3.8-Flash-Next, et seul un cinquième environ de ses experts tient dans les 32 Go de cette carte :
+il écrit donc plus lentement. Ce qui a été mesuré et comment : [docs/GLM.md](docs/GLM.md#what-it-was-measured-on) (en anglais).
 
 ## Ce qu'il vous faut
+
+### Qwen3.8-Flash-Next
 
 | | |
 | --- | --- |
@@ -73,6 +101,20 @@ Expérimental, écrit et testé par des membres de la communauté sur leurs prop
 - **Processeurs plus anciens sans AVX2** : ça marche, mais lentement. [Older CPUs](docs/INSTALL.md#older-cpus-experimental).
 
 La liste complète : [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
+
+### GLM 5.3 Flash
+
+| | |
+| --- | --- |
+| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente. Il n'a tourné qu'avec **32 Go de VRAM**. Environ 12 Go sont pris avant le premier expert : une carte de 12 Go ne peut donc pas le démarrer. |
+| **RAM** | À côté d'une carte de 32 Go, **96 Go ou plus** pour le modèle entier, 60 Go pour la taille qui garde la moitié des experts. Une carte plus petite demande plus de RAM ([combien](#quel-modèle-choisir-)). Il a tourné avec 120 Go. |
+| **Disque** | 114 Go ou 79 Go pour le fichier du modèle, sur un SSD. |
+| **Système** | Linux, et un pilote NVIDIA récent. |
+
+L'installeur s'occupe de tout le reste. Il compile le moteur sur votre PC et propose d'installer ce qu'il faut pour cela
+(g++ et le CUDA Toolkit). Pas encore : Windows, les cartes AMD, plusieurs cartes, les images.
+
+La liste complète : [docs/GLM.md](docs/GLM.md#what-you-need) (en anglais).
 
 ## Installation
 
@@ -98,11 +140,15 @@ Il vous pose quelques questions :
 
 - quel modèle et quelle taille,
 - combien de contexte (la quantité de texte que le modèle garde en tête),
-- s'il doit lire les images.
+- s'il doit lire les images (Qwen3.8-Flash-Next).
 
-Appuyez sur Entrée à chaque fois pour garder la réponse recommandée. Ensuite il télécharge le modèle (environ 70 Go)
+Appuyez sur Entrée à chaque fois pour garder la réponse recommandée. Ensuite il télécharge le modèle (environ 70 Go pour
+Qwen3.8-Flash-Next, 79 ou 114 Go pour GLM 5.3 Flash)
 et le démarre. Si le téléchargement s'arrête, relancez-le : il reprend là où il s'était arrêté. Votre navigateur
 ouvre l'application PolyStrata à l'adresse `http://127.0.0.1:8080`.
+
+GLM 5.3 Flash figure dans la liste des modèles de l'installeur. `./setup.sh --family glm` y mène directement
+([ce qu'il demande et écrit](docs/GLM.md#install), en anglais).
 
 > **Pendant le démarrage du modèle, votre PC peut ralentir ou ne plus répondre pendant 1-3 minutes** (plus longtemps la première fois).
 > PolyStrata charge 35-55 Go dans votre RAM et en réserve une partie pour la carte graphique. C'est normal. Attendez, et
@@ -113,6 +159,8 @@ deux fois. Fermez sa fenêtre pour arrêter le modèle. `UPDATE.bat` (`./update.
 Mises à jour, Docker, plusieurs cartes, emplacement des fichiers et toutes les options : [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Quel modèle choisir ?
+
+### Qwen3.8-Flash-Next
 
 L'installateur en recommande un selon votre RAM. Le même modèle existe en plusieurs tailles, plus ou moins
 compressées. Les petites tailles sont plus rapides. Les grandes sont un peu plus intelligentes.
@@ -142,10 +190,36 @@ compressées. Les petites tailles sont plus rapides. Les grandes sont un peu plu
 Tailles, téléchargements et ce qui tient où : [docs/MODELS.md](docs/MODELS.md). Pour ajouter un autre modèle plus
 tard, lancez `SETUP.bat` (Linux : `./setup.sh --setup`).
 
+### GLM 5.3 Flash
+
+Deux tailles pour l'instant. L'installeur prend la première pour laquelle votre RAM suffit.
+
+| Taille | Ce que c'est | Téléchargement | RAM à côté d'une carte de 32 Go |
+| --- | --- | ---: | ---: |
+| **3.0BIT** | le modèle entier | 114 Go | 96 Go |
+| **REAP50-Q3_K_M** | la moitié des experts routés retirée ([REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF) de patrickbdevaney) | 79 Go | 60 Go |
+
+C'est votre carte graphique qui décide de la RAM nécessaire : les experts que la carte ne contient pas doivent rester en RAM.
+
+| Votre carte graphique | 3.0BIT | REAP50-Q3_K_M | |
+| --- | ---: | ---: | --- |
+| **32 Go** | **96 Go** | **60 Go** | le PC sur lequel il a tourné (120 Go de RAM) |
+| **24 Go** | environ 104 Go | environ 68 Go | pas encore essayé |
+| **16 Go** | environ 113 Go | environ 77 Go | pas encore essayé |
+| **12 Go ou moins** | | | ne démarre pas |
+
+Les chiffres de RAM sont l'estimation de l'installeur, d'après le seul PC où il a tourné. Avec moins de RAM il démarre quand
+même, mais il lit des experts sur le SSD pendant qu'il répond et devient bien plus lent. L'installeur le dit et demande
+d'abord.
+
+Les autres quantifications de GLM 5.3 Flash ne sont pas encore prises en charge : [ce qui manque](docs/GLM.md#what-is-missing) (en anglais).
+
 ## Utilisation
 
+Les deux modèles s'utilisent de la même façon : la même application, la même API.
+
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="L'onglet Monitor de l'application PolyStrata à côté d'un agent de code"><br>
-<sub>Le <b>Monitor</b> de l'application PolyStrata (à gauche) pendant qu'un agent de code écrit le jardin de pagode de la vidéo (à droite)</sub></p>
+<sub>Le <b>Monitor</b> de l'application PolyStrata (à gauche) pendant qu'un agent de code écrit le jardin de pagode de la vidéo (à droite). Une capture d'écran de <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>
 
 - **Dans le navigateur :** ouvrez `http://127.0.0.1:8080`. Vous y trouvez **Chat**, un **Monitor** en direct du
   modèle et de votre GPU/CPU/RAM, et **About** avec les réglages et les adresses.
@@ -157,16 +231,17 @@ tard, lancez `SETUP.bat` (Linux : `./setup.sh --setup`).
     ([configuration](docs/DETAILS.md#the-responses-api-and-codex-cli)).
 - **Réflexion :** choisissez **off, low, medium ou high** dans le menu du chat ou dans le « reasoning effort » de
   votre application. Off est le plus rapide. High est le meilleur pour les questions difficiles.
-- **Images :** répondez oui à « Images? » pendant l'installation. Ensuite cliquez sur **Picture** dans le chat, ou
-  joignez des images dans votre application. Les cartes AMD lisent les images sous Linux via le processeur ; sous
-  Windows, pas encore.
 - **Depuis votre téléphone ou un autre PC :** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Définissez
   toujours une clé.
-- **Une requête à la fois :** par défaut, PolyStrata répond à une requête et les autres attendent. Pour répondre à
-  plusieurs en même temps, mettez `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). Sur une carte de 12 Go, chaque
-  réponse devient alors plus lente.
-- **Longs prompts :** PolyStrata lit en entier le premier message d'une discussion, environ 1 minute pour 30,000 tokens.
-  Les messages suivants démarrent en quelques secondes.
+
+Là où les deux diffèrent :
+
+| | Qwen3.8-Flash-Next | GLM 5.3 Flash |
+| --- | --- | --- |
+| **Images** | Répondez oui à « Images? » pendant l'installation. Ensuite cliquez sur **Picture** dans le chat, ou joignez des images dans votre application. Les cartes AMD lisent les images sous Linux via le processeur ; sous Windows, pas encore. | Pas encore. |
+| **Une requête à la fois** | Par défaut, PolyStrata répond à une requête et les autres attendent. Pour répondre à plusieurs en même temps, mettez `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). Sur une carte de 12 Go, chaque réponse devient alors plus lente. | Une à la fois, les autres attendent. |
+| **Plusieurs discussions** | La dernière est conservée, donc les messages suivants démarrent en quelques secondes. Deux arguments du moteur en gardent plusieurs en RAM ([détails](docs/DETAILS.md#using-it)). | La dernière est conservée. L'installation demande s'il faut en garder plusieurs en RAM, pour qu'un agent et ses sous-agents se relaient sans que leurs prompts soient relus ([comment](docs/GLM.md#several-conversations-at-once)). |
+| **Longs prompts** | PolyStrata lit en entier le premier message d'une discussion, environ 1 minute pour 30,000 tokens. Les messages suivants démarrent en quelques secondes. | Le premier message est lu en entier, environ 1,5 minute pour 30,000 tokens. |
 
 Plus d'infos : [où sont stockées vos discussions](docs/INSTALL.md#where-things-are-stored), [l'API](docs/DETAILS.md#using-it).
 
@@ -189,9 +264,11 @@ avez trouvé un problème de sécurité ? Signalez-le en privé : [SECURITY.md](
 ## Comment ça marche ?
 
 Les modèles comme celui-ci tournent d'habitude sur des serveurs avec des centaines de gigaoctets de mémoire
-graphique. Votre carte graphique a 12-24 Go. PolyStrata fait tenir le modèle en **répartissant le travail sur tout votre
+graphique. Votre carte graphique a 12-32 Go. PolyStrata fait tenir le modèle en **répartissant le travail sur tout votre
 PC**. Pensez à une cuisine : ce que vous utilisez tout le temps reste sur le plan de travail, et le reste attend dans
 le placard.
+
+### Qwen3.8-Flash-Next
 
 <p align="center"><img src="docs/media/how-it-works.svg" width="860" alt="Les 24,576 experts du modèle : les plus sollicités sur la carte graphique, tous en RAM, une table de correspondance sur le SSD"></p>
 
@@ -209,11 +286,25 @@ le placard.
 L'explication plus longue : [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Chaque partie et ses chiffres :
 [les détails](docs/DETAILS.md#how-it-works) et l'[article](docs/paper/Strata-Paper.pdf).
 
+### GLM 5.3 Flash
+
+- **Le modèle compte 12,096 experts**, 288 dans chacune de 42 couches. Chaque mot en demande 8 par couche.
+- **Votre carte graphique** garde les plus utilisés, environ 2,570 sur une carte de 32 Go. Le moteur compte ceux
+  que votre travail utilise et refait son choix au démarrage suivant.
+- **Pendant qu'il écrit**, votre processeur calcule les experts que la carte ne contient pas. **Pendant qu'il lit un
+  prompt**, ils passent par la carte, 1,024 tokens à la fois.
+- **Le fichier du modèle est utilisé là où il se trouve**, sans seconde copie sur le disque. Un démarrage prend
+  environ 6 secondes une fois le fichier dans votre RAM.
+
+Chaque partie et ses chiffres : [docs/GLM.md](docs/GLM.md#how-it-uses-the-card) (en anglais).
+
 ## Crédits et licence
 
-Le modèle est [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), de l'équipe Qwen. Il a été
-compressé par [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5)
-et Unsloth. PolyStrata utilise des parties de [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Tous les
+Qwen3.8-Flash-Next est de l'[équipe Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). Il a été compressé par
+[ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) et Unsloth.
+GLM 5.3 Flash tourne à partir des fichiers de [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF)
+et de patrickbdevaney. PolyStrata est construit sur [Strata](https://github.com/Niko1221/Strata) de Niko1221 et de ses
+contributeurs, et utilise des parties de [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Tous les
 crédits : [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). PolyStrata est open source sous [licence MIT](LICENSE).
 Quelques parties et chaque modèle ont leur propre licence ([lesquelles](docs/HOW_IT_WORKS.md#license)).
 
