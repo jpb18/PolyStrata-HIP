@@ -1201,24 +1201,31 @@ void Engine::moe_rows(Layer& L, int il, int n) {
 
     moe_shared(L, il, n);
 
-    // read() takes a layer's calls one after the other.  What the call before this one copied ahead is then
-    // still in the buffer, and L.ahead still says what: the copy is made once for all of them.  A call too
-    // small to copy ahead leaves it: with the experts of another launch its sums would be split another way
-    // (the batched kernels divide a launch's work among their blocks), and it would not come out as it does alone.
+    // read() takes a layer's calls one after the other, so the buffer may hold this layer's experts from the
+    // call before (staged_).  The ones copied ahead do not depend on the routing and are this call's too.  A
+    // later round is this call's only if it routes to the same experts, and waiting to see means nothing is
+    // copied ahead meanwhile.  That pays when the card gets to the routing in under half the time the copy
+    // ahead takes: most of that copy then holds the card up.  A call too small to copy ahead does not use what
+    // is there: with another launch's experts the batched kernels would split its sums another way.
     const bool ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead;
-    const bool held = ahead && staged_il_ == il;
-    if (ahead && !held) plan_ahead(L, il);
+    if (ahead) plan_ahead(L, il);
     const int n_ahead = ahead ? (int) L.ahead.size() : 0;
-    if (n_ahead > 0 && !held) {
+    const bool mine = ahead && staged_il_ == il && (staged_ == L.ahead || 2 * route_ms_ < ahead_ms_);
+    const bool early = n_ahead > 0 && !mine;
+    if (early) {
+        const Clock::time_point t = Clock::now();
         // the buffer is free once the layer before has read it
         ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
         stage(L, L.ahead.data(), n_ahead, up_);
         ck(cudaEventRecord((cudaEvent_t) ev_ahead_, cs(up_)), "expert staging");
-        staged_il_ = il;
+        ahead_ms_ = ms_since(t);
+        // out already: how long before is not known until a call waits for it
+        route_ms_ = cudaEventQuery((cudaEvent_t) ev_) == cudaSuccess ? 0 : ahead_ms_;
     }
 
     const Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
+    if (ahead && !early) route_ms_ = ms_since(t0);
     stats_.route_wait_ms += ms_since(t0);
 
     // The layer's tables.  tok and place: a row's token, and its place among that token's experts.  bounds: each
@@ -1351,14 +1358,29 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         mmq_->mul(slot_of(r.j) + gu2, dt, n_embd_, ff, L.slot_bytes, r.m, mq2_, d_cb + (size_t) r.c * cb_row + r.j,
                   d_place, rc, r.most, dx_, n_embd_, st_);
 
-    for (int r = 0; r < n_round; ++r) {
+    // The round the buffer holds goes first and is not copied.  If it holds none of this call's, the experts
+    // that go ahead are copied last, so the next call finds them.  The order does not change a round's launches.
+    int kept = -1;
+    for (int r = 0; r < n_round && mine && kept < 0; ++r) {
+        const auto first = group_.begin() + round_[(size_t) r], last = group_.begin() + round_[(size_t) r + 1];
+        if ((size_t) (last - first) == staged_.size() && std::equal(first, last, staged_.begin())) kept = r;
+    }
+    const int from = mine && kept < 0 ? 1 : 0;
+    int holds = early ? 0 : kept;   // the round in the buffer when this call is done
+    for (int turn = 0; turn < n_round; ++turn) {
+        const int r = kept < 0 ? (turn + from) % n_round : turn == 0 ? kept : turn - (turn <= kept ? 1 : 0);
         const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
         const size_t down_at = pad((size_t) m * gu2);
-        if (r == 0 && n_ahead > 0) ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_ahead_, 0), "expert staging");
-        else stage(L, group_.data() + g0, m, st_);
-
         const int r0 = bounds[g0], rows = bounds[g0 + m] - r0;
-        if (rows == 0) continue;   // nothing routed to the experts that went ahead
+        if (r == kept) {
+            // the buffer has it
+        } else if (r == 0 && early) {
+            ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_ahead_, 0), "expert staging");
+        } else if (rows > 0) {
+            stage(L, group_.data() + g0, m, st_);
+            holds = r;
+        }
+        if (rows == 0) continue;   // nothing routed to the experts that go ahead
         int most = 0;
         for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
         mmq_->mul(stage_, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rr, most, gu_, ff2, st_);
@@ -1370,6 +1392,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     }
     ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
     moe_sum(dx_, d_w, fo_, n_embd_, n_used_, n, st_);
+    if (ahead && holds >= 0) {
+        staged_.assign(group_.begin() + round_[(size_t) holds], group_.begin() + round_[(size_t) holds + 1]);
+        staged_il_ = il;
+    }
 }
 
 // The rows a recorded attention launch is sized for, for n tokens from pos(): the power of two from 1024 that

@@ -416,7 +416,9 @@ protected:
     void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
     void* ev_ahead_ = nullptr;                    ///< marks the last of them
     void* ev_free_ = nullptr;                     ///< marks a layer's last read of the staging buffer
-    int staged_il_ = -1;                          ///< the layer whose `ahead` experts the buffer holds, or -1
+    int staged_il_ = -1;                          ///< the layer whose experts the buffer holds for its next call, or -1
+    std::vector<int32_t> staged_;                 ///< those experts, in the buffer's order: one round of the layer's
+    double ahead_ms_ = 0, route_ms_ = 0;          ///< what that layer's copy ahead took, and the card to its routing
     size_t stage_bytes_ = 0, chunk_bytes_ = 0;
     int stage_turn_ = 0;
     std::vector<int32_t> ids_, count_, first_, group_, round_;
