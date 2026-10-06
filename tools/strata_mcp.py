@@ -711,7 +711,7 @@ class Strata:
             return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Qwen3.8-Flash-Next needs 32 GB or "
                                                           "more (its smallest, the Coder, keeps ~23 GB of experts in "
                                                           "RAM); the 13-17 GB models (family qwen36, ornith or "
-                                                          "gemma4: Linux, experimental) want 17-22 GB"}
+                                                          "gemma4: Linux, experimental) want 18-22 GB"}
         ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
         if vram < 11:
             notes.append("less than 12 GB of VRAM: it runs, but slowly (most experts stay on the CPU)")
@@ -1002,7 +1002,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "Flash (another model: Linux, one NVIDIA card, 64-128 GB of RAM, a 79 or "
                                        "114 GB download, no images), qwen36 = Qwen3.6-35B-A3B, ornith = Ornith "
                                        "1.5, gemma4 = Gemma 4 26B-A4B (GLM's engine: Linux, one NVIDIA card, a "
-                                       "13-17 GB download, 17-22 GB of RAM beside an 8 GB card by setup's "
+                                       "13-17 GB download, 18-22 GB of RAM beside an 8 GB card by setup's "
                                        "estimate, no images)"},
              "model": {"type": "string", "enum": list(dict.fromkeys(
                            [*models, *(m for f in families.values() for m in f.get("models", ()))])),

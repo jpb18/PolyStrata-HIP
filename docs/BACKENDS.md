@@ -15,7 +15,7 @@ card with 8 GB was not there: [one table](#with-8-gb-of-vram) holds the 5090 to 
 | GLM 5.3 Flash | `glm5-next` | `strata-glm` | GSQ-RCO 3.0bit, REAP50-Q3_K_M, UD-IQ2_XXS | draft block |
 | Qwen3.6-35B-A3B | `qwen35moe` | `strata-glm` | Unsloth UD-Q3_K_M, 17.1 GB | draft block in the file |
 | Ornith 1.5 35B-A3B | `qwen35moe` | `strata-glm` | APEX-MTP-I-Compact, 17.4 GB | draft block in the file |
-| Gemma 4 26B-A4B | `gemma4` | `strata-glm` | Unsloth UD-Q3_K_M, 12.7 GB | repeats of the text only |
+| Gemma 4 26B-A4B | `gemma4` | `strata-glm` | Unsloth UD-Q3_K_M, 12.7 GB | its draft model, a file of 0.46 GB |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-glm` is the engine that reads a
 GGUF in place, and it now has three architectures. Its name is from its first model and will change.
@@ -41,13 +41,14 @@ straight to it:
 | --- | --- | --- | --- | --- |
 | `qwen36` | Qwen3.6-35B-A3B | Unsloth UD-Q3_K_M | 17.1 GB | about 21 GB |
 | `ornith` | Ornith 1.5 35B-A3B | APEX-MTP-I-Compact | 17.4 GB | about 22 GB |
-| `gemma4` | Gemma 4 26B-A4B | Unsloth UD-Q3_K_M | 12.7 GB | about 17 GB |
+| `gemma4` | Gemma 4 26B-A4B | Unsloth UD-Q3_K_M and its draft model | 13.2 GB | about 18 GB |
 
 The steps are GLM's ([GLM.md](GLM.md#install)). Setup asks the context and whether to keep several conversations in
-RAM, compiles `strata-glm`, downloads the one file from a pinned revision, checks its SHA-256, writes the tokenizer
-directory, the run config and a start script, and starts the model. `--gguf-dir /folder/with/the/file` takes a file
-you already have. The engine is compiled once for all of them. On the test machine, with the files on the disk,
-the first install took a minute, most of it the compile, and the other two 17 seconds each.
+RAM, compiles `strata-glm`, downloads the model's file from a pinned revision (for Gemma 4 also its draft model,
+0.46 GB), checks the SHA-256, writes the tokenizer directory, the run config and a start script, and starts the
+model. `--gguf-dir /folder/with/the/file` takes a file you already have; a draft model that is not in that folder is
+downloaded to setup's own. The engine is compiled once for all of them. On the test machine, with the files on the
+disk, the first install took a minute, most of it the compile, and the other two 17 seconds each.
 
 Each install is a model of its own: `--list-models`, `/model` and the web page's list show all of them, and
 `./setup.sh --check` has a line for each with what this PC's card and RAM make of it.
@@ -114,6 +115,19 @@ key, so a model the engine cannot run is listed as unavailable with the reason i
 Within an architecture the shape comes from the file: layer counts, widths, head counts, expert counts, which
 layers have which attention, whether there is a draft block. Qwen3.6 and Ornith 1.5 are one class because their
 files describe the same layout with other weights.
+
+The server takes how a model talks from its tokenizer directory: the chat template, the tokens that end a reply,
+and, by the tokenizer's `pre` name, how the model writes its reasoning and its tool calls (`serve/frontend.py`).
+
+| Model | Reasoning | A tool call |
+| --- | --- | --- |
+| Qwen3.8, Qwen3.6, Ornith | the prompt opens it, `</think>` ends it | `<tool_call><function=NAME><parameter=P>...` |
+| GLM | the same | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...` |
+| Gemma 4 | `<\|channel>thought` to `<channel\|>`, opened by the model | `<\|tool_call>call:NAME{key:value,...}<tool_call\|>` |
+
+Gemma 4's template thinks only when it is told to, reads a tool in OpenAI's shape and starts with the tokenizer's
+`<bos>`; the server gives it all three. A tool's answers are put in the order of their calls for every model,
+because a model reads them by position.
 
 ## The registry
 
@@ -209,31 +223,39 @@ the expert cache's hit rate, the share of guessed tokens that were right, and th
 use and mean GPU and CPU load while it ran. The speeds and the cache figures are the engine's own clock and
 counters.
 
-Tokens per second on the machine above, context 32768, every expert in VRAM for the three new models.
-"Before" is the first build of each backend, "after" has the changes under [What was tuned](#what-was-tuned).
+Tokens per second on the machine above, context 32768, every expert in VRAM for the three new models, as setup
+installs them. The first build of each backend read the longest prompt at 636, 632 and 213 tokens/s and wrote
+after it at 68, 54 and 55; [What was tuned](#what-was-tuned) has the steps between.
 
 | Model | Prompt, tokens | First token, s | Reads, tokens/s | Writes, tokens/s | Experts from VRAM | Guesses right |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B | 21 | 0.20 | 106 | 110 to 108 | 100% | 88% |
-| | 2,486 | 3.0 to 2.9 | 831 to 859 | 97 to 106 | 100% | 94% |
-| | 10,083 | 12.7 to 9.1 | 636 to 889 | 68 to 84 | 100% | 86% |
-| Ornith 1.5 | 21 | 0.20 | 105 | 87 to 90 | 100% | 93% |
-| | 2,486 | 3.0 to 2.9 | 825 to 854 | 81 to 86 | 100% | 93% |
-| | 10,083 | 12.8 to 9.2 | 632 to 877 | 54 to 68 | 100% | 78% |
-| Gemma 4 26B-A4B | 22 | 0.25 | 88 | 95 | 100% | |
-| | 2,544 | 10.9 to 1.2 | 235 to 2,192 | 69 to 82 | 100% | 21% |
-| | 10,465 | 39.5 to 3.7 | 213 to 2,346 | 55 to 75 | 100% | 45% |
-| GLM 5.3 Flash 3.0bit | 23 | 0.87 | 27 | 43 | 48% | 87% |
-| | 2,337 | 7.4 | 317 | 43 | 50% | 80% |
-| | 9,497 | 23.4 | 319 | 47 | 59% | 85% |
+| Qwen3.6-35B-A3B | 21 | 0.17 | 127 | 125 | 100% | 89% |
+| | 2,571 | 0.75 | 3,526 | 116 | 100% | 86% |
+| | 10,042 | 2.4 | 3,504 | 95 | 100% | 88% |
+| Ornith 1.5 | 21 | 0.16 | 140 | 102 | 100% | 94% |
+| | 2,571 | 0.73 | 3,603 | 94 | 100% | 87% |
+| | 10,042 | 2.3 | 3,497 | 78 | 100% | 84% |
+| Gemma 4 26B-A4B | 26 | 0.23 | 131 | 122 | 100% | 66% |
+| | 2,658 | 0.85 | 3,361 | 110 | 100% | 69% |
+| | 10,396 | 2.7 | 3,262 | 93 | 100% | 69% |
+| GLM 5.3 Flash 3.0bit | 23 | 0.89 | 26 | 43 | 48% | 84% |
+| | 2,427 | 7.5 | 325 | 46 | 48% | 89% |
+| | 9,448 | 23.7 | 312 | 46 | 58% | 86% |
 
-Where a cell has two numbers they are before and after. GLM's numbers did not change. A short prompt is read a
-few tokens at a time, which is why its reading speed is low. Gemma 4's guesses come from repeats of the text
-alone, so there are few of them and fewer are right.
+A short prompt is read a few tokens at a time, which is why its reading speed is low. Gemma 4 thinks in this
+table, as the others do, and guesses with its draft model. GLM's rows are of the engine before these changes,
+which left its speeds where they were: the builds after each change wrote 41 to 43 tokens/s after the short
+prompt in the same test.
+
+GLM is sensitive to what the machine did before. After the other models had run, its first request came out at
+28 to 35 tokens/s until its file was back in the file cache, and its starts were ended by a kill signal while the
+pod's memory was at its limit with other files' pages, until those pages were dropped. Setup's build of the engine
+wrote 38 to 43 tokens/s where the development build wrote 41 to 44, from the same sources; the two take ggml from
+different checkouts, and the difference was not looked into.
 
 llama.cpp (Unsloth's fork at 86ebfef) with every layer on the same card writes about 180 tokens/s with Qwen3.6
 and Ornith and 165 with Gemma 4, and reads prompts at 6000 to 9000. It cannot do that on a card the model does
-not fit, which is the case this engine is for; that case has not been measured for the new models yet.
+not fit, which is the case this engine is for.
 
 ### With 8 GB of VRAM
 
@@ -244,15 +266,20 @@ above. 300-token answers, tokens per second; the two numbers are without and wit
 
 | Model | Experts from VRAM | Writes after a short prompt | after about 2,100 tokens | after about 7,700 | Reads a long prompt |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B | 46% to 60% | 86, 102 | 92, 102 | 73, 78 | 840 to 1,040 |
-| Ornith 1.5 | 50% to 61% | 90, 78 | 97, 95 | 79, 73 | 830 to 1,030 |
-| Gemma 4 26B-A4B | 58% to 61% | 81, 103 | 78 | 68, 73 | 1,570 to 2,870 |
+| Qwen3.6-35B-A3B | 43% to 60% | 84 to 94, 112 to 118 | 95, 108 | 80, 88 | 1,770 to 2,680 |
+| Ornith 1.5 | 44% to 60% | 96 to 109, 87 to 96 | 102, 99 | 81, 78 | 1,750 to 2,670 |
+| Gemma 4 26B-A4B | 48% to 61% | 77 to 81, 105 to 110 | 77, 86 | 69, 75 | 1,650 to 3,000 |
+
+The short prompts are two of three: the first run of Qwen3.6 and of Gemma 4 started with the file out of the file
+cache and wrote at half these speeds. With guesses a smaller share of the experts comes from VRAM (48% against
+60% for Gemma 4). Ornith writes no faster with its guesses here, which was not looked into.
 
 With part of the experts on the CPU, two runs of a prompt no longer write the same tokens: which experts are
 cached changes while the answer is written, and an expert on the CPU differs from the same one on the card in the
-last bits. One of the fifteen runs behind this table was ended by a kill signal while it read its prompt (Gemma 4,
-2,212 tokens); four runs of the same command afterwards finished and wrote the reference's 64 tokens. The pod's
-memory was at its limit then (file cache); the cause was not found.
+last bits. In an earlier round of these runs one was ended by a kill signal while it read its prompt (Gemma 4,
+2,212 tokens); four runs of the same command afterwards finished. The pod's memory was at its limit then (file
+cache), as it was when a GLM start was killed later; the pod's own counter of memory kills stayed at zero, and the
+cause was not found.
 
 ## How each backend was checked
 
@@ -261,9 +288,9 @@ token ids compared and the probabilities of the reference's five likeliest token
 
 | Model | Same tokens as llama.cpp (of 64) | Largest probability difference |
 | --- | --- | --- |
-| Qwen3.6-35B-A3B | 64, 64, 64, 64, 64 | 0.08 |
-| Ornith 1.5 | 60 of 60, 7, 56, 2, 64 | 0.35 |
-| Gemma 4 26B-A4B | 64, 64, 32, 44, 64 | 0.08 |
+| Qwen3.6-35B-A3B | 64, 64, 64, 64, 64 | 0.07 |
+| Ornith 1.5 | 60 of 60, 7, 39, 40, 64 | 0.48 |
+| Gemma 4 26B-A4B | 64, 64, 32, 64, 64 | 0.07 |
 
 Two correct implementations do not write the same tokens for long. Activations are quantized to 8 bits at every
 quantized matrix, in a layout that depends on the kernel, so the two differ in the last bits and a near tie
@@ -271,9 +298,21 @@ between two tokens goes either way. Ornith's file has 3-bit experts and 4-bit at
 llama.cpp's own GPU and CPU runs of it agree for 17 of 50, 7 of 64 and 15 of 64 tokens on the three short prompts
 and differ by up to 0.19, which is as far apart as this engine is from either.
 
+The numbers move with every change to a kernel that changes the order of a sum: before the last ones Ornith's
+were 60, 7, 56, 2, 64 and Gemma 4's fourth was 44. Where a change kept the arithmetic (the first rewrite of the
+delta net's step, the threads of the routing, the sum of a call's experts), the numbers and the tokens stayed as
+they were, and that was the check of the change.
+
 Also checked, for each model: with windows of guessed tokens and without, 300-token answers are the same tokens;
 with every expert on the CPU the short prompts still follow the reference to a near tie. GLM writes the same
 tokens as before the engine was split, with every expert on the CPU.
+
+Gemma 4 with its draft model writes the same tokens as without it on nine prompts of 26 to 8,001 tokens, with and
+without thinking and tools; on the prompts with thinking the engine's tokens are llama.cpp's for 96 of 96 and 82
+of 82 and up to a near tie on two more. Its tool calls were run through the server with the real template: a
+call and its answer with thinking on and off, a streamed call, two calls answered in the other order, the
+Anthropic route, a follow-up after an answer with text. The same script passes with Qwen3.6, and with GLM but for
+one check that expected reasoning where GLM gave none.
 
 The tokenizers give llama.cpp's ids on the same prompts (27 to 8001 tokens) for Qwen3.6, Ornith and Gemma 4.
 
@@ -286,8 +325,27 @@ The tokenizers give llama.cpp's ids on the same prompts (27 to 8001 tokens) for 
 | | Qwen3.6, reading 7709 tokens | 750 | 931 |
 | The attention's sum over values in eight shares | Qwen3.6, writing after 7709 tokens | 57 | 78 |
 | | Gemma 4, writing after 8001 tokens | 53 | 68 |
+| A layer's cached experts in a few launches, by how many rows each has | Qwen3.6, reading 7709 tokens | 932 | 1,114 |
+| The delta net's state update a warp a column, its norms outside the walk over the tokens | Qwen3.6, reading 7709 tokens | 1,114 | 3,189 |
+| A prompt batch's routing on every host thread | Qwen3.6, reading 7709 tokens | 3,189 | 4,241 |
+| | Gemma 4, reading 8001 tokens | 3,254 | 4,663 |
+| One launch adds up a call's cached experts | Qwen3.6, writing after a short prompt | 122 to 129 | 132 to 138 |
+| Gemma 4's draft model | Gemma 4, writing after a short prompt | 94 | 126 to 141 |
+| | Gemma 4, writing after 8001 tokens | 73 | 99 |
 
-All three are in the shared kernels, so every architecture with that kind of attention has them.
+All but the last are in the shared runtime or its kernels, so every architecture with that kind of layer has
+them. Gemma 4's row for the routing has the two changes before it in it as well.
+
+Each of the three steps of reading a prompt came from timing the one before it. Timed on the 7709-token prompt,
+the delta net's step was 4.8 of 6.9 seconds, where this page had said the experts' launches were most of it; they
+were a sixth. After it the routing, one thread's work, was 0.9 of 2.4 seconds.
+
+Writing is bound by the engine's thread, not by the card. With the default windows of guessed tokens, and before
+the change that adds a call's experts up in one launch, 1.75 of the 2.37 seconds Qwen3.6 took for 300 tokens were
+spent handing the cached experts' launches to the card, five an expert, and the card was waited for during 0.3
+of them. That change took one of the five away. Recording the launches as a CUDA graph and setting each expert's
+slot in it for every token was tried and gave 1 to 2%: setting a node's arguments costs about what a launch
+does. Fewer launches an expert is what is left to do.
 
 ## Adding a model of an architecture that is there
 
@@ -332,16 +390,19 @@ Setup knows the files in the table above. Another file of one of these architect
 - Linux and one NVIDIA card. Built and run on one machine.
 - The three new models have run with all their experts in VRAM and with the card held to 8 GB, not on a card
   that has 8 GB, nor on a PC with 32 GB of RAM. The target of 8 GB of VRAM with 32 GB of RAM is not measured.
-- Setup installed the three new models from files that were already on the disk. Its download of them was not
-  run: the three addresses were asked for their headers only, and each states the pinned size.
+- Setup installed the three new models from files that were already on the disk. Of the new files its own
+  download fetched Gemma 4's draft model (0.46 GB, through a mirror) and found the pinned SHA-256; the three
+  addresses of the model files were asked for their headers only, and each states the pinned size.
 - Setup's RAM figures for them are estimates.
-- Gemma 4: its draft model (a separate small GGUF that shares the caches) is not run, so it guesses from repeats
-  only; its tool calls are not parsed; images are not read.
-- Qwen3.6 and Ornith: images are not read.
-- Qwen3.6 and Ornith read prompts at about 900 tokens/s. A prompt batch launches the batched kernel once per
-  cached expert, and with 256 experts a layer that is most of the time.
+- Images are not read by Qwen3.6, Ornith or Gemma 4.
 - A layer with attention over the cache is not recorded as a CUDA graph, because its launches take the position.
   Gemma 4 has such a layer everywhere, Qwen in every fourth.
-- With everything in VRAM, llama.cpp is faster on the same card (see above). The router's scores go to the host
-  and back in every layer, which a model that fits does not need.
+- With everything in VRAM, llama.cpp is still faster on the same card: it writes 165 to 180 tokens/s where this
+  engine writes 100 to 125, and reads prompts about twice as fast. Writing here is bound by the launches of the
+  cached experts (see [What was tuned](#what-was-tuned)), and the router's scores go to the host and back in
+  every layer, which a model that fits does not need.
+- GLM's recurrent layers still use the step the delta net had before it was rewritten for Qwen3.6. GLM's prompts
+  are bound by the experts that are not in VRAM, so it was left.
+- No test runs the engine without a GPU and the model files: what is said of it here was measured by hand on the
+  one machine.
 - The benchmark's VRAM and RAM figures are the machine's, not the engine's alone.
