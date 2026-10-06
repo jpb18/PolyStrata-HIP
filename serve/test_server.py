@@ -2845,6 +2845,64 @@ class ThinkingEngine(MockEngine):
             yield t
 
 
+class EndsInsideThinkingEngine(ThinkingEngine):
+    """The #1053 reply: one sentence of reasoning, then the end-of-turn token, no </think>.  A prompt that ends the
+    thinking (the retry) gets the answer."""
+    THOUGHT = "Let me think: two plus two is four."
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        self.prompts.append(list(ids))
+        done = self.tok.decode(ids).endswith("</think>" + chr(10) + chr(10))
+        text = self.ANSWER if done else self.THOUGHT
+        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
+            if cancel.is_set():
+                return
+            yield t
+
+
+class ReasoningCloseRetry(unittest.TestCase):
+    """#1053 (opt-in): a reply that ends inside <think> with no answer is continued once with the thinking closed."""
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.engine = EndsInsideThinkingEngine(self.tok)
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def chat(self):
+        body = {"model": "m", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 300}
+        req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())["choices"][0]
+
+    def test_off_by_default_the_reply_stays_empty(self):
+        c = self.chat()
+        self.assertEqual(self.engine.prompts.__len__(), 1)
+        self.assertFalse(c["message"].get("content"))
+
+    def test_on_it_closes_the_thinking_once_and_answers(self):
+        self.svc.reasoning_close_retry = True
+        c = self.chat()
+        self.assertEqual(len(self.engine.prompts), 2)
+        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith("</think>" + chr(10) + chr(10)))
+        self.assertEqual(c["message"]["content"], EndsInsideThinkingEngine.ANSWER)
+        self.assertIn("two plus two is four", c["message"]["reasoning_content"])
+        self.assertEqual(c["finish_reason"], "stop")
+
+    def test_a_reply_that_answered_is_not_touched(self):
+        self.svc.reasoning_close_retry = True
+        self.engine.THOUGHT = "ok</think>" + chr(10) + chr(10) + "Fine."
+        c = self.chat()
+        self.assertEqual(len(self.engine.prompts), 1)
+        self.assertEqual(c["message"]["content"], "Fine.")
+
+
 class ThinkingBudget(unittest.TestCase):
     """#123: reasoning_budget_tokens (opt-in): at the budget the thinking is wrapped up and the model answers,
     continuing from the prompt plus what it generated plus the wrap-up (a prefix the engine already holds)."""
