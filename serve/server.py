@@ -1089,6 +1089,7 @@ class StrataEngine:
         out: list[int] = []
         pending: list[int] = []
         prompt, left = list(ids), int(max_new)
+        reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         ok = yield from self._take_control(cancel, len(prompt))
         if not ok:
             return
@@ -1148,6 +1149,8 @@ class StrataEngine:
                         left = int(max_new) - len(out)
                         if cancel.is_set() or left <= 0 or finish in ("stop", "length") or (out and out[-1] in EOS_IDS):
                             return
+                        if reused0 is None:
+                            reused0 = (self.last or {}).get("reused")
                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
                 while True:
                     if slot is None:
@@ -1257,6 +1260,8 @@ class StrataEngine:
                                 self.slot_busy[slot] = False
                                 self.slot_cv.notify_all()
                             slot, gen0 = None, None
+                            if reused0 is None:
+                                reused0 = (self.last or {}).get("reused")
                             prompt, left = list(ids) + out, int(max_new) - len(out)
                             solo_again += 1
                             btrace("back to the solo path")
@@ -1279,6 +1284,8 @@ class StrataEngine:
                         phase = "slot"
             except EngineDied:
                 pass
+            if reused0 is not None and isinstance(self.last, dict):
+                self.last = {**self.last, "reused": reused0}
             if holding:
                 self.ctl.release()
             if reserved is not None:
@@ -3557,8 +3564,10 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                 "tool_use" if used_tool and streamed <= finished and x["finish"] == "stop" else \
                 {"stop": "end_turn", "length": "max_tokens", "cancel": "end_turn"}[x["finish"]]
             # the final counts, Anthropic's way: input_tokens leaves out what the conversation cache already held,
-            # which is cache_read_input_tokens (message_start could only say the whole prompt)
-            reused = min(x.get("reused") or 0, len(ids))
+            # which is cache_read_input_tokens (message_start could only say the whole prompt).  At least the last
+            # prompt token is always read, and Claude Code takes an input_tokens of 0 as "not given" and keeps
+            # message_start's whole prompt beside cache_read_input_tokens: the prompt counted twice (#1013)
+            reused = max(0, min(x.get("reused") or 0, len(ids) - 1))
             yield "message_delta", {"type": "message_delta", "delta": {"stop_reason": stop,
                                                                        "stop_sequence": x.get("stop_sequence")},
                                     "usage": {"input_tokens": len(ids) - reused, "cache_read_input_tokens": reused,
