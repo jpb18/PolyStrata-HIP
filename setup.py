@@ -1128,16 +1128,17 @@ def find_vcvars():
 
 
 def find_tool(name):
-    """A tool on PATH, or the one pip installed next to this Python (cmake, ninja)."""
+    """cmake or ninja: the one pip installed next to this Python, else one on PATH.  The system's own can be older
+    than CMakeLists.txt takes: Ubuntu 22.04 has cmake 3.22, and the engine asks for 3.24."""
+    file = name + (".exe" if WIN else "")
+    for d in (Path(sys.executable).parent / "Scripts", Path(sys.executable).parent):
+        if (d / file).exists():
+            return str(d / file)
     p = shutil.which(name)
     if p:
         return p
-    for d in (Path(sys.executable).parent / "Scripts", Path(sys.executable).parent,
-              Path.home() / ".local" / "bin"):
-        c = d / (name + (".exe" if WIN else ""))
-        if c.exists():
-            return str(c)
-    return None
+    c = Path.home() / ".local" / "bin" / file
+    return str(c) if c.exists() else None
 
 
 def free_gb(path):

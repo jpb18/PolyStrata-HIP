@@ -157,6 +157,20 @@ class Config(unittest.TestCase):
             self.assertIn(setup.OLD_ENGINE_POLY_DIR + "/ can be deleted", out)
         self.assertFalse(setup.poly_config({"exe": "/x/engine/" + setup.EXE}))
 
+    def test_the_compile_takes_the_cmake_pip_installed(self):
+        # a cmake on PATH can be older than CMakeLists.txt takes (Ubuntu 22.04's); the one beside Python is setup's
+        with tempfile.TemporaryDirectory() as t:
+            mine, name = Path(t) / "bin", "cmake" + (".exe" if setup.WIN else "")
+            mine.mkdir()
+            with mock.patch.object(sys, "executable", str(mine / "python")), \
+                    mock.patch.object(setup.shutil, "which", lambda n: "/usr/bin/" + n), \
+                    mock.patch.object(setup.Path, "home", lambda: Path(t) / "home"):
+                self.assertEqual(setup.find_tool("cmake"), "/usr/bin/cmake")       # none of its own: PATH's
+                (mine / name).write_text("")
+                self.assertEqual(setup.find_tool("cmake"), str(mine / name))
+                with mock.patch.object(setup.shutil, "which", lambda n: None):
+                    self.assertIsNone(setup.find_tool("ninja"))
+
     def test_saved_conversation_cache(self):
         with tempfile.TemporaryDirectory() as t:
             p = Path(t) / "c.json"
