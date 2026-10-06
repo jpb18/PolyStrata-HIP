@@ -1625,7 +1625,17 @@ ROCM_INDEXES = {"gfx1100": "https://rocm.nightlies.amd.com/v2/gfx110X-dgpu/",   
                 "gfx1031": "https://rocm.nightlies.amd.com/v2/gfx103X-all/",
                 "gfx1151": "https://rocm.nightlies.amd.com/v2/gfx1151/",       # Strix Halo (docs/STRIX_HALO.md)
                 "gfx1103": "https://rocm.nightlies.amd.com/v2/gfx110X-all/"}   # Radeon 780M: only with STRATA_EXPERIMENTAL_GFX1103=1
-ROCM_VERSION = os.environ.get("STRATA_ROCM_VERSION", "7.10.0a20251120")   # what Strata's HIP build was tested with
+# The TheRock nightly indexes are pruned and move on, and each GPU family's index holds its own range (#1103: gfx103X-all
+# starts at 7.13.0a20260422 and has no 7.10; #1267: the 7.10 wheel segfaults on a Strix Halo with kernel 7.2.8), so one
+# version for every card cannot work.  The wheel is chosen per index (the family): a preferred version, tried first; when
+# the index no longer offers it, the newest one of the same 7.x line, else of the same major, with a warning (rocm_pick).
+# STRATA_ROCM_VERSION still forces one exact version (no lookup).
+ROCM_VERSION_DEFAULT = "7.10.0a20251120"                 # what Strata's HIP build was tested with (gfx120X, gfx110X)
+ROCM_FAMILY_PINS = {"gfx103X-all": "7.13.0a20260515",    # #1103: 7.13.0a20260515 runs; the 7.14 nightlies time out
+                    "gfx110X-all": "7.10.0a20251121",    # the experimental gfx1103: this index has no ...20251120
+                    "gfx1151": "7.14.0a20260608"}        # #1267: 7.14.0a20260529 to 20260608 run on kernel 7.2.8; the 7.10 wheel segfaults
+ROCM_VERSION_OVERRIDE = os.environ.get("STRATA_ROCM_VERSION") or None
+ROCM_VERSION = ROCM_VERSION_OVERRIDE or ROCM_VERSION_DEFAULT   # kept for callers that read one version
 ROCM_SYSTEM_MIN = (7, 0)       # an older system ROCm is passed over for the wheels (gfx1201 needs ROCm 6.4 or newer)
 # STRATA_EXPERIMENTAL_GFX1103=1 (opt-in, unsupported): the Radeon 780M / 760M / 740M iGPU (Ryzen 7040 / 8040, gfx1103) is taken
 # as a unified-memory AMD card like Strix Halo, with the portable kernels (no WMMA) (measured on one machine: Ryzen 7 255).  Unset: unchanged.
@@ -1651,6 +1661,62 @@ AMD_CARDS = ("the RX 7900 XT / XTX (gfx1100), RX 7800 XT / 7700 XT (gfx1101), RX
 
 def rocm_index(arch):
     return os.environ.get("STRATA_ROCM_INDEX") or ROCM_INDEXES[arch]
+
+
+def rocm_family(index):
+    """The family name of a TheRock index url (.../v2/gfx103X-all/ -> gfx103X-all)."""
+    return index.rstrip("/").rsplit("/", 1)[-1]
+
+
+def rocm_vkey(version):
+    """Sort key of a TheRock version: 7.13.0a20260515 -> (7, 13, 0, 20260515); None when it is not one."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[a-z]+(\d+))?", version)
+    return tuple(int(g or 0) for g in m.groups()) if m else None
+
+
+def rocm_index_versions(html):
+    """The versions of the `rocm` package that a TheRock index page (<index>/rocm/) lists, oldest first."""
+    return sorted({m for m in re.findall(r"rocm-(\d+\.\d+\.\d+(?:[a-z]+\d+)?)\.(?:tar\.gz|whl)", html or "")
+                   if rocm_vkey(m)}, key=rocm_vkey)
+
+
+def rocm_pick(available, preferred):
+    """(version, note) for an index that lists `available`: `preferred` when it is there, else the newest of the same
+    7.x line, else the newest of the same major (the note says so); `preferred` unchanged when the list is empty (the
+    index could not be read: pip then reports its own error) or nothing of that major exists (the note says so)."""
+    if not available or preferred in available:
+        return preferred, None
+    want = rocm_vkey(preferred)
+    for same, what in ((lambda k: k[:2] == want[:2], "line"), (lambda k: k[0] == want[0], "major")):
+        hits = [v for v in available if same(rocm_vkey(v))]
+        if hits:
+            got = max(hits, key=rocm_vkey)
+            return got, (f"ROCm {preferred} is not on this index any more: using {got}, the newest of the same {what} "
+                         f"(set STRATA_ROCM_VERSION to choose another)")
+    return preferred, (f"ROCm {preferred} is not on this index and nothing of its major version is: "
+                       f"{available[0]} to {available[-1]} are (set STRATA_ROCM_VERSION to one of them)")
+
+
+def rocm_wanted(index, listing=None):
+    """(ROCm wheel version, warning or None) for a TheRock index (see ROCM_FAMILY_PINS).  `listing` is the index
+    page's html (None: fetched from <index>/rocm/; a failed fetch keeps the preferred version)."""
+    if ROCM_VERSION_OVERRIDE:
+        version, note = ROCM_VERSION_OVERRIDE, None
+    else:
+        preferred = ROCM_FAMILY_PINS.get(rocm_family(index), ROCM_VERSION_DEFAULT)
+        if listing is None:
+            try:
+                req = urllib.request.Request(index.rstrip("/") + "/rocm/", headers={"User-Agent": "strata-setup"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    listing = r.read().decode("utf-8", "replace")
+            except (OSError, ValueError):
+                listing = ""
+        version, note = rocm_pick(rocm_index_versions(listing), preferred)
+    if rocm_family(index) == "gfx1151" and (rocm_vkey(version) or (9, 0))[:2] < (7, 11):
+        note = ((note + "; ") if note else "") + (
+            "the ROCm 7.10 wheels segfault in the HSA runtime on a Strix Halo with a new kernel (7.2.8, #1267): "
+            "the 7.14 line (docs/STRIX_HALO.md) is the one that works")
+    return version, note
 
 
 # Strix Halo (Ryzen AI Max 380 / 385 / 390 / 395 + PRO: Radeon 8040S / 8050S / 8060S, RDNA 3.5, gfx1151) and the other
@@ -2212,7 +2278,7 @@ def rocm_dev_missing(sysroot: Path) -> list:
 def rocm_root(archs):
     """ROCm for compiling and running the HIP engine for `archs` (one arch or a list: the cards of a layer split):
     (root, library folders).  A system ROCm 7 with hipcc, hipBLAS and the HIP development files (#446), else AMD's
-    TheRock wheels (ROCM_VERSION, from the card family's index) installed into .venv."""
+    TheRock wheels (rocm_wanted: a version per card family, from the family's index) installed into .venv."""
     archs = [archs] if isinstance(archs, str) else list(archs)
     sysroot = Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
     if (sysroot / "bin" / "hipcc").exists() and list((sysroot / "lib").glob("libhipblas.so*")):
@@ -2233,13 +2299,21 @@ def rocm_root(archs):
     index = indexes[0]
     stamp = Path(sys.prefix) / ".strata-rocm.json"
     have = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
-    if have.get("version") != ROCM_VERSION or have.get("index") != index:
-        say(f"  Installing ROCm {ROCM_VERSION} for AMD GPUs into .venv (AMD's TheRock wheels, ~10 GB, no sudo) ...")
+    wheel = None
+    if have.get("index") == index and have.get("version") and not ROCM_VERSION_OVERRIDE \
+            and (Path(sys.executable).parent / "rocm-sdk").exists() and have["version"] == ROCM_FAMILY_PINS.get(rocm_family(index), ROCM_VERSION_DEFAULT):
+        wheel = have["version"]                         # the family's pin is installed: no lookup
+    if wheel is None:
+        wheel, note = rocm_wanted(index)
+        if note:
+            warn(note)
+    if have.get("version") != wheel or have.get("index") != index:
+        say(f"  Installing ROCm {wheel} for AMD GPUs into .venv (AMD's TheRock wheels, ~10 GB, no sudo) ...")
         pip = [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--index-url", index]
-        if have.get("version") == ROCM_VERSION:        # the same version for another GPU family: its own libraries
-            run(pip + ["--force-reinstall", "--no-deps", f"rocm=={ROCM_VERSION}"])
-        run(pip + [f"rocm[libraries,devel]=={ROCM_VERSION}"])
-        stamp.write_text(json.dumps({"version": ROCM_VERSION, "index": index}))
+        if have.get("version") == wheel:               # the same version for another GPU family: its own libraries
+            run(pip + ["--force-reinstall", "--no-deps", f"rocm=={wheel}"])
+        run(pip + [f"rocm[libraries,devel]=={wheel}"])
+        stamp.write_text(json.dumps({"version": wheel, "index": index}))
     sdk = Path(sys.executable).parent / "rocm-sdk"
     root = Path(out([str(sdk), "path", "--root"]).strip())
     if not (root / "llvm" / "bin" / "clang++").exists():
