@@ -4224,6 +4224,9 @@ def main() -> int:
                     help="where the model files come from: auto (default: Hugging Face), huggingface or modelscope "
                          "(mainland China: the same files, checked against ModelScope's published SHA-256; "
                          "STRATA_SOURCE)")
+    ap.add_argument("--inspect", nargs="+", metavar=("SOURCE", "VARIANT"),
+                    help="what a GGUF is and whether Strata runs it, from its headers only (no download): a file, a "
+                         "folder, a URL, ms:owner/repo (ModelScope) or hf:owner/repo, and optionally a variant name")
     ap.add_argument("--cuda", choices=["12", "13", "auto"], default=os.environ.get("STRATA_CUDA") or None,
                     help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13, the ready-made "
                          "engine; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
@@ -4263,6 +4266,8 @@ def main() -> int:
     a = ap.parse_args()
     if a.source:
         os.environ["STRATA_SOURCE"] = a.source
+    if a.inspect:                                      # headers only: nothing is installed
+        sys.exit(subprocess.run([sys.executable, str(ROOT / "tools" / "strata_inspect.py"), *a.inspect[:2]]).returncode)
     if a.backend == "sycl":                            # Intel Arc: the SYCL port's own setup (sycl/setup_intel.py)
         return sycl_setup(sys.argv[1:])
     if a.resident_budget_gib is not None and not a.resident_budget_gib > 0:

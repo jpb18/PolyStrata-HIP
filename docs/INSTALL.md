@@ -227,6 +227,7 @@ START-HERE.bat --setup                          install another model, or change
 SETUP.bat                                       the same (double-click it)
 START-HERE.bat --model IQ2_XS --context 32768 --vision yes --yes     no questions
 START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
+START-HERE.bat --inspect D:\models\some.gguf     what a GGUF really holds and whether Strata runs it (no download)
 START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (setup picks the one with the most VRAM)
@@ -261,7 +262,12 @@ free the most.
 
 **Model files downloaded by hand, or from a mirror (#495):** setup's step 5 prints the folder it expects them in
 (`Strata-data\models\<SIZE>\`, e.g. `Strata-data\models\IQ3_XXS\`): put them there with their original names, or
-point setup at them with `--gguf-dir`. To let setup download from a Hugging Face mirror itself, set `HF_ENDPOINT`
+point setup at them with `--gguf-dir`. To see what a file really holds before using or downloading it, `--inspect`
+reads only its headers (a few MB, also over the network: a file, a folder, a URL, `ms:owner/repo` for ModelScope or
+`hf:owner/repo`): every weight group's real bits per weight and storage types, and whether it is one of the files setup
+installs (under any name), stored like one of them, or not one Strata runs (another architecture, or experts in a
+format no Strata kernel reads). A name says little: Unsloth's `UD-IQ3_XXS` stores its routed experts at 3.22 bits per
+weight, `UD-Q4_K_XL` at 5.10, the original `Q2_0` at 2.25 and `IQ3_S` at 3.33. To let setup download from a Hugging Face mirror itself, set `HF_ENDPOINT`
 first (Windows: `set HF_ENDPOINT=https://hf-mirror.com`, Linux: `export HF_ENDPOINT=https://hf-mirror.com`): the same
 pinned revisions and checks apply, and the MTP draft layer comes from there too.
 
