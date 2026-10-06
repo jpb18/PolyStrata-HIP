@@ -1205,9 +1205,12 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     // call before (staged_).  The ones copied ahead do not depend on the routing and are this call's too.  A
     // later round is this call's only if it routes to the same experts, and waiting to see means nothing is
     // copied ahead meanwhile.  That pays when the card gets to the routing in under half the time the copy
-    // ahead takes: most of that copy then holds the card up.  A call too small to copy ahead does not use what
-    // is there: with another launch's experts the batched kernels would split its sums another way.
-    const bool ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead;
+    // ahead takes: most of that copy then holds the card up.
+    //
+    // A small call on its own copies only the experts it routes to.  With another launch's experts the batched
+    // kernels would split its sums another way, so it cannot take what a call before it left.  In a read of
+    // several calls it copies ahead as the others do, and the copy is theirs too.
+    const bool ahead = opt_.stage_ahead > 0 && (n >= opt_.stage_ahead || shared_ahead_);
     if (ahead) plan_ahead(L, il);
     const int n_ahead = ahead ? (int) L.ahead.size() : 0;
     const bool mine = ahead && staged_il_ == il && (staged_ == L.ahead || 2 * route_ms_ < ahead_ms_);
@@ -1633,7 +1636,8 @@ void Engine::layer(int il, int n) {
 // call copies every layer's through the staging buffer, which is most of what reading a prompt takes.  So the
 // calls go through a layer one after the other before any goes on to the next, and the second one finds the
 // layer's experts where the first one's copy left them (moe_rows()).  A call's tokens meet what they met in a
-// call of their own, in the same order, so the result is eval()'s.
+// call of their own, in the same order, so the result is eval()'s.  But a call under stage_ahead tokens takes
+// those experts too, which on its own it would not, and its sums are split as a larger call's.
 //
 // All a call needs kept from one layer to the next is its rows of the residual.  r_ holds two calls' rows.  With
 // more calls, a call's rows go to host memory when the card is done with them and come back before the call's
@@ -1708,6 +1712,7 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
     }
     // a turn for each layer, and one for the model's output, which the draft block keeps a row of
     const int turns = n_layer_ + (draft_ ? 1 : 0);
+    shared_ahead_ = true;
     try {
         for (int il = 0; il < turns; ++il)
             for (int c = 0; c < n_calls; ++c) {
@@ -1746,10 +1751,12 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
         if (host) ck(cudaStreamSynchronize(cs(rs_)), "read");
     } catch (...) {
         if (host) cudaStreamSynchronize(cs(rs_));
+        shared_ahead_ = false;
         r_ = r0;
         pos_ = pos0;
         throw;
     }
+    shared_ahead_ = false;
     r_ = r0;
     pos_ = pos0 + n;
     stats_.tokens += n;
