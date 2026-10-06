@@ -390,7 +390,7 @@ class Install(FakeRoot):
         self.assertFalse(err, res)
         p = res["plan"]
         self.assertEqual((p["family"], p["model"], p["context"], p["download_gb"], p["ram"]),
-                         ("gemma4", "UD-Q3_K_M", 32768, 12.7, "fits"))
+                         ("gemma4", "UD-Q3_K_M", 32768, 13.2, "fits"))
         self.assertIn("--family gemma4 --model UD-Q3_K_M --context 32768 --vision no", p["setup_command"])
         res, err = self.call("strata_install", {"model": "APEX-I-COMPACT"})
         self.assertFalse(err, res)
@@ -406,7 +406,7 @@ class Install(FakeRoot):
         by = {f["family"]: f["sizes"] for f in res["families"]}
         self.assertEqual([(x["model"], x["download_gb"], x["on_this_pc"], x["id"]) for x in by["qwen36"]],
                          [("UD-Q3_K_M", 17.1, "fits", "qwen36-ud-q3_k_m")])
-        self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (12.7, False))
+        self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (13.2, False))
 
     def test_progress_while_running_and_cancel(self):
         (self.root / "slow").write_text("")

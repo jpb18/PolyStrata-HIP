@@ -97,11 +97,11 @@ FALLBACK_FAMILIES = {
                "engine": "glm", "vision": False, "experimental": True,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the "
                                                       "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8}}},
-    "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on GLM's engine too; a 13 GB file, ~17 GB of RAM beside an 8 GB "
+    "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on GLM's engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB "
                                                      "card; text only here", "tag": "gemma4-", "engine": "glm",
                "vision": False, "experimental": True,
-               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic); it guesses ahead from repeats only",
-                                        "download_gb": 12.7, "ram_gb": 17, "arena_gb": 10.3}}},
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
+                                        "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "

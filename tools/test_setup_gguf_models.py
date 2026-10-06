@@ -34,11 +34,13 @@ class Pins(unittest.TestCase):
             self.assertRegex(fam["hf"], rf"^https://huggingface.co/{repo}/resolve/[0-9a-f]{{40}}/$")
             self.assertEqual(list(setup.family_models(family)), [size])
             self.assertEqual((setup.model_file(fam, size, 1), setup.model_shards(fam, size)), (file, 1))
-            self.assertEqual(list(fam["sha256"]), [file])
-            self.assertEqual(fam["sha256"][file][0], n)
-            self.assertRegex(fam["sha256"][file][1], r"^[0-9a-f]{64}$")
             d = fam["models"][size]
-            self.assertAlmostEqual(n / 1e9, d["download_gb"], delta=0.05)
+            more = [Path(d["draft_model"]).name] if d.get("draft_model") else []
+            self.assertEqual(list(fam["sha256"]), [file, *more])
+            self.assertEqual(fam["sha256"][file][0], n)
+            for pinned in fam["sha256"].values():
+                self.assertRegex(pinned[1], r"^[0-9a-f]{64}$")
+            self.assertAlmostEqual(sum(p[0] for p in fam["sha256"].values()) / 1e9, d["download_gb"], delta=0.05)
             self.assertLess(d["arena_gb"], d["download_gb"])            # the experts are part of the file
 
     def test_two_families_have_a_size_of_one_name(self):
@@ -66,7 +68,7 @@ class Estimates(unittest.TestCase):
         need = {f: setup.glm_ram_need(next(iter(setup.family_models(f).values())), 8.0) for f in NEW}
         self.assertAlmostEqual(need["qwen36"], 21, delta=0.5)
         self.assertAlmostEqual(need["ornith"], 22, delta=0.5)
-        self.assertAlmostEqual(need["gemma4"], 17, delta=0.5)
+        self.assertAlmostEqual(need["gemma4"], 18, delta=0.5)
         for f, n in need.items():
             self.assertIn(f"~{n:.0f} GB of RAM beside an 8 GB card", setup.FAMILIES[f]["about"])
             self.assertEqual(next(iter(setup.family_models(f).values()))["ram_gb"], round(n))
@@ -100,8 +102,10 @@ class Main(unittest.TestCase):
                 code, out, cfg = self.main(family=family, ram=32.0, vram=8.0)
                 self.assertEqual(code, 0, out)
                 fam = setup.FAMILIES[family]
-                self.assertEqual(self.downloads, [fam["hf"] + file])
-                self.assertEqual(self.verified, [(file, *fam["sha256"][file])])
+                guesser = fam["models"][size].get("draft_model")      # Gemma 4's: a second file, beside the model's
+                more = [Path(guesser).name] if guesser else []
+                self.assertEqual(self.downloads, [fam["hf"] + file] + ([fam["hf"] + guesser] if guesser else []))
+                self.assertEqual(self.verified, [(f, *fam["sha256"][f]) for f in [file, *more]])
                 tag = fam["tag"] + size
                 pack = self.t / "data" / "packs" / tag.lower()
                 # the tokenizer alone: no draft block is fetched for these
@@ -111,11 +115,38 @@ class Main(unittest.TestCase):
                 self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / tag / file)
                 self.assertEqual(Path(args[args.index("--expert-profile") + 1]), pack / "expert-profile.txt")
                 self.assertFalse((pack / "expert-profile.txt").exists())   # none is shipped: the engine starts it
-                self.assertNotIn("--draft-model", args)
+                if guesser:
+                    self.assertEqual(Path(args[args.index("--draft-model") + 1]),
+                                     self.t / "models" / tag / more[0])
+                else:
+                    self.assertNotIn("--draft-model", args)        # theirs is in the model's file
                 self.assertEqual(cfg["model_name"], f"{fam['name']}-{size.lower()}")
                 self.assertEqual(cfg["display_name"], f"{fam['title']} {size}")
                 self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_GLM_DIR / setup.GEXE)
                 self.assertIn("% of its experts fit in VRAM (100% there)", out)
+
+    def test_the_draft_model_beside_files_of_ones_own(self):
+        size, file, _repo, _n = NEW["gemma4"]
+        fam = setup.FAMILIES["gemma4"]
+        guesser = fam["models"][size]["draft_model"]
+        mine = self.t / "mine"
+        mine.mkdir()
+        (mine / file).write_bytes(b"")
+        # --gguf-dir has the model alone: its draft model is downloaded, to where setup keeps its own files
+        code, out, cfg = self.main(["--gguf-dir", str(mine)], family="gemma4", ram=32.0, vram=8.0)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.downloads, [fam["hf"] + guesser])
+        args = cfg["args"]
+        self.assertEqual(Path(args[args.index("--model") + 1]), mine / file)
+        self.assertEqual(Path(args[args.index("--draft-model") + 1]),
+                         self.t / "models" / (fam["tag"] + size) / Path(guesser).name)
+        # with both files there, nothing is downloaded and both are used where they are
+        (mine / Path(guesser).name).write_bytes(b"")
+        self.downloads, self.verified = [], []
+        code, out, cfg = self.main(["--gguf-dir", str(mine)], family="gemma4", ram=32.0, vram=8.0)
+        self.assertEqual((code, self.downloads), (0, []), out)
+        self.assertEqual([v[0] for v in self.verified], [file, Path(guesser).name])
+        self.assertEqual(Path(cfg["args"][cfg["args"].index("--draft-model") + 1]), mine / Path(guesser).name)
 
     def test_a_pc_below_the_qwen_models_ram_is_not_stopped(self):
         # 24 GB is under what the smallest Qwen3.8 size needs, and enough for these by their own estimate

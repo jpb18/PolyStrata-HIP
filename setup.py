@@ -277,7 +277,8 @@ FAMILIES = {
     # quantization the same for every model, so two families' sizes share a name.  A size's "arena_gb" (its routed
     # experts) is from its file, "vram_beside_gb" was measured on an RTX 5090 at 32K, and "row_bytes" is the VRAM a
     # context token takes, measured from 8K to 131K there.  "ram_gb" is glm_ram_need() for an 8 GB card.  They ship
-    # no expert profile: the engine starts one.
+    # no expert profile: the engine starts one.  "draft_model": a file of the size's repository that guesses ahead
+    # for it, a model of its own; it is downloaded beside the model's and its VRAM is in "vram_beside_gb".
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
                "about": "on GLM's engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
@@ -300,15 +301,18 @@ FAMILIES = {
                "sha256": {"Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf":
                           (17437861408, "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165")}},
     "gemma4": {"title": "Gemma 4 26B-A4B", "by": "Google; quantized by Unsloth",
-               "about": "on GLM's engine too; a 13 GB file, ~17 GB of RAM beside an 8 GB card; text only here",
+               "about": "on GLM's engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card; text only here",
                "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
                "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "glm", "vision": False, "experimental": True,
                "row_bytes": 28672,
-               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic); it guesses ahead from repeats only",
-                                        "download_gb": 12.7, "ram_gb": 17, "arena_gb": 10.3,
-                                        "vram_beside_gb": 5.3}},
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
+                                        "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3,
+                                        "vram_beside_gb": 5.8,
+                                        "draft_model": "MTP/mtp-gemma-4-26B-A4B-it-Q8_0.gguf"}},
                "sha256": {"gemma-4-26B-A4B-it-UD-Q3_K_M.gguf":
-                          (12728497888, "811882f6df81c8ea204a5d382f196d6bd601245091786912d4c70df41cdfa052")}},
+                          (12728497888, "811882f6df81c8ea204a5d382f196d6bd601245091786912d4c70df41cdfa052"),
+                          "mtp-gemma-4-26B-A4B-it-Q8_0.gguf":
+                          (461766816, "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -3874,8 +3878,13 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
             mark(s, "whole (checked against its own tensor directory)")
     gguf = shards[0]
     have_model = all(s.exists() and (done(s) or bool(a.gguf_dir)) for s in shards)
+    # the size's draft model: beside the model's file, or, when --gguf-dir has none, where setup keeps its own
+    guesser = models_dir / Path(d["draft_model"]).name if d.get("draft_model") else None
+    if guesser is not None and a.gguf_dir and not guesser.exists():
+        guesser = Path(a.models_dir) / tag / guesser.name
+    have_guesser = guesser is None or guesser.exists() and (done(guesser) or bool(a.gguf_dir) or whole_shard(guesser))
     on_disk = sum(f.stat().st_size for s in shards for f in (s, s.with_name(s.name + ".part")) if f.is_file()) / 1e9
-    need = (0 if have_model else max(d["download_gb"] - on_disk, 0)) + 2
+    need = (0 if have_model and have_guesser else max(d["download_gb"] - on_disk, 0)) + 2
     if free_gb(models_dir) < need:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
@@ -3907,6 +3916,11 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
     check_shards(shards)
     for s in shards:
         verify_sha256(s, *fam["sha256"][s.name])
+    if guesser is not None:
+        if not have_guesser:
+            say("  Its draft model lets it guess a few words ahead and check them at once (faster answers).")
+            download(d.get("hf", fam["hf"]) + d["draft_model"], guesser)
+        verify_sha256(guesser, *fam["sha256"][guesser.name])
     ok("model file present")
 
     step(6, "preparing the model for PolyStrata")
@@ -3931,6 +3945,9 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
             say(f"  {model}'s file has none, so the block alone is downloaded (~{fam['draft_gb']} GB).")
             run([sys.executable, str(ROOT / "tools" / "glm_draft_fetch.py"), "fetch", "--out", str(draft)])
         ok(f"draft block: {draft}")
+    if guesser is not None:
+        draft = guesser
+        ok(f"draft model: {draft}")
     ok(f"model prepared: {pack}")
 
     step(7, "writing the start script")
