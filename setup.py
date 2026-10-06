@@ -141,7 +141,10 @@ MODELS = {
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), EXPERIMENTAL: the best quality, but most experts come from the "
                             "SSD on a 64 GB PC (7-8.5 tokens/s measured)", "download_gb": 111.3, "ram_gb": 48,
                    "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "nvidia_only": True,
-                   "experimental": True},
+                   "experimental": True,
+                   # #967: images are allowed (the same base model and image encoder as UD-IQ4_XS), with a warning:
+                   # reported working by hand (#967, #971), not tested by us on this file
+                   "vision": True, "vision_untested": True},
     # #621: Unsloth's UD-IQ4_XS - IQ3_S gate/up experts with IQ4_NL (43 layers) or Q8_0 (5) downs, the dense side as
     # UD-Q4_K_XL's; three shards.  A regular choice from 0.1.39 (no longer experimental).  Its 59.5 GB of experts: a
     # RAM budget of them, like UD-Q4_K_XL, but far fewer read from the SSD on a 64 GB PC and none from ~80 GB of RAM.
@@ -4550,6 +4553,9 @@ def main() -> int:
         say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
         vision = "gpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
+    if vision != "none" and MODELS[model].get("vision_untested"):
+        warn(f"images with {model} are untested: users report them working, but we have not run this file with "
+             "images (#967); tell us if the answers look wrong")
     # The low-RAM mode's two variants.  resident: the experts the GPU's cache does not hold (and, as far as RAM allows,
     # the ones the prompt path borrows cache room from) are copied from the pack's experts.bin into RAM once, so
     # nothing is read from the SSD while it answers (engine 0.1.30, --resident-experts; the engine falls back to mmap
