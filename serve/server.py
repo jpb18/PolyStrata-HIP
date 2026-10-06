@@ -3840,7 +3840,7 @@ def make_handler(svc: Service):
                 return True
             auth = self.headers.get("Authorization", "")
             given = auth[7:].strip() if auth.lower().startswith("bearer ") else self.headers.get("x-api-key", "")
-            if hmac.compare_digest(given.encode(), svc.api_key.encode()):   # #213: constant-time
+            if key_matches(given, svc.api_key):
                 return True
             self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong API key"}})
             return False
@@ -4722,6 +4722,30 @@ def host_allowed(host, names, any_host=False) -> bool:
                            or _name_in(name, names))
 
 
+def api_key_of(value) -> str:
+    """The key as a client can send it (#725).  An HTTP header loses the spaces and line ends around its value, so a
+    key kept with them (a config file or an environment file with CRLF line ends, a quoted " key ") matched no
+    request: every client got 401 with the right key.  A value that is only such characters raises ValueError, it
+    never means "no key" (#213)."""
+    key = "" if value is None else str(value)
+    if key and not key.strip():
+        raise ValueError("an API key was given but it is empty")
+    return key.strip()
+
+
+def key_matches(given: str, key: str) -> bool:
+    """given: a header's value as http.server read it, each byte one character.  A key with characters outside ASCII
+    arrives as UTF-8 from most clients and as Latin-1 from some; the right key passes in both forms (#725: the
+    bytes were re-encoded before, so a UTF-8 key never matched).  Constant-time (#213)."""
+    raw = given.encode("latin-1", "replace")
+    ok = hmac.compare_digest(raw, key.encode())
+    try:
+        ok |= hmac.compare_digest(raw, key.encode("latin-1"))
+    except UnicodeEncodeError:
+        pass
+    return ok
+
+
 def origin_allowed(origin: str, host, names, origins=()) -> bool:
     """A browser page's Origin that may use the model without an API key: this server's own page (the Origin is the
     request's own Host), a page on one of the names this server answers to (any port), or an origin the config lists
@@ -5010,7 +5034,11 @@ def main() -> int:
         print("[strata] an API key was given but it is empty: set a key, or leave --api-key / STRATA_API_KEY out",
               file=sys.stderr)
         return 2
-    svc.api_key = a.api_key or cfg.get("api_key", "")
+    try:
+        svc.api_key = api_key_of(a.api_key or cfg.get("api_key", ""))
+    except ValueError as e:
+        print(f'[strata] {e}: set a key, or leave --api-key / STRATA_API_KEY / "api_key" out', file=sys.stderr)
+        return 2
     svc.cors_origins = origins_of(cfg.get("cors_origins"), "cors_origins", wildcard=True)
     svc.trusted_origins = origins_of(cfg.get("trusted_origins"), "trusted_origins", wildcard=False)
     try:

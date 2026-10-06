@@ -22,7 +22,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
 from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, GpuBusy, MockEngine, PP_DONE_TAIL, Service,  # noqa: E402
-                          StrataEngine, engine_args, layer_split_value, prompt_progress, prompt_tokens_seen,
+                          StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
+                          prompt_tokens_seen,
                           request_timings, serve, start_failure_hint)
 from types import SimpleNamespace  # noqa: E402
 
@@ -841,6 +842,53 @@ class StatusNeedsTheKey(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=10) as r:
                 self.assertEqual(r.status, 200)
                 self.assertNotIn("tail", json.loads(r.read()))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class ApiKeyForms(unittest.TestCase):
+    """#725: a key no client could send (spaces or a line end around it), and a key outside ASCII."""
+
+    def test_the_key_loses_what_a_header_cannot_carry(self):
+        self.assertEqual(api_key_of(" s3cret "), "s3cret")
+        self.assertEqual(api_key_of("s3cret\r\n"), "s3cret")
+        self.assertEqual(api_key_of("two words"), "two words")
+        self.assertEqual(api_key_of(12345), "12345")              # a number in the config file
+        self.assertEqual(api_key_of(""), "")
+        self.assertEqual(api_key_of(None), "")
+
+    def test_a_blank_key_is_an_error_not_no_key(self):
+        for blank in (" ", "\r\n", "\t "):
+            with self.assertRaises(ValueError):
+                api_key_of(blank)
+
+    def test_a_key_outside_ascii_matches_as_utf8_and_as_latin1(self):
+        def as_read(key, enc):                                    # what http.server hands the handler
+            return key.encode(enc).decode("latin-1")
+        self.assertTrue(key_matches("s3cret", "s3cret"))
+        self.assertFalse(key_matches("s3cret ", "s3cret"))
+        self.assertFalse(key_matches("", "s3cret"))
+        self.assertTrue(key_matches(as_read("clé", "utf-8"), "clé"))
+        self.assertTrue(key_matches(as_read("clé", "latin-1"), "clé"))
+        self.assertTrue(key_matches(as_read("ключ", "utf-8"), "ключ"))
+        self.assertFalse(key_matches(as_read("ключ", "utf-8"), "ключx"))
+
+    def test_a_utf8_key_over_http(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.api_key = "ключ"
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}/status"
+        try:
+            sent = ("Bearer " + svc.api_key).encode().decode("latin-1")   # UTF-8 bytes, as curl and the web app send
+            with urllib.request.urlopen(urllib.request.Request(base, headers={"Authorization": sent}), timeout=10) as r:
+                self.assertEqual(r.status, 200)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(urllib.request.Request(base, headers={"Authorization": "Bearer ???"}),
+                                       timeout=10)
+            self.assertEqual(e.exception.code, 401)
+            e.exception.close()
         finally:
             httpd.shutdown()
             httpd.server_close()
