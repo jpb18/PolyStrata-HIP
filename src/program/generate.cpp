@@ -1533,12 +1533,21 @@ int main(int argc, char** argv) {
     // anything else.  The value itself is consumed again by the option loop below.
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::string(argv[i]) != "--gpu") continue;
+        // The caller's own environment is overridden, so say so (a stale CUDA_VISIBLE_DEVICES from a launcher
+        // would otherwise silently lose to the flag).
+        const char* envname = "CUDA_VISIBLE_DEVICES";
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+        envname = "HIP_VISIBLE_DEVICES";   // the AMD runtime ignores CUDA_VISIBLE_DEVICES (serve/server.py sets this one)
+#endif
+        const char* prev = std::getenv(envname);
+        if (prev && prev[0] && std::string(prev) != argv[i + 1])
+            std::fprintf(stderr, "warning: --gpu %s overrides %s=%s from the environment\n", argv[i + 1], envname, prev);
 #if defined(_WIN32)
         _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
-        _putenv_s("CUDA_VISIBLE_DEVICES", argv[i + 1]);
+        _putenv_s(envname, argv[i + 1]);
 #else
         setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 1);
-        setenv("CUDA_VISIBLE_DEVICES", argv[i + 1], 1);
+        setenv(envname, argv[i + 1], 1);
 #endif
         break;
     }
