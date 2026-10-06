@@ -7172,6 +7172,14 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
                                      " add --vram-reserve-mib %lld to the config's args (or lower --max-context)\n",
                              (long long) free_mib, (long long) (o.vram_reserve_mib + 512 - free_mib));
+                // #781 / #831: an explicit --expert-cache N is a byte budget that is not checked against the VRAM once
+                // the slots are written (auto is), so on a card it fills a smaller N is the cure: a few hundred slots
+                // can be the difference between 14 and 100 tok/s under WDDM.  Said, never changed.
+                if (!auto_cache)
+                    std::fprintf(stderr, "strata serve: the expert cache was set with --expert-cache (%lld slots): a "
+                                         "smaller one - or --expert-cache auto, which checks the free VRAM once the "
+                                         "slots are written - leaves room; decode can be several times slower with the "
+                                         "card this full\n", (long long) xcache.slots());
             }
         }
         // what the server's Monitor tab shows (servers before 0.1.8 skip unknown lines until READY)
