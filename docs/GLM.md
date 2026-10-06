@@ -1,6 +1,6 @@
-# GLM 5.3 Flash (`strata-glm`)
+# GLM 5.3 Flash (`strata-poly`)
 
-PolyStrata adds a second engine, `strata-glm`, that runs GLM 5.3 Flash. It sits beside `strata`, which still runs
+PolyStrata adds a second engine, `strata-poly`, that runs GLM 5.3 Flash. It sits beside `strata`, which still runs
 Qwen3.8-Flash-Next as before. The server, the web app and the API are the same for both: a run config names the
 engine it starts.
 
@@ -17,7 +17,7 @@ It is early. It has been built and run on one machine, with Linux and one NVIDIA
 | Model | `GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf`, 113.6 GB, from [neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) |
 | Context | 32K |
 
-| | `strata-glm` | llama.cpp ([neurall's fork](https://github.com/neurall/llama.cpp)), stock settings |
+| | `strata-poly` | llama.cpp ([neurall's fork](https://github.com/neurall/llama.cpp)), stock settings |
 | --- | ---: | ---: |
 | Writes answers | 26.7 to 27.7 tokens/s | 26 tokens/s |
 | Reads a prompt of 3,059 tokens | 373 tokens/s | about 265 tokens/s |
@@ -68,7 +68,7 @@ draft block, 2.8 GB, once for every size that needs it. The web app is at
 `http://127.0.0.1:8080`. After that, `./setup.sh` starts the model again without asking.
 
 - The compile needs g++ and the CUDA toolkit (12.8 or newer for an RTX 50 card). Setup offers to install what is
-  missing. No release ships `strata-glm` yet.
+  missing. No release ships `strata-poly` yet.
 - You already have the GGUF: `./setup.sh --family glm --gguf-dir /folder/with/the/file`.
 - The other options are the README's: `--context`, `--port`, `--host`, `--api-key`, `--gpu`, `--yes`, `--no-start`.
   The ones for the Qwen engine (`--kv`, `--vision`, `--low-ram`, `--parallel`, ...) are named and left out.
@@ -76,7 +76,7 @@ draft block, 2.8 GB, once for every size that needs it. The web app is at
 On the test machine, with the file already on the disk, this took about five minutes.
 
 Setup writes the run config `strata-glm-3.0bit.json` and `run-glm-3.0bit.sh` into the PolyStrata folder, the engine into
-`engine-glm/`, and the tokenizer and the expert profile into the data folder. The profile starts as the counts in
+`engine-poly/`, and the tokenizer and the expert profile into the data folder. The profile starts as the counts in
 `data/expert-profile-glm.txt`, which come from the test runs here, and the engine updates it every time it stops.
 
 A 64K or 128K context starts and answers, with an expert cache 0.8 or 2.6 GiB smaller. No long prompt has been read
@@ -88,7 +88,7 @@ Build the engine:
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON
-cmake --build build --target strata-glm
+cmake --build build --target strata-poly
 ```
 
 Write the tokenizer out of the GGUF once:
@@ -101,7 +101,7 @@ Then write a run config, `glm.json`:
 
 ```json
 {
-  "exe": "build/strata-glm",
+  "exe": "build/strata-poly",
   "cwd": "/path/to/PolyStrata",
   "args": ["--model", "/models/GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf",
            "--max-context", "32768",
@@ -225,14 +225,14 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--conversation-cache-min-free-mib N` | 2560 | park only while this much physical RAM stays free |
 | `--eos-ids ID,ID,...` | from the GGUF | tokens that end a reply |
 
-`strata-glm` with no arguments prints the list, with the options for running it without the server.
+`strata-poly` with no arguments prints the list, with the options for running it without the server.
 
 ## What is missing
 
 - Other files of the model. The engine reads the layouts of four converters (neurall's llama.cpp fork,
   patrickbdevaney's, antirez's and Unsloth's), a model in several files, and the weight types llama.cpp's kernels
   have. Only the two sizes above have been run: setup offers no other.
-- Release builds of `strata-glm`: setup compiles it.
+- Release builds of `strata-poly`: setup compiles it.
 - Windows. Nothing has been compiled there, and setup asks before it tries.
 - AMD and Intel cards, and more than one card.
 - Pictures. The model's image input is not read.

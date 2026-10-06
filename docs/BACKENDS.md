@@ -12,13 +12,14 @@ card with 8 GB was not there: [one table](#with-8-gb-of-vram) holds the 5090 to 
 | Model | Architecture | Engine | File it was checked with | Guesses ahead |
 | --- | --- | --- | --- | --- |
 | Qwen3.8-Flash-Next and fine-tunes | `qwen4exp` | `strata` | the packs setup builds | separate MTP model |
-| GLM 5.3 Flash | `glm5-next` | `strata-glm` | GSQ-RCO 3.0bit, REAP50-Q3_K_M, UD-IQ2_XXS | draft block |
-| Qwen3.6-35B-A3B | `qwen35moe` | `strata-glm` | Unsloth UD-Q3_K_M, 17.1 GB | draft block in the file |
-| Ornith 1.5 35B-A3B | `qwen35moe` | `strata-glm` | APEX-MTP-I-Compact, 17.4 GB | draft block in the file |
-| Gemma 4 26B-A4B | `gemma4` | `strata-glm` | Unsloth UD-Q3_K_M, 12.7 GB | its draft model, a file of 0.46 GB |
+| GLM 5.3 Flash | `glm5-next` | `strata-poly` | GSQ-RCO 3.0bit, REAP50-Q3_K_M, UD-IQ2_XXS | draft block |
+| Qwen3.6-35B-A3B | `qwen35moe` | `strata-poly` | Unsloth UD-Q3_K_M, 17.1 GB | draft block in the file |
+| Ornith 1.5 35B-A3B | `qwen35moe` | `strata-poly` | APEX-MTP-I-Compact, 17.4 GB | draft block in the file |
+| Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, 12.7 GB | its draft model, a file of 0.46 GB |
 
-`strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-glm` is the engine that reads a
-GGUF in place, and it now has three architectures. Its name is from its first model and will change.
+`strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
+GGUF in place, and it now has three architectures. It was called `strata-glm`, after its first model; an install
+from then keeps its engine and moves to the new name the next time setup updates it.
 
 ## Install
 
@@ -44,7 +45,7 @@ straight to it:
 | `gemma4` | Gemma 4 26B-A4B | Unsloth UD-Q3_K_M and its draft model | 13.2 GB | about 18 GB |
 
 The steps are GLM's ([GLM.md](GLM.md#install)). Setup asks the context and whether to keep several conversations in
-RAM, compiles `strata-glm`, downloads the model's file from a pinned revision (for Gemma 4 also its draft model,
+RAM, compiles `strata-poly`, downloads the model's file from a pinned revision (for Gemma 4 also its draft model,
 0.46 GB), checks the SHA-256, writes the tokenizer directory, the run config and a start script, and starts the
 model. `--gguf-dir /folder/with/the/file` takes a file you already have; a draft model that is not in that folder is
 downloaded to setup's own. The engine is compiled once for all of them. On the test machine, with the files on the
@@ -67,7 +68,7 @@ lines is a backend to the server. Changing the model stops the child and starts 
 memory and its file mappings are given back by the operating system when the process ends, not by cleanup code
 that could miss something.
 
-**The engine.** Inside `strata-glm`, `Engine` (src/glm/engine.hpp) is what every architecture shares:
+**The engine.** Inside `strata-poly`, `Engine` (src/poly/engine.hpp) is what every architecture shares:
 
 - the GGUF, read in place, in one file or several
 - the dense weights in VRAM in the type the file has them
@@ -363,7 +364,7 @@ Setup knows the files in the table above. Another file of one of these architect
 3. Write `strata-<name>.json` beside `setup.py`:
 
    ```json
-   {"exe": "engine/strata-glm", "args": ["--model", "/path/model.gguf", "--max-context", "32768"],
+   {"exe": "engine/strata-poly", "args": ["--model", "/path/model.gguf", "--max-context", "32768"],
     "cwd": ".", "tokenizer": "packs/<name>/tokenizer", "model_name": "<name>", "port": 8080}
    ```
 4. `python polystrata.py --list-models` should list it as available, and `python polystrata.py --model <name>`
@@ -379,7 +380,7 @@ Setup knows the files in the table above. Another file of one of these architect
 1. Read llama.cpp's graph for it (`src/models/<arch>.cpp`) and the ggml ops it builds. That is the reference.
 2. Derive a class from `Engine`. `qwen35.cpp` is the shortest example with both a recurrent layer and attention;
    `gemma4.cpp` shows the hooks for a model that departs further.
-3. Put what the layers need that no kernel does yet in `src/glm/kernels.cu`, next to the others. Keep a kernel's
+3. Put what the layers need that no kernel does yet in `src/poly/kernels.cu`, next to the others. Keep a kernel's
    result for a token independent of the tokens beside it when it runs in a window of guessed tokens.
 4. Name the class in `Engine::open()` and the file in `CMakeLists.txt`.
 5. Check it against llama.cpp on the same file before any tuning: tokens and probabilities on short and long
