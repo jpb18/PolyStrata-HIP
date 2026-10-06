@@ -4695,6 +4695,29 @@ def warn_tight_ram(arena_mib) -> None:
               + "Close other programs, or run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS).", flush=True)
 
 
+def warn_budget_over_ram(args) -> str | None:
+    """#1080: an explicit `--resident-budget-gib N` bigger than the RAM this PC has free (or than its total beside
+    ~6 GB for everything else) pushes experts into swap or the file tier: decode that is "dead slow" until the number is
+    removed.  A warning at start, never a refusal (recommend, never force).  -> the sentence printed, or None."""
+    try:
+        budget = float(args[list(args).index("--resident-budget-gib") + 1])
+    except (ValueError, IndexError):
+        return None
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        total, free = vm.total / 2**30, vm.available / 2**30
+    except Exception:  # noqa: BLE001 - psutil is optional here
+        return None
+    if budget <= free and budget <= total - 6:
+        return None
+    msg = (f"WARNING: the RAM budget for experts is {budget:g} GiB (--resident-budget-gib), but this PC has "
+           f"{free:.0f} GiB free of {total:.0f} GiB: what does not fit goes to swap or is read from disk, which can make "
+           "decoding very slow. Lower it (setup sizes it for this PC) or remove the argument to let the engine choose.")
+    print("[strata] " + msg, flush=True)
+    return msg
+
+
 DESKTOP_FREE_MIB = 2048          # #560 #516: below this, an AMD card that also drives a Linux desktop can run out
 DESKTOP_RESERVE_MIB = 3072       # what kept KDE/Wayland alive beside a full expert cache in both reports
 
@@ -5094,6 +5117,7 @@ def main() -> int:
                             env=vision_env(cfg, env), lazy=lazy)
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
+        warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
         if layer_split_of(cfg):
             try:
                 split = layer_split_value(cfg)          # #644: before the (minutes-long) start

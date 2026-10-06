@@ -4186,6 +4186,32 @@ class VisionCacheEviction(unittest.TestCase):
             self.assertFalse(first.exists())
 
 
+class BudgetOverRam(unittest.TestCase):
+    """#1080: a RAM budget above what the PC has free is a warning at start, not silence and not a refusal."""
+
+    def run_with(self, budget, total, free):
+        import serve.server as S
+        vm = SimpleNamespace(total=total * 2**30, available=free * 2**30)
+        fake = SimpleNamespace(virtual_memory=lambda: vm)
+        with mock.patch.dict(sys.modules, {"psutil": fake}), contextlib.redirect_stdout(io.StringIO()):
+            return S.warn_budget_over_ram(["--native", "x", "--resident-budget-gib", str(budget)])
+
+    def test_over_free_ram_warns(self):
+        msg = self.run_with(55, 64, 30)
+        self.assertIn("55 GiB", msg)
+        self.assertIn("30 GiB free of 64", msg)
+
+    def test_over_total_less_headroom_warns(self):
+        self.assertIsNotNone(self.run_with(60, 64, 60))
+
+    def test_a_budget_that_fits_is_quiet(self):
+        self.assertIsNone(self.run_with(40, 64, 50))
+
+    def test_no_budget_argument_is_quiet(self):
+        import serve.server as S
+        self.assertIsNone(S.warn_budget_over_ram(["--native", "x"]))
+
+
 class LazyVision(unittest.TestCase):
     """#673: with --lazy the image encoder is not started either; it starts with the model, and an encoder that fails
     to start leaves nothing running."""
