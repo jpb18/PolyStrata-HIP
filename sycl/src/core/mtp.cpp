@@ -757,7 +757,8 @@ bool MtpDrafter::bind(const WeightTable &wt, const NativeHead *head,
                     0 ||
                 DPCT_CHECK_ERROR(dhead_ = (uint8_t *)sycl::malloc_device(
                                      (size_t)(n_dvocab_ * row_bytes),
-                                     dpct::get_in_order_queue())) != 0) {
+                                     dpct::get_in_order_queue())) != 0 ||
+                dvocab_ == nullptr || dhead_ == nullptr) {   // Level Zero returns null when the VRAM is full
                 err = "mtp: the draft head does not fit";
                 draft_head_hint(n_dvocab_, row_bytes);
                 return false;

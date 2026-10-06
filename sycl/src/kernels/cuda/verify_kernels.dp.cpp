@@ -1177,7 +1177,7 @@ void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int6
                 sycl::nd_range<3>(sycl::range(1, 1, 48 * 8) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
-                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                [=](sycl::nd_item<3> item_ct1) {
                     gather_rows_kernel((const sycl::uint4 *)src, row_bytes_ct1,
                                        ids, n, (sycl::uint4 *)dst);
                 });
@@ -1195,7 +1195,7 @@ void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int6
                 sycl::nd_range<3>(sycl::range(1, 1, 48 * 8) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
-                exp_props, [=](sycl::nd_item<3> item_ct1) {
+                [=](sycl::nd_item<3> item_ct1) {
                     gather_rows_kernel((const uint32_t *)src, row_bytes_ct1,
                                        ids, n, (uint32_t *)dst);
                 });
@@ -1209,7 +1209,7 @@ void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int6
             sycl::nd_range<3>(sycl::range(1, 1, 48 * 8) *
                                   sycl::range(1, 1, 256),
                               sycl::range(1, 1, 256)),
-            exp_props, [=](sycl::nd_item<3> item_ct1) {
+            [=](sycl::nd_item<3> item_ct1) {
                 gather_rows_kernel(src, row_bytes, ids, n, dst);
             });
     }

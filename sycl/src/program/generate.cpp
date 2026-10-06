@@ -4390,9 +4390,7 @@ int main(int argc, char **argv) try {
                 return 1;
             }
             if (!auto_cache || attempt - failed >= 6) break;
-            dpct::get_in_order_queue()
-                .memset(xcache.device_slot(0), 0, (size_t)xcache.bytes())
-                .wait();
+            if (uint8_t* slot0 = xcache.device_slot(0)) strata::big_fill_zero(dpct::get_in_order_queue(), slot0, (size_t)xcache.bytes());
             dpct::get_current_device().queues_wait_and_throw();
             size_t free_b = 0, total_b = 0;
             free_b = strata::core::device_free_bytes(); (void) total_b;

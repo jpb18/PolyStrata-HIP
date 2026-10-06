@@ -151,9 +151,9 @@ bool mapped(size_t bytes, void **h, void **d) try {
     migrated code and was removed or replaced with 0. You may need to check the
     migrated code.
     */
-    if (DPCT_CHECK_ERROR(*h = (void *)sycl::malloc_host(
+    if (DPCT_CHECK_ERROR(*h = strata::host_malloc_polled(
                              bytes, dpct::get_in_order_queue())) !=
-        0) return false;
+        0 || *h == nullptr) return false;   // polled by the window's kernels: uncached host memory (sycl_queue.hpp)
     std::memset(*h, 0, bytes);
     return DPCT_CHECK_ERROR(*d = (void *)*h) == 0;
 }
@@ -372,7 +372,7 @@ Verifier::~Verifier() try {
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
                      h_flagA_, h_plan_, h_flagB_, h_plan_err_};
     for (void* h : hosts)
-        if (h) sycl::free(h, dpct::get_in_order_queue());
+        if (h) strata::host_free_polled(h, dpct::get_in_order_queue());
 } catch (...) {
 }
 

@@ -764,8 +764,8 @@ bool SessionLoopScratch::init(size_t parts_bytes_in, std::string &err) try {
     the migrated code and was removed or replaced with 0. You may need to check
     the migrated code.
     */
-    if (DPCT_CHECK_ERROR(y_miss = (float *)sycl::malloc_host(
-                             parts_bytes, dpct::get_in_order_queue())) != 0) {
+    if (DPCT_CHECK_ERROR(y_miss = (float *)strata::host_malloc_polled(
+                             parts_bytes, dpct::get_in_order_queue())) != 0 || y_miss == nullptr) {
         err = "SessionLoopScratch: cudaHostAlloc for the pool's staging failed";
         return false;
     }
@@ -811,7 +811,7 @@ void SessionLoopScratch::free() {
     }
     if (probe != nullptr) { dpct::destroy_event(probe); probe = nullptr; }
     if (y_miss != nullptr) {
-        sycl::free(y_miss, dpct::get_in_order_queue()); y_miss = nullptr;
+        strata::host_free_polled(y_miss, dpct::get_in_order_queue()); y_miss = nullptr;
     }
     parts_bytes = 0;
 }
