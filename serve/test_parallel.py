@@ -87,6 +87,9 @@ while True:
         slot = int(f[1]) if f[0] == "BGEN" else None
         max_new = int(f[2] if f[0] == "BGEN" else f[1])
         ids = f[-1].split(",")
+        if bytes(int(x) & 255 for x in ids).find(b"REFUSEME") >= 0:   # #1059: refused up front, then idle (no DONE)
+            print("ERR refused: images are not enabled", flush=True)
+            continue
         if log:
             log.write(f"{f[0]} {slot} {len(ids)} {max(len(active), 0)}\n"); log.flush()
         toks = reply(ids)

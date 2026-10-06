@@ -668,6 +668,7 @@ class StrataEngine:
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
+        self._ctl_erred = False                         # #1059: the control lines ended on an ERR
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
         self.wlock = threading.Lock()                   # stdin writes from several request threads
         self.pump = threading.Thread(target=self._pump, daemon=True)
@@ -947,6 +948,7 @@ class StrataEngine:
                 if len(f) >= 3 and f[1].lstrip("-").isdigit() and f[2].isdigit():
                     self._yielded = (int(f[1]), int(f[2]))
             elif line.startswith("ERR"):
+                self._ctl_erred = True                   # #1059: the engine refused it and is idle: no DONE follows
                 raise ValueError(line[4:].strip())
             if line.startswith("DONE") and self._ctl_mode == "solo":
                 self._ctl_result = ("done", None)
@@ -1110,6 +1112,7 @@ class StrataEngine:
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     phase = "solo"
                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
+                    self._ctl_erred = False
                     def others():
                         with self.slot_cv:
                             return self.waiting > 0
@@ -1181,6 +1184,7 @@ class StrataEngine:
                     self.slot_held[slot] = []               # the admission overwrites what the slot held
                     phase = "admit"
                     self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
+                    self._ctl_erred = False
                     asked = False
                     for x in self._control(cancel, pending.append):
                         while pending:
@@ -1264,6 +1268,8 @@ class StrataEngine:
             try:
                 if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
                     phase = "none"                      # #1012: its engine is gone: nothing to stop or drain
+                if phase in ("solo", "admit") and self._ctl_erred:
+                    phase = "none"                      # #1059: it ended on the engine's ERR: no DONE to wait 300 s for
                 if phase == "solo":
                     self._send("STOP")
                     self._drain_control("DONE", born=born)
