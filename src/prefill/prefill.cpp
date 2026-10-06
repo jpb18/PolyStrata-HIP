@@ -96,6 +96,14 @@ constexpr int64_t C = 10240, ZV = 6144, HV = 48;
 inline int64_t MAXBLOB() { return (int64_t) strata::kernels::cpu::expert_layout().max_blob; }
 constexpr int STAGE = 8;           // host->device expert staging ring (chunks below stream_all_min())
 constexpr int kSplitHelpRing = 48;  // layer split help: the helper stage's ring slots it streams through (at most)
+// STRATA_PREFILL_STREAM_AHEAD=0 keeps the previous routed-only upload schedule (A/B).
+inline bool stream_ahead_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_PREFILL_STREAM_AHEAD");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    return on;
+}
 // Step 3: from this chunk size on, every non-resident expert of every layer streams in a fixed order through a
 // ring_slots()-slot ring (nearly all 512 are routed at such a chunk), so the copy engine keeps working through the
 // attention halves instead of waiting for each layer's routing.
@@ -2498,13 +2506,20 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
                     // the shared expert and its scalar gate
-                    if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
-                    if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
-                    swiglu_pair(m.sgate, m.sup, m.sh_h, T, m.cs);
-                    if (!native_proj(m.gemm, wsd, m.sh_h, m.shared, T, v.name("ffn_down_shexp.weight"), err)) return false;
-                    if (wgi->kind != core::WeightKind::Bf16InF32) { err = "prefill: shared gate is not BF16"; return false; }
-                    m.gemm.bf16(m.mixed_bf, (const uint16_t*) wgi->data, m.sg, T, 1, N);
-                    if (m.mixed_bf_lo) m.gemm.bf16(m.mixed_bf_lo, (const uint16_t*) wgi->data, m.sg, T, 1, N, 0, 1.0f);
+                    auto shared_expert = [&]() -> bool {
+                        if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
+                        if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
+                        swiglu_pair(m.sgate, m.sup, m.sh_h, T, m.cs);
+                        if (!native_proj(m.gemm, wsd, m.sh_h, m.shared, T, v.name("ffn_down_shexp.weight"), err)) return false;
+                        if (wgi->kind != core::WeightKind::Bf16InF32) { err = "prefill: shared gate is not BF16"; return false; }
+                        m.gemm.bf16(m.mixed_bf, (const uint16_t*) wgi->data, m.sg, T, 1, N);
+                        if (m.mixed_bf_lo) m.gemm.bf16(m.mixed_bf_lo, (const uint16_t*) wgi->data, m.sg, T, 1, N, 0, 1.0f);
+                        return true;
+                    };
+                    // Only the router needs to finish before readback. Queue the shared expert afterwards
+                    // so it can overlap CPU grouping and the routed-only path's initial expert uploads.
+                    const bool defer_shared = !stream_all && stream_ahead_enabled();
+                    if (!defer_shared && !shared_expert()) return false;
                     // #136: STRATA_PF_FUSED=1 - the Q2_0 pack's experts on the fused int8 kernels (moe_fused.hpp),
                     // grouped on the GPU: no host sync.  Only where every expert's place is known before the routing -
                     // the streamed walk, in which every non-resident expert of the layer comes through the ring in id
@@ -2615,6 +2630,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         pt.fold();
                         if (pe.on) {   // the peer's marks so far are done: the primary waited for its last rows
                             int pd = 0; cudaGetDevice(&pd); cudaSetDevice(pe.dev); cudaStreamSynchronize(m.pp->s); pe.fold(); cudaSetDevice(pd);
+                        }
+                        if (defer_shared) {
+                            pt.mark(kPfRouter, cs);   // keep the existing router+shared timing attribution
+                            if (!shared_expert()) return false;
+                            pt.mark(kPfHostGroup, cs);
                         }
                         std::fill(m.cnt.begin(), m.cnt.end(), 0);
                         for (int64_t i = 0; i < T * K; ++i) {
@@ -3073,10 +3093,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         };
                         if (!stream_all) {
                             size_t staged = 0;
+                            size_t pending = 0;
+                            const bool stream_ahead = stream_ahead_enabled();
                             const size_t lookahead = STAGE - 1;
                             for (size_t j = 0; j < order.size(); ++j) {
-                                while (staged < order.size() && staged <= j + lookahead) {
+                                // Resident experts occupy no staging slot. Keep STAGE actual transfers ahead,
+                                // rather than STAGE positions in the mixed resident/streamed order.
+                                while (staged < order.size() && (stream_ahead ? pending < STAGE : staged <= j + lookahead)) {
                                     if (!stage_one(staged)) return false;
+                                    if (stage_of[staged] >= 0) ++pending;
                                     ++staged;
                                 }
                                 const int32_t e = order[j];
@@ -3087,6 +3112,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     pt.mark(kPfWaitCopy, cs);
                                     cudaStreamWaitEvent(m.cs, m.copied[stage_of[j]], 0);
                                     if (!compute(j, m.stage_dev[stage_of[j]], stage_of[j])) return false;
+                                    --pending;   // compute recorded the slot's release event before any reuse
                                 }
                             }
                         } else {
