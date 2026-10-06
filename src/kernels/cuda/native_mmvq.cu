@@ -1078,6 +1078,16 @@ struct IQ4XSTraits {
         return d * sumi;
     }
 };
+// Q2_K keeps the block pointer: `apply` is the q2k_q8_dot of native_q2_k_mmvq_kernel, which has no multi-column
+// form, so the launch of several matrices (native_mmvq_slots) gives that kernel's bits.
+struct Q2KTraits {
+    using Block = Q2KBlock;
+    static constexpr int DIV = 256, T = 16, KBY = 8, BPI = WARPS * WARP / 16;
+    __device__ static int kqs(int tid) { return tid % 16; }
+    struct W { const Block* w; };
+    __device__ static W load(const Block* __restrict__ w, int) { return W{w}; }
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) { return q2k_q8_dot(r.w, x, iqs); }
+};
 // The four 32-element formats: `load` keeps the block pointer (their decode is a few integer ops) and `apply` is
 // the unchanged small_q8_dot. Their per-column cost is small; the win above is for the K and IQ formats.
 template<typename Weight, int Qi>
@@ -1770,7 +1780,8 @@ bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_i
     return false;   // the wave layout has no kernel for it
 #else
     const bool small = ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 20;
-    const bool k = ggml_type == 11 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 23;
+    const bool k = ggml_type == 10 || ggml_type == 11 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 ||
+                   ggml_type == 23;
     // the formats native_mmvq() hands to iq_mmvq()
     const bool iq = ggml_type == 7 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 || ggml_type == 21 ||
                     ggml_type == 22 || ggml_type == 29;
@@ -1794,6 +1805,7 @@ bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_i
     case 6: launch_slots<SmallTraits<Q50Block, 4>>(slots, count, n_in, n_out, s); break;
     case 8: launch_slots<SmallTraits<Q80Block, 8>>(slots, count, n_in, n_out, s); break;
     case 20: launch_slots<SmallTraits<IQ4NLBlock, 4>>(slots, count, n_in, n_out, s); break;
+    case 10: launch_slots<Q2KTraits>(slots, count, n_in, n_out, s); break;
     case 11: launch_slots<Q3KTraits>(slots, count, n_in, n_out, s); break;
     case 12: launch_slots<Q4KTraits>(slots, count, n_in, n_out, s); break;
     case 13: launch_slots<Q5KTraits>(slots, count, n_in, n_out, s); break;

@@ -107,8 +107,8 @@ void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
 
 // Up to 8 matrices of one format and shape in one launch: matrix i times its own Q8_1 column x[i] into y[i], as
 // native_mmvq(type, w[i], x[i], y[i], n_in, n_out, 1, stream) would each.  A launch costs the calling thread more
-// than a small product costs the card, which is what this saves.  False, with nothing launched: the format has
-// no kernel for it (Q2_K), and the caller launches the matrices one by one.
+// than a small product costs the card, which is what this saves.  False, with nothing launched: there is no
+// kernel for it (a format native_mmvq() does not take, or a HIP build), and the caller launches them one by one.
 struct MmvqSlots {
     const void* w[8];
     const void* x[8];
