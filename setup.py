@@ -317,7 +317,12 @@ def done(path: Path) -> bool:
 
 
 def mark(path: Path, text=""):
-    path.with_name(path.name + ".done").write_text(text or time.strftime("%Y-%m-%d %H:%M"), encoding="utf-8")
+    """Write the finish mark.  A folder that cannot be written (--gguf-dir on a read-only share, #570) only costs the
+    mark: setup says so and goes on (the step is repeated on the next run), it does not stop."""
+    try:
+        path.with_name(path.name + ".done").write_text(text or time.strftime("%Y-%m-%d %H:%M"), encoding="utf-8")
+    except OSError as e:
+        warn(f"the finish mark of {path.name} cannot be written ({e}): the next run does this step again")
 
 
 # ------------------------------------------------------------------------------------------------ the PC

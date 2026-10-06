@@ -176,6 +176,14 @@ class ReadOnlyGgufDir(unittest.TestCase):
         self.assertIn("is whole but its finish mark cannot be written", out)
 
 
+    def test_mark_itself_never_stops_on_a_read_only_folder(self):
+        """#570: every finish mark (the SHA-256 result of a verified shard too), not only the one for a whole shard."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(Path, "write_text",
+                                                                     side_effect=PermissionError(13, "read-only")):
+            setup.mark(Path(tmp) / "x.gguf", "sha256 abc")                   # no exception
+            self.assertFalse(setup.done(Path(tmp) / "x.gguf"))
+
+
 class ExperimentalSm60(unittest.TestCase):
     """#295: Pascal (6.x) and Volta (7.0) only with STRATA_EXPERIMENTAL_SM60=1, built with -DSTRATA_EXPERIMENTAL_SM60=ON
     and a CUDA 12.x toolkit; nothing changes without the variable."""
