@@ -165,6 +165,16 @@ void Qwen35::assign_scratch() {
     }
 }
 
+// A recurrent layer's convolution and delta-rule state lie one behind the other in state_ (alloc_caches()).
+void Qwen35::save_layer(int il, int64_t, uint8_t* dst) {
+    const Block& B = blocks_[(size_t) il];
+    if (!B.past) return;
+    const size_t n = size_t(3) * conv_dim_ + size_t(v_heads_) * s_dim_ * s_dim_;
+    ck(cudaMemcpy(dst + (size_t) (B.past - state_) * sizeof(float), B.past, n * sizeof(float),
+                  cudaMemcpyDeviceToHost),
+       "save state");
+}
+
 size_t Qwen35::row_bytes() const { return (size_t) n_attn_ * 2 * n_kv_ * head_dim_ * sizeof(uint16_t); }
 
 void Qwen35::save_rows(int64_t first, int64_t n, uint8_t* dst) {

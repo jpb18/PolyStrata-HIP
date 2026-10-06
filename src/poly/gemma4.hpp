@@ -42,7 +42,7 @@ protected:
     void finish_logits(float* logits, int rows) override;
     float embed_scale() const override;
     size_t extra_bytes() const override;
-    void save_extra(uint8_t* dst) override;
+    void save_layer(int il, int64_t pos, uint8_t* dst) override;
     void load_extra(const uint8_t* src, int64_t pos) override;
     void load_drafter() override;
     void draft_step(int32_t token, int i) override;

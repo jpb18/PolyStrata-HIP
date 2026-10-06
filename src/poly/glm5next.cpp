@@ -312,6 +312,16 @@ void Glm5Next::alloc_caches() {
     h_sel_ = (int32_t*) hmalloc(n * sel_stride_ * sizeof(int32_t), "pinned memory");
 }
 
+// A recurrent layer's convolution and delta-rule state lie one behind the other in state_ (alloc_caches()).
+void Glm5Next::save_layer(int il, int64_t, uint8_t* dst) {
+    const Block& B = blocks_[(size_t) il];
+    if (!B.conv) return;
+    const size_t n = size_t(3) * d_inner_ * (kConv - 1) + size_t(n_head_) * kda_dim_ * kda_dim_;
+    ck(cudaMemcpy(dst + (size_t) (B.conv - state_) * sizeof(float), B.conv, n * sizeof(float),
+                  cudaMemcpyDeviceToHost),
+       "save state");
+}
+
 size_t Glm5Next::row_bytes() const {
     return (size_t) n_dsa_ * ((size_t) kv_rank_ * sizeof(uint16_t) + (size_t) 3 * idx_dim_ * sizeof(float));
 }

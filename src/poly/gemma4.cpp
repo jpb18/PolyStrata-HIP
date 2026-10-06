@@ -288,7 +288,7 @@ void Gemma4::assign_scratch() {
     }
 }
 
-// A sequence's rows are the full layers': a window layer's are part of its state (save_extra()).
+// A sequence's rows are the full layers': a window layer's are part of its state (save_layer()).
 size_t Gemma4::row_bytes() const {
     size_t b = 0;
     for (const Block& B : blocks_)
@@ -346,18 +346,24 @@ size_t Gemma4::extra_bytes() const {
     return b;
 }
 
-void Gemma4::save_extra(uint8_t* dst) {
-    std::memset(dst, 0, extra_bytes());   // the places of positions before the sequence's start
-    for (const Block& B : blocks_) {
-        if (!B.swa) continue;
-        const size_t row = (size_t) B.n_kv * B.dim * sizeof(uint16_t);
-        for (const uint16_t* cache : {B.keys, B.vals}) {
-            window_runs(pos_, [&](size_t slot, size_t at, size_t m) {
-                ck(cudaMemcpy(dst + slot * row, (const uint8_t*) cache + at * row, m * row, cudaMemcpyDeviceToHost),
-                   "save state");
-            });
-            dst += (size_t) keep_ * row;
-        }
+// A window layer's rows, behind the recurrent state (which this architecture has none of) and the window layers
+// before it.
+void Gemma4::save_layer(int il, int64_t pos, uint8_t* dst) {
+    if (!blocks_[(size_t) il].swa) return;
+    dst += state_n_ * sizeof(float);
+    for (int j = 0; j < il; ++j) {
+        const Block& B = blocks_[(size_t) j];
+        if (B.swa) dst += 2 * (size_t) keep_ * B.n_kv * B.dim * sizeof(uint16_t);
+    }
+    const Block& B = blocks_[(size_t) il];
+    const size_t row = (size_t) B.n_kv * B.dim * sizeof(uint16_t);
+    for (const uint16_t* cache : {B.keys, B.vals}) {
+        std::memset(dst, 0, (size_t) keep_ * row);   // the places of positions before the sequence's start
+        window_runs(pos, [&](size_t slot, size_t at, size_t m) {
+            ck(cudaMemcpy(dst + slot * row, (const uint8_t*) cache + at * row, m * row, cudaMemcpyDeviceToHost),
+               "save state");
+        });
+        dst += (size_t) keep_ * row;
     }
 }
 

@@ -246,8 +246,11 @@ protected:
     /// What a sequence has beside its recurrent state and its rows, in bytes: it is saved and brought back with
     /// the state (save_state(), load_state()).  load_extra() gets the position the state is for.
     virtual size_t extra_bytes() const { return 0; }
-    virtual void save_extra(uint8_t* dst) { (void) dst; }
     virtual void load_extra(const uint8_t* src, int64_t pos) { (void) src, (void) pos; }
+    /// Layer il's part of what save_state() writes, to its place in dst: the layer's recurrent state, and what
+    /// extra_bytes() counts for it, as they are once the layer has run every token before `pos`.  The card is
+    /// done with the layer when this is called.  save_state() is this for every layer.
+    virtual void save_layer(int il, int64_t pos, uint8_t* dst) = 0;
     /// The draft block's attention for n tokens from position `pos`.  xn_ and xq_ hold its normed input; ao_ gets
     /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
     virtual void block_attend(int64_t pos, int n) { (void) pos, (void) n; }
@@ -289,6 +292,7 @@ protected:
     void plan_ahead(Layer& L, int il);
     void run(const int32_t* tokens, int n);
     void layer(int il, int n);
+    void save_last(uint8_t* dst);
     void moe_router(const Layer& L, int n);
     bool moe(Layer& L, int il, int n, const std::function<void()>* first = nullptr);
     void moe_add(int n);

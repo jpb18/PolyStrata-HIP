@@ -923,8 +923,16 @@ void Engine::reset() {
 
 void Engine::save_state(uint8_t* dst) {
     ck(cudaStreamSynchronize(cs(st_)), "save state");
-    ck(cudaMemcpy(dst, state_, state_n_ * sizeof(float), cudaMemcpyDeviceToHost), "save state");
-    save_extra(dst + state_n_ * sizeof(float));
+    for (int il = 0; il < (int) layers_.size(); ++il) save_layer(il, pos_, dst);
+    save_last(dst);
+}
+
+// What the state has that is no layer's: the model's output for the last token, which the draft block pairs the
+// next one with.  It lies behind the layers' state.
+void Engine::save_last(uint8_t* dst) {
+    if (!draft_) return;
+    ck(cudaMemcpy(dst + rec_n_ * sizeof(float), hn_, (size_t) n_embd_ * sizeof(float), cudaMemcpyDeviceToHost),
+       "save state");
 }
 
 void Engine::load_state(const uint8_t* src, int64_t pos) {

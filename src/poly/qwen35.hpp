@@ -24,6 +24,7 @@ protected:
     void begin_pass() override;
     void check_draft_block() override;
     size_t recurrent_floats() const override;
+    void save_layer(int il, int64_t pos, uint8_t* dst) override;
     void alloc_caches() override;
     void assign_scratch() override;
     int widest() const override;
