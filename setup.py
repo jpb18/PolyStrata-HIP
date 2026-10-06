@@ -2710,26 +2710,36 @@ def pip_cuda_libs(toolkit=13) -> None:
         pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
 
 
-CUDA_SM120_SUSPECT = (13, 2)   # #892 #968: nvcc 13.2.51 for sm_120 made garbage answers (IQ1_S / IQ2_S / IQ3_S) and prompts
+CUDA_SM120_SUSPECT = (13, 2)   # #892 #968: nvcc 13.2.0 / 13.2.1 (build 13.2.51) for sm_120 made garbage answers (IQ1_S / IQ2_S / IQ3_S) and prompts
                                # (K-quant MMQ) that the same source compiled with 13.0.88 answers correctly (llama.cpp hit it too)
+CUDA_SM120_FIXED_BUILD = 86    # CUDA 13.2.2 (nvcc build 13.2.86) fixes it (ggml-org/llama.cpp#28581, confirmed on a 5090 in #968)
+
+
+def nvcc_build(nvcc):
+    """The build number of an nvcc ("Build cuda_13.2.r13.2/compiler...", "V13.2.86" -> 86); None when it cannot be read."""
+    m = re.search(r"\bV\d+\.\d+\.(\d+)", out([nvcc, "--version"]) if nvcc else "")
+    return int(m.group(1)) if m else None
 
 
 def sm120_nvcc(nvcc, cuda_v, archs):
-    """#892 / #968: CUDA 13.2's nvcc for an RTX 50 card (sm_120).  Returns (nvcc, cuda_v): an older 13.x toolkit when one is
-    installed and the user did not name a compiler (STRATA_NVCC), else the one found, with a warning that says what to
-    do.  Recommends, never forces: a user who picked 13.2 keeps it."""
+    """#892 / #968: CUDA 13.2.0 / 13.2.1's nvcc for an RTX 50 card (sm_120).  Returns (nvcc, cuda_v): an older 13.x toolkit
+    when one is installed and the user did not name a compiler (STRATA_NVCC), else the one found, with a warning that says
+    what to do.  CUDA 13.2.2 (build 86 or newer) is fine.  Recommends, never forces: a user who picked 13.2 keeps it."""
     if not nvcc or cuda_v != CUDA_SM120_SUSPECT or max(archs) < 120:
+        return nvcc, cuda_v
+    build = nvcc_build(nvcc)
+    if build is not None and build >= CUDA_SM120_FIXED_BUILD:
         return nvcc, cuda_v
     if not os.environ.get("STRATA_NVCC"):
         alt, alt_v = find_nvcc(below=CUDA_SM120_SUSPECT)
         if alt and alt_v and alt_v >= (13, 0):
-            ok(f"CUDA {alt_v[0]}.{alt_v[1]} is used for the RTX 50 card (sm_120): CUDA 13.2's compiler made wrong answers "
-               "there (#892, #968); STRATA_NVCC=<nvcc> picks another")
+            ok(f"CUDA {alt_v[0]}.{alt_v[1]} is used for the RTX 50 card (sm_120): CUDA 13.2.0 / 13.2.1's compiler made wrong "
+               "answers there (#892, #968); STRATA_NVCC=<nvcc> picks another")
             return alt, alt_v
-    warn("CUDA 13.2's compiler (nvcc) made garbage prompts and answers for RTX 50 cards (sm_120) in two reports "
-         "(#892, #968): the same source compiled with CUDA 13.0 or 13.1 is right. If the engine answers with "
-         "nonsense, install CUDA 13.0 next to it (https://developer.nvidia.com/cuda-toolkit-archive) and set "
-         "STRATA_NVCC to its nvcc; the ready-made engine is built with 13.0")
+    warn("CUDA 13.2.0 and 13.2.1's compiler (nvcc) made garbage prompts and answers for RTX 50 cards (sm_120) in two "
+         "reports (#892, #968): the same source compiled with CUDA 13.0, 13.1 or 13.2.2 is right. If the engine answers "
+         "with nonsense, update to CUDA 13.2.2 or install CUDA 13.0 next to it (https://developer.nvidia.com/cuda-toolkit-archive) "
+         "and set STRATA_NVCC to its nvcc; the ready-made engine is built with 13.0")
     return nvcc, cuda_v
 
 

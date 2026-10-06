@@ -92,10 +92,10 @@ RTX 4080 SUPER). Try another driver (a Studio one, or an older one) and a lower 
 `--spec 4`, `--spec 0` avoids the verify window while you wait for a driver fix.
 
 **An RTX 50 card (a source build with CUDA 13.2) answers with nonsense, or reads prompts wrongly (#892, #968).**
-CUDA 13.2's compiler (nvcc 13.2.51) miscompiles some of the engine's kernels for sm_120: on our RTX 5070 the IQ2_S and IQ3_S
+CUDA 13.2.0 and 13.2.1's compiler (nvcc 13.2.51) miscompile some of the engine's kernels for sm_120: on our RTX 5070 the IQ2_S and IQ3_S
 products are wrong (relative error 0.5 to 1.0 in the tests) with 13.2 and right with 13.0. The ready-made engine is built
-with 13.0. If you compile it yourself, use CUDA 13.0 or 13.1 (it can sit next to 13.2: `STRATA_NVCC=<path to its nvcc>`);
-setup warns when it finds 13.2 for such a card, and takes an older 13.x when one is installed.
+with 13.0. If you compile it yourself, use CUDA 13.0, 13.1 or 13.2.2 (13.2.2, nvcc build 13.2.86, fixes it; an older one can sit next to a newer: `STRATA_NVCC=<path to its nvcc>`);
+setup warns when it finds 13.2.0 or 13.2.1 for such a card, and takes an older 13.x when one is installed.
 
 **Pictures are refused, or slow.**
 "this server was started without the vision encoder": the model was set up for text only - run setup again with
