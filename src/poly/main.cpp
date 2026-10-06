@@ -773,9 +773,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata-poly: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
+        // Pages on another node than the threads are read at about two thirds of the speed.  The file cache puts a
+        // page on the node of whatever read it first, so a file read back by something else lands on any.
+        const bool far = engine.numa_share() > 0.0 && engine.numa_share() < 0.95;
         if (engine.numa_node() >= 0)
             std::fprintf(stderr, "strata-poly: the CPU threads stay on NUMA node %d, which has %.0f%% of the experts' "
-                                 "pages\n", engine.numa_node(), 100.0 * engine.numa_share());
+                                 "pages%s\n", engine.numa_node(), 100.0 * engine.numa_share(),
+                         far ? "; the rest is read from another node, more slowly" : "");
+        else if (far)
+            std::fprintf(stderr, "strata-poly: the experts' pages are on several NUMA nodes, %.0f%% on the fullest; "
+                                 "the CPU reads the ones far from it more slowly\n", 100.0 * engine.numa_share());
         if (eos.empty())
             for (const char* key : {"tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",
                                     "tokenizer.ggml.eom_token_id"}) {
