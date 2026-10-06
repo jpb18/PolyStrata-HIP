@@ -264,6 +264,7 @@ struct Session {
     // of it, what followed there is the guess.  The policy learns from the windows so far, their hits and their
     // time, which of the two pays.  It and the repeats are the other engine's (strata/spec).
     int most;                             // the tokens of a window at most; 1: no guesses
+    double ask_ms = 0.0;                  // what one guess of the block takes, as measured
     bool look;                            // guess from repeats
     strata::spec::SuffixDrafter repeats;
     strata::spec::DraftPolicy policy;
@@ -414,11 +415,15 @@ struct Session {
                     double sure = 1.0, tokens = 1.0;
                     int n_d = 0;
                     for (int32_t from = t; n_d < most - 1; from = d[n_d++]) {
-                        float p = 0.f;
-                        d[n_d] = engine.draft(from, n_d, &p);
-                        sure *= p;
                         const double more =
                             std::clamp((policy.cost_ms(n_d + 2) - policy.cost_ms(n_d + 1)) / one, 0.2, 0.8);
+                        // asking takes time too: not when a guess the block were sure of would not pay for it
+                        if (sure * policy.cost_ms(n_d + 1) <= tokens * (more * one + ask_ms)) break;
+                        float p = 0.f;
+                        const Clock::time_point asked_at = Clock::now();
+                        d[n_d] = engine.draft(from, n_d, &p);
+                        ask_ms = ask_ms > 0.0 ? 0.9 * ask_ms + 0.1 * ms_since(asked_at) : ms_since(asked_at);
+                        sure *= p;
                         if (sure * policy.cost_ms(n_d + 1) <= tokens * more * one) break;
                         tokens += sure;
                     }
