@@ -2289,6 +2289,31 @@ class WebApp(unittest.TestCase):
         finally:
             self.svc.template = original
 
+    def test_slot_reports_the_context_in_use(self):
+        """/slots in llama.cpp's names: a front-end's context meter divides n_prompt_tokens by n_ctx, so a server
+        that leaves the key out shows 0 % no matter how full the context is."""
+        with self.svc.status_lock:
+            self.svc.status["prompt_tokens"] = 1234
+        try:
+            slot = json.loads(self.get("/slots")[2])[0]
+            self.assertEqual((slot["n_ctx"], slot["n_prompt_tokens"]), (CTX, 1234))
+        finally:
+            with self.svc.status_lock:
+                self.svc.status.pop("prompt_tokens", None)
+        self.assertEqual(json.loads(self.get("/slots")[2])[0]["n_prompt_tokens"], 0)
+
+    def test_slots_lists_every_batch_slot(self):
+        engine = self.svc.engine
+        engine.batch, engine.max_context = 2, CTX
+        engine.slots_view = lambda: [{"slot": 0, "state": "decoding", "prompt_tokens": 500},
+                                     {"slot": 1, "state": "idle", "held_tokens": 77}]
+        try:
+            slots = json.loads(self.get("/slots")[2])
+        finally:
+            del engine.batch, engine.slots_view
+        self.assertEqual(slots, [{"id": 0, "n_ctx": CTX, "is_processing": True, "n_prompt_tokens": 500},
+                                 {"id": 1, "n_ctx": CTX, "is_processing": False, "n_prompt_tokens": 77}])
+
     def test_props_total_slots_follows_the_batch_slots(self):
         # llama.cpp clients read total_slots as the number of requests the server runs at once
         engine, had = self.svc.engine, hasattr(self.svc.engine, "batch")
@@ -2325,7 +2350,8 @@ class WebApp(unittest.TestCase):
                     self.svc.status["busy"] = busy
                 code, _, body = self.get("/slots")
                 self.assertEqual(code, 200)
-                self.assertEqual(json.loads(body), [{"id": 0, "n_ctx": CTX, "is_processing": busy}])
+                self.assertEqual(json.loads(body), [{"id": 0, "n_ctx": CTX, "is_processing": busy,
+                                                     "n_prompt_tokens": 0}])
         finally:
             with self.svc.status_lock:
                 self.svc.status["busy"] = False
