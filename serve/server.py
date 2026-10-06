@@ -1754,9 +1754,23 @@ class Vision:
         return data
 
     @staticmethod
+    def _exif_rotated(data: bytes) -> bool:
+        """A JPEG whose EXIF Orientation says it is stored turned (phones do this for portrait photos): the decoder
+        (stb_image) ignores the tag.  False without Pillow, or when the tag is missing, 1 or unreadable (#1229)."""
+        try:
+            import io
+            from PIL import Image
+            with Image.open(io.BytesIO(data)) as im:
+                return im.getexif().get(0x0112, 1) not in (None, 0, 1)
+        except Exception:  # noqa: BLE001 - any failure leaves the image as it was sent
+            return False
+
+    @staticmethod
     def normalize(data: bytes) -> bytes:
-        """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG."""
-        if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
+        """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG.
+        A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow)."""
+        jpeg = data[:3] == b"\xff\xd8\xff"
+        if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
                 data[:6] in (b"GIF87a", b"GIF89a"):
             return data
         try:
@@ -1768,6 +1782,8 @@ class Vision:
         try:
             im = Image.open(io.BytesIO(data))
             im.load()
+            from PIL import ImageOps
+            im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied (#1229)
         except Exception as e:
             raise ValueError(f"the image could not be read ({e})") from None
         if im.mode in ("RGBA", "LA", "P") and "transparency" in im.info or im.mode in ("RGBA", "LA"):
