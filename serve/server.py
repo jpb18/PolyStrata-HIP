@@ -694,6 +694,9 @@ class StrataEngine:
         seed = sampling.get("seed")
         if isinstance(seed, int) and seed > 0:
             keys += f" seed={seed}"
+        pad = sampling.get("image_pad")                 # an image request's (Service.run()); strata skips the key
+        if isinstance(pad, int) and not isinstance(pad, bool):
+            keys += f" image_pad={pad}"
         # setup's calibration (tools/calibrate.py): engine settings for this request only, measured without a restart
         tune = sampling.get("strata_tune")
         if isinstance(tune, dict):
@@ -1740,6 +1743,11 @@ class Service:
             answer = tokenizer.encode("<|tool_response>", parse_special=True)
             self.stop_ids |= set(answer if len(answer) == 1 else [])
             self.think_open_ids = tokenizer.encode("<|channel>thought\n", parse_special=True)
+        # an image in a prompt (prepare()): the token the template writes for it, which stands for each of its rows;
+        # the token the template writes before that one, if it writes one; the tokens to put around the rows, if
+        # the template leaves that to the program
+        self.image_marks = ("<|image|>", None, ("<|image>", "<image|>")) if self.call_format == "gemma" else \
+            (IMAGE_PAD, VISION_START, None)
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -2286,8 +2294,12 @@ class Service:
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images")
-            pad = self.tok.encode(IMAGE_PAD, parse_special=True)[0]
-            start = self.tok.encode(VISION_START, parse_special=True)[0]
+            mark, before, around = self.image_marks
+
+            def one(text):
+                return self.tok.encode(text, parse_special=True)[0]
+
+            pad, start = one(mark), one(before) if before else None
             # Encode only while the engine is idle: the engine and the image encoder (a separate process) must not
             # run on the GPU at the same time - an encode during a running request left that request stuck at
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
@@ -2296,12 +2308,15 @@ class Service:
                 encoded = [self.vision.encode(src) for src in images]
             # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
             # (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs,
-            # #150) is kept as plain text, or it took an image's place and the counts no longer matched.
-            literal = self.tok.encode(IMAGE_PAD, parse_special=False)
+            # #150) is kept as plain text, or it took an image's place and the counts no longer matched.  A template
+            # that writes the marker alone (Gemma 4's) leaves nothing to tell the two by: the first ones are the
+            # images, and the model's own tokens go around each image's rows here, as llama.cpp puts them.
+            literal = self.tok.encode(mark, parse_special=False)
+            begin, end = ([one(around[0])], [one(around[1])]) if around else ([], [])
             out, k = [], 0
             for j, t in enumerate(ids):
-                if t == pad and j > 0 and ids[j - 1] == start and k < len(encoded):
-                    out += [pad] * encoded[k][1]
+                if t == pad and k < len(encoded) and (start is None or (j > 0 and ids[j - 1] == start)):
+                    out += begin + [pad] * encoded[k][1] + end
                     k += 1
                 elif t == pad:
                     out += literal
@@ -2314,7 +2329,7 @@ class Service:
             with open(combined, "wb") as f:
                 for path, _ in encoded:
                     f.write(path.read_bytes())
-            self.embeddings.path = combined
+            self.embeddings.path, self.embeddings.pad = combined, pad
         ctx = self.engine.max_context
         if ctx <= 0:
             if getattr(self.engine, "starting", False):   # #344: (re)starting, not a prompt that is too long
@@ -2391,6 +2406,8 @@ class Service:
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
+        if emb:                                         # strata-poly finds the images' rows by their token
+            sampling = {**(sampling or {}), "image_pad": self.embeddings.pad}
         # Identity token: only a DONE line replaces engine.last, so a request that died, errored or was
         # disconnected must not have the PREVIOUS request's decode figures recorded as its own.
         engine_last0 = getattr(self.engine, "last", None)

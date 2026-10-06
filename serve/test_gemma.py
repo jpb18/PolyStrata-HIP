@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import strata_tokenizer as ST  # noqa: E402
 from serve.frontend import ChatTemplate, OutputParser, openai_to_messages, parse_gemma_tool_call  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service  # noqa: E402
+from serve.server import ByteTokenizer, MockEngine, Service, StrataEngine  # noqa: E402
 
 SP = ST.SPACE
 BYTES = ["<0x%02X>" % b for b in range(256)]
@@ -234,6 +234,49 @@ class ServiceForGemma(unittest.TestCase):
         self.assertTrue(text.endswith("Let me add.<turn|>\n<|turn>model\n"), text)
         text, _ = self.prompt({"messages": self.ASKED[:1] + said, "chat_template_kwargs": {"enable_thinking": False}})
         self.assertTrue(text.endswith("Let me add.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"), text)
+
+
+class ImageTokens(GemmaTokens):
+    SPECIALS = GemmaTokens.SPECIALS + ["<|image>", "<|image|>", "<image|>"]
+
+
+class AnImage(unittest.TestCase):
+    """Gemma 4's template writes <|image|> for an image and no more; the tokens around its rows are the server's."""
+
+    class FakeVision:
+        def __init__(self, d):
+            self.dir = Path(d)
+            self.rows = self.dir / "img.sve"
+            self.rows.write_bytes(b"rows")
+
+        def encode(self, source):
+            return self.rows, 3
+
+    def test_an_images_rows_between_the_models_tokens(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "chat_template.jinja"
+            path.write_text("{{- bos_token -}}{%- for m in messages -%}<|turn>{{ m['role'] }}\n"
+                            "{%- for item in m['content'] -%}"
+                            "{%- if item['type'] == 'image' -%}<|image|>{%- else -%}{{ item['text'] }}{%- endif -%}"
+                            "{%- endfor -%}<turn|>\n{%- endfor -%}<|turn>model\n", encoding="utf-8")
+            class Asked(MockEngine):
+                def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+                    self.asked = (StrataEngine.sampling_keys(sampling), embeddings)
+                    yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+            tok = ImageTokens()
+            svc = Service(Asked(tok, "a cat"), tok, ChatTemplate(path), vision=self.FakeVision(d))
+            begin, pad, end = (256 + ImageTokens.SPECIALS.index(s) for s in ("<|image>", "<|image|>", "<image|>"))
+            msgs = [{"role": "user", "content": [{"type": "image", "source": "x.png"},
+                                                 {"type": "text", "text": "what is this?"}]}]
+            ids, _, _ = svc.prepare(msgs, None, {})
+            at = ids.index(begin)
+            self.assertEqual(ids[at:at + 5], [begin, pad, pad, pad, end])
+            self.assertEqual((ids.count(pad), svc.embeddings.pad), (3, pad))
+            # the engine is told which token stands for an image's rows
+            rows = svc.embeddings.path
+            list(svc.run(ids, False, None, 8, {}, __import__("threading").Event()))
+            self.assertEqual(svc.engine.asked, (f" image_pad={pad}", rows))
 
 
 if __name__ == "__main__":
