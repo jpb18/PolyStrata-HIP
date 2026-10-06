@@ -141,12 +141,15 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
             int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0);
 /// attend() for a prompt batch: the same attention with cuBLAS products, a few times faster on many tokens.  A
 /// token's result depends on the tokens beside it in the last bits, so the windows of guessed tokens use attend().
-/// keys and vals: scratch for the rows a chunk reads as floats, kv_heads * dim each: pos + rows of them, or
-/// window + chunk if that is less (with `whole`, window + rows).  work: 2 * chunk * n_head * dim floats.  score
-/// as in attend().  Throws std::runtime_error.
+/// It takes the call's tokens together and the rows they attend a block at a time: as many rows as have their
+/// scores, n_head floats a token each, in the score_floats floats of `score`, which must hold n_head for each
+/// row a token can attend.  keys and vals: scratch for a block's rows as floats, kv_heads * dim each: room for
+/// pos + rows of them, or for window + rows if that is less.  work: rows * n_head * (2 * dim + 3) floats.
+/// Throws std::runtime_error.
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
-                  float* keys, float* vals, float* score, float* work, int chunk, float* out, int dim, int n_head,
-                  int kv_heads, float scale, void* stream, int window = 0, int ring = 0, bool whole = false);
+                  float* keys, float* vals, float* score, size_t score_floats, float* work, float* out, int dim,
+                  int n_head, int kv_heads, float scale, void* stream, int window = 0, int ring = 0,
+                  bool whole = false);
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
 /// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.

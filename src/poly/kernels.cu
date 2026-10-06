@@ -614,27 +614,44 @@ __global__ void attn_regroup_kernel(const float* __restrict__ src, float* __rest
     else dst[by_token] = src[by_group];
 }
 
-// attn_softmax_kernel for scores in the order of the groups, over the rows a chunk has as floats: they start at
-// row lo0 of the sequence, and a token's own start later.  The scores of rows it does not attend become zero.
-// One block per head and token: blockIdx.x counts (group, token, head of the group).
-__global__ void attn_softmax_span_kernel(float* score, int n_keys, long long pos, int first, int window,
-                                         long long lo0, int tokens, int per, long long last) {
+// A softmax over a chunk's rows a block of rows at a time, for scores in the order of the groups: blockIdx.x
+// counts (group, token, head of the group), and the block's rows start at row0 of the sequence.  A score becomes
+// its exp against the largest its token and head have had (top), zero for a row the token does not attend.  sum
+// is the sum of the exps against that top, and shrink what the exps of the blocks before are worth against it.
+// With `fresh` there was no block before.
+__global__ void attn_softmax_block_kernel(float* score, int n_keys, long long row0, long long pos, int first,
+                                          int window, int tokens, int per, long long last, float* top, float* sum,
+                                          float* shrink, bool fresh) {
     __shared__ float part[8];
     const int tok = first + (blockIdx.x % (tokens * per)) / per;
     long long lo;
     const int n = attn_rows(pos + tok, window, last, &lo);
-    const int j0 = int(lo - lo0), j1 = j0 + n;
+    const long long end = lo + n;   // the token attends the sequence's rows from lo to before end
+    const int j0 = lo > row0 ? int(lo - row0) : 0, j1 = end - row0 < n_keys ? int(end - row0) : n_keys;
     float* row = score + size_t(blockIdx.x) * n_keys;
     float mx = -INFINITY;
     for (int j = j0 + threadIdx.x; j < j1; j += blockDim.x) mx = fmaxf(mx, row[j]);
     mx = block_max(mx, part);
-    float sum = 0.0f;
-    for (int j = j0 + threadIdx.x; j < j1; j += blockDim.x) {
-        row[j] = expf(row[j] - mx);
-        sum += row[j];
+    const float before = fresh ? -INFINITY : top[blockIdx.x], now = fmaxf(before, mx);
+    float s = 0.0f;
+    for (int j = threadIdx.x; j < n_keys; j += blockDim.x) {
+        row[j] = j >= j0 && j < j1 ? expf(row[j] - now) : 0.0f;
+        s += row[j];
     }
-    const float inv = 1.0f / block_sum(sum, part);
-    for (int j = threadIdx.x; j < n_keys; j += blockDim.x) row[j] = j >= j0 && j < j1 ? row[j] * inv : 0.0f;
+    s = block_sum(s, part);
+    if (threadIdx.x != 0) return;
+    const float f = mx == -INFINITY ? 1.0f : expf(before - now);   // none of the block's rows: nothing changes
+    top[blockIdx.x] = now;
+    sum[blockIdx.x] = (fresh ? 0.0f : sum[blockIdx.x] * f) + s;
+    shrink[blockIdx.x] = f;
+}
+
+// A chunk's results in the order of the groups, `dim` values a token and head: times its factor, or divided by it.
+__global__ void attn_scale_kernel(float* out, const float* __restrict__ factor, int dim, bool divide) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dim) return;
+    const float f = factor[blockIdx.y];
+    out[size_t(blockIdx.y) * dim + i] *= divide ? 1.0f / f : f;
 }
 
 __global__ void softcap_kernel(float* x, size_t n, float cap) {
@@ -975,39 +992,54 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
 }
 
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
-                  float* keys, float* vals, float* score, float* work, int chunk, float* out, int dim, int n_head,
-                  int kv_heads, float scale, void* stream, int window, int ring, bool whole) {
+                  float* keys, float* vals, float* score, size_t score_floats, float* work, float* out, int dim,
+                  int n_head, int kv_heads, float scale, void* stream, int window, int ring, bool whole) {
     const cublasHandle_t h = (cublasHandle_t) blas;
     const float one = 1.0f, zero = 0.0f;
     const int per = n_head / kv_heads, width = kv_heads * dim;
     const long long last = whole ? pos + rows - 1 : -1;
-    for (int first = 0; first < rows; first += chunk) {
-        const int c = std::min(chunk, rows - first);
+    for (int first = 0, c = 0; first < rows; first += c) {
+        // every token left, unless a grid's 65535 rows or the scratch for one row's scores is less
+        c = (int) std::min({size_t(rows - first), size_t(65535 / n_head), score_floats / n_head});
         const long long p0 = pos + first;   // the chunk's first position, and the first row its tokens read
         const long long lo0 = window > 0 && p0 >= window ? p0 - window + 1 : 0;
         const int n_keys = int((whole ? last : p0 + c - 1) - lo0) + 1;
-        float* qg = work;                              // the queries by group, then the results
-        float* og = work + size_t(c) * n_head * dim;
-        for (int at = 0; at < n_keys; at += 32768) {   // a grid has at most 65535 rows
-            const int m = std::min(32768, n_keys - at);
-            attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>(
-                (const half*) kcache, keys + size_t(at) * width, width, lo0 + at, ring);
-            attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>(
-                (const half*) vcache, vals + size_t(at) * width, width, lo0 + at, ring);
-        }
+        const size_t heads = size_t(c) * n_head;
+        float* qg = work;                    // the queries by group, then the results
+        float* og = qg + heads * dim;
+        float* top = og + heads * dim;       // a token and head's largest score so far, the sum of its exps against
+        float* sum = top + heads;            // it, and what a block of rows makes the sums before it worth
+        float* shrink = sum + heads;
         attn_regroup_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(
             q + size_t(first) * n_head * dim, qg, dim, n_head, kv_heads, c, true);
-        // A product a group: its heads' queries of every token of the chunk against the group's keys.  cuBLAS
-        // reads a buffer of rows as the transpose, and the groups' keys lie `dim` apart in a row.
+        // The rows go a block at a time, as many as have their scores in the scratch, so that a product has the
+        // chunk's every token for its columns however long the context is: cuBLAS is several times slower on a
+        // few columns.  A token's softmax is kept from block to block (top, sum), and its values so far shrink
+        // to the new top.
         const long long cols = (long long) c * per;
-        blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, n_keys, (int) cols, dim, &scale, keys, width,
-                                          dim, qg, dim, cols * dim, &zero, score, n_keys, cols * n_keys, kv_heads),
-                "attention scores");
-        attn_softmax_span_kernel<<<c * n_head, 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window,
-                                                                    lo0, c, per, last);
-        blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, n_keys, &one, vals, width,
-                                          dim, score, n_keys, cols * n_keys, &zero, og, dim, cols * dim, kv_heads),
-                "attention values");
+        const int block = (int) std::min<size_t>(32768, score_floats / heads);   // a grid has at most 65535 rows
+        for (int k0 = 0; k0 < n_keys; k0 += block) {
+            const int m = std::min(block, n_keys - k0);
+            attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>((const half*) kcache, keys, width,
+                                                                               lo0 + k0, ring);
+            attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>((const half*) vcache, vals, width,
+                                                                               lo0 + k0, ring);
+            // A product a group: its heads' queries of every token of the chunk against the group's keys.  cuBLAS
+            // reads a buffer of rows as the transpose, and the groups' keys lie `dim` apart in a row.
+            blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, m, (int) cols, dim, &scale, keys, width,
+                                              dim, qg, dim, cols * dim, &zero, score, m, cols * m, kv_heads),
+                    "attention scores");
+            attn_softmax_block_kernel<<<c * n_head, 256, 0, cs(stream)>>>(score, m, lo0 + k0, (long long) pos, first,
+                                                                         window, c, per, last, top, sum, shrink,
+                                                                         k0 == 0);
+            if (k0 > 0)
+                attn_scale_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(og, shrink, dim, false);
+            blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, m, &one, vals, width, dim,
+                                              score, m, cols * m, k0 > 0 ? &one : &zero, og, dim, cols * dim,
+                                              kv_heads),
+                    "attention values");
+        }
+        attn_scale_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(og, sum, dim, true);
         attn_regroup_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(
             og, out + size_t(first) * n_head * dim, dim, n_head, kv_heads, c, false);
     }

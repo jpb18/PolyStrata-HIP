@@ -161,7 +161,7 @@ void Qwen35::assign_scratch() {
     if (rows_ >= kStageRows) {   // a prompt batch reads the cache's rows as floats
         akeys_ = fbuf((size_t) opt_.max_context * n_kv_ * head_dim_);
         avals_ = fbuf((size_t) opt_.max_context * n_kv_ * head_dim_);
-        awork_ = fbuf(2 * (size_t) chunk_ * n_head_ * head_dim_);
+        awork_ = fbuf(2 * heads + 3 * n * n_head_);
     }
 }
 
@@ -302,8 +302,8 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
     const float scale = 1.f / std::sqrt((float) head_dim_);
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
     if (n >= kStageRows)
-        attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_, awork_, chunk_, att_, head_dim_,
-                     n_head_, n_kv_, scale, st_);
+        attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_,
+                     (size_t) chunk_ * n_head_ * opt_.max_context, awork_, att_, head_dim_, n_head_, n_kv_, scale, st_);
     else
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
                at, at ? room(n) : 0);
