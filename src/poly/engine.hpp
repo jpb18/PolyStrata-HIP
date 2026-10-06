@@ -412,7 +412,8 @@ protected:
     std::string swap_error_;         ///< why the thread stopped; follow() throws it
     std::vector<float> recent_;      ///< per (layer, expert): its uses by written tokens, halved every kSwapHalf
     std::vector<uint8_t> coming_;    ///< per (layer, expert): on its way into the cache
-    std::vector<Pick> in_, out_;     ///< per trade number: the expert to bring in, and the one to give up
+    std::vector<Pick> in_, out_;     ///< per trade number: the experts to bring in, and the ones to give up
+    std::vector<size_t> trade_at_;   ///< per trade number: how many of its pairs follow() has taken
 
     int64_t pos_ = 0;
     std::vector<Image> images_;          ///< the sequence's pictures, by row

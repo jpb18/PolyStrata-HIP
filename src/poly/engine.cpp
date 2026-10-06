@@ -587,38 +587,62 @@ void Engine::follow(int written) {
     if (written <= 0) return;
     const float keep = std::exp2(-(float) written / (float) kSwapHalf);
     for (float& r : recent_) r *= keep;
+    if (n_free == 0) return;
 
+    // One pass over the experts lists, for each slot size, the ones that may come in, the most used first, and
+    // the cached ones that may go, the least used first: as many of each as uploads are free, which is all the
+    // pairs below can take.  A pass for every upload was 0.6 ms of a window of GLM 5.3 Flash's.
+    const size_t most = (size_t) n_free;
+    in_.assign((size_t) n_trade_ * most, Pick{});
+    out_.assign((size_t) n_trade_ * most, Pick{});
+    // p to its place in a list, whose last one drops out; equals stay in the order they came
+    const auto put = [most](Pick* list, const Pick& p, bool (*before)(const Pick&, const Pick&)) {
+        if (list[most - 1].il >= 0 && !before(p, list[most - 1])) return;
+        size_t at = most - 1;
+        for (; at > 0 && (list[at - 1].il < 0 || before(p, list[at - 1])); --at) list[at] = list[at - 1];
+        list[at] = p;
+    };
+    const auto more = [](const Pick& a, const Pick& b) {
+        return a.recent != b.recent ? a.recent > b.recent : a.prior > b.prior;
+    };
+    const auto less = [](const Pick& a, const Pick& b) {
+        return a.recent != b.recent ? a.recent < b.recent : a.prior < b.prior;
+    };
+    for (int il = 0; il < (int) layers_.size(); ++il) {
+        const Layer& L = layers_[(size_t) il];
+        if (L.trade < 0) continue;
+        Pick* in = in_.data() + (size_t) L.trade * most;
+        Pick* out = out_.data() + (size_t) L.trade * most;
+        for (int e = 0; e < n_expert_; ++e) {
+            const size_t i = (size_t) il * ne + (size_t) e;
+            const float r = recent_[i];
+            const int64_t p = prior_.empty() ? 0 : prior_[i];
+            if (L.slot[(size_t) e]) put(out, {il, e, r, p}, less);
+            else if (r >= kSwapMin && !coming_[i]) put(in, {il, e, r, p}, more);
+        }
+    }
+
+    // An upload goes to the size whose next pair gains most.  A cached expert that has given its slot is no
+    // candidate to come in: it was used no more than the cached ones left.
+    trade_at_.assign((size_t) n_trade_, 0);
     bool asked = false;
     for (; n_free > 0; --n_free) {
-        in_.assign((size_t) n_trade_, Pick{});
-        out_.assign((size_t) n_trade_, Pick{});
-        for (int il = 0; il < (int) layers_.size(); ++il) {
-            const Layer& L = layers_[(size_t) il];
-            if (L.trade < 0) continue;
-            Pick& in = in_[(size_t) L.trade];
-            Pick& out = out_[(size_t) L.trade];
-            for (int e = 0; e < n_expert_; ++e) {
-                const size_t i = (size_t) il * ne + (size_t) e;
-                const float r = recent_[i];
-                const int64_t p = prior_.empty() ? 0 : prior_[i];
-                if (L.slot[(size_t) e]) {
-                    if (out.il < 0 || r < out.recent || (r == out.recent && p < out.prior)) out = {il, e, r, p};
-                } else if (r >= kSwapMin && !coming_[i] &&
-                           (in.il < 0 || r > in.recent || (r == in.recent && p > in.prior))) {
-                    in = {il, e, r, p};
-                }
-            }
-        }
         int best = -1;
+        float gain = 0.f;
         for (int c = 0; c < n_trade_; ++c) {
-            const Pick& in = in_[(size_t) c];
-            const Pick& out = out_[(size_t) c];
+            const size_t k = (size_t) c * most + trade_at_[(size_t) c];
+            const Pick& in = in_[k];
+            const Pick& out = out_[k];
             if (in.il < 0 || out.il < 0 || in.recent < 2.f * out.recent + kSwapMin) continue;
-            if (best < 0 || in.recent - out.recent > in_[(size_t) best].recent - out_[(size_t) best].recent) best = c;
+            if (best < 0 || in.recent - out.recent > gain) {
+                best = c;
+                gain = in.recent - out.recent;
+            }
         }
         if (best < 0) break;
 
-        const Pick in = in_[(size_t) best], out = out_[(size_t) best];
+        const size_t k = (size_t) best * most + trade_at_[(size_t) best]++;
+        const Pick in = in_[k], out = out_[k];
         Swap* s = nullptr;
         for (int j = 0; j < n_swap_ && !s; ++j)
             if (swap_[(size_t) j].at.load() == Swap::kFree) s = &swap_[(size_t) j];
