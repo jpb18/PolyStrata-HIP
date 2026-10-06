@@ -970,10 +970,14 @@ bool ExpertCache::verify_slot(int32_t slot, const uint8_t *host_blob,
     if (std::memcmp(got.data(), host_blob, (size_t) nb) != 0) {
         size_t first = 0;
         while (first < (size_t) nb && got[first] == host_blob[first]) ++first;
-        char buf[256];
+        char buf[384];
         std::snprintf(buf, sizeof buf,
-                      "ExpertCache::verify_slot: slot %d differs from the arena at byte %llu (of %lld)",
-                      (int) slot, (unsigned long long) first, (long long) blob_);
+                      "ExpertCache::verify_slot: slot %d differs from the arena at byte %llu (of %lld): device %02x%02x%02x%02x, arena %02x%02x%02x%02x",
+                      (int) slot, (unsigned long long) first, (long long) blob_, first < (size_t) nb ? got[first] : 0,
+                      first + 1 < (size_t) nb ? got[first + 1] : 0, first + 2 < (size_t) nb ? got[first + 2] : 0,
+                      first + 3 < (size_t) nb ? got[first + 3] : 0, first < (size_t) nb ? host_blob[first] : 0,
+                      first + 1 < (size_t) nb ? host_blob[first + 1] : 0, first + 2 < (size_t) nb ? host_blob[first + 2] : 0,
+                      first + 3 < (size_t) nb ? host_blob[first + 3] : 0);
         err = buf;
         return false;
     }
