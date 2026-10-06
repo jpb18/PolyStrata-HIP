@@ -44,6 +44,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <thread>
@@ -143,6 +144,33 @@ bool one_token_self_commit() {
     }();
     return on;
 #endif
+}
+
+// True when the GPU runs under the i915 kernel driver (Arc Alchemist: A310-A770), read from sysfs.
+bool intel_i915_gpu() {
+    static const bool v = [] {
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator("/sys/class/drm", ec)) {
+            const std::string n = e.path().filename().string();
+            if (n.rfind("card", 0) != 0 || n.find('-') != std::string::npos) continue;
+            const auto drv = std::filesystem::read_symlink(e.path() / "device" / "driver", ec);
+            if (!ec && drv.filename() == "i915") return true;
+        }
+        return false;
+    }();
+    return v;
+}
+
+// How long the host waits for a layer's doorbell before it gives the window up (#267).  20 s by default; the first
+// window of a run on a card that JIT-compiles its kernels (no AOT: an Arc A750 needs FP64 emulation) can take longer
+// to start, so STRATA_RING_TIMEOUT_S raises it.
+std::chrono::seconds strata_ring_timeout() {
+    static const long s = [] {
+        const char* v = std::getenv("STRATA_RING_TIMEOUT_S");
+        const long n = v ? std::atol(v) : 20;
+        return n >= 1 ? n : 20L;
+    }();
+    return std::chrono::seconds(s);
 }
 
 bool mapped(size_t bytes, void **h, void **d) try {
@@ -1881,6 +1909,16 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     static Clock::time_point t_prev_end;   // SYCL port timing: where does a round's wall clock go?
     const Clock::time_point t_launch = Clock::now();
     if (ar_on() && h_plan_err_ != nullptr) *(volatile uint32_t*) h_plan_err_ = 0;
+    {   // SYCL port: on an Arc A750 the first window after other GPU work (a prefill, the previous request) never
+        // started when it was launched behind that work still in flight on another queue (no GPU breadcrumb, 20 s
+        // timeout, the engine dies). Letting the other queues drain before every window removes it (9 of 9 three-request runs pass; before, almost all
+        // failed; the gap rule alone (=2) did not help, so it is the windows after each other, not only the first). The cost is
+        // the overlap of a window with the previous commit's tail.  STRATA_WINDOW_SYNC=1 always drains, =0 never, =2 the gap rule; the default is 1 on an i915 card, 0 elsewhere.
+        static const char* wv = std::getenv("STRATA_WINDOW_SYNC");
+        static const int wmode = wv ? std::atoi(wv) : (intel_i915_gpu() ? 1 : 0);
+        const bool first_or_gap = t_prev_end.time_since_epoch().count() == 0 || (t_launch - t_prev_end) > std::chrono::milliseconds(20);
+        if (wmode == 1 || (wmode == 2 && first_or_gap)) dpct::get_current_device().queues_wait_and_throw();
+    }
     const dpct::err0 le = (std::getenv("STRATA_VERIFY_EAGER") != nullptr)
                               ? (record_window(T, cs_, err) ? 0 : 1)   // SYCL port: eager replay of the window body
                               : DPCT_CHECK_ERROR((cs_)->ext_oneapi_graph(*(ar_off_ ? exec_nr_[T] : exec_[T])));
@@ -1963,7 +2001,7 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
                     return false;
                 }
             }
-            if (now - a > std::chrono::seconds(20)) {
+            if (now - a > strata_ring_timeout()) {
                 // #267: the caller ends the engine; no spin kernel may outlive it
                 trace_ev("TIMEOUT", k, l, (int64_t) !cs_->ext_oneapi_empty());   // SYCL port: 1 = still running
                 if (g_trace) {
@@ -2028,14 +2066,14 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
     trace_ev("SYNC", -1, -1, 0);
     const dpct::err0 se = DPCT_CHECK_ERROR(cs_->wait());
     trace_ev("SYNCED", -1, -1, (int64_t) se);
+    const Clock::time_point t_done = Clock::now();
     if (std::getenv("STRATA_VERIFY_DEBUG") != nullptr) {
-        const Clock::time_point t_done = Clock::now();
         std::fprintf(stderr, "verify dbg: T=%d window: since previous window %.1f ms, staging %.1f ms, gpu %.1f ms\n", T,
                      t_prev_end.time_since_epoch().count() ? std::chrono::duration<double, std::milli>(t0 - t_prev_end).count() : 0.0,
                      std::chrono::duration<double, std::milli>(t_launch - t0).count(),
                      std::chrono::duration<double, std::milli>(t_done - t_launch).count());
-        t_prev_end = t_done;
     }
+    t_prev_end = t_done;
     /*
     DPCT1009: SYCL reports errors using exceptions and does not use error
     codes. Please replace the "get_error_string_dummy(...)" with a real
@@ -2920,7 +2958,7 @@ bool Verifier::run_slot_rows(const int *rows, int S, const int32_t *tokens,
                     return false;
                 }
             }
-            if (now - a > std::chrono::seconds(20)) {
+            if (now - a > strata_ring_timeout()) {
                 err = "verify batch: timed out at layer " + std::to_string(l) + released_note(release_gpu_waits(5000));
                 return false;
             }
@@ -3164,7 +3202,7 @@ int Verifier::batch_poll(PoolMultiFn pool, void *user, std::string &err) try {
                     b_running_ = false;
                     return -1;
                 }
-                if (now - b_last_ > std::chrono::seconds(20)) {
+                if (now - b_last_ > strata_ring_timeout()) {
                     err = "verify batch: timed out at layer " + std::to_string(lb_ + b_k_) + released_note(release_gpu_waits(5000));
                     b_running_ = false;
                     return -1;
