@@ -1400,6 +1400,52 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(plain.get("HIP_VISIBLE_DEVICES"), os.environ.get("HIP_VISIBLE_DEVICES"))
 
 
+class HipEnvGuard(unittest.TestCase):
+    """#654: a HIP_PATH that points nowhere and an unwritable TEMP crash the AMD runtime; both are repaired, a healthy
+    environment is not touched."""
+
+    def test_stale_hip_path_dropped(self):
+        import tempfile
+        from serve.server import hip_env_guard
+        with tempfile.TemporaryDirectory() as d:
+            gone = os.path.join(d, "TheRock", "build")
+            env = {"HIP_PATH": gone, "HIP_DEVICE_LIB_PATH": gone, "LLVM_PATH": d}
+            said = hip_env_guard(env, {"log": os.path.join(d, "x.log")})
+            self.assertNotIn("HIP_PATH", env)
+            self.assertNotIn("HIP_DEVICE_LIB_PATH", env)
+            self.assertEqual(env["LLVM_PATH"], d)             # exists: left alone
+            self.assertEqual(len(said), 2)
+
+    def test_unwritable_temp_replaced(self):
+        import tempfile
+        from serve.server import hip_env_guard
+        with tempfile.TemporaryDirectory() as d:
+            nothing = os.path.join(d, "no", "such", "dir")
+            env = {"TEMP": nothing, "TMP": d}
+            hip_env_guard(env, {"log": os.path.join(d, "x.log")})
+            self.assertEqual(env["TMP"], d)                   # writable: untouched
+            self.assertTrue(os.path.samefile(env["TEMP"], os.path.join(d, "tmp")))
+            self.assertTrue(os.path.isdir(env["TEMP"]))
+
+    def test_healthy_untouched(self):
+        import tempfile
+        from serve.server import hip_env_guard
+        with tempfile.TemporaryDirectory() as d:
+            env = {"HIP_PATH": d, "TEMP": d}
+            before = dict(env)
+            self.assertEqual(hip_env_guard(env, {}), [])
+            self.assertEqual(env, before)
+
+    def test_only_for_hip(self):
+        from serve.server import child_env
+        os.environ["HIP_PATH"] = r"Z:\definitely\not\here"
+        try:
+            self.assertEqual(child_env({}).get("HIP_PATH"), os.environ["HIP_PATH"])
+            self.assertNotIn("HIP_PATH", child_env({"backend": "hip"}))
+        finally:
+            del os.environ["HIP_PATH"]
+
+
 class RecordingPrompt(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_ids = list(ids)

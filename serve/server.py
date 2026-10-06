@@ -2021,7 +2021,50 @@ def child_env(cfg: dict) -> dict:
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
         env[var] = os.pathsep.join(dirs + ([env[var]] if env.get(var) else []))
+    if cfg.get("backend") == "hip":
+        hip_env_guard(env, cfg)
     return env
+
+
+def _dir_writable(p: str) -> bool:
+    try:
+        with tempfile.TemporaryFile(dir=p):
+            return True
+    except OSError:
+        return False
+
+
+def hip_env_guard(env: dict, cfg: dict) -> list[str]:
+    """#654: two things in an AMD user's environment that crash the HIP runtime before it prints a line.  (1) HIP_PATH,
+    HIP_DEVICE_LIB_PATH or LLVM_PATH naming a folder that is gone (a ROCm build that was deleted): the bundled runtime
+    follows them.  They are dropped, and only when the folder does not exist.  (2) A TEMP / TMP / TMPDIR the engine cannot
+    create a file in: the runtime's comgr JIT builds its blit kernels through temporary files and the first call
+    crashes in amdhip64 (0xC0000005).  A writable folder next to the engine's log takes its place.  Returns what it
+    changed (said once, on stderr); a healthy environment is left exactly as it was."""
+    said: list[str] = []
+    for k in ("HIP_PATH", "HIP_DEVICE_LIB_PATH", "LLVM_PATH"):
+        v = env.get(k)
+        if v and not Path(v).exists():
+            del env[k]
+            said.append(f"{k}={v} does not exist: not passed to the engine")
+    bad = [k for k in ("TEMP", "TMP", "TMPDIR") if env.get(k) and not _dir_writable(env[k])]
+    if bad:
+        base = Path(cfg.get("log") or cfg.get("cwd") or ROOT).resolve()
+        for d in (base.parent / "tmp", ROOT / "tmp"):
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            if _dir_writable(str(d)):
+                for k in bad:
+                    said.append(f"{k}={env[k]} is not writable: using {d}")
+                    env[k] = str(d)
+                break
+        else:
+            said.append(f"{', '.join(bad)} not writable (AMD's runtime needs a writable temporary folder)")
+    for line in said:
+        print(f"strata serve: AMD: {line}", file=sys.stderr, flush=True)
+    return said
 
 
 def vision_env(cfg: dict, env: dict) -> dict:
