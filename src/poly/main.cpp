@@ -400,12 +400,13 @@ struct Session {
                 // measured, held to 0.2 to 0.8 of a token alone: one slow window must not end the guessing.
                 const bool blocks = engine.drafts() && room && !(k == most - 1 && policy.lookup_rate(match) >= 0.9);
                 const bool ask = blocks && gate.ask();
-                // a round that recorded launches took many rounds' time: it is not counted
+                // a round that recorded launches took many rounds' time: it is not counted, and the policy gets no
+                // time for it, which it leaves out of what a window costs
                 const auto count = [&](int n) {
                     const double ms = ms_since(round);
                     const bool recorded = engine.took_record();
                     if (blocks && !recorded) gate.saw(ask, n, ms);
-                    return ms;
+                    return recorded ? 0.0 : ms;
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
                 if (ask) {
