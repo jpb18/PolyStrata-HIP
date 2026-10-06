@@ -270,22 +270,13 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
-    {
-        auto exp_props = sycl::ext::oneapi::experimental::properties{
-            sycl::ext::oneapi::experimental::use_root_sync};
-
-        ((sycl::queue *)(strata::q_of(stream)))
-            ->parallel_for<dpct_kernel_name<class route_multi_a3bff6>>(
-                sycl::nd_range<3>(
-                    sycl::range(1, 1, (unsigned)((n_tok + 7) / 8)) *
-                        sycl::range(1, 8, 32),
-                    sycl::range(1, 8, 32)),
-                exp_props,
-                [=](sycl::nd_item<3> item_ct1)
-                    [[sycl::reqd_sub_group_size(32)]] {
-                        route_multi(logits, ids, weights, n_tok);
-                    });
-    }
+    // SYCL port: one block per token running the single-token route<512> (the same kernel as the 256-expert multi
+    // launch below).  Upstream's one-warp-per-token route_multi gives the same bits (native_multi_parity checks
+    // that) but hung an Arc A750 (Alchemist) on its first launch.
+    ((sycl::queue *)(strata::q_of(stream)))
+        ->parallel_for<dpct_kernel_name<class route_512_multi>>(
+            sycl::nd_range<3>(sycl::range(1, 1, (unsigned) n_tok) * sycl::range(1, 8, 32), sycl::range(1, 8, 32)),
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(32)]] { route<512>(logits, ids, weights); });
     /*
     DPCT1010: SYCL uses exceptions to report errors and does not use the
     error codes. The cudaGetLastError function call was replaced with 0. You
