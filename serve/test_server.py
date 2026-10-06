@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -4183,6 +4184,76 @@ class VisionCacheEviction(unittest.TestCase):
                 v.encode(f"image {i}".encode())
             self.assertEqual(len(v.cache), 64)
             self.assertFalse(first.exists())
+
+
+class LazyVision(unittest.TestCase):
+    """#673: with --lazy the image encoder is not started either; it starts with the model, and an encoder that fails
+    to start leaves nothing running."""
+
+    def make(self, ready=True):
+        import serve.server as server
+        started = []
+
+        class Proc:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO("READY 1" + chr(10) if ready else "oops" + chr(10))
+                self.killed = False
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        def popen(what, args, **kw):
+            p = Proc()
+            started.append(p)
+            return p
+
+        with mock.patch.object(server, "popen", popen), mock.patch.object(server, "contain"):
+            v = server.Vision({"exe": "strata-vision", "mmproj": "m.gguf", "model": "t.gguf"}, lazy=True)
+            self.addCleanup(lambda: shutil.rmtree(v.dir, ignore_errors=True))
+            return v, started, popen
+
+    def test_lazy_starts_nothing_and_alive_says_so(self):
+        v, started, _ = self.make()
+        self.assertEqual(started, [])
+        self.assertFalse(v.alive())
+
+    def test_restart_starts_it_and_close_ends_it(self):
+        import serve.server as server
+        v, started, popen = self.make()
+        with mock.patch.object(server, "popen", popen), mock.patch.object(server, "contain"):
+            v.restart()
+        self.assertTrue(v.alive())
+        self.assertEqual(len(started), 1)
+        v.close()
+        self.assertFalse(v.alive())
+
+    def test_a_failed_start_kills_the_process_and_raises(self):
+        import serve.server as server
+        v, started, _ = self.make(ready=False)
+
+        def popen(what, args, **kw):
+            class P:
+                stdin, stdout, killed = io.StringIO(), io.StringIO("oops" + chr(10)), False
+
+                def kill(self):
+                    P.killed = True
+
+                def wait(self, timeout=None):
+                    return 0
+            started.append(P)
+            return P()
+        with mock.patch.object(server, "popen", popen), mock.patch.object(server, "contain"):
+            with self.assertRaises(RuntimeError):
+                v.restart()
+        self.assertTrue(started[-1].killed)
+        self.assertFalse(v.alive())
 
 
 class VisionShutdown(unittest.TestCase):
