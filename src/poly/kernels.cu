@@ -1017,7 +1017,7 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
         // few columns.  A token's softmax is kept from block to block (top, sum), and its values so far shrink
         // to the new top.
         const long long cols = (long long) c * per;
-        const int block = (int) std::min<size_t>(32768, score_floats / heads);   // a grid has at most 65535 rows
+        const int block = (int) std::min<size_t>(kAttendRows, score_floats / heads);
         for (int k0 = 0; k0 < n_keys; k0 += block) {
             const int m = std::min(block, n_keys - k0);
             attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>((const half*) kcache, keys, width,

@@ -139,13 +139,13 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
             int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0);
+constexpr int kAttendRows = 4096;   ///< the most rows attend_batch() takes at a time
 /// attend() for a prompt batch: the same attention with cuBLAS products, a few times faster on many tokens.  A
 /// token's result depends on the tokens beside it in the last bits, so the windows of guessed tokens use attend().
 /// It takes the call's tokens together and the rows they attend a block at a time: as many rows as have their
 /// scores, n_head floats a token each, in the score_floats floats of `score`, which must hold n_head for each
-/// row a token can attend.  keys and vals: scratch for a block's rows as floats, kv_heads * dim each: room for
-/// pos + rows of them, or for window + rows if that is less.  work: rows * n_head * (2 * dim + 3) floats.
-/// Throws std::runtime_error.
+/// row a token can attend, and kAttendRows at most.  keys and vals: scratch for a block's rows as floats,
+/// kv_heads * dim each.  work: rows * n_head * (2 * dim + 3) floats.  Throws std::runtime_error.
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
                   float* keys, float* vals, float* score, size_t score_floats, float* work, float* out, int dim,
                   int n_head, int kv_heads, float scale, void* stream, int window = 0, int ring = 0,

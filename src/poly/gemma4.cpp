@@ -278,10 +278,12 @@ void Gemma4::assign_scratch() {
         dg_up_ = fbuf((size_t) d_ff_);
         dg_h_ = fbuf((size_t) d_ff_);
     }
-    if (rows_ >= kStageRows) {   // a prompt batch reads the rows it attends as floats: a picture's, a ring's all
+    if (rows_ >= kStageRows) {   // a prompt batch reads the rows it attends as floats, a block of them at a time
         size_t rows_f = 0;
-        for (const Block& B : blocks_)
-            rows_f = std::max(rows_f, (size_t) (B.swa ? ring_ : opt_.max_context) * B.n_kv * B.dim);
+        for (const Block& B : blocks_) {
+            const int block = std::min(B.swa ? ring_ : opt_.max_context, kAttendRows);
+            rows_f = std::max(rows_f, (size_t) block * B.n_kv * B.dim);
+        }
         akeys_ = fbuf(rows_f);
         avals_ = fbuf(rows_f);
         awork_ = fbuf(2 * heads + 3 * n * n_head_);

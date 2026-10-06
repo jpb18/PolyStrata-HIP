@@ -158,9 +158,10 @@ void Qwen35::assign_scratch() {
     att_ = fbuf(heads);
     score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
     sg_ = fbuf(n);
-    if (rows_ >= kStageRows) {   // a prompt batch reads the cache's rows as floats
-        akeys_ = fbuf((size_t) opt_.max_context * n_kv_ * head_dim_);
-        avals_ = fbuf((size_t) opt_.max_context * n_kv_ * head_dim_);
+    if (rows_ >= kStageRows) {   // a prompt batch reads the cache's rows as floats, a block of them at a time
+        const size_t block = (size_t) std::min(opt_.max_context, kAttendRows) * n_kv_ * head_dim_;
+        akeys_ = fbuf(block);
+        avals_ = fbuf(block);
         awork_ = fbuf(2 * heads + 3 * n * n_head_);
     }
 }
