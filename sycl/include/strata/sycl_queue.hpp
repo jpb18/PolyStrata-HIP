@@ -6,6 +6,7 @@
 #pragma once
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include <cstdlib>
 
 namespace strata {
 inline sycl::queue* q_of(const void* stream) {
@@ -18,6 +19,8 @@ namespace strata {
 // queue.memset of many GiB runs on the blitter engine and times out ("Engine memory CAT error", GT reset); kernels do not.
 // Small fills (<= chunk) and non-multiple-of-8 tails fall back to memset.
 inline void big_fill_zero(sycl::queue& q, void* p, size_t bytes, size_t chunk = (size_t)256 << 20) {
+    static const bool plain = [] { const char* v = std::getenv("STRATA_CHUNKED_FILL"); return v && v[0] == '0'; }();
+    if (plain) { q.memset(p, 0, bytes); q.wait(); return; }
     uint8_t* b = (uint8_t*)p;
     size_t off = 0;
     while (off < bytes) {

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <set>
 #include <cstdio>
 #include <filesystem>
 #include <cstdlib>
@@ -25,6 +26,42 @@
 #include <cstring>
 
 namespace strata::core {
+
+// Local (card) memory this process holds, from the DRM clients' fdinfo (i915: drm-total-local0, xe: drm-total-vram0).
+// Level Zero's free-memory query reads the constant total on an Arc A750 (i915): the engine then sized its caches
+// from the whole card and over-allocated (UR_RESULT_ERROR_OUT_OF_HOST_MEMORY at the first launch). Other processes'
+// memory is not in this number, so it only ever LOWERS the figure the driver gave.  0 = not available.
+static unsigned long long own_drm_local_bytes() {
+#if defined(__linux__)
+    unsigned long long total = 0;
+    std::error_code ec;
+    std::set<unsigned long long> seen;   // one DRM client may appear under several fds
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/fdinfo", ec)) {
+        std::FILE* f = std::fopen(e.path().string().c_str(), "r");
+        if (f == nullptr) continue;
+        char line[256];
+        bool drm = false;
+        unsigned long long client = 0, bytes = 0;
+        while (std::fgets(line, sizeof line, f)) {
+            unsigned long long v = 0;
+            char unit[8] = {0};
+            if (std::strncmp(line, "drm-driver:", 11) == 0) drm = true;
+            else if (std::sscanf(line, "drm-client-id: %llu", &client) == 1) {}
+            else if ((std::sscanf(line, "drm-total-local0: %llu %7s", &v, unit) >= 1 ||
+                      std::sscanf(line, "drm-total-vram0: %llu %7s", &v, unit) >= 1) && v > 0) {
+                const unsigned long long mul = unit[0] == 'K' ? 1024ull : unit[0] == 'M' ? 1048576ull
+                                             : unit[0] == 'G' ? 1073741824ull : 1ull;
+                bytes += v * mul;
+            }
+        }
+        std::fclose(f);
+        if (drm && bytes > 0 && seen.insert(client).second) total += bytes;
+    }
+    return total;
+#else
+    return 0;
+#endif
+}
 
 // See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
 // not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
@@ -37,6 +74,13 @@ size_t device_free_bytes() try {
     You may need to adjust the code.
     */
     dpct::get_current_device().get_memory_info(free_b, total_b);
+    if (const unsigned long long own = own_drm_local_bytes(); own > 0 && total_b > own && total_b - own < free_b) {
+        static std::atomic<bool> said{false};
+        if (free_b + (16ull << 20) >= total_b && !said.exchange(true))
+            std::fprintf(stderr, "strata: the driver reports the whole card as free although this process holds %.2f GiB of it (Arc A750/i915 does this); sizing from the DRM fdinfo instead
+", (double) own / 1073741824.0);
+        free_b = (size_t) (total_b - own);
+    }
 #if defined(__linux__) && !defined(STRATA_HIP_GFX906)   // (the gfx906 compat layer has no cudaDevAttrIntegrated; that GPU is discrete)
     // per device: a box can mix an integrated GPU (an APU) with a discrete one, and the answer is the CURRENT device's
     static std::atomic<int> uma_cache[64];   // 0 unknown, 1 integrated (unified memory), 2 discrete
