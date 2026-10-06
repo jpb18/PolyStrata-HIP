@@ -3,8 +3,8 @@
 //   strata-poly --model M.gguf --tokens 1,2,3 [--max-new N]   one prompt; prints the generated ids
 //   strata-poly --model M.gguf --serve                        the line protocol serve/server.py speaks
 //
-// The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, STOP and QUIT in, and RESUME,
-// PP, T, DONE and ERR out.
+// The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, GENI for a prompt with pictures,
+// STOP and QUIT in, and RESUME, PP, T, DONE and ERR out.
 #include "conversations.hpp"
 #include "engine.hpp"
 #include "strata/core/conversation_memory.hpp"
@@ -141,6 +141,74 @@ bool parse_ids(const char* s, std::vector<int32_t>& out) {
     return !out.empty();
 }
 
+uint64_t fnv1a(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
+    const uint8_t* b = (const uint8_t*) p;
+    for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
+// A request's pictures: strata-vision's records (tools/vision/strata_vision.cpp), one after the other in the
+// order of the prompt.
+struct Pictures {
+    std::vector<float> rows;
+    std::vector<strata::poly::Image> at;
+};
+
+// Reads a request's pictures and finds their places: each takes the next run of `pad` in ids, a token a row.
+// Those ids then become numbers below zero made from the picture, so that the conversation cache tells a picture
+// from another one of the same size.  Returns what is wrong, or nothing.
+std::string take_pictures(const std::string& path, int32_t pad, int n_embd, std::vector<int32_t>& ids, Pictures& out) {
+    struct Record {
+        int n, nx;
+        size_t off;
+    };
+    std::vector<Record> records;
+    out = Pictures{};
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return "cannot open " + path;
+    std::string err;
+    for (;;) {
+        int32_t hdr[5];   // 'SVE1', rows, rows of a line, lines, a row's floats
+        const size_t got = std::fread(hdr, sizeof(int32_t), 5, f);
+        if (got == 0) break;
+        if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[1] > 1 << 20 || hdr[2] < 1 || hdr[3] < 1 ||
+            (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != n_embd) {
+            err = "bad embeddings file (expected strata-vision records of width " + std::to_string(n_embd) + ")";
+            break;
+        }
+        const size_t off = out.rows.size(), count = (size_t) hdr[1] * (size_t) n_embd;
+        out.rows.resize(off + count);
+        if (std::fread(out.rows.data() + off, sizeof(float), count, f) != count) {
+            err = "short embeddings file";
+            break;
+        }
+        records.push_back({hdr[1], hdr[2], off});
+    }
+    std::fclose(f);
+    if (!err.empty()) return err;
+
+    size_t i = 0;
+    for (size_t k = 0; k < records.size(); ++k) {
+        const Record& r = records[k];
+        while (i < ids.size() && ids[i] != pad) ++i;
+        for (int j = 0; j < r.n; ++j)
+            if (i + (size_t) j >= ids.size() || ids[i + (size_t) j] != pad)
+                return "picture " + std::to_string(k + 1) + " has " + std::to_string(r.n) +
+                       " rows and the prompt fewer places for it";
+        const float* rows = out.rows.data() + r.off;
+        const int32_t grid[2] = {r.n, r.nx};
+        const uint64_t h = fnv1a(rows, (size_t) r.n * (size_t) n_embd * sizeof(float), fnv1a(grid, sizeof grid));
+        for (int j = 0; j < r.n; ++j)
+            ids[i + (size_t) j] = -1 - (int32_t) ((h + (uint64_t) j * 0x9E3779B97F4A7C15ull) >> 33);
+        out.at.push_back({(int64_t) i, r.n, r.nx, rows});
+        i += (size_t) r.n;
+    }
+    if (std::find(ids.begin() + (std::ptrdiff_t) i, ids.end(), pad) != ids.end())
+        return "the prompt has more pictures than the embeddings file";
+    if (!ids.empty() && ids.back() < 0) return "a prompt cannot end in a picture";
+    return {};
+}
+
 // stdin on its own thread, so a STOP is seen while a request runs
 class Lines {
 public:
@@ -224,13 +292,15 @@ struct Session {
         const char* finish = "length";
     };
 
-    // Reads the prompt and generates.  on_token gets every token, the end-of-sequence one included.
+    // Reads the prompt and generates.  on_token gets every token, the end-of-sequence one included.  The rows of
+    // the prompt's pictures have ids below zero (take_pictures()); `pad` is the token they stand in for.
     template<class OnToken, class OnProgress>
-    Result generate(const std::vector<int32_t>& ids, int64_t max_new, const Sampling& s, const std::atomic<bool>& stop,
-                    OnToken on_token, OnProgress on_progress) {
+    Result generate(const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad, int64_t max_new,
+                    const Sampling& s, const std::atomic<bool>& stop, OnToken on_token, OnProgress on_progress) {
         Result r;
         const int64_t n = (int64_t) ids.size();
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
+        engine.images(pictures.at.data(), (int) pictures.at.size());
         r.resume = kept.resume(ids);
         asked += n;
         reused += r.resume;
@@ -245,7 +315,8 @@ struct Session {
                 break;
             }
             const bool last = i == n - 1;
-            const int64_t m = last ? 1 : kept.until_checkpoint(i, std::min<int64_t>(n - 1 - i, engine.max_rows()));
+            const int64_t m =
+                last ? 1 : engine.whole(i, kept.until_checkpoint(i, std::min<int64_t>(n - 1 - i, engine.max_rows())));
             kept.before(i, last);
             engine.eval(ids.data() + i, (int) m, last);
             kept.read(ids.data() + i, m);
@@ -262,6 +333,7 @@ struct Session {
 
         t0 = Clock::now();
         std::vector<int32_t> history = kept.seq();
+        std::replace_if(history.begin(), history.end(), [](int32_t t) { return t < 0; }, pad);
         if (look) {
             repeats.reset();
             repeats.append(history.data(), history.size());
@@ -341,11 +413,16 @@ struct Session {
     }
 };
 
-bool parse_gen(const std::string& line, long long& max_new, Sampling& s, std::vector<int32_t>& ids) {
+// GEN <max_new> [key=value ...] <id,id,...>, or GENI with the file of the prompt's pictures ahead of the ids and
+// the key image_pad, the token whose runs in the ids are the pictures' places.
+bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t& pad, std::string& pictures,
+               std::vector<int32_t>& ids) {
+    const bool geni = line.rfind("GENI ", 0) == 0;
     char* p = nullptr;
-    max_new = std::strtoll(line.c_str() + 4, &p, 10);
+    max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &p, 10);
     if (max_new < 1) return false;
-    for (;;) {   // key=value tokens, then the ids
+    pad = -1;
+    for (;;) {   // key=value tokens, then the file and the ids
         while (*p == ' ') ++p;
         const char* start = p;
         while (*p != '\0' && *p != ' ') ++p;
@@ -366,7 +443,15 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, std::ve
         else if (key == "penalty_freq") s.penalty_freq = std::strtof(v, nullptr);
         else if (key == "penalty_present") s.penalty_present = std::strtof(v, nullptr);
         else if (key == "seed") s.seed = std::strtoull(v, nullptr, 10);
+        else if (key == "image_pad") pad = (int32_t) std::atoi(v);
         // other keys belong to the other engine and are skipped
+    }
+    pictures.clear();
+    if (geni) {
+        const char* end = std::strchr(p, ' ');
+        if (!end || end == p || pad < 0) return false;
+        pictures.assign(p, (size_t) (end - p));
+        p = const_cast<char*>(end);
     }
     return parse_ids(p, ids);
 }
@@ -381,6 +466,7 @@ int serve(Session& ss) {
     std::fflush(stdout);
 
     static Lines lines;   // its thread may still be in a read when this function returns
+    Pictures pictures;    // the engine reads the last request's until the next one's are set
     for (;;) {
         const std::string line = lines.pop();
         if (line == "QUIT") break;
@@ -389,12 +475,14 @@ int serve(Session& ss) {
         long long max_new = 0;
         Sampling s;
         std::vector<int32_t> ids;
-        if (line.rfind("GEN ", 0) != 0) {
-            std::printf("ERR expected: GEN <max_new> <id,id,...>\n");
+        int32_t pad = -1;
+        std::string file;
+        if (line.rfind("GEN ", 0) != 0 && line.rfind("GENI ", 0) != 0) {
+            std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> image_pad=<id> <file> <id,id,...>\n");
             std::fflush(stdout);
             continue;
         }
-        if (!parse_gen(line, max_new, s, ids)) {
+        if (!parse_gen(line, max_new, s, pad, file, ids)) {
             std::printf("ERR bad request\n");
             std::fflush(stdout);
             continue;
@@ -411,13 +499,22 @@ int serve(Session& ss) {
             std::fflush(stdout);
             continue;
         }
+        std::string wrong;
+        if (file.empty()) pictures = Pictures{};
+        else if (!engine.sees()) wrong = "this model does not read pictures";
+        else wrong = take_pictures(file, pad, engine.n_embd(), ids, pictures);
+        if (!wrong.empty()) {
+            std::printf("ERR %s\n", wrong.c_str());
+            std::fflush(stdout);
+            continue;
+        }
 
         const strata::poly::Stats before = engine.stats();
         int64_t resume = 0;
         Session::Result r;
         try {
             r = ss.generate(
-                ids, max_new, s, lines.stop,
+                ids, pictures, pad, max_new, s, lines.stop,
                 [](int32_t t) {
                     std::printf("T %d\n", (int) t);
                     std::fflush(stdout);
@@ -474,11 +571,12 @@ void print_top(const float* logits, int n_vocab, int n) {
     std::fprintf(stderr, "\n");
 }
 
-int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const Sampling& s, int top_probs) {
+int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad, long long max_new,
+         const Sampling& s, int top_probs) {
     std::atomic<bool> stop{false};
     std::string out;
     const Session::Result r = ss.generate(
-        ids, max_new, s, stop,
+        ids, pictures, pad, max_new, s, stop,
         [&](int32_t t) {
             // the logits the token was picked from are still the engine's
             if (top_probs > 0) print_top(ss.engine.logits(), ss.engine.n_vocab(), top_probs);
@@ -540,6 +638,8 @@ void usage() {
                  "                         2560)\n"
                  "  --eos-ids ID,ID,...    tokens that end a reply (default: the GGUF's eos, eot and eom)\n"
                  "  --temperature F --top-k N --top-p F --min-p F --seed N   sampling for --tokens (default greedy)\n"
+                 "  --images FILE          with --tokens: the prompt's pictures, as strata-vision writes them\n"
+                 "  --image-pad ID         the token whose runs in --tokens are the pictures' places, a token a row\n"
                  "  --dump-layers          print a checksum of every layer's stages to stderr\n"
                  "  --top-probs N          with --tokens: print the N most likely ids of every step to stderr\n");
 }
@@ -552,7 +652,8 @@ int main(int argc, char** argv) {
     Sampling s;
     bool want_serve = false;
     long long max_new = 32;
-    int top_probs = 0, lookup = 3;
+    int top_probs = 0, lookup = 3, image_pad = -1;
+    std::string images;
     std::vector<int32_t> ids, eos;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -587,6 +688,8 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
+        else if (a == "--images") images = val();
+        else if (a == "--image-pad") image_pad = std::atoi(val());
         else if (a == "--top-probs") top_probs = std::atoi(val());
         else if (a == "--max-new") max_new = std::atoll(val());
         else if (a == "--temperature") s.temperature = std::strtof(val(), nullptr);
@@ -641,7 +744,14 @@ int main(int argc, char** argv) {
         } else if ((long long) ids.size() + max_new > engine.max_context()) {
             throw std::runtime_error("the prompt and --max-new together exceed --max-context");
         } else {
-            rc = once(ss, ids, max_new, s, top_probs);
+            Pictures pictures;
+            if (!images.empty()) {
+                if (!engine.sees()) throw std::runtime_error("this model does not read pictures");
+                if (image_pad < 0) throw std::runtime_error("--images needs --image-pad");
+                const std::string wrong = take_pictures(images, image_pad, engine.n_embd(), ids, pictures);
+                if (!wrong.empty()) throw std::runtime_error(wrong);
+            }
+            rc = once(ss, ids, pictures, image_pad, max_new, s, top_probs);
         }
         engine.save_profile();
         return rc;

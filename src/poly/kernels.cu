@@ -443,10 +443,12 @@ __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__
     if (i < n) acc[size_t(blockIdx.y) * n + i] += b[i];
 }
 
-// One block per head and token.  The pairs of the rotation are i and i + n_rot / 2 for i below n_rot / 2.
+// One block per head and token.  The pairs of the rotation are i and i + n_rot / 2 for i below n_rot / 2.  With
+// axes, a token has a position on each of three axes, and pair j turns by the one on axis (j % sections) % 3.
 __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride, const float* __restrict__ w,
                                       float* __restrict__ y, int dim, int heads, int n_rot, float theta_scale,
-                                      const float* __restrict__ freq, long long pos, float eps) {
+                                      const float* __restrict__ freq, long long pos, float eps,
+                                      const int* __restrict__ axes, int sections) {
     __shared__ float part[8];
     const float* xr = x + size_t(blockIdx.x) * x_stride;
     float* yr = y + size_t(blockIdx.x) * dim;
@@ -454,7 +456,8 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
     for (int i = threadIdx.x; i < dim; i += blockDim.x) ss += xr[i] * xr[i];
     ss = block_sum(ss, part);
     const float scale = 1.0f / sqrtf(ss / float(dim) + eps);
-    const float p = float(pos + blockIdx.x / heads);
+    const int tok = blockIdx.x / heads;
+    const float own = float(pos + tok);
     const int half = n_rot / 2;
     for (int i = threadIdx.x; i < dim; i += blockDim.x) {
         if (i >= n_rot) {
@@ -462,6 +465,7 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
             continue;
         }
         const int j = i < half ? i : i - half;
+        const float p = axes ? float(axes[size_t(tok) * 3 + (j % sections) % 3]) : own;
         const float turn = p * powf(theta_scale, float(j));
         const float theta = freq ? turn / freq[j] : turn;
         const float x0 = w ? xr[j] * scale * w[j] : xr[j] * scale;
@@ -470,21 +474,22 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
     }
 }
 
-// The rows the token at position p attends: how many, and the first of them.
-__device__ __forceinline__ int attn_rows(long long p, int window, long long* lo) {
+// The rows the token at position p attends: how many, and the first of them.  They end at its own row, or at row
+// `last` when that is given: the tokens of the call then see each other.
+__device__ __forceinline__ int attn_rows(long long p, int window, long long last, long long* lo) {
     *lo = window > 0 && p >= window ? p - window + 1 : 0;
-    return int(p - *lo) + 1;
+    return int((last < 0 ? p : last) - *lo) + 1;
 }
 
 // score[head][i] = scale * (q[head] . the key of the head's group in the i-th row the token attends).  A block
 // has the token first + blockIdx.y and blockDim.x / n_head rows; a thread is a row and a head.
 __global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
                                   float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, float scale, int window, int ring) {
+                                  long long pos, int first, float scale, int window, int ring, long long last) {
     const int tok = first + blockIdx.y;
     const int key = blockIdx.x * (blockDim.x / n_head) + threadIdx.x / n_head, h = threadIdx.x % n_head;
     long long lo;
-    if (key >= attn_rows(pos + tok, window, &lo)) return;
+    if (key >= attn_rows(pos + tok, window, last, &lo)) return;
     const long long row = ring > 0 ? (lo + key) % ring : lo + key;
     const float* qh = q + (size_t(tok) * n_head + h) * dim;
     const half* k = kcache + (size_t(row) * kv_heads + h / (n_head / kv_heads)) * dim;
@@ -494,10 +499,10 @@ __global__ void attn_score_kernel(const float* __restrict__ q, const half* __res
 }
 
 // Softmax in place over a head's scores of the rows its token attends.  One block per head and token.
-__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int window) {
+__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int window, long long last) {
     __shared__ float part[8];
     long long lo;
-    const int n = attn_rows(pos + first + blockIdx.y, window, &lo);
+    const int n = attn_rows(pos + first + blockIdx.y, window, last, &lo);
     float* row = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
     float mx = -INFINITY;
     for (int j = threadIdx.x; j < n; j += blockDim.x) mx = fmaxf(mx, row[j]);
@@ -517,7 +522,7 @@ __global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int
 // otherwise be one thread's walk over every row.  The shares are added in their order.
 __global__ void attn_value_kernel(const float* __restrict__ score, const half* __restrict__ vcache,
                                   float* __restrict__ out, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, int per, int window, int ring) {
+                                  long long pos, int first, int per, int window, int ring, long long last) {
     __shared__ float share[VALUE_SHARES][VALUE_DIMS];
     const int tok = first + blockIdx.y, h = blockIdx.x / per;
     const int dl = threadIdx.x % VALUE_DIMS, s = threadIdx.x / VALUE_DIMS;
@@ -525,7 +530,7 @@ __global__ void attn_value_kernel(const float* __restrict__ score, const half* _
     float acc = 0.0f;
     if (d < dim) {
         long long lo;
-        const int n = attn_rows(pos + tok, window, &lo);
+        const int n = attn_rows(pos + tok, window, last, &lo);
         const float* p = score + (size_t(blockIdx.y) * n_head + h) * n_keys;
         const half* v = vcache + size_t(h / (n_head / kv_heads)) * dim + d;
         const size_t width = size_t(kv_heads) * dim;
@@ -569,11 +574,11 @@ __global__ void attn_regroup_kernel(const float* __restrict__ src, float* __rest
 // row lo0 of the sequence, and a token's own start later.  The scores of rows it does not attend become zero.
 // One block per head and token: blockIdx.x counts (group, token, head of the group).
 __global__ void attn_softmax_span_kernel(float* score, int n_keys, long long pos, int first, int window,
-                                         long long lo0, int tokens, int per) {
+                                         long long lo0, int tokens, int per, long long last) {
     __shared__ float part[8];
     const int tok = first + (blockIdx.x % (tokens * per)) / per;
     long long lo;
-    const int n = attn_rows(pos + tok, window, &lo);
+    const int n = attn_rows(pos + tok, window, last, &lo);
     const int j0 = int(lo - lo0), j1 = j0 + n;
     float* row = score + size_t(blockIdx.x) * n_keys;
     float mx = -INFINITY;
@@ -865,39 +870,47 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream) {
 }
 
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
-                    float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq) {
+                    float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq,
+                    const int32_t* axes, int sections) {
     head_norm_rope_kernel<<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
-        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps);
+        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps, axes, sections);
 }
 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window,
-            int ring) {
-    const auto most = [&](long long n) { return int(window > 0 && n > window ? window : n); };
-    const int n_keys = most(pos + rows), key_block = std::max(1, 256 / n_head), per = grid(dim, VALUE_DIMS);
+            int ring, bool whole) {
+    const long long last = whole ? pos + rows - 1 : -1;
+    // the rows the token at position p attends, which are the most among the tokens after it too
+    const auto most = [&](long long p) {
+        return int((whole ? last : p) - (window > 0 && p >= window ? p - window + 1 : 0)) + 1;
+    };
+    const int n_keys = most(whole ? pos : pos + rows - 1), key_block = std::max(1, 256 / n_head);
+    const int per = grid(dim, VALUE_DIMS);
     for (int first = 0; first < rows; first += chunk) {
-        const int c = std::min(chunk, rows - first), keys = most(pos + first + c);   // the chunk's last token's
+        const int c = std::min(chunk, rows - first), keys = most(whole ? pos + first : pos + first + c - 1);
         attn_score_kernel<<<dim3(grid(keys, key_block), c), key_block * n_head, 0, cs(stream)>>>(
             q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale, window,
-            ring);
-        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window);
+            ring, last);
+        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window,
+                                                                    last);
         attn_value_kernel<<<dim3(n_head * per, c), VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
             score, (const half*) vcache, out, n_keys, dim, n_head, kv_heads, (long long) pos, first, per, window,
-            ring);
+            ring, last);
     }
 }
 
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
                   float* keys, float* vals, float* score, float* work, int chunk, float* out, int dim, int n_head,
-                  int kv_heads, float scale, void* stream, int window, int ring) {
+                  int kv_heads, float scale, void* stream, int window, int ring, bool whole) {
     const cublasHandle_t h = (cublasHandle_t) blas;
     const float one = 1.0f, zero = 0.0f;
     const int per = n_head / kv_heads, width = kv_heads * dim;
+    const long long last = whole ? pos + rows - 1 : -1;
     for (int first = 0; first < rows; first += chunk) {
         const int c = std::min(chunk, rows - first);
         const long long p0 = pos + first;   // the chunk's first position, and the first row its tokens read
         const long long lo0 = window > 0 && p0 >= window ? p0 - window + 1 : 0;
-        const int n_keys = int(p0 + c - lo0);
+        const int n_keys = int((whole ? last : p0 + c - 1) - lo0) + 1;
         float* qg = work;                              // the queries by group, then the results
         float* og = work + size_t(c) * n_head * dim;
         for (int at = 0; at < n_keys; at += 32768) {   // a grid has at most 65535 rows
@@ -916,7 +929,7 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                                           dim, qg, dim, cols * dim, &zero, score, n_keys, cols * n_keys, kv_heads),
                 "attention scores");
         attn_softmax_span_kernel<<<c * n_head, 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window,
-                                                                    lo0, c, per);
+                                                                    lo0, c, per, last);
         blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, n_keys, &one, vals, width,
                                           dim, score, n_keys, cols * n_keys, &zero, og, dim, cols * dim, kv_heads),
                 "attention values");

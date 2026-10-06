@@ -67,6 +67,7 @@ void Qwen35::load_geometry() {
         const int s = pair % covered;
         need(s < 3 * sections[s % 3], "the rotary embedding leaves pairs to an axis text has no position on");
     }
+    sections_ = covered;
     theta_scale_ = std::pow(shape_f("rope.freq_base"), -2.f / (float) n_rot_);
 
     // this architecture puts no limit on a SwiGLU's inputs
@@ -135,6 +136,8 @@ void Qwen35::alloc_caches() {
         }
     }
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), 1, (size_t) rows_);
+    axes_ = (int32_t*) dmalloc((size_t) rows_ * 3 * sizeof(int32_t), "a call's rotary positions");
+    h_axes_.resize((size_t) rows_ * 3);
 }
 
 // Per-token buffers hold rows_ tokens, row after row.
@@ -207,20 +210,68 @@ void Qwen35::gdn(Block& B, int n) {
     lin(B.wo, gated_, ao_, n);
 }
 
+// A row's position on the rotary embedding's three axes, as llama.cpp's mtmd counts them.  Text has the same on
+// all three and counts up.  A picture's rows share the position the picture starts at on the first axis, and add
+// their line to it on the second and their column on the third; the text after a picture goes on as many
+// positions later as the picture has lines or columns, whichever is more.
+void Qwen35::turn_of(int64_t row, int32_t* thw) const {
+    int64_t skipped = 0;   // the rows before this one that took no position of their own
+    for (const Image& im : images_) {
+        if (row < im.at) break;
+        if (row < im.at + im.n) {
+            const int64_t p = im.at - skipped, j = row - im.at;
+            thw[0] = (int32_t) p;
+            thw[1] = (int32_t) (p + j / im.nx);
+            thw[2] = (int32_t) (p + j % im.nx);
+            return;
+        }
+        skipped += im.n - std::max(im.nx, im.n / im.nx);
+    }
+    thw[0] = thw[1] = thw[2] = (int32_t) (row - skipped);
+}
+
+// The rotary positions of n rows from row `pos`.  Rows of text alone count up from *first, and the result is
+// null.  With a picture's rows among them the result is the positions of each row on the three axes, on the card.
+const int32_t* Qwen35::turns(int64_t pos, int n, int64_t* first) {
+    int32_t thw[3];
+    turn_of(pos, thw);
+    *first = thw[0];
+    const bool pictures = std::any_of(images_.begin(), images_.end(), [&](const Image& im) {
+        return im.at < pos + n && im.at + im.n > pos;
+    });
+    if (!pictures) return nullptr;
+    if (axes_pos_ != pos || axes_n_ != n || axes_set_ != images_set_) {
+        for (int t = 0; t < n; ++t) turn_of(pos + t, h_axes_.data() + (size_t) t * 3);
+        // the launches that read the positions of the call before this one have to be through
+        ck(cudaStreamSynchronize(cs(st_)), "rotary positions");
+        ck(cudaMemcpy(axes_, h_axes_.data(), (size_t) n * 3 * sizeof(int32_t), cudaMemcpyHostToDevice),
+           "rotary positions");
+        axes_pos_ = pos;
+        axes_n_ = n;
+        axes_set_ = images_set_;
+    }
+    return axes_;
+}
+
 // The rows n tokens from position `pos` leave in an attention layer's caches: each head group's key, normed and
 // turned by the position, and its value.  xn_ and xq_ hold the layer's input.
 void Qwen35::attn_store(Block& B, int64_t pos, int n) {
+    int64_t first;
+    const int32_t* axes = turns(pos, n, &first);
     lin(B.wk, xn_, kraw_, n, xq_);
-    head_norm_rope(kraw_, head_dim_, fp(B.k_norm), k_, head_dim_, n_kv_, n_rot_, theta_scale_, pos, n, rms_eps_, st_);
+    head_norm_rope(kraw_, head_dim_, fp(B.k_norm), k_, head_dim_, n_kv_, n_rot_, theta_scale_, first, n, rms_eps_, st_,
+                   nullptr, axes, sections_);
     store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_);
     lin(B.wv, xn_, v_, n, xq_);
     store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_);
 }
 
 void Qwen35::attn(Block& B, int64_t pos, int n) {
+    int64_t first;
+    const int32_t* axes = turns(pos, n, &first);
     lin(B.wq, xn_, qg_, n, xq_);
-    head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, pos, n, rms_eps_,
-                   st_);
+    head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, first, n, rms_eps_,
+                   st_, nullptr, axes, sections_);
     attn_store(B, pos, n);
     const float scale = 1.f / std::sqrt((float) head_dim_);
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company

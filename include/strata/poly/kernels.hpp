@@ -110,25 +110,31 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream);
 /// head; null: none), then ggml's rotary embedding on its first n_rot values in the NeoX pairing: value i goes
 /// with value i + n_rot / 2, and the pair turns by position * theta_scale^i, divided by freq[i] when freq is
 /// given.  A head's input starts x_stride floats after the one before it; y has dim values a head.
+/// The position is the token's place in the call counted from `pos`.  With `axes` (three numbers a token) it is
+/// the token's position on one of three axes instead: pair i takes axis (i % sections) % 3, ggml's interleaved
+/// rope_multi, which is how a picture's rows get a line and a column.
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
-                    float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq = nullptr);
+                    float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq = nullptr,
+                    const int32_t* axes = nullptr, int sections = 1);
 /// Causal attention for the tokens from position `pos`: token t attends the rows 0 to pos + t, or with `window`
 /// only the last `window` of them.  q: n_head * dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the
 /// heads read a row's keys and values in turn, n_head / kv_heads heads each.  With `ring`, the sequence's row p
 /// is cache row p % ring.  out: n_head * dim a token.  It takes `chunk` tokens at a time, and score is scratch
 /// of chunk * n_head floats for each row a token can attend: pos + rows, or `window` if that is less.  A token
 /// comes out the same whatever tokens the call has beside it.
+/// With `whole` the call's tokens see each other: each attends up to the call's last row, so a token can attend
+/// window - 1 + rows of them.
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
-            int ring = 0);
+            int ring = 0, bool whole = false);
 /// attend() for a prompt batch: the same attention with cuBLAS products, a few times faster on many tokens.  A
 /// token's result depends on the tokens beside it in the last bits, so the windows of guessed tokens use attend().
 /// keys and vals: scratch for the rows a chunk reads as floats, kv_heads * dim each: pos + rows of them, or
-/// window + chunk if that is less.  work: 2 * chunk * n_head * dim floats.  score as in attend().  Throws
-/// std::runtime_error.
+/// window + chunk if that is less (with `whole`, window + rows).  work: 2 * chunk * n_head * dim floats.  score
+/// as in attend().  Throws std::runtime_error.
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
                   float* keys, float* vals, float* score, float* work, int chunk, float* out, int dim, int n_head,
-                  int kv_heads, float scale, void* stream, int window = 0, int ring = 0);
+                  int kv_heads, float scale, void* stream, int window = 0, int ring = 0, bool whole = false);
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
 /// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.

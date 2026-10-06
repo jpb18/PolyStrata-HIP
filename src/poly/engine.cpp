@@ -867,6 +867,34 @@ void Engine::embed(int32_t token, float* dst) const {
     else ggml_get_type_traits((ggml_type) tok_type_)->to_float(row, dst, n_embd_);
 }
 
+void Engine::images(const Image* im, int n) {
+    for (int i = 0; i < n; ++i) {
+        const Image& a = im[i];
+        if (a.n < 1 || a.nx < 1 || a.n % a.nx != 0 || !a.rows || a.at < (i ? im[i - 1].at + im[i - 1].n : 0))
+            throw std::logic_error("images: a picture's rows are not a grid, or the pictures are out of order");
+    }
+    images_.assign(im, im + n);
+    ++images_set_;
+}
+
+const Image* Engine::image_at(int64_t row) const {
+    for (const Image& im : images_)
+        if (row >= im.at && row < im.at + im.n) return &im;
+    return nullptr;
+}
+
+// What the model reads at a row of the sequence: a picture's row there, else the token's embedding.  True for a
+// picture's row, which goes in as the encoder made it (llama.cpp scales token embeddings only).
+bool Engine::input(int32_t token, int64_t row, float* dst) const {
+    if (const Image* im = image_at(row)) {
+        std::memcpy(dst, im->rows + (size_t) (row - im->at) * n_embd_, (size_t) n_embd_ * sizeof(float));
+        return true;
+    }
+    if (token < 0 || token >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
+    embed(token, dst);
+    return false;
+}
+
 void Engine::dbg(const char* name, int il, const float* dev, int n) {
     if (!opt_.dump) return;
     std::vector<float> h((size_t) n);
@@ -1224,8 +1252,6 @@ void* Engine::record(F&& work) {
 // n tokens from pos() through every layer.  The sequence is not longer for it: the caller says by how much.
 void Engine::run(const int32_t* tokens, int n) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
-    for (int t = 0; t < n; ++t)
-        if (tokens[t] < 0 || tokens[t] >= n_vocab_) throw std::runtime_error("a token id is outside the vocabulary");
     if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
 
@@ -1236,8 +1262,7 @@ void Engine::run(const int32_t* tokens, int n) {
     const float scale = embed_scale();
     for (int t = 0; t < n; ++t) {
         float* r = h_r_ + (size_t) t * r_row;
-        embed(tokens[t], r);
-        if (scale != 1.f)
+        if (!input(tokens[t], pos_ + t, r) && scale != 1.f)
             for (size_t i = 0; i < e_row; ++i) r[i] *= scale;
         for (int h = 1; h < streams(); ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
     }
@@ -1346,9 +1371,9 @@ void Engine::keep(int n) {
 // block works in it: n rows of the two halves, then the residual.
 //
 // h_r_ is free to write: every call that copied out of it has waited for the card since.
-float* Engine::draft_input(const int32_t* tokens, const float* h, int n) {
+float* Engine::draft_input(const int32_t* tokens, int64_t row, const float* h, int n) {
     const size_t e = (size_t) n_embd_, rows = (size_t) n;
-    for (int t = 0; t < n; ++t) embed(tokens[t], h_r_ + (size_t) t * e);
+    for (int t = 0; t < n; ++t) input(tokens[t], row + t, h_r_ + (size_t) t * e);
     ck(cudaMemcpyAsync(cur_, h_r_, rows * e * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
     rms_norm(cur_, fp(d_enorm_), r_, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
     rms_norm(h, fp(d_hnorm_), r_ + e, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
@@ -1365,7 +1390,7 @@ float* Engine::draft_input(const int32_t* tokens, const float* h, int n) {
 void Engine::draft_rows(const int32_t* tokens, int first, int n) {
     const size_t e = (size_t) n_embd_;
     if (block_layer_ && first < n) {
-        draft_input(tokens + first, hn_ + (size_t) first * e, n - first);
+        draft_input(tokens + first, pos_ + first, hn_ + (size_t) first * e, n - first);
         block_rows(pos_ + first, n - first);
     }
     ck(cudaMemcpyAsync(hn_, hn_ + (size_t) n * e, e * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)), "draft");
@@ -1378,7 +1403,7 @@ void Engine::draft_rows(const int32_t* tokens, int first, int n) {
 void Engine::draft_step(int32_t token, int i) {
     Layer& L = layers_[(size_t) n_layer_];
     float* own = hn_ + n_embd_;   // the block's output, which stands in for the model's from the second guess on
-    float* x = draft_input(&token, i == 0 ? hn_ : own, 1);
+    float* x = draft_input(&token, pos_ + i, i == 0 ? hn_ : own, 1);
     block_attend(pos_ + i, 1);
     axpy(ao_, 1.f, x, n_embd_, true, st_);
     rms_norm(x, fp(L.ffn_norm), xn_, n_embd_, 1, rms_eps_, st_);

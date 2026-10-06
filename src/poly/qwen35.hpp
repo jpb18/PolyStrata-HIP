@@ -16,6 +16,7 @@ public:
     size_t row_bytes() const override;
     void save_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
+    bool sees() const override { return true; }
 
 protected:
     void load_geometry() override;
@@ -54,10 +55,18 @@ private:
     void gdn(Block& B, int n);
     void attn(Block& B, int64_t pos, int n);
     void attn_store(Block& B, int64_t pos, int n);
+    void turn_of(int64_t row, int32_t* thw) const;
+    const int32_t* turns(int64_t pos, int n, int64_t* first);
 
     std::vector<Block> blocks_;   ///< one a layer of layers_
     int n_head_ = 0, n_kv_ = 0, head_dim_ = 0, n_rot_ = 0;
     float theta_scale_ = 0;   ///< a rotary pair turns by position * theta_scale^pair
+    int sections_ = 1;        ///< the pairs the rotary embedding's three axes take in turn before they start over
+    int32_t* axes_ = nullptr;         ///< a call's positions on the three axes, when it has a picture's rows
+    std::vector<int32_t> h_axes_;
+    int64_t axes_pos_ = -1;           ///< the call axes_ holds: its first row, its rows and the pictures it was
+    int axes_n_ = 0;                  ///< made for (images_set_)
+    uint64_t axes_set_ = 0;
     int s_dim_ = 0, k_heads_ = 0, v_heads_ = 0, d_inner_ = 0, conv_dim_ = 0;
     int n_gdn_ = 0, n_attn_ = 0;
     int chunk_ = 1;   ///< tokens the attention takes at a time

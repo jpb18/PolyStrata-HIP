@@ -20,6 +20,8 @@ public:
     size_t row_bytes() const override;
     void save_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
+    bool sees() const override { return true; }
+    int64_t whole(int64_t at, int64_t m) const override;
 
 protected:
     void load_geometry() override;

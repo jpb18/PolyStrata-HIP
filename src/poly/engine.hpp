@@ -95,6 +95,14 @@ struct Stats {
 
 class Mmq;
 
+/// A picture in a sequence: n rows that stand where n tokens would, each the vision encoder's output for a patch,
+/// as wide as a token's embedding.  The patches come line after line, nx to a line.
+struct Image {
+    int64_t at = 0;   ///< the sequence's row its first one takes
+    int n = 0, nx = 0;
+    const float* rows = nullptr;
+};
+
 class Engine {
 public:
     Engine();
@@ -108,6 +116,7 @@ public:
     void load(const Options& o);
 
     int n_vocab() const { return n_vocab_; }
+    int n_embd() const { return n_embd_; }
     int max_context() const { return opt_.max_context; }
     int threads() const { return workers_ ? workers_->threads() : 0; }
     /// The NUMA node the CPU threads were kept on, and the share of the experts' pages it holds; -1: no node chosen.
@@ -124,6 +133,16 @@ public:
     /// last one.
     void eval(const int32_t* tokens, int n, bool want_logits);
     const float* logits() const { return h_logits_; }
+
+    /// Whether the architecture reads pictures.
+    virtual bool sees() const { return false; }
+    /// The pictures of the sequence, in its order, in place of the ones set before.  eval() reads a row that lies
+    /// in one from the picture and not from its token, so their rows must stay where they are while tokens are
+    /// read.  A sequence that is come back to must get the pictures it was read with.
+    void images(const Image* im, int n);
+    /// Of m rows from row `at`, how many the next eval() takes.  An architecture whose pictures' rows see each
+    /// other takes a picture in a call of its own, which can be more than m.
+    virtual int64_t whole(int64_t at, int64_t m) const { (void) at; return m; }
 
     /// Guessed tokens.  window() feeds t tokens from pos(): the first is the one that is known, each of the others a
     /// guess at what follows the one before it.  logits_of(i) then holds the scores of the token after the i-th, so
@@ -234,8 +253,10 @@ protected:
     void load_moe(int il, bool shared = true);
     void alloc();
     void shared_scratch();
-    float* draft_input(const int32_t* tokens, const float* h, int n);
+    float* draft_input(const int32_t* tokens, int64_t row, const float* h, int n);
     void draft_rows(const int32_t* tokens, int first, int n);
+    const Image* image_at(int64_t row) const;
+    bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);
@@ -363,6 +384,8 @@ protected:
     std::vector<Pick> in_, out_;     ///< per trade number: the expert to bring in, and the one to give up
 
     int64_t pos_ = 0;
+    std::vector<Image> images_;          ///< the sequence's pictures, by row
+    uint64_t images_set_ = 0;            ///< counts images(): what was derived from an earlier list is stale
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     Stats stats_;
 };

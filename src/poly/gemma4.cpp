@@ -278,11 +278,10 @@ void Gemma4::assign_scratch() {
         dg_up_ = fbuf((size_t) d_ff_);
         dg_h_ = fbuf((size_t) d_ff_);
     }
-    if (rows_ >= kStageRows) {   // a prompt batch reads the rows it attends as floats
+    if (rows_ >= kStageRows) {   // a prompt batch reads the rows it attends as floats: a picture's, a ring's all
         size_t rows_f = 0;
         for (const Block& B : blocks_)
-            rows_f = std::max(rows_f, (size_t) (B.swa ? std::min(ring_, window_ + chunk_) : opt_.max_context) *
-                                          B.n_kv * B.dim);
+            rows_f = std::max(rows_f, (size_t) (B.swa ? ring_ : opt_.max_context) * B.n_kv * B.dim);
         akeys_ = fbuf(rows_f);
         avals_ = fbuf(rows_f);
         awork_ = fbuf(2 * (size_t) chunk_ * widest());
@@ -385,9 +384,30 @@ void Gemma4::store(const float* x, uint16_t* cache, const Block& B, int64_t pos,
     if (head < n) store_f16(x + (size_t) head * width, cache, width, 0, n - head, st_);
 }
 
+// A picture's rows see each other in the window layers (llama.cpp reads a picture without the causal mask there,
+// and with it in the full layers), so a picture goes into the model in a call of its own.
+int64_t Gemma4::whole(int64_t at, int64_t m) const {
+    for (const Image& im : images_) {
+        if (at >= im.at + im.n) continue;
+        if (at < im.at) return std::min(m, im.at - at);
+        if (at != im.at) throw std::logic_error("a sequence cannot go on from the middle of a picture");
+        if (im.n > rows_)
+            throw std::runtime_error("a picture of " + std::to_string(im.n) + " rows is more than a prompt batch (" +
+                                     std::to_string(rows_) + "): raise --prompt-batch or lower the picture's tokens");
+        return im.n;
+    }
+    return m;
+}
+
 // Queries and keys are normed a head and turned by the position; values are normed without weights.  The scores
 // are not scaled: the norms set their size.
 void Gemma4::attn(Block& B, int64_t pos, int n) {
+    // a call is a picture or has no row of one (whole())
+    const Image* im = image_at(pos);
+    for (const Image& o : images_)
+        if (o.at < pos + n && o.at + o.n > pos && (&o != im || o.at != pos || o.n != n))
+            throw std::logic_error("a picture's rows in a call with other rows");
+    const bool sees_all = B.swa && im != nullptr;
     const float* freq = B.swa ? nullptr : fp(freq_);
     lin(B.wq, xn_, qraw_, n, xq_);
     head_norm_rope(qraw_, B.dim, fp(B.q_norm), q_, B.dim, n_head_, B.n_rot, B.theta_scale, pos, n, rms_eps_, st_,
@@ -407,9 +427,10 @@ void Gemma4::attn(Block& B, int64_t pos, int n) {
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
     if (n >= kStageRows)
         attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_, awork_, chunk_, att_, B.dim, n_head_,
-                     B.n_kv, 1.f, st_, window, ring);
+                     B.n_kv, 1.f, st_, window, ring, sees_all);
     else
-        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, B.dim, n_head_, B.n_kv, 1.f, st_, window, ring);
+        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, B.dim, n_head_, B.n_kv, 1.f, st_, window, ring,
+               sees_all);
     lin(B.wo, att_, ao_, n);
 }
 
