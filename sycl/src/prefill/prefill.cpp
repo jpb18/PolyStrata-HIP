@@ -2567,7 +2567,9 @@ bool Prefill::run(const int64_t *tokens, int64_t n, int64_t pos0,
                     // that never returns (the first ck() to see it is `prefill mmq: iota`, one prompt later).  fused_layout()
                     // and fused_ring() keep the shrink and this decision in step; this is the backstop for anything that
                     // drifts: a clear error, never a hang.
-                    if (!fused_l && m.fused_bufs && T >= stream_all_min()) {
+                    // STRATA_DBG_FORCE_SLOW_LAYER=1 (a test of the backstop): layer 0 counts as one the fused path does not take
+                    static const bool force_slow = [] { const char* e = std::getenv("STRATA_DBG_FORCE_SLOW_LAYER"); return e && e[0] == '1'; }();
+                    if ((!fused_l || (force_slow && l == 0)) && m.fused_bufs && T >= stream_all_min()) {
                         err = "prefill: the fused layout's MoE buffers are too small for layer " + std::to_string(l) +
                               "'s expert path at a chunk of " + std::to_string(T) + " tokens";
                         return false;
