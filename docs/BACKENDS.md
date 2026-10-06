@@ -456,25 +456,27 @@ prompt tokens.
 | Model | Picture rows in the prompt | Same tokens as llama.cpp | Largest probability difference |
 | --- | --- | --- | --- |
 | Qwen3.6-35B-A3B | 280, 440, 160 | 0 of 11, 33 of 64, 64 of 64 | 0.14 |
-| Ornith 1.5 | 280, 440, 160 | 17 of 17, 4 of 35, 9 of 59 | 0.15 |
+| Ornith 1.5 | 280, 440, 160 | 17 of 17, 35 of 35, 59 of 59 | 0.19 |
 | Gemma 4 26B-A4B | 117, 194, 77 | 14 of 14, 19 of 19, 55 of 55 | 0.12 |
 
-Ornith's row is from before a prompt batch's float matrices were cuBLAS products and was not run again; the
-other two had 0.07 then, with the same tokens. Qwen3.6's first answer starts with another token than
-llama.cpp's: five tokens were between 0.10 and 0.17 there in both, and its first step is now 0.14 from the
-reference's where it was 0.04. Ornith's second and third leave at near ties (0.516 against 0.483 here, 0.495
-against 0.504 there; 0.605 against 0.392 here, 0.455 against 0.542 there). The differences are what the same
-models show on text. Before
-the sums had more threads a block the counts were 11 of 11, 11 of 64 and 64 of 64 for Qwen3.6, with its second
-answer leaving at a near tie, 17 of 17, 35 of 35 and 59 of 59 for Ornith, and Gemma 4's as they are.
+Before a prompt batch's float matrices were cuBLAS products Ornith's second and third answers left llama.cpp's
+after 4 and 9 tokens, at near ties (0.516 against 0.483 here, 0.495 against 0.504 there; 0.605 against 0.392
+here, 0.455 against 0.542 there), within 0.15, and the other two models had the tokens they have now within
+0.07. Qwen3.6's first answer starts with another token than llama.cpp's: five tokens were between 0.10 and 0.17
+there in both, and its first step is now 0.14 from the reference's where it was 0.04. The differences are what
+the same models show on text. Before the sums had more threads a block the counts were 11 of 11, 11 of 64 and
+64 of 64 for Qwen3.6, with its second answer leaving at a near tie, and Ornith's and Gemma 4's as they are.
 
 A fourth prompt has the picture after a list of 180 lines, about 3,600 tokens: past a prompt batch, a checkpoint
-and the rows Gemma 4's window layers keep. Qwen3.6 writes llama.cpp's 64 tokens. Gemma 4 starts with another
-token at a near tie (0.494 against 0.482 here, 0.457 against 0.517 there) and Ornith leaves at its eleventh, one
-of three tokens between 0.28 and 0.37; each names the shapes and reads the right line of the list. Before the
-sums changed Gemma 4 wrote llama.cpp's 31 tokens, with prompt batches of 1,024 and of 4,096 tokens, and Ornith
-left at its fourth. A fifth has 43 lines ahead of the picture, so that its rows start in one prompt batch of
-Qwen3.6's and end in the next: 64 of 64 tokens.
+and the rows Gemma 4's window layers keep. Gemma 4 writes llama.cpp's 31 tokens. Qwen3.6 leaves after four, at a
+near tie (0.459 against 0.451 here, 0.402 against 0.502 there), and Ornith after eleven, where three tokens are
+between 0.21 and 0.43 in both; each names the shapes and reads the right line of the list. Before a prompt
+batch's float matrices were cuBLAS products Qwen3.6 wrote llama.cpp's 64 tokens and Gemma 4 started with another
+token at a near tie (0.494 against 0.482 here, 0.457 against 0.517 there); the build before that change and the
+one with it were both run on this prompt again, and it is that change that moved the two. Before the sums had
+more threads a block Gemma 4 wrote llama.cpp's 31 tokens as well, with prompt batches of 1,024 and of 4,096
+tokens, and Ornith left at its fourth. A fifth has 43 lines ahead of the picture, so that its rows start in one
+prompt batch of Qwen3.6's and end in the next: 64 of 64 tokens.
 
 For Gemma 4 the other ways a picture's rows could see each other were run against the same reference. With no
 row seeing a later one, the second prompt's answer leaves llama.cpp's at its 14th token with probabilities 0.63
