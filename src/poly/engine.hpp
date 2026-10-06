@@ -99,6 +99,9 @@ struct Stats {
     double cpu_ms = 0, route_wait_ms = 0;
 };
 
+/// The most likely token of n logits: the first of the largest.
+int most_likely(const float* logits, int n);
+
 class Mmq;
 
 /// A picture in a sequence: n rows that stand where n tokens would, each the vision encoder's output for a patch,

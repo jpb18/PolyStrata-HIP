@@ -57,15 +57,29 @@ class Sampler {
 public:
     int pick(const float* logits, int n_vocab, const Sampling& s, const std::vector<int32_t>& history,
              std::mt19937_64& rng) {
-        cand_.resize((size_t) n_vocab);
-        for (int i = 0; i < n_vocab; ++i) cand_[(size_t) i] = {logits[i], i};
-        penalize(s, history);
-        auto by_logit = [](const Cand& a, const Cand& b) { return a.logit != b.logit ? a.logit > b.logit : a.id < b.id; };
-        if (s.temperature <= 0.f) return std::min_element(cand_.begin(), cand_.end(), by_logit)->id;
+        if (penalizes(s)) {
+            pen_.assign(logits, logits + n_vocab);
+            penalize(s, history);
+            logits = pen_.data();
+        }
+        if (s.temperature <= 0.f) return strata::poly::most_likely(logits, n_vocab);
 
-        const size_t k = s.top_k > 0 ? std::min((size_t) s.top_k, cand_.size()) : cand_.size();
-        std::partial_sort(cand_.begin(), cand_.begin() + (std::ptrdiff_t) k, cand_.end(), by_logit);
-        cand_.resize(k);
+        // The k best, the best first and of equals the lower id.  A token is a candidate only when it beats the
+        // worst of the k so far, which is the heap's first; most of a vocabulary never does.
+        auto by_logit = [](const Cand& a, const Cand& b) { return a.logit != b.logit ? a.logit > b.logit : a.id < b.id; };
+        const size_t k = s.top_k > 0 ? std::min((size_t) s.top_k, (size_t) n_vocab) : (size_t) n_vocab;
+        cand_.clear();
+        for (int i = 0; i < n_vocab; ++i) {
+            if (cand_.size() == k) {
+                if (!(logits[i] > cand_.front().logit)) continue;   // an equal with a higher id is no better
+                std::pop_heap(cand_.begin(), cand_.end(), by_logit);
+                cand_.back() = {logits[i], i};
+            } else {
+                cand_.push_back({logits[i], i});
+            }
+            std::push_heap(cand_.begin(), cand_.end(), by_logit);
+        }
+        std::sort_heap(cand_.begin(), cand_.end(), by_logit);
 
         if (s.top_p < 1.f) {
             softmax();
@@ -97,15 +111,18 @@ private:
         int id;
     };
 
+    static bool penalizes(const Sampling& s) {
+        return s.penalty_last_n != 0 &&
+               (s.penalty_repeat != 1.f || s.penalty_freq != 0.f || s.penalty_present != 0.f);
+    }
+
+    // on pen_, the logits' copy
     void penalize(const Sampling& s, const std::vector<int32_t>& history) {
-        if (s.penalty_last_n == 0 ||
-            (s.penalty_repeat == 1.f && s.penalty_freq == 0.f && s.penalty_present == 0.f))
-            return;
         const size_t n = s.penalty_last_n < 0 ? history.size() : std::min(history.size(), (size_t) s.penalty_last_n);
         seen_.clear();
         for (size_t i = history.size() - n; i < history.size(); ++i) ++seen_[history[i]];
         for (const auto& [id, count] : seen_) {
-            float& l = cand_[(size_t) id].logit;
+            float& l = pen_[(size_t) id];
             l = l <= 0.f ? l * s.penalty_repeat : l / s.penalty_repeat;
             l -= (float) count * s.penalty_freq + s.penalty_present;
         }
@@ -121,6 +138,7 @@ private:
     }
 
     std::vector<Cand> cand_;
+    std::vector<float> pen_;
     std::vector<double> p_;
     std::unordered_map<int32_t, int> seen_;
 };

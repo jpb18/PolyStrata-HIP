@@ -173,6 +173,21 @@ void read_profile(const std::string& path, int n_layer, int n_expert, std::vecto
     std::fclose(f);
 }
 
+// The largest of n values, as eight maxima side by side: one best-so-far is a chain every compare waits on, and
+// a vocabulary is 150,000 values.
+constexpr int kLanes = 8;
+float largest(const float* x, int n) {
+    float mx[kLanes];
+    std::fill(mx, mx + kLanes, -INFINITY);
+    int i = 0;
+    for (; i + kLanes <= n; i += kLanes)
+        for (int j = 0; j < kLanes; ++j) mx[j] = std::max(mx[j], x[i + j]);
+    float best = -INFINITY;
+    for (int j = 0; j < kLanes; ++j) best = std::max(best, mx[j]);
+    for (; i < n; ++i) best = std::max(best, x[i]);
+    return best;
+}
+
 }  // namespace
 
 // One expert on its way into the cache.  The engine's thread asks, the follower copies and sends, and the engine's
@@ -1633,15 +1648,23 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
     }
 
     const float* l = h_dlogits_;
-    int best = 0;
-    for (int v = 1; v < n_vocab_; ++v)
-        if (l[v] > l[best]) best = v;
-    // the softmax's sum without the tokens too unlikely to change it
+    const int best = most_likely(l, n_vocab_);
+    // the softmax's sum without the tokens too unlikely to change it: a stretch with none of them is passed over
+    const float least = l[best] - 20.f;
     double sum = 0.0;
-    for (int v = 0; v < n_vocab_; ++v)
-        if (l[v] > l[best] - 20.f) sum += std::exp((double) (l[v] - l[best]));
+    for (int v0 = 0; v0 < n_vocab_; v0 += kLanes * 8) {
+        const int v1 = std::min(n_vocab_, v0 + kLanes * 8);
+        if (!(largest(l + v0, v1 - v0) > least)) continue;
+        for (int v = v0; v < v1; ++v)
+            if (l[v] > least) sum += std::exp((double) (l[v] - l[best]));
+    }
     *prob = (float) (1.0 / sum);
     return best;
+}
+
+int most_likely(const float* logits, int n) {
+    const float* at = std::find(logits, logits + n, largest(logits, n));
+    return at == logits + n ? 0 : (int) (at - logits);
 }
 
 }  // namespace strata::poly
