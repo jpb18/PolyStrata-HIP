@@ -394,6 +394,13 @@ __global__ void axpy_kernel(const float* __restrict__ x, float a, float* __restr
     acc[i] = add ? acc[i] + x[i] * a : x[i] * a;
 }
 
+// The sums may be one and the same, so a thread adds its value of each vector in turn.
+__global__ void add_scaled_kernel(ScaledRows rows, int count, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    for (int k = 0; k < count; ++k) rows.acc[k][i] = rows.acc[k][i] + rows.x[k][i] * rows.w[k];
+}
+
 __global__ void swiglu_clamp_rows_kernel(const float* __restrict__ gate_up, float* __restrict__ out, int n,
                                          float limit) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -830,6 +837,11 @@ void swiglu_clamp(const float* gate, const float* up, float* out, int n, float l
 
 void axpy(const float* x, float a, float* acc, int n, bool add, void* stream) {
     axpy_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(x, a, acc, n, add);
+}
+
+void add_scaled(const ScaledRows& rows, int count, int n, void* stream) {
+    if (count < 1 || count > 32) throw std::invalid_argument("add_scaled: 1 to 32 vectors");
+    add_scaled_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(rows, count, n);
 }
 
 void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float limit, void* stream) {

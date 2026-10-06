@@ -732,7 +732,7 @@ void Engine::shared_scratch() {
     g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
     u_ = fbuf(ff);
     h_ = fbuf(ff);
-    d_ = fbuf((size_t) n_embd_);   // one routed expert of one token
+    d_ = fbuf((size_t) kSumRows * n_embd_);   // the routed experts of a few tokens, until they are added up
     cpu_ = fbuf(e);
     rl_ = fbuf(n * n_expert_);
     logits_ = fbuf((size_t) n_vocab_);
@@ -953,18 +953,26 @@ void Engine::moe(Layer& L, int il, int n) {
         }
         stats_.gpu_experts += n_cached;
         stats_.cpu_experts += n_host;
-        // Five launches a cached expert.  Nothing else goes to the stream until the CPU experts are done, so one
-        // of their threads hands these to the card meanwhile: on this thread they held the CPU experts up.
+        // Four launches a cached expert, and one that adds up to kSumRows of them into their tokens' rows, in the
+        // order they came.  The launches cost this thread more than they cost the card, so each one less counts.
+        // Nothing else goes to the stream until the CPU experts are done, so one of their threads hands these to
+        // the card meanwhile: on this thread they held the CPU experts up.
         const std::function<void()> launch = [&] {
+            ScaledRows sum{};
             for (int i = 0; i < n_cached; ++i) {
                 const Cached& c = cached[i];
+                const int k = i % kSumRows;
+                float* d = d_ + (size_t) k * e_row;
                 const void* xq = (const uint8_t*) xq_ + (size_t) c.row * xq_row;
                 kernels::native_mmvq((int) L.gu_type, c.slot, xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
                 if (gelu_) geglu(g_, g_ + n_ff_exp_, h_, n_ff_exp_, st_);
                 else swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
                 kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
-                kernels::native_mmvq((int) L.d_type, c.slot + 2 * L.gu_bytes, q8_, d_, n_ff_exp_, n_embd_, 1, st_);
-                axpy(d_, c.w, fo_ + (size_t) c.row * e_row, n_embd_, true, st_);
+                kernels::native_mmvq((int) L.d_type, c.slot + 2 * L.gu_bytes, q8_, d, n_ff_exp_, n_embd_, 1, st_);
+                sum.x[k] = d;
+                sum.acc[k] = fo_ + (size_t) c.row * e_row;
+                sum.w[k] = c.w;
+                if (k == kSumRows - 1 || i == n_cached - 1) add_scaled(sum, k + 1, n_embd_, st_);
             }
         };
 

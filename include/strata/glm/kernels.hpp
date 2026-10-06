@@ -93,6 +93,14 @@ void geglu_rows(const float* gate_up, float* out, int n, int rows, void* stream)
 void moe_sum(const float* x, const float* w, float* acc, int n, int n_used, int rows, void* stream);
 /// acc = x * a, or acc += x * a when `add`.
 void axpy(const float* x, float a, float* acc, int n, bool add, void* stream);
+/// Up to 32 vectors of n values, each times its weight into its own sum, one after the other: acc[k] += x[k] * w[k]
+/// for k = 0, 1, ...  Two of them may have the same sum.
+struct ScaledRows {
+    const float* x[32];
+    float* acc[32];
+    float w[32];
+};
+void add_scaled(const ScaledRows& rows, int count, int n, void* stream);
 /// acc[row] += b for each of the rows of n values.
 void add_bias(const float* b, float* acc, int n, int rows, void* stream);
 
