@@ -39,12 +39,13 @@
 
 namespace strata::core {
 
-/// STRATA_SPEC_PROB_GATE=pick: --spec-min-p gates a further draft on the drawn token's probability under q (default:
-/// q's top probability, how sure the draft head is).
+/// --spec-min-p gates a further draft on the drawn token's probability under q (as the coupled drafter does).
+/// STRATA_SPEC_PROB_GATE=top gates on q's top probability instead: measured on the RTX 3060 it drafts longer windows
+/// whose later guesses are kept less often, and decodes slower.
 inline bool spec_gate_pick() {
     static const bool on = [] {
         const char* e = std::getenv("STRATA_SPEC_PROB_GATE");
-        return e != nullptr && std::strcmp(e, "pick") == 0;
+        return e == nullptr || std::strcmp(e, "top") != 0;
     }();
     return on;
 }
