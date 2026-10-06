@@ -154,10 +154,13 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   RAM place of the one that replaces it, so the RAM copy keeps holding exactly what the GPU does not.
 - `--adapt-async 1` (opt-in, `--serve`): the swaps of a round advance between decode windows on a helper thread
   (copy back, copy in, move into RAM) instead of one window waiting for the whole round. Not with `--batch` or
-  `--peer-device` (the blocking tier runs there). It is not bit-exact from run to run: which window first computes a
-  swapped-in expert on the GPU (which rounds differently from the CPU) depends on when its copy lands.
-  It stays on the blocking tier (said in the log) when the exchange buffers are not page-locked, and with
-  `--pipeline-windows`; the stats line reports ms per round.
+  `--peer-device` (the blocking tier runs there). With `--pipeline-windows 2` (two windows in flight, see
+  [MULTI_GPU.md](MULTI_GPU.md)) the copies into the evicted slots and the moves into RAM also wait until the windows
+  that were in flight when they were decided have completed (`STRATA_PIPELINE_ADAPT_ASYNC=0`: the blocking tier
+  there). It is not bit-exact from run to run: which window first computes a swapped-in expert on the GPU (which
+  rounds differently from the CPU) depends on when its copy lands.
+  It stays on the blocking tier (said in the log) when the exchange buffers are not page-locked; the stats line
+  reports ms per round.
 - `STRATA_EXCHANGE_ROTATE=1` (opt-in): an adaptive swap hands buffer ownership over instead of copying the evicted
   blob into the RAM copy (equal-size blobs, fully page-locked copy). Same tokens, fewer host copies; it works with
   `--adapt-async 1` too. Details and the measurement: [EXCHANGE_ROTATION.md](EXCHANGE_ROTATION.md).
