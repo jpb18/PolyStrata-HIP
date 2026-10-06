@@ -141,7 +141,7 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 
 - 用哪个模型、哪个规格，
 - 上下文多大（模型能记住多少文字），
-- 是否要识别图片（Qwen3.8-Flash-Next）。
+- 是否要识别图片（GLM 5.3 Flash 不支持）。
 
 每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 79 或 114 GB）并启动。
 如果下载中断了，再运行一次即可：它会从中断的地方继续。浏览器会打开 PolyStrata 应用，地址是 `http://127.0.0.1:8080`。

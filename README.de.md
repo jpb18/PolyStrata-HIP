@@ -147,7 +147,7 @@ dafür ein. Er stellt dir ein paar Fragen:
 
 - welches Modell und welche Größe,
 - wie viel Kontext (wie viel Text sich das Modell merkt),
-- ob es Bilder lesen soll (Qwen3.8-Flash-Next).
+- ob es Bilder lesen soll (GLM 5.3 Flash liest keine).
 
 Drück jedes Mal Enter, um die empfohlene Antwort zu nehmen. Dann lädt er das Modell herunter (etwa 70 GB für
 Qwen3.8-Flash-Next, 79 oder 114 GB für GLM 5.3 Flash) und

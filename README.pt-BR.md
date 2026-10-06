@@ -145,7 +145,7 @@ Ele faz algumas perguntas:
 
 - qual modelo e qual tamanho,
 - quanto contexto (quanto texto o modelo guarda na memória),
-- se ele deve entender imagens (Qwen3.8-Flash-Next).
+- se ele deve entender imagens (o GLM 5.3 Flash não entende).
 
 Aperte Enter em cada uma para usar a resposta recomendada. Depois ele baixa o modelo (cerca de 70 GB para o
 Qwen3.8-Flash-Next, 79 ou 114 GB para o GLM 5.3 Flash) e o inicia.

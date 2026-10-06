@@ -143,7 +143,7 @@ The installer finds your card and sets up the right engine for it. It asks you a
 
 - which model and which size,
 - how much context (how much text the model keeps in mind),
-- whether it should read pictures (Qwen3.8-Flash-Next).
+- whether it should read pictures (GLM 5.3 Flash reads none).
 
 Press Enter each time for the recommended answer. Then it downloads the model (about 70 GB for Qwen3.8-Flash-Next,
 79 or 114 GB for GLM 5.3 Flash) and starts it. If the download stops, run it again: it continues where it left off. Your

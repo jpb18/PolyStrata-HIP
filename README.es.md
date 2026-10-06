@@ -145,7 +145,7 @@ Te hace unas pocas preguntas:
 
 - qué modelo y qué tamaño,
 - cuánto contexto (cuánto texto tiene presente el modelo),
-- si debe entender imágenes (Qwen3.8-Flash-Next).
+- si debe entender imágenes (GLM 5.3 Flash no las entiende).
 
 Pulsa Enter cada vez para usar la respuesta recomendada. Después descarga el modelo (unos 70 GB para
 Qwen3.8-Flash-Next, 79 o 114 GB para GLM 5.3 Flash) y lo arranca. Si la
