@@ -406,7 +406,8 @@ class Install(FakeRoot):
         by = {f["family"]: f["sizes"] for f in res["families"]}
         self.assertEqual([(x["model"], x["download_gb"], x["on_this_pc"], x["id"]) for x in by["qwen36"]],
                          [("UD-Q3_K_M", 17.1, "fits", "qwen36-ud-q3_k_m")])
-        self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (13.2, False))
+        self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (13.2, True))
+        self.assertFalse(next(f for f in res["families"] if f["family"] == "glm")["images"])   # GLM reads none
 
     def test_progress_while_running_and_cancel(self):
         (self.root / "slow").write_text("")
@@ -592,6 +593,8 @@ class Helpers(unittest.TestCase):
         self.assertEqual(list(S.FAMILIES), list(M.FALLBACK_FAMILIES))
         for f, d in S.FAMILIES.items():
             self.assertEqual(d["tag"], M.FALLBACK_FAMILIES[f]["tag"])
+            self.assertEqual((d.get("vision"), d["about"]), (M.FALLBACK_FAMILIES[f].get("vision"),
+                                                              M.FALLBACK_FAMILIES[f]["about"]), f)
             own = M.FALLBACK_FAMILIES[f].get("models", {})
             self.assertEqual(list(d.get("models", {})), list(own), f)
             for m, size in d.get("models", {}).items():

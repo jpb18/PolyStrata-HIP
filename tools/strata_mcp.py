@@ -89,17 +89,17 @@ FALLBACK_FAMILIES = {
     # a family with sizes of its own ("models"): two of these have a size of one name
     "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB "
                                                      "of RAM beside an 8 GB card", "tag": "qwen36-", "engine": "poly",
-               "vision": False, "experimental": True,
+               "vision": True, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6}}},
     "ornith": {"title": "Ornith 1.5 35B-A3B", "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, "
                                                         "~22 GB of RAM beside an 8 GB card", "tag": "ornith-",
-               "engine": "poly", "vision": False, "experimental": True,
+               "engine": "poly", "vision": True, "experimental": True,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the "
                                                       "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8}}},
     "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB "
-                                                     "card; text only here", "tag": "gemma4-", "engine": "poly",
-               "vision": False, "experimental": True,
+                                                     "card", "tag": "gemma4-", "engine": "poly",
+               "vision": True, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
                                         "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3}}},
 }
@@ -1003,7 +1003,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "114 GB download, no images), qwen36 = Qwen3.6-35B-A3B, ornith = Ornith "
                                        "1.5, gemma4 = Gemma 4 26B-A4B (GLM's engine: Linux, one NVIDIA card, a "
                                        "13-17 GB download, 18-22 GB of RAM beside an 8 GB card by setup's "
-                                       "estimate, no images)"},
+                                       "estimate; images with vision)"},
              "model": {"type": "string", "enum": list(dict.fromkeys(
                            [*models, *(m for f in families.values() for m in f.get("models", ()))])),
                        "description": "the size (quantization): see strata_models"},

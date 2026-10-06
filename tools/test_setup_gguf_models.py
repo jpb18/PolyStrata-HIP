@@ -36,11 +36,13 @@ class Pins(unittest.TestCase):
             self.assertEqual((setup.model_file(fam, size, 1), setup.model_shards(fam, size)), (file, 1))
             d = fam["models"][size]
             more = [Path(d["draft_model"]).name] if d.get("draft_model") else []
-            self.assertEqual(list(fam["sha256"]), [file, *more])
+            # the image encoder is pinned too; it is downloaded when images are wanted, so it has its own size
+            self.assertEqual(list(fam["sha256"]), [file, *more, fam["mmproj"]])
             self.assertEqual(fam["sha256"][file][0], n)
             for pinned in fam["sha256"].values():
                 self.assertRegex(pinned[1], r"^[0-9a-f]{64}$")
-            self.assertAlmostEqual(sum(p[0] for p in fam["sha256"].values()) / 1e9, d["download_gb"], delta=0.05)
+            self.assertAlmostEqual(sum(fam["sha256"][f][0] for f in [file, *more]) / 1e9, d["download_gb"], delta=0.05)
+            self.assertAlmostEqual(fam["sha256"][fam["mmproj"]][0] / 1e9, fam["vision_gb"], delta=0.05)
             self.assertLess(d["arena_gb"], d["download_gb"])            # the experts are part of the file
 
     def test_two_families_have_a_size_of_one_name(self):
@@ -124,6 +126,56 @@ class Main(unittest.TestCase):
                 self.assertEqual(cfg["display_name"], f"{fam['title']} {size}")
                 self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE)
                 self.assertIn("% of its experts fit in VRAM (100% there)", out)
+                self.assertEqual((self.encoder, cfg.get("vision")), ("none", None))   # --yes: no images
+
+    def test_images(self):
+        for family, (size, file, _repo, _n) in NEW.items():
+            fam = setup.FAMILIES[family]
+            folder = self.t / "models" / (fam["tag"] + size)
+            # (the card's VRAM, --vision) -> where the encoder runs: a small card keeps its VRAM for the model
+            for vram, asked, where in ((31.84, "yes", "gpu"), (8.0, "yes", "cpu"), (12.0, "gpu", "gpu")):
+                with self.subTest(family=family, vram=vram, asked=asked):
+                    self.downloads, self.verified = [], []
+                    code, out, cfg = self.main(["--vision", asked], family=family, ram=64.0, vram=vram)
+                    self.assertEqual(code, 0, out)
+                    self.assertEqual(self.encoder, where)
+                    if vram > 30:                      # the first run: the encoder is the last file fetched
+                        self.assertEqual(self.downloads[-1], fam["mmproj_hf"] + fam["mmproj"])
+                    self.assertEqual(self.verified[-1], (fam["mmproj"], *fam["sha256"][fam["mmproj"]]))
+                    v = cfg["vision"]
+                    self.assertEqual((Path(v["exe"]), Path(v["mmproj"]), Path(v["model"]), v["gpu"]),
+                                     (self.t / setup.ENGINE_POLY_DIR / setup.VEXE, folder / fam["mmproj"],
+                                      folder / file, where == "gpu"))
+                    self.assertEqual(v["max_tokens"], setup.VISION[where]["max_tokens"])
+                    self.assertEqual("threads" in v, where == "cpu")
+                    self.assertIn("images: on" + (" (encoder on the CPU)" if where == "cpu" else ""), out)
+            # the encoder was downloaded once, beside the model's file, and found there afterwards
+            self.assertTrue((folder / fam["mmproj"]).exists())
+            self.assertEqual(self.downloads, [])
+        # the encoder on the GPU leaves less VRAM to the experts, and the estimate says so
+        need = {}
+        for asked in ("no", "gpu"):
+            code, out, cfg = self.main(["--vision", asked], family="gemma4", ram=64.0, vram=16.0,
+                                       answers={})
+            need[asked] = out
+        self.assertIn("about 10 of", need["no"])
+        self.assertIn("about 8 of", need["gpu"])
+        # and on a card it leaves too little of, setup stops and says how to keep it off the card
+        code, out, cfg = self.main(["--vision", "gpu"], family="gemma4", ram=64.0, vram=8.0)
+        self.assertNotEqual(code, 0)
+        self.assertIn("and its image encoder 2.4 GB", out)
+        self.assertIn("--vision cpu keeps the image encoder off the card", out)
+
+    def test_images_are_asked_about(self):
+        code, out, cfg = self.main(family="qwen36", ram=64.0, vram=24.0, answers={"Do you want images": "y"})
+        self.assertEqual(code, 0, out)
+        self.assertIn("a 0.9 GB", out)
+        self.assertEqual((self.encoder, cfg["vision"]["gpu"]), ("gpu", True))
+        # GLM 5.3 Flash reads no pictures: it is not asked, and --vision is said to be unused
+        code, out, cfg = self.main(["--vision", "yes"], family="glm")
+        self.assertEqual(code, 0, out)
+        self.assertIn("not used with GLM 5.3 Flash", out)
+        self.assertNotIn("vision", cfg)
 
     def test_the_draft_model_beside_files_of_ones_own(self):
         size, file, _repo, _n = NEW["gemma4"]

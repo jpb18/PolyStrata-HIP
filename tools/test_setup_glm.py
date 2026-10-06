@@ -136,7 +136,7 @@ class Config(unittest.TestCase):
             self.assertTrue(setup.poly_config(cfg))
             self.assertEqual(setup.choices_from_config(p)["family"], "glm")
 
-            def build(gpu, yes, llama, works=True):
+            def build(gpu, yes, llama, vision="none", works=True):
                 if not works:
                     raise RuntimeError("no compiler")
                 (root / setup.ENGINE_POLY_DIR).mkdir(exist_ok=True)
@@ -215,8 +215,9 @@ class Main(unittest.TestCase):
             dst.write_bytes(b"")
             setup.mark(dst)
 
-        def fake_build(gpu, yes, llama):
+        def fake_build(gpu, yes, llama, vision="none"):
             self.built.append(gpu["archs"])
+            self.encoder = vision
             eng = self.t / setup.ENGINE_POLY_DIR
             eng.mkdir(exist_ok=True)
             (eng / "BUILD.json").write_text(json.dumps({"source": "local", "cuda_dirs": ["/cuda/lib64"]}))

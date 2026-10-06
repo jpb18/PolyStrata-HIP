@@ -279,32 +279,42 @@ FAMILIES = {
     # context token takes, measured from 8K to 131K there.  "ram_gb" is poly_ram_need() for an 8 GB card.  They ship
     # no expert profile: the engine starts one.  "draft_model": a file of the size's repository that guesses ahead
     # for it, a model of its own; it is downloaded beside the model's and its VRAM is in "vram_beside_gb".
+    # "mmproj": the repository's image encoder, downloaded beside the model's file when images are wanted;
+    # "vision_vram_gb" is what it holds on the GPU once it has warmed up at 1,024 image tokens (measured there too).
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
                "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
-               "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": False, "experimental": True,
-               "row_bytes": 26624,
+               "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": True, "experimental": True,
+               "row_bytes": 26624, "mmproj_hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "mmproj": "mmproj-F16.gguf",
+               "vision_gb": 0.9, "vision_vram_gb": 1.6,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6,
                                         "vram_beside_gb": 4.8, "draft": "own"}},
                "sha256": {"Qwen3.6-35B-A3B-UD-Q3_K_M.gguf":
-                          (17104402720, "8966dd0cd8c543c4228490a2a8b0e0814fc4f1e6a8e199ceed4de6754ae7b8e1")}},
+                          (17104402720, "8966dd0cd8c543c4228490a2a8b0e0814fc4f1e6a8e199ceed4de6754ae7b8e1"),
+                          "mmproj-F16.gguf":
+                          (899283584, "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160")}},
     "ornith": {"title": "Ornith 1.5 35B-A3B", "by": "ornith-ai; APEX quantization by mudler",
                "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, ~22 GB of RAM beside an 8 GB card",
                "hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf",
-               "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "poly", "vision": False,
+               "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "poly", "vision": True,
                "experimental": True, "row_bytes": 26624,
+               "mmproj_hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "mmproj": "mmproj.gguf", "vision_gb": 0.9,
+               "vision_vram_gb": 1.6,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the file",
                                              "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8,
                                              "vram_beside_gb": 4.2,
                                              "file": "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf", "draft": "own"}},
                "sha256": {"Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf":
-                          (17437861408, "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165")}},
+                          (17437861408, "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165"),
+                          "mmproj.gguf":
+                          (899283200, "e277123529451fbcff6d880ad5bd7ada999f9d5e6339ba3639d06c5cef4763b1")}},
     "gemma4": {"title": "Gemma 4 26B-A4B", "by": "Google; quantized by Unsloth",
-               "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card; text only here",
+               "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card",
                "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
-               "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "poly", "vision": False, "experimental": True,
-               "row_bytes": 28672,
+               "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "poly", "vision": True, "experimental": True,
+               "row_bytes": 28672, "mmproj_hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "mmproj": "mmproj-F16.gguf",
+               "vision_gb": 1.2, "vision_vram_gb": 2.4, "vision_most": 1024,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
                                         "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3,
                                         "vram_beside_gb": 5.8,
@@ -312,7 +322,9 @@ FAMILIES = {
                "sha256": {"gemma-4-26B-A4B-it-UD-Q3_K_M.gguf":
                           (12728497888, "811882f6df81c8ea204a5d382f196d6bd601245091786912d4c70df41cdfa052"),
                           "mtp-gemma-4-26B-A4B-it-Q8_0.gguf":
-                          (461766816, "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b")}},
+                          (461766816, "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b"),
+                          "mmproj-F16.gguf":
+                          (1193058784, "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -329,6 +341,9 @@ VEXE = "strata-vision.exe" if WIN else "strata-vision"
 # stays as it was downloaded.  It was called strata-glm, after its first model, and an install from then has that
 # name and folder in its run config (poly_config(), update_poly_engine()).
 POLY_EXE = "strata-poly.exe" if WIN else "strata-poly"
+# A model of strata-poly that reads pictures has its image encoder on the GPU from this much VRAM (GiB), and on the
+# CPU below it: the encoder holds 1.6 to 2.4 GB there, which a smaller card needs for the model
+POLY_VISION_GPU_GB = 15.5
 ENGINE_POLY_DIR = "engine-poly"
 OLD_POLY_EXE = "strata-glm.exe" if WIN else "strata-glm"
 OLD_ENGINE_POLY_DIR = "engine-glm"
@@ -3709,37 +3724,55 @@ def poly_saved_conv(paths) -> int | None:
     return None
 
 
-def build_engine_poly(gpu, yes, llama) -> Path:
-    """Compile strata-poly for this GPU; the result goes to engine-poly/.  It is compiled again when its source
-    changed (a `git pull`) or the card is one it has no code for."""
+def build_engine_poly(gpu, yes, llama, vision="none") -> Path:
+    """Compile strata-poly for this GPU and, for images, the encoder beside it ("gpu": with CUDA, "cpu": without);
+    the results go to engine-poly/.  Each is compiled again when its source changed (a `git pull`); the engine also
+    when the card is one it has no code for, and the encoder when it is wanted on the GPU and was built without."""
     eng = ROOT / ENGINE_POLY_DIR
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
-    src = source_hash(ENGINE_SOURCES)
+    src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
     built = {int(x) for x in meta.get("archs", [])}
     archs = sorted(built | {int(x) for x in gpu.get("archs", [gpu["arch"]])})
     have = (eng / POLY_EXE).exists()
-    if have and meta.get("src") == src and set(archs) == built:
+    engine_ok = have and meta.get("src") == src and set(archs) == built
+    # an encoder built with CUDA also runs on the CPU, so the one there is kept unless the GPU is asked of a CPU one
+    was = meta.get("vision") or "none"
+    vision_ok = vision == "none" or ((eng / VEXE).exists() and meta.get("vision_src") == vsrc and
+                                     (was == "gpu" or vision == "cpu"))
+    if engine_ok and vision_ok:
         ok("strata-poly already built for this PC")
         return eng
     # CUDA 12.8 is the toolkit it was written and measured with, on an RTX 5090: the Qwen engine's reason to want 13.0
     # there (#220, its prompt path) is not this engine's
     nvcc, vcvars = install_build_tools({**gpu, "archs": archs, "toolkit": 13,
                                         "need_cuda": (12, 8) if max(archs) >= 120 else (12, 0)}, yes)
-    say("  strata-poly's source changed: compiling it again (only what changed, a few minutes) ..."
-        if have and set(archs) == built else "  Compiling the strata-poly engine for your GPU (some minutes, once) ...")
-    bdir = ROOT / "build-poly"
-    cmake_build(ROOT, bdir, "strata-poly",
-                ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
-                 f"-DCMAKE_CUDA_ARCHITECTURES={';'.join(str(x) for x in archs)}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
-                 f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata-poly.bat")
-    shutil.copy2(bdir / POLY_EXE, eng / POLY_EXE)
+    cuda_archs = ";".join(str(x) for x in archs)
+    if not engine_ok:
+        say("  strata-poly's source changed: compiling it again (only what changed, a few minutes) ..."
+            if have and set(archs) == built else
+            "  Compiling the strata-poly engine for your GPU (some minutes, once) ...")
+        bdir = ROOT / "build-poly"
+        cmake_build(ROOT, bdir, "strata-poly",
+                    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
+                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata-poly.bat")
+        shutil.copy2(bdir / POLY_EXE, eng / POLY_EXE)
+    if not vision_ok:
+        say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
+        defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}"]
+        if vision == "gpu":
+            defs += [f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}", f"-DCMAKE_CUDA_COMPILER={nvcc}"]
+        # its own build folder: the Qwen engine's encoder may be built for another toolkit in build-vision/
+        cmake_build(ROOT / "tools" / "vision", ROOT / "build-vision-poly", "strata-vision", defs, vcvars,
+                    "build-vision-poly.bat")
+        shutil.copy2(ROOT / "build-vision-poly" / "bin" / VEXE, eng / VEXE)
+        was, meta = vision, {**meta, "vision_src": vsrc}
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(x) for x in (bindir, bindir / "x64", bindir.parent / "lib64") if x.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs, "cuda_dirs": dirs,
-                                 "src": src}, indent=1))
-    ok(f"strata-poly compiled: {eng / POLY_EXE}")
+                                 "src": src, "vision": was, "vision_src": meta.get("vision_src")}, indent=1))
+    ok(f"strata-poly compiled: {eng / POLY_EXE}" + (f", image encoder: {eng / VEXE}" if vision != "none" else ""))
     return eng
 
 
@@ -3760,9 +3793,13 @@ def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> No
         gpu = gpu_info(cfg["gpu"] if isinstance(cfg.get("gpu"), int) else None)
         if gpu is None:
             raise RuntimeError("no NVIDIA GPU found")
+        # the encoder too, when this model has one: on the device it was built for
+        vis = cfg.get("vision")
+        vision = ("gpu" if meta.get("vision") == "gpu" or vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none"
         if not (meta.get("src") == source_hash(ENGINE_SOURCES) and (eng / POLY_EXE).exists()
-                and int(gpu["arch"]) in [int(x) for x in meta.get("archs", [])]):
-            build_engine_poly(gpu, yes, get_llama_cpp())
+                and int(gpu["arch"]) in [int(x) for x in meta.get("archs", [])]
+                and (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES))):
+            build_engine_poly(gpu, yes, get_llama_cpp(), vision)
         if renamed:
             cfg["exe"] = str(eng / POLY_EXE)
             if cfg_path is not None:
@@ -3792,8 +3829,10 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
                      f"use Linux, or --family {family} --yes to try it here")
     if multi:
         warn(f"{title} runs on one GPU: {gpu_name(gpu)} alone")
+    sees = fam.get("vision") is True
     unused = [flag for flag, given in (
-        ("--vision", a.vision not in (None, "no", "none")), ("--vision-tokens", a.vision_tokens is not None),
+        ("--vision", not sees and a.vision not in (None, "no", "none")),
+        ("--vision-tokens", not sees and a.vision_tokens is not None),
         ("--kv", a.kv), ("--kv-streaming", a.kv_streaming != "auto"), ("--rope-scaling", a.rope_scaling),
         ("--rope-scale", a.rope_scale is not None), ("--low-ram", a.low_ram != "auto"),
         ("--resident-budget-gib", a.resident_budget_gib is not None), ("--parallel", a.parallel is not None),
@@ -3818,15 +3857,36 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         model = names[int(ask("Size?", [str(i) for i in range(1, len(names) + 1)], str(names.index(model) + 1),
                               a.yes)) - 1]
     d = sizes[model]
+    # images: the encoder on the GPU takes VRAM the experts would have, so a small card gets it on the CPU
+    vision = "none"
+    if sees:
+        auto = "gpu" if vram >= POLY_VISION_GPU_GB else "cpu"
+        if a.vision:
+            vision = {"yes": auto, "no": "none"}.get(a.vision, a.vision)
+        else:
+            say()
+            say(f"  Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a "
+                f"{fam['vision_gb']} GB")
+            say("  download and a compile of the image encoder, which " +
+                (f"keeps ~{fam['vision_vram_gb']} GB of VRAM (--vision cpu: none, a few seconds a picture)."
+                 if auto == "gpu" else
+                 f"runs on the CPU on this card (a few seconds a picture; --vision gpu: ~{fam['vision_vram_gb']} "
+                 "GB of VRAM)."))
+            vision = auto if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
+        ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
+    room = max(0.0, vram - (fam["vision_vram_gb"] if vision == "gpu" else 0))   # the VRAM left for the model
     beside = poly_beside_gb(d)
-    held, need_ram = poly_held_gb(d, vram), poly_ram_need(d, vram)
+    held, need_ram = poly_held_gb(d, room), poly_ram_need(d, room)
     say()
     say(f"  {model}: {d['about']}; download {d['download_gb']:.0f} GB. The file is read in place: about {held:.0f} of")
     say(f"  its {d['arena_gb']:.0f} GB of experts fit this card, the rest stay in RAM (the OS file cache).")
-    if vram < beside + 2:
+    if room < beside + 2:
+        enc = vision == "gpu"                          # the encoder's share may be what does not fit
         confirm_risk(f"{title} takes about {beside} GB of VRAM before any expert (measured on a 32 GB "
-                     f"card at a 32K context); {gpu_name(gpu)} has less than it takes to start", bool(a.model), a.yes,
+                     f"card at a 32K context)" + (f" and its image encoder {fam['vision_vram_gb']} GB" if enc else "") +
+                     f"; {gpu_name(gpu)} has less than it takes to start", bool(a.model), a.yes,
                      f"{title} needs more VRAM than {vram:.0f} GB",
+                     ("--vision cpu keeps the image encoder off the card; " if enc else "") +
                      f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
     elif vram < 30:
@@ -3898,8 +3958,14 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     if guesser is not None and a.gguf_dir and not guesser.exists():
         guesser = Path(a.models_dir) / tag / guesser.name
     have_guesser = guesser is None or guesser.exists() and (done(guesser) or bool(a.gguf_dir) or whole_shard(guesser))
+    # the image encoder, in the same places
+    mmproj = models_dir / fam["mmproj"] if vision != "none" else None
+    if mmproj is not None and a.gguf_dir and not mmproj.exists():
+        mmproj = Path(a.models_dir) / tag / mmproj.name
+    have_mmproj = mmproj is None or mmproj.exists() and (done(mmproj) or bool(a.gguf_dir) or whole_shard(mmproj))
     on_disk = sum(f.stat().st_size for s in shards for f in (s, s.with_name(s.name + ".part")) if f.is_file()) / 1e9
-    need = (0 if have_model and have_guesser else max(d["download_gb"] - on_disk, 0)) + 2
+    need = (0 if have_model and have_guesser else max(d["download_gb"] - on_disk, 0)) + \
+        (0 if have_mmproj else fam["vision_gb"]) + 2
     if free_gb(models_dir) < need:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
@@ -3912,7 +3978,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     step(4, "the strata-poly engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml)")
-    eng = build_engine_poly(gpu, a.yes, llama)
+    eng = build_engine_poly(gpu, a.yes, llama, vision)
     lib_dirs = json.loads((eng / "BUILD.json").read_text()).get("cuda_dirs") or cuda_lib_dirs(13)
     ok(f"engine: {eng / POLY_EXE}")
 
@@ -3936,6 +4002,11 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
             say("  Its draft model lets it guess a few words ahead and check them at once (faster answers).")
             download(d.get("hf", fam["hf"]) + d["draft_model"], guesser)
         verify_sha256(guesser, *fam["sha256"][guesser.name])
+    if mmproj is not None:
+        if not have_mmproj:
+            download(fam["mmproj_hf"] + fam["mmproj"], mmproj, "vision encoder")
+        verify_sha256(mmproj, *fam["sha256"][mmproj.name])
+        ok(f"vision encoder: {mmproj}")
     ok("model file present")
 
     step(6, "preparing the model for PolyStrata")
@@ -3987,7 +4058,18 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         cfg["api_key"] = a.api_key
     if a.browser is not None:
         cfg["open_browser"] = a.browser
-    write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
+    earlier = adopted if adopted is not None and adopted.name == cfg_path.name else None
+    if vision != "none":
+        # the most rows a picture becomes: one of this engine's prompt batches (1,024) holds a picture of Gemma 4's
+        vt = vision_tokens(a.vision_tokens, vision, cfg_path if cfg_path.is_file() else earlier)
+        if vt > fam.get("vision_most", vt):
+            warn(f"--vision-tokens {vt}: {title} reads a picture in one prompt batch, {fam['vision_most']} tokens "
+                 "unless the engine is started with a larger --prompt-batch; a picture with more is refused")
+        cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(gguf), "gpu": vision == "gpu",
+                         "max_tokens": vt}
+        if vision == "cpu":
+            cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
+    write_setup_config(cfg_path, cfg, earlier)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     ok(f"start script: {script.name}")
 
@@ -3995,6 +4077,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     say("All set.")
     say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1   (any API key; model name: anything)")
     say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
+    if vision != "none":
+        say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
     if a.host and a.host not in ("127.0.0.1", "localhost"):
         say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{port}/)"
             + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
