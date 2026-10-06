@@ -3598,6 +3598,17 @@ def anthropic_collect(events) -> dict:
 
 
 # ------------------------------------------------------------------------------------------------ HTTP
+CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding: chunked body may hold (read into memory)
+
+
+class BadBody(Exception):
+    """A request body that cannot be read (a malformed or oversized chunked body): the status and the sentence."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
 def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
@@ -3614,8 +3625,56 @@ def make_handler(svc: Service):
             super().handle_one_request()
             self._drain_body()
 
+        def _chunked(self) -> bool:
+            """#893: a body sent as Transfer-Encoding: chunked (a relay or proxy that does not buffer it).  By RFC 9112
+            it wins over a Content-Length."""
+            te = self.headers.get("Transfer-Encoding", "") or ""
+            return te.split(",")[-1].strip().lower() == "chunked"
+
+        def _read_chunked(self, limit: int, keep: bool = True, deadline: float | None = None) -> bytes:
+            """Decode a chunked body: at most `limit` bytes (BadBody 413 beyond it - the size is checked before a chunk
+            is read, so a huge announced chunk is never allocated), BadBody 400 for a malformed one.  keep=False reads
+            and drops it (the drain); `deadline` (monotonic) ends the read early."""
+            parts, total = [], 0
+            while True:
+                if deadline is not None:
+                    wait = deadline - time.monotonic()
+                    if wait <= 0:
+                        return b"".join(parts)
+                    self.connection.settimeout(wait)
+                line = self.rfile.readline(1025)
+                if not line.endswith(b"\n"):
+                    raise BadBody(400, "malformed chunked request body")
+                try:
+                    size = int(line.split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    raise BadBody(400, "malformed chunk size in the request body") from None
+                if size < 0:
+                    raise BadBody(400, "malformed chunk size in the request body")
+                if size == 0:
+                    for _ in range(64):                       # the trailers, up to the blank line
+                        if self.rfile.readline(8193).strip() == b"":
+                            break
+                    return b"".join(parts)
+                total += size
+                if total > limit:
+                    self.close_connection = True
+                    raise BadBody(413, f"the request body is larger than {limit >> 20} MiB")
+                left = size
+                while left > 0:
+                    piece = self.rfile.read(min(left, 1 << 20))
+                    if not piece:
+                        raise BadBody(400, "the chunked request body ended early")
+                    left -= len(piece)
+                    if keep:
+                        parts.append(piece)
+                if self.rfile.read(2) != b"\r\n":
+                    raise BadBody(400, "malformed chunked request body")
+
         def _body(self) -> bytes:
             self.body_read = True
+            if self._chunked():
+                return self._read_chunked(CHUNKED_BODY_MAX)
             return self.rfile.read(int(self.headers.get("Content-Length", 0)))
 
         def _drain_body(self):
@@ -3627,6 +3686,12 @@ def make_handler(svc: Service):
             megabytes, at any speed the client has, still gets its answer."""
             headers = getattr(self, "headers", None)
             if self.body_read or headers is None:
+                return
+            if self._chunked():
+                try:
+                    self._read_chunked(CHUNKED_BODY_MAX, keep=False, deadline=time.monotonic() + self.DRAIN_SECONDS)
+                except (BadBody, OSError):
+                    self.close_connection = True
                 return
             try:
                 left = int(headers.get("Content-Length", 0))
@@ -3897,6 +3962,12 @@ def make_handler(svc: Service):
                 self._json(404, {"error": {"message": "not found"}})
 
         def do_POST(self):
+            try:
+                self._post()
+            except BadBody as e:                              # #893: a malformed or oversized chunked body
+                self._json(e.status, {"error": {"type": "invalid_request_error", "message": str(e)}})
+
+        def _post(self):
             if not self._authorized():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
@@ -4055,6 +4126,18 @@ def make_handler(svc: Service):
 
         def _control_body(self) -> bool:
             """Consume the unused control body before replying/closing (Windows otherwise sends a TCP reset)."""
+            if self._chunked():
+                self.body_read = True
+                try:
+                    self.connection.settimeout(2.0)
+                    self._read_chunked(65536, keep=False)
+                except BadBody as e:
+                    self._json(e.status, {"error": {"message": f"control request: {e}"}})
+                    return False
+                except OSError:
+                    self._json(400, {"error": {"message": "incomplete control request body"}})
+                    return False
+                return True
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
