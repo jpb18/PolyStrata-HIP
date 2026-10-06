@@ -54,6 +54,17 @@ disk, the first install took a minute, most of it the compile, and the other two
 Each install is a model of its own: `--list-models`, `/model` and the web page's list show all of them, and
 `./setup.sh --check` has a line for each with what this PC's card and RAM make of it.
 
+The three new models read pictures. Say yes to setup's question about images, or pass `--vision yes`:
+
+```bash
+./setup.sh --family gemma4 --vision yes
+```
+
+Setup then downloads the model's image encoder too (0.9 GB, Gemma 4's 1.2 GB), compiles `strata-vision` beside
+the engine and writes both into the run config. On the GPU the encoder holds 1.6 GB of VRAM (Gemma 4's 2.4 GB),
+which a small card needs for the model, so on a card with less than 16 GB it runs on the CPU and a picture takes
+a few seconds. `--vision gpu` and `--vision cpu` choose the place. GLM 5.3 Flash reads no pictures.
+
 The RAM column is the experts an 8 GB card does not hold, plus 10 GB for the rest. It is setup's estimate and was
 not checked on such a PC. Setup does not stop a PC below the 32 GB that Qwen3.8 needs when one of these families is
 named.
@@ -67,6 +78,12 @@ token ids goes in, `T` lines with tokens and a `DONE` line with timings come out
 lines is a backend to the server. Changing the model stops the child and starts another, so its VRAM, its pinned
 memory and its file mappings are given back by the operating system when the process ends, not by cleanup code
 that could miss something.
+
+A picture goes through a second child, `strata-vision`: llama.cpp's image code with the model's encoder file. It
+turns the picture into rows as wide as a token's embedding. The server puts one placeholder token a row into the
+prompt and sends `GENI` with the rows' file and `image_pad=`, the placeholder's id; the engine reads a row where
+a placeholder stands. The template says where a picture goes: Qwen's writes the tokens around it, Gemma 4's
+writes one token and the server adds the two that llama.cpp puts around the rows.
 
 **The engine.** Inside `strata-poly`, `Engine` (src/poly/engine.hpp) is what every architecture shares:
 
@@ -92,6 +109,7 @@ An architecture is a class derived from `Engine` (`Glm5Next`, `Qwen35`, `Gemma4`
 | `route()`, `moe_shared()`, `router_scores()` | the routing rule, the shared expert, the router's input |
 | `output_rows()`, `finish_logits()`, `embed_scale()` | the output norm, a cap on the logits, a scale on embeddings |
 | `block_attend()`, `block_rows()` | the draft block's attention |
+| `sees()`, `whole()` | whether it reads pictures, and how many of a prompt's rows the next call takes |
 | `row_bytes()`, `save_rows()`, `load_rows()`, `extra_bytes()`, `save_extra()`, `load_extra()` | what a conversation keeps |
 
 A layer's own weights live in the class's `Block`, one a layer, beside the shared `Layer`. The engine calls a hook
@@ -100,6 +118,14 @@ the same speed before and after the split (51.8, 50.6 and 46.1 tokens/s against 
 
 Nothing in the shared code asks which model it runs. What differs between architectures is a hook or a value the
 architecture sets (`gelu_` for the experts' activation, the distance between experts in a fused tensor).
+
+Pictures show it. The shared code puts a picture's rows where token embeddings go and gives the conversation
+cache a number for each row made from the picture, so that it tells one picture from another of the same size.
+The rest is the architecture's. Qwen3.6's rotary embedding has three axes: text has one position on all of them,
+a picture's rows share a position on the first and add their line and their column on the other two, and the
+text after a picture goes on as many positions later as the picture has lines or columns, whichever is more.
+Gemma 4 counts a picture's rows like text, lets them see each other in its window layers and keeps its full
+layers causal, so it takes a picture in a call of its own (`whole()`). Both are what llama.cpp does.
 
 ## How a model is recognized
 
@@ -317,6 +343,33 @@ one check that expected reasoning where GLM gave none.
 
 The tokenizers give llama.cpp's ids on the same prompts (27 to 8001 tokens) for Qwen3.6, Ornith and Gemma 4.
 
+Pictures were checked the same way, greedy and up to 64 tokens, on three prompts: one picture; two pictures of
+different shapes with text between and after them; a picture, an answer and a second question. PolyStrata's
+server code rendered each prompt. llama.cpp's server got it as text with its media marker where a picture goes
+and encoded the pictures itself; the engine got the ids and `strata-vision`'s rows. Both read the same number of
+prompt tokens.
+
+| Model | Picture rows in the prompt | Same tokens as llama.cpp | Largest probability difference |
+| --- | --- | --- | --- |
+| Qwen3.6-35B-A3B | 280, 440, 160 | 11 of 11, 11 of 64, 64 of 64 | 0.05 |
+| Ornith 1.5 | 280, 440, 160 | 17 of 17, 35 of 35, 59 of 59 | 0.37 |
+| Gemma 4 26B-A4B | 117, 194, 77 | 14 of 14, 19 of 19, 55 of 55 | 0.10 |
+
+Qwen3.6's second answer leaves llama.cpp's at a near tie (0.504 against 0.493 here, 0.518 against 0.480 there).
+The differences are what the same models show on text.
+
+For Gemma 4 the other ways a picture's rows could see each other were run against the same reference. With no
+row seeing a later one, the second prompt's answer leaves llama.cpp's at its 14th token with probabilities 0.63
+apart. With the rows seeing each other in the full layers too, the tokens stay the same and the average
+difference on that prompt is twice what it is with the window layers alone (0.0077 against 0.0038).
+
+Over the engine's protocol, with Qwen3.6 and Gemma 4: a conversation with a picture goes on from its last token
+(332 of 342 and 166 of 176 tokens are not read again) and writes what a fresh engine writes; a mirrored copy of
+the picture in the same place, which gives the same ids, is read from the start and answered for what it shows
+(the shape on the left is the other one); the first conversation then comes back from the parked ones with its
+tokens. Through the server each of the three models answered the three prompts, the first one with the other
+picture in its place, and a prompt without pictures after them.
+
 ## What was tuned
 
 | Change | Model | Before | After |
@@ -395,7 +448,15 @@ Setup knows the files in the table above. Another file of one of these architect
   download fetched Gemma 4's draft model (0.46 GB, through a mirror) and found the pinned SHA-256; the three
   addresses of the model files were asked for their headers only, and each states the pinned size.
 - Setup's RAM figures for them are estimates.
-- Images are not read by Qwen3.6, Ornith or Gemma 4.
+- Pictures were read with the encoder on the GPU of the one machine. Setup puts it on the CPU of a card with
+  less than 16 GB: that was run through the server with Qwen3.6 (a new picture took 3 to 5 s with 12 threads),
+  and not on such a card.
+- Setup's install with images ran on the test machine for the three models, with the encoder files already
+  beside the models' files: it compiled the encoder and wrote the run configs, and the server read pictures
+  with them. The files had been fetched before with setup's download and checked against the pinned SHA-256.
+- A picture of Gemma 4's goes into the model in one prompt batch, 1,024 rows unless `--prompt-batch` says more;
+  one with more rows is refused. Setup holds pictures to 1,024 rows (`--vision-tokens` changes it).
+- Video and audio are not read.
 - A layer with attention over the cache is not recorded as a CUDA graph, because its launches take the position.
   Gemma 4 has such a layer everywhere, Qwen in every fourth.
 - With everything in VRAM, llama.cpp is still faster on the same card: it writes 165 to 180 tokens/s where this

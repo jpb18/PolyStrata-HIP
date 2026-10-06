@@ -84,8 +84,9 @@ By the PC's RAM (ask the user whether they mainly want it for code - then the Co
 
 `--family qwen36`, `--family ornith` and `--family gemma4` (Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B) are
 smaller models on GLM's engine, and experimental too: Linux, one NVIDIA card, a 13 to 17 GB download, about 18 to
-22 GB of RAM beside an 8 GB card by setup's estimate, no images. Each has one size, so leave `--model` out. Take one
-only when the user asks for it; [BACKENDS.md](BACKENDS.md#install) has what was measured.
+22 GB of RAM beside an 8 GB card by setup's estimate. They read pictures with `--vision yes` (about 1 GB more to
+download; the encoder runs on the CPU of a card with less than 16 GB). Each has one size, so leave `--model` out.
+Take one only when the user asks for it; [BACKENDS.md](BACKENDS.md#install) has what was measured.
 
 ## 4. Run setup without questions
 
