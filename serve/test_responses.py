@@ -115,6 +115,17 @@ class Parsing(unittest.TestCase):
         self.assertEqual(skipped, ["web_search"])
         self.assertIsNone(request_tools({"tools": TOOLS, "tool_choice": "none"})[0])
 
+    def test_additional_tools_input_items_are_accepted(self):
+        """#782: Codex sends an `additional_tools` input item; it used to be refused with a 400."""
+        extra = {"type": "additional_tools", "tools": [{"type": "function", "name": "later_tool",
+                                                         "parameters": {"type": "object"}}]}
+        req = {"input": [{"type": "message", "role": "user", "content": "hi"}, extra,
+                         {"type": "additional_tools"}], "tools": TOOLS}
+        self.assertEqual([m["role"] for m in input_messages(req)], ["user"])
+        tools, names, _ = request_tools(req)
+        self.assertEqual([t["name"] for t in tools], ["exec_command", "later_tool"])
+        self.assertIn("later_tool", names)
+
     def test_effort_and_text_format(self):
         self.assertEqual(template_kwargs({"reasoning": {"effort": "minimal"}}, {}), {"enable_thinking": False})
         self.assertEqual(template_kwargs({"reasoning": {"effort": "high"}}, {}), {"reasoning_effort": "xhigh"})

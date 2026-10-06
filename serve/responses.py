@@ -191,6 +191,8 @@ def input_messages(req: dict) -> list[dict]:
             messages.append({"role": "tool", "content": _tool_output(item, param), "_call_id": item.get("call_id")})
             open_turn = None
             thinking.clear()
+        elif kind == "additional_tools":
+            continue                                 # #782 (Codex): tools the client adds as an input item; see request_tools
         elif kind == "item_reference":
             raise ResponsesError("item references need stored responses, and this server keeps none: send the items "
                                  "themselves", param, "unsupported_parameter")
@@ -237,6 +239,12 @@ def request_tools(req: dict):
     given = req.get("tools") or []
     if not isinstance(given, list):
         raise ResponsesError("tools must be an array", "tools")
+    # #782 (Codex v0.160): `additional_tools` input items carry more tool definitions (a `tools` array, as the request
+    # has); they join the request's own, and an item without a usable array adds nothing
+    extra = [t for item in (req.get("input") if isinstance(req.get("input"), list) else [])
+             if isinstance(item, dict) and item.get("type") == "additional_tools" and isinstance(item.get("tools"), list)
+             for t in item["tools"]]
+    given = list(given) + extra
 
     def add(tool, param, namespace=None, ns_description=""):
         kind = tool.get("type")
