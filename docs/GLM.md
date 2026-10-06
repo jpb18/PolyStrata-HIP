@@ -19,13 +19,19 @@ It is early. It has been built and run on one machine, with Linux and one NVIDIA
 
 | | `strata-poly` | llama.cpp ([neurall's fork](https://github.com/neurall/llama.cpp)), stock settings |
 | --- | ---: | ---: |
-| Writes answers | 26.7 to 27.7 tokens/s | 26 tokens/s |
-| Reads a prompt of 3,059 tokens | 373 tokens/s | about 265 tokens/s |
-| Reads a prompt of 11,673 tokens | 334 tokens/s | |
-| Reads a prompt of 29,069 tokens | 312 tokens/s | |
+| Writes answers | 48 to 55 tokens/s after the two long prompts, 66 to 67 for a 400-token answer to a short one | 26 tokens/s |
+| Reads a prompt of 3,059 tokens | 539 to 545 tokens/s | about 265 tokens/s |
+| Reads a prompt of 11,673 tokens | 598 to 610 tokens/s | |
+| Reads a prompt of 29,069 tokens | 448 to 459 tokens/s | |
 | Starts | about 6 s with the file in the page cache | |
 
 Both ran on the machine above. Nothing here has been run on a smaller card.
+
+The engine's numbers are two runs of the build setup installs, with what setup gives it: the draft block, and
+the expert profile the repository ships after one run has added its counts. The 29,069-token prompt starts like
+the 11,673-token one before it, so its first 10,240 tokens are not read again. An earlier build, measured the
+same way without the draft block, wrote 26.7 to 27.7 tokens/s and read the three prompts at 373, 334 and 312;
+[BACKENDS.md](BACKENDS.md#what-was-tuned) has what changed since. llama.cpp was not run again.
 
 With greedy sampling the two write the same tokens until two candidates are nearly tied. The model's activations
 are quantized to 8 bits between layers, so a difference in rounding between two correct implementations can decide
@@ -51,8 +57,9 @@ such a tie.
 The RAM is setup's estimate: the experts the card does not hold, and 10 GB beside them. Without `--model` setup
 takes the first size whose estimate the PC meets.
 
-REAP50-Q3_K_M on the machine above: 27.4 tokens/s, and prompts of 3,059, 11,673 and 29,069 tokens read at 493, 448
-and 384 tokens/s. The card held 20.8 GiB of its experts, 1,869 of 6,048. Against llama-server of the llama.cpp
+REAP50-Q3_K_M on the machine above, with that earlier build: 27.4 tokens/s, and prompts of 3,059, 11,673 and
+29,069 tokens read at 493, 448 and 384 tokens/s. The card held 20.8 GiB of its experts, 1,869 of 6,048. It was
+not run again: its file is no longer on the test machine. Against llama-server of the llama.cpp
 fork the file was made for, on a prompt of 1,678 tokens, the first 63 tokens were the same.
 
 ## Install
@@ -128,8 +135,8 @@ calls and streaming were checked through `/v1/chat/completions`. `"enable_thinki
 The model has 45 layers. 42 of them choose 8 of 288 experts for every token, which makes 12,096 experts and most
 of the file. The rest of the weights are always in VRAM.
 
-- **The expert cache.** The experts used most often are kept in VRAM: 2,573 of them, 19.9 GiB, on the 32 GB card
-  at a 32K context. `--expert-profile FILE` is where the engine keeps count of which ones are used. It reads the
+- **The expert cache.** The experts used most often are kept in VRAM: about 2,470 of them, 19.2 GiB, on the 32 GB
+  card at a 32K context with the draft block. `--expert-profile FILE` is where the engine keeps count of which ones are used. It reads the
   file at the start to choose, and writes it back when it stops. Without a profile it has no counts yet and keeps
   the same number of experts from every layer, so the second start is the one to measure.
 - **The cache follows the answer.** The choice at the start fits the average answer, and some answers badly: of
@@ -155,7 +162,7 @@ of the file. The rest of the weights are always in VRAM.
   leaves it out, so setup downloads the block alone for it, 2.8 GB out of Unsloth's files, and gives it to the
   engine as `--draft-model`. REAP50 has its own, pruned like its layers. A right guess saves less than a whole
   token, because its experts outside VRAM still run on the CPU: four tokens together take about three times as
-  long as one. Measured on the 32 GB card, 600-token answers, twice each, in tokens/s:
+  long as one. Measured on the 32 GB card with an earlier build, 600-token answers, twice each, in tokens/s:
 
   | Answer | 3.0BIT without guesses | with | REAP50-Q3_K_M without | with |
   | --- | ---: | ---: | ---: | ---: |
@@ -169,8 +176,8 @@ of the file. The rest of the weights are always in VRAM.
   sources off.
 - **Reading a prompt.** The prompt goes in up to 1,024 tokens at a time. For each layer the experts outside the
   cache are copied through a buffer in VRAM and run there. A larger batch reads faster and leaves less VRAM for the
-  expert cache, so answers get slower: 4,096 at a time read the 11,673-token prompt at 396 tokens/s and wrote 18.5
-  tokens/s.
+  expert cache, so answers get slower: with an earlier build, which read the 11,673-token prompt at 334 tokens/s
+  and wrote about 27, 4,096 at a time read it at 396 and wrote 18.5.
 
 ## Several conversations at once
 

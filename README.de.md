@@ -78,12 +78,14 @@ Gemessen für PolyStrata auf einer Workstation, mit einem Prompt von 29K Tokens.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **3.0BIT** | 27 Tokens/s | 312 Tokens/s |
-| **REAP50-Q3_K_M** | 27 Tokens/s | 384 Tokens/s |
+| **3.0BIT** | 53-55 Tokens/s | 448-459 Tokens/s |
+| **REAP50-Q3_K_M** (früherer Build) | 27 Tokens/s | 384 Tokens/s |
 
 </td></tr>
 </table>
 
+Die Zeile REAP50-Q3_K_M stammt von einem früheren Build der Engine und wurde nicht neu gemessen; 3.0BIT schrieb mit
+jenem Build 27 Tokens/s und las 312.
 llama.cpp schrieb mit der 3.0BIT-Datei auf demselben PC 26 Tokens/s und las etwa 265. GLM 5.3 Flash ist ein viel größeres
 Modell als Qwen3.8-Flash-Next, und nur etwa ein Fünftel seiner Experten passt in die 32 GB dieser Karte, deshalb
 schreibt es langsamer. Was gemessen wurde und wie: [docs/GLM.md](docs/GLM.md#what-it-was-measured-on) (englisch).

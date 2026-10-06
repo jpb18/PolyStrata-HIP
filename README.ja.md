@@ -76,12 +76,14 @@ PolyStrata が 1 台のワークステーションで測った値です。プロ
 
 | サイズ | 回答の書き出し | プロンプトの読み込み |
 | --- | ---: | ---: |
-| **3.0BIT** | 27 tokens/s | 312 tokens/s |
-| **REAP50-Q3_K_M** | 27 tokens/s | 384 tokens/s |
+| **3.0BIT** | 53-55 tokens/s | 448-459 tokens/s |
+| **REAP50-Q3_K_M**（以前のビルド） | 27 tokens/s | 384 tokens/s |
 
 </td></tr>
 </table>
 
+REAP50-Q3_K_M の行は以前のビルドのエンジンで測った値で、測り直していません。そのビルドでは 3.0BIT は書き出しが毎秒 27 トークン、
+読み込みが 312 でした。
 同じ PC で llama.cpp に 3.0BIT のファイルを読ませると、書き出しは毎秒 26 トークン、読み込みは約 265 でした。GLM 5.3 Flash は
 Qwen3.8-Flash-Next よりずっと大きなモデルで、このカードの 32 GB にはエキスパートの約 5 分の 1 しか載らないため、書き出しは遅くなります。
 測定の内容と方法：[docs/GLM.md](docs/GLM.md#what-it-was-measured-on)（英語）。
