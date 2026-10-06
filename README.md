@@ -3,7 +3,7 @@
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
 <p align="center"><b>Run large AI models on your own PC</b><br>
-Qwen3.8-Flash-Next and GLM 5.3 Flash · free and open source</p>
+Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5 and Gemma 4 · free and open source</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden the model wrote, running in the browser"></a><br>
 <sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with <a href="https://github.com/Niko1221/Strata">Strata</a> (Qwen3.8-Flash-Next IQ3_S, 128K context) ·
@@ -12,17 +12,21 @@ Qwen3.8-Flash-Next and GLM 5.3 Flash · free and open source</p>
 PolyStrata runs large AI models on a normal PC, models that usually need a server. They chat, write code and work
 with your apps and coding agents. Nothing leaves your PC.
 
-It runs two models, each with its own engine:
+It runs five models, on two engines:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** on an NVIDIA or AMD graphics card with
   12 GB or more, on Windows or Linux. It also reads pictures. Its engine is the Strata project's, unchanged.
-- **[GLM 5.3 Flash](docs/GLM.md)** on Linux with one NVIDIA card. Its engine was written for PolyStrata. It is
-  experimental: it has run on one PC, with a 32 GB card.
 
-That second engine also runs Qwen3.6-35B-A3B, Ornith 1.5 and Gemma 4 26B-A4B, files of 13 to 17 GB, and the server
-can change between installed models while it runs. They are in the installer's list of models;
-`./setup.sh --family qwen36`, `ornith` or `gemma4` goes straight to one.
-[Models and backends](docs/BACKENDS.md) says what was measured.
+The other four run on an engine written for PolyStrata, on Linux with one NVIDIA card. They are experimental: they
+have run on one PC, with a 32 GB card.
+
+- **[GLM 5.3 Flash](docs/GLM.md)**, the largest: a file of 79 to 114 GB, most of which stays in RAM.
+- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, a 17 GB file. It also reads pictures.
+- **[Ornith 1.5](docs/BACKENDS.md)**, which has Qwen3.6-35B-A3B's architecture and other weights: a 17 GB file. It
+  also reads pictures.
+- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, a 13 GB file. It also reads pictures.
+
+The server can change between installed models while it runs ([how](docs/BACKENDS.md#changing-the-model)).
 
 PolyStrata is built on [Strata](https://github.com/Niko1221/Strata) by Niko1221.
 
@@ -67,7 +71,7 @@ about 100-140 tokens per second. Long chats and other cards: [speed of each size
 
 ### GLM 5.3 Flash
 
-Measured for PolyStrata on one workstation, with a 29K-token prompt.
+Measured for PolyStrata on one workstation, with a 28K-token prompt.
 
 <table>
 <tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th></tr>
@@ -75,17 +79,97 @@ Measured for PolyStrata on one workstation, with a 29K-token prompt.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **3.0BIT** | 53-55 tokens/s | 448-459 tokens/s |
+| **3.0BIT** | 58-59 tokens/s | 529-531 tokens/s |
+| **UD-IQ2_XXS** (earlier build) | 33 tokens/s | 347 tokens/s |
 | **REAP50-Q3_K_M** (earlier build) | 27 tokens/s | 384 tokens/s |
 
 </td></tr>
 </table>
 
-The REAP50-Q3_K_M row is from an earlier build of the engine and was not measured again; 3.0BIT wrote 27 tokens/s
-and read 312 with that build.
+The UD-IQ2_XXS and REAP50-Q3_K_M rows are from earlier builds of the engine and were not measured again: their
+files are no longer on the test PC. With those two builds 3.0BIT wrote 37 and 27 tokens/s and read 286 and 312.
 llama.cpp with the 3.0BIT file on the same PC wrote 26 tokens/s and read about 265. GLM 5.3 Flash is a much larger
-model than Qwen3.8-Flash-Next, and about a fifth of its experts fit in this card's 32 GB, so it writes more slowly.
+model than the others, and about a fifth of its experts fit in this card's 32 GB, so it writes more slowly.
 What was measured and how: [docs/GLM.md](docs/GLM.md#what-it-was-measured-on).
+
+### Qwen3.6-35B-A3B
+
+Measured for PolyStrata on the same workstation, with a 30K-token prompt. On the left the card holds the whole
+model. On the right the same card is held to 8 GB, and most of the experts run on the processor.
+
+<table>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th><th>The same PC, the card held to 8 GB</th></tr>
+<tr><td>
+
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 307-309 tokens/s | 2,210-2,220 tokens/s |
+
+</td><td>
+
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 149-164 tokens/s | 1,970-1,990 tokens/s |
+
+</td></tr>
+</table>
+
+The right table is not an 8 GB PC: the processor, the RAM and the card's speed are this workstation's. A shorter
+prompt is read faster: one of 10,000 tokens at 3,800 tokens/s with the whole model on the card. llama.cpp with the
+whole model on the same card wrote about 180 tokens/s and read prompts at 6,000 to 9,000. It needs a card the model
+fits.
+
+### Ornith 1.5
+
+Measured the same way, with the same 30K-token prompt.
+
+<table>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th><th>The same PC, the card held to 8 GB</th></tr>
+<tr><td>
+
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **APEX-I-COMPACT** | 230 tokens/s | 2,210-2,230 tokens/s |
+
+</td><td>
+
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **APEX-I-COMPACT** | 136-148 tokens/s | 1,940 tokens/s |
+
+</td></tr>
+</table>
+
+A prompt of 10,000 tokens is read at 3,800 tokens/s with the whole model on the card. llama.cpp with the whole model
+on the same card wrote about 180 tokens/s and read prompts at 6,000 to 9,000.
+
+### Gemma 4 26B-A4B
+
+Measured the same way, with a 31K-token prompt.
+
+<table>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th><th>The same PC, the card held to 8 GB</th></tr>
+<tr><td>
+
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 259-275 tokens/s | 2,390-2,410 tokens/s |
+
+</td><td>
+
+| Size | Writes answers | Reads your prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 137 tokens/s | 2,240-2,250 tokens/s |
+
+</td></tr>
+</table>
+
+A prompt of 10,000 tokens is read at 3,300 to 3,500 tokens/s with the whole model on the card. llama.cpp with the
+whole model on the same card wrote about 165 tokens/s and read prompts at 6,000 to 9,000.
+
+The four models of PolyStrata's own engine were measured with its benchmark, which you can run on your PC:
+`python polystrata.py benchmark --model <name> --prompt-tokens 24000`
+([what it sends and prints](docs/BACKENDS.md#benchmark)).
 
 ## What you need
 
@@ -113,14 +197,49 @@ The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 | | |
 | --- | --- |
 | **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer. It has run on **32 GB of VRAM** only. About 12 GB are taken before any expert, so a 12 GB card cannot start it. |
-| **RAM** | Beside a 32 GB card, **96 GB or more** for the whole model, 60 GB for the size with half the experts. A smaller card needs more RAM ([how much](#which-model-should-i-pick)). It has run with 120 GB. |
-| **Disk** | 114 GB or 79 GB for the model file, on an SSD. |
+| **RAM** | Beside a 32 GB card, **96 GB or more** for the whole model, 82 GB for its 2-bit size, 60 GB for the size with half the experts. A smaller card needs more RAM ([how much](#which-model-should-i-pick)). It has run with 120 GB. |
+| **Disk** | 114 GB, 102 GB or 79 GB for the model file, on an SSD. |
 | **System** | Linux, and a current NVIDIA driver. |
 
 The installer sets up everything else. It compiles the engine on your PC and offers to install what that needs
 (g++ and the CUDA toolkit). Not yet: Windows, AMD cards, several cards, pictures.
 
 The full list: [docs/GLM.md](docs/GLM.md#what-you-need).
+
+### Qwen3.6-35B-A3B
+
+| | |
+| --- | --- |
+| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 5 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
+| **RAM** | About **21 GB** beside an 8 GB card, the installer's estimate. A card with 24 GB holds the whole model. |
+| **Disk** | 17 GB for the model file, 1 GB more to read pictures. |
+| **System** | Linux, and a current NVIDIA driver. |
+
+The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
+
+### Ornith 1.5
+
+| | |
+| --- | --- |
+| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 4 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
+| **RAM** | About **22 GB** beside an 8 GB card, the installer's estimate. A card with 24 GB holds the whole model. |
+| **Disk** | 17 GB for the model file, 1 GB more to read pictures. |
+| **System** | Linux, and a current NVIDIA driver. |
+
+The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
+
+### Gemma 4 26B-A4B
+
+| | |
+| --- | --- |
+| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 6 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
+| **RAM** | About **18 GB** beside an 8 GB card, the installer's estimate. By the same estimate a card with 16 GB holds the whole model. |
+| **Disk** | 13 GB for the model file and its draft model, 1 GB more to read pictures. |
+| **System** | Linux, and a current NVIDIA driver. |
+
+The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
+
+What each of the three needs and how it was checked: [docs/BACKENDS.md](docs/BACKENDS.md#install).
 
 ## Install
 
@@ -148,11 +267,11 @@ The installer finds your card and sets up the right engine for it. It asks you a
 - whether it should read pictures (GLM 5.3 Flash reads none).
 
 Press Enter each time for the recommended answer. Then it downloads the model (about 70 GB for Qwen3.8-Flash-Next,
-79 or 114 GB for GLM 5.3 Flash) and starts it. If the download stops, run it again: it continues where it left off. Your
-browser opens the PolyStrata app at `http://127.0.0.1:8080`.
+79 to 114 GB for GLM 5.3 Flash, 13 to 17 GB for the other three) and starts it. If the download stops, run it again:
+it continues where it left off. Your browser opens the PolyStrata app at `http://127.0.0.1:8080`.
 
-GLM 5.3 Flash is in the installer's list of models. `./setup.sh --family glm` goes straight to it
-([what it asks and writes](docs/GLM.md#install)).
+All five are in the installer's list of models. `./setup.sh --family glm`, `qwen36`, `ornith` or `gemma4` goes
+straight to one ([what it asks and writes](docs/GLM.md#install)).
 
 > **While the model starts, your PC can be slow or stop responding for 1-3 minutes** (longest the first time).
 > PolyStrata loads 35-55 GB into your RAM and locks part of it for the graphics card. This is normal. Wait, and don't
@@ -194,30 +313,66 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). To add a
 
 ### GLM 5.3 Flash
 
-Two sizes so far. The installer takes the first one your RAM is enough for.
+Three sizes so far. The installer takes the first one your RAM is enough for.
 
 | Size | What it is | Download | RAM beside a 32 GB card |
 | --- | --- | ---: | ---: |
-| **3.0BIT** | the whole model | 114 GB | 96 GB |
+| **3.0BIT** | the whole model, at about 3 bits ([neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF)) | 114 GB | 96 GB |
+| **UD-IQ2_XXS** | the whole model, at about 2 bits ([Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)): it reads a prompt faster and writes more slowly | 102 GB | 82 GB |
 | **REAP50-Q3_K_M** | half of the routed experts removed ([REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF) by patrickbdevaney) | 79 GB | 60 GB |
 
 Your graphics card decides how much RAM it needs, because the experts the card does not hold have to stay in RAM.
 
-| Your graphics card | 3.0BIT | REAP50-Q3_K_M | |
-| --- | ---: | ---: | --- |
-| **32 GB** | **96 GB** | **60 GB** | the PC it has run on (120 GB of RAM) |
-| **24 GB** | about 104 GB | about 68 GB | not run yet |
-| **16 GB** | about 113 GB | about 77 GB | not run yet |
-| **12 GB or less** | | | it does not start |
+| Your graphics card | 3.0BIT | UD-IQ2_XXS | REAP50-Q3_K_M | |
+| --- | ---: | ---: | ---: | --- |
+| **32 GB** | **96 GB** | **82 GB** | **60 GB** | the PC it has run on (120 GB of RAM) |
+| **24 GB** | about 104 GB | about 90 GB | about 68 GB | not run yet |
+| **16 GB** | about 113 GB | about 99 GB | about 77 GB | not run yet |
+| **12 GB or less** | | | | it does not start |
 
 The RAM numbers are the installer's estimate from the one PC it has run on. With less RAM it still starts, but it
 reads experts from the SSD while it answers and gets much slower. The installer says so and asks first.
 
 Other quantizations of GLM 5.3 Flash are not supported yet: [what is missing](docs/GLM.md#what-is-missing).
 
+### Qwen3.6-35B-A3B
+
+One size so far.
+
+| Size | What it is | Download | RAM beside an 8 GB card |
+| --- | --- | ---: | ---: |
+| **UD-Q3_K_M** | the whole model with 3-bit experts ([Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)) | 17 GB | about 21 GB |
+
+A larger card holds more of the model and needs less RAM: about 17 GB beside a 12 GB card, 13 GB beside a 16 GB
+card, and 10 GB once the card holds all of it. These are the installer's estimates. They have not been checked on
+such a PC.
+
+### Ornith 1.5
+
+One size so far.
+
+| Size | What it is | Download | RAM beside an 8 GB card |
+| --- | --- | ---: | ---: |
+| **APEX-I-COMPACT** | the whole model with 3- and 4-bit experts ([APEX](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF) by mudler) | 17 GB | about 22 GB |
+
+A larger card holds more of the model and needs less RAM: about 17 GB beside a 12 GB card, 13 GB beside a 16 GB
+card, and 10 GB once the card holds all of it. These are the installer's estimates. They have not been checked on
+such a PC.
+
+### Gemma 4 26B-A4B
+
+One size so far.
+
+| Size | What it is | Download | RAM beside an 8 GB card |
+| --- | --- | ---: | ---: |
+| **UD-Q3_K_M** | the whole model with 3-bit experts ([Unsloth](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)), and Google's draft model for it | 13 GB | about 18 GB |
+
+A larger card holds more of the model and needs less RAM: about 14 GB beside a 12 GB card, and 10 GB once the card
+holds all of it. These are the installer's estimates. They have not been checked on such a PC.
+
 ## Using it
 
-Both models are used the same way: the same app, the same API.
+All five models are used the same way: the same app, the same API.
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="The app's Monitor tab next to a coding agent"><br>
 <sub>The app's <b>Monitor</b> (left) while a coding agent writes the pagoda garden from the video (right). A screenshot from <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>
@@ -234,14 +389,14 @@ Both models are used the same way: the same app, the same API.
   fastest. High is best for hard questions.
 - **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Always set a key.
 
-Where the two differ:
+Where they differ:
 
-| | Qwen3.8-Flash-Next | GLM 5.3 Flash |
-| --- | --- | --- |
-| **Pictures** | Say yes to "Images?" in setup. Then click **Picture** in the chat, or attach pictures in your app. AMD cards read pictures on Linux through the processor; on Windows they can't yet. | Not yet. |
-| **Several requests** | One at a time by default, the others wait. `"parallel": 2` answers several at once ([BATCHING.md](docs/BATCHING.md)); on a 12 GB card each answer gets slower. | One at a time, the others wait. |
-| **Several conversations** | The last one is kept, so follow-up messages start in seconds. Two engine arguments keep several in RAM ([details](docs/DETAILS.md#using-it)). | The last one is kept. Setup asks whether to keep several in RAM, so that an agent and its subagents take turns without their prompts being read again ([how](docs/GLM.md#several-conversations-at-once)). |
-| **Long prompts** | The first message of a chat is read in full, about 1 minute per 30,000 tokens. | The first message is read in full, about 1.5 minutes per 30,000 tokens. |
+| | Qwen3.8-Flash-Next | GLM 5.3 Flash | Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B |
+| --- | --- | --- | --- |
+| **Pictures** | Say yes to "Images?" in setup. Then click **Picture** in the chat, or attach pictures in your app. AMD cards read pictures on Linux through the processor; on Windows they can't yet. | Not yet. | Say yes to "Images?" in setup, then as with Qwen3.8-Flash-Next. On a card with less than 16 GB the picture encoder runs on the processor, and a picture takes a few seconds. |
+| **Several requests** | One at a time by default, the others wait. `"parallel": 2` answers several at once ([BATCHING.md](docs/BATCHING.md)); on a 12 GB card each answer gets slower. | One at a time, the others wait. | One at a time, the others wait. |
+| **Several conversations** | The last one is kept, so follow-up messages start in seconds. Two engine arguments keep several in RAM ([details](docs/DETAILS.md#using-it)). | The last one is kept. Setup asks whether to keep several in RAM, so that an agent and its subagents take turns without their prompts being read again ([how](docs/GLM.md#several-conversations-at-once)). | As GLM 5.3 Flash. |
+| **Long prompts** | The first message of a chat is read in full, about 1 minute per 30,000 tokens. | The first message is read in full, about 1 minute per 30,000 tokens. | The first message is read in full, about 15 seconds per 30,000 tokens. |
 
 More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [the API](docs/DETAILS.md#using-it).
 
@@ -262,7 +417,7 @@ security problem? Report it privately: [SECURITY.md](SECURITY.md).
 ## How does it work?
 
 Models like these usually run on servers with hundreds of gigabytes of graphics memory. Your graphics card has
-12-32 GB. PolyStrata makes the model fit by **sharing the work across your whole PC**. Think of a kitchen: the things
+8-32 GB. PolyStrata makes the model fit by **sharing the work across your whole PC**. Think of a kitchen: the things
 you use all the time stay on the counter, and the rest waits in the pantry.
 
 ### Qwen3.8-Flash-Next
@@ -285,21 +440,58 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Every part
 ### GLM 5.3 Flash
 
 - **The model has 12,096 experts**, 288 in each of 42 layers. Each word needs 8 from every layer.
-- **Your graphics card** keeps the ones used most often, about 2,570 of them on a 32 GB card. The engine counts
+- **Your graphics card** keeps the ones used most often, about 2,470 of them on a 32 GB card. The engine counts
   which ones your work uses and chooses again at the next start.
 - **While it writes**, your processor runs the experts the card does not hold. **While it reads a prompt**, they
   pass through the card, 1,024 tokens at a time.
+- **Guess, then check:** a block of the model made for guessing proposes the next few words, and the model checks
+  them at once.
 - **The model file is used where it is**, with no second copy on the disk. A start takes about 6 seconds once the
   file is in your RAM.
 
 Every part and its numbers: [docs/GLM.md](docs/GLM.md#how-it-uses-the-card).
+
+### Qwen3.6-35B-A3B
+
+- **The model has 10,240 experts**, 256 in each of 40 layers. Each word needs 8 from every layer.
+- **Your graphics card** keeps as many as fit, all of them from 24 GB on. Held to 8 GB, the test card kept about
+  1,200 of them, and they served about half of what an answer used: while it writes, the engine brings in the
+  experts the answer keeps choosing.
+- **Guess, then check:** the model's own draft block, which is in its file, proposes the next few words, and the
+  model checks them at once.
+- **The model file is used where it is**, with no second copy on the disk.
+
+### Ornith 1.5
+
+- **Qwen3.6-35B-A3B's architecture with other weights:** 10,240 experts, 256 in each of 40 layers, and 8 of every
+  layer for each word.
+- **Your graphics card** keeps as many as fit, all of them from 24 GB on. Held to 8 GB, the test card kept about
+  1,600 of them, and they served about half of what an answer used.
+- **Guess, then check:** its draft block is in its file too. It guesses right less often than Qwen3.6-35B-A3B's.
+- **The model file is used where it is**, with no second copy on the disk.
+
+### Gemma 4 26B-A4B
+
+- **The model has 3,840 experts**, 128 in each of 30 layers. Each word needs 8 from every layer, beside a part of
+  the layer that every word uses.
+- **Your graphics card** keeps as many as fit, all of them from 16 GB on by the installer's estimate. Held to
+  8 GB, the test card kept about 200 of them, and with the ones the engine brought in while it wrote they served
+  a third to a half of what an answer used.
+- **Guess, then check:** Google's small draft model for it, a file of 0.5 GB that the installer downloads with the
+  model, proposes the next few words.
+- **The model file is used where it is**, with no second copy on the disk.
+
+Every part of the three and its numbers: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works).
 
 ## Credits and license
 
 Qwen3.8-Flash-Next is by the [Qwen team](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). It was compressed by
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) and Unsloth.
 GLM 5.3 Flash runs from the files of
-[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF) and patrickbdevaney.
+[neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF), Unsloth and patrickbdevaney.
+Qwen3.6-35B-A3B is by the Qwen team and Gemma 4 by Google, both in
+[Unsloth](https://huggingface.co/unsloth)'s quantization. Ornith 1.5 is by ornith-ai, in
+[mudler](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF)'s APEX quantization.
 PolyStrata is built on
 [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors, and uses parts of
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:

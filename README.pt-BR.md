@@ -3,7 +3,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · **Português**
 
 <p align="center"><b>Rode modelos de IA grandes no seu próprio PC</b><br>
-Qwen3.8-Flash-Next e GLM 5.3 Flash · gratuito e de código aberto</p>
+Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5 e Gemma 4 · gratuito e de código aberto</p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Um jardim com pagode em voxels que o modelo do PolyStrata escreveu, rodando no navegador"></a><br>
 <sub>Um jardim com pagode em voxels, feito com um único prompt numa RTX 5070 com o <a href="https://github.com/Niko1221/Strata">Strata</a> (Qwen3.8-Flash-Next IQ3_S, contexto de 128K) ·
@@ -12,18 +12,23 @@ Qwen3.8-Flash-Next e GLM 5.3 Flash · gratuito e de código aberto</p>
 O PolyStrata roda modelos de IA grandes num PC comum, modelos que normalmente precisam de um servidor.
 Eles conversam, escrevem código e funcionam com seus apps e agentes de programação. Nada sai do seu PC.
 
-Ele roda dois modelos, cada um com seu próprio motor:
+Ele roda cinco modelos, com dois motores:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** numa placa de vídeo NVIDIA ou AMD de
   12 GB ou mais, no Windows ou no Linux. Ele também entende imagens. O motor dele é o do
   [Strata](https://github.com/Niko1221/Strata), sem mudanças.
-- **[GLM 5.3 Flash](docs/GLM.md)** no Linux com uma placa NVIDIA. O motor dele foi escrito para o PolyStrata. É
-  experimental: só rodou em um PC, com uma placa de 32 GB.
 
-Esse segundo motor também roda o Qwen3.6-35B-A3B, o Ornith 1.5 e o Gemma 4 26B-A4B, arquivos de 13 a 17 GB, e o
-servidor pode trocar entre os modelos instalados enquanto está rodando. Eles estão na lista de modelos do
-instalador; `./setup.sh --family qwen36`, `ornith` ou `gemma4` vai direto para um deles. O que foi medido:
-[Modelos e backends](docs/BACKENDS.md) (em inglês).
+Os outros quatro usam um motor escrito para o PolyStrata, no Linux com uma placa NVIDIA. São experimentais: só
+rodaram em um PC, com uma placa de 32 GB.
+
+- **[GLM 5.3 Flash](docs/GLM.md)**, o maior: um arquivo de 79 a 114 GB, que fica na maior parte na RAM.
+- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, um arquivo de 17 GB. Ele também entende imagens.
+- **[Ornith 1.5](docs/BACKENDS.md)**, com a arquitetura do Qwen3.6-35B-A3B e outros pesos: um arquivo de 17 GB. Ele
+  também entende imagens.
+- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, um arquivo de 13 GB. Ele também entende imagens.
+
+O servidor pode trocar entre os modelos instalados enquanto está rodando
+([como](docs/BACKENDS.md#changing-the-model), em inglês).
 
 O PolyStrata é feito sobre o [Strata](https://github.com/Niko1221/Strata) de Niko1221.
 
@@ -68,7 +73,7 @@ RTX 3090 (24 GB) deve escrever cerca de 100-140 tokens por segundo. Conversas lo
 
 ### GLM 5.3 Flash
 
-Medido para o PolyStrata numa estação de trabalho, com um prompt de 29K tokens.
+Medido para o PolyStrata numa estação de trabalho, com um prompt de 28K tokens.
 
 <table>
 <tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th></tr>
@@ -76,17 +81,97 @@ Medido para o PolyStrata numa estação de trabalho, com um prompt de 29K tokens
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **3.0BIT** | 53-55 tokens/s | 448-459 tokens/s |
+| **3.0BIT** | 58-59 tokens/s | 529-531 tokens/s |
+| **UD-IQ2_XXS** (build anterior) | 33 tokens/s | 347 tokens/s |
 | **REAP50-Q3_K_M** (build anterior) | 27 tokens/s | 384 tokens/s |
 
 </td></tr>
 </table>
 
-A linha REAP50-Q3_K_M é de uma build anterior do motor e não foi medida de novo; com ela, o 3.0BIT escrevia
-27 tokens/s e lia 312.
+As linhas UD-IQ2_XXS e REAP50-Q3_K_M são de builds anteriores do motor e não foram medidas de novo: os arquivos
+delas não estão mais no PC de teste. Com essas duas builds, o 3.0BIT escrevia 37 e 27 tokens/s e lia 286 e 312.
 No mesmo PC, o llama.cpp escreveu 26 tokens/s com o arquivo 3.0BIT e leu cerca de 265. O GLM 5.3 Flash é um modelo
-muito maior que o Qwen3.8-Flash-Next, e só cerca de um quinto dos experts dele cabe nos 32 GB desta placa, por isso
+muito maior que os outros, e só cerca de um quinto dos experts dele cabe nos 32 GB desta placa, por isso
 ele escreve mais devagar. O que foi medido e como: [docs/GLM.md](docs/GLM.md#what-it-was-measured-on) (em inglês).
+
+### Qwen3.6-35B-A3B
+
+Medido para o PolyStrata na mesma estação de trabalho, com um prompt de 30K tokens. À esquerda, a placa guarda o
+modelo inteiro. À direita, a mesma placa está limitada a 8 GB, e a maioria dos experts é calculada pelo processador.
+
+<table>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th><th>O mesmo PC, com a placa limitada a 8 GB</th></tr>
+<tr><td>
+
+| Tamanho | Escreve respostas | Lê seu prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 307-309 tokens/s | 2,210-2,220 tokens/s |
+
+</td><td>
+
+| Tamanho | Escreve respostas | Lê seu prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 149-164 tokens/s | 1,970-1,990 tokens/s |
+
+</td></tr>
+</table>
+
+A tabela da direita não é um PC com placa de 8 GB: o processador, a RAM e a velocidade da placa são os desta estação
+de trabalho. Um prompt mais curto é lido mais rápido: um de 10,000 tokens a 3,800 tokens/s com o modelo inteiro na
+placa. O llama.cpp, com o modelo inteiro na mesma placa, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
+Ele precisa de uma placa em que o modelo caiba.
+
+### Ornith 1.5
+
+Medido do mesmo jeito, com o mesmo prompt de 30K tokens.
+
+<table>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th><th>O mesmo PC, com a placa limitada a 8 GB</th></tr>
+<tr><td>
+
+| Tamanho | Escreve respostas | Lê seu prompt |
+| --- | ---: | ---: |
+| **APEX-I-COMPACT** | 230 tokens/s | 2,210-2,230 tokens/s |
+
+</td><td>
+
+| Tamanho | Escreve respostas | Lê seu prompt |
+| --- | ---: | ---: |
+| **APEX-I-COMPACT** | 136-148 tokens/s | 1,940 tokens/s |
+
+</td></tr>
+</table>
+
+Um prompt de 10,000 tokens é lido a 3,800 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo inteiro
+na mesma placa, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
+
+### Gemma 4 26B-A4B
+
+Medido do mesmo jeito, com um prompt de 31K tokens.
+
+<table>
+<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th><th>O mesmo PC, com a placa limitada a 8 GB</th></tr>
+<tr><td>
+
+| Tamanho | Escreve respostas | Lê seu prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 259-275 tokens/s | 2,390-2,410 tokens/s |
+
+</td><td>
+
+| Tamanho | Escreve respostas | Lê seu prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 137 tokens/s | 2,240-2,250 tokens/s |
+
+</td></tr>
+</table>
+
+Um prompt de 10,000 tokens é lido a 3,300 a 3,500 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo
+inteiro na mesma placa, escreveu cerca de 165 tokens/s e leu prompts a 6,000 a 9,000.
+
+Os quatro modelos do motor próprio do PolyStrata foram medidos com o benchmark dele, que você pode rodar no seu PC:
+`python polystrata.py benchmark --model <name> --prompt-tokens 24000`
+([o que ele envia e mostra](docs/BACKENDS.md#benchmark), em inglês).
 
 ## Do que você precisa
 
@@ -114,14 +199,49 @@ A lista completa: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 | | |
 | --- | --- |
 | **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova. Ele só rodou com **32 GB de VRAM**. Cerca de 12 GB são ocupados antes do primeiro expert, então uma placa de 12 GB não consegue iniciá-lo. |
-| **RAM** | Ao lado de uma placa de 32 GB, **96 GB ou mais** para o modelo inteiro, 60 GB para o tamanho com metade dos experts. Uma placa menor precisa de mais RAM ([quanto](#qual-modelo-devo-escolher)). Ele rodou com 120 GB. |
-| **Disco** | 114 GB ou 79 GB para o arquivo do modelo, num SSD. |
+| **RAM** | Ao lado de uma placa de 32 GB, **96 GB ou mais** para o modelo inteiro, 82 GB para o tamanho de 2 bits, 60 GB para o tamanho com metade dos experts. Uma placa menor precisa de mais RAM ([quanto](#qual-modelo-devo-escolher)). Ele rodou com 120 GB. |
+| **Disco** | 114 GB, 102 GB ou 79 GB para o arquivo do modelo, num SSD. |
 | **Sistema** | Linux e um driver NVIDIA atual. |
 
 O instalador cuida de todo o resto. Ele compila o motor no seu PC e oferece instalar o que falta para isso
 (g++ e o CUDA Toolkit). Ainda não: Windows, placas AMD, várias placas, imagens.
 
 A lista completa: [docs/GLM.md](docs/GLM.md#what-you-need) (em inglês).
+
+### Qwen3.6-35B-A3B
+
+| | |
+| --- | --- |
+| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 5 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, e nessa placa limitada a 8 GB. |
+| **RAM** | Cerca de **21 GB** ao lado de uma placa de 8 GB, pela estimativa do instalador. Uma placa de 24 GB guarda o modelo inteiro. |
+| **Disco** | 17 GB para o arquivo do modelo, 1 GB a mais para ler imagens. |
+| **Sistema** | Linux e um driver NVIDIA atual. |
+
+O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. Ainda não: Windows, placas AMD, várias placas.
+
+### Ornith 1.5
+
+| | |
+| --- | --- |
+| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 4 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, e nessa placa limitada a 8 GB. |
+| **RAM** | Cerca de **22 GB** ao lado de uma placa de 8 GB, pela estimativa do instalador. Uma placa de 24 GB guarda o modelo inteiro. |
+| **Disco** | 17 GB para o arquivo do modelo, 1 GB a mais para ler imagens. |
+| **Sistema** | Linux e um driver NVIDIA atual. |
+
+O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. Ainda não: Windows, placas AMD, várias placas.
+
+### Gemma 4 26B-A4B
+
+| | |
+| --- | --- |
+| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 6 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, e nessa placa limitada a 8 GB. |
+| **RAM** | Cerca de **18 GB** ao lado de uma placa de 8 GB, pela estimativa do instalador. Pela mesma estimativa, uma placa de 16 GB guarda o modelo inteiro. |
+| **Disco** | 13 GB para o arquivo do modelo e o modelo de rascunho dele, 1 GB a mais para ler imagens. |
+| **Sistema** | Linux e um driver NVIDIA atual. |
+
+O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. Ainda não: Windows, placas AMD, várias placas.
+
+Do que cada um dos três precisa e como foi conferido: [docs/BACKENDS.md](docs/BACKENDS.md#install) (em inglês).
 
 ## Instalação
 
@@ -150,12 +270,12 @@ Ele faz algumas perguntas:
 - se ele deve entender imagens (o GLM 5.3 Flash não entende).
 
 Aperte Enter em cada uma para usar a resposta recomendada. Depois ele baixa o modelo (cerca de 70 GB para o
-Qwen3.8-Flash-Next, 79 ou 114 GB para o GLM 5.3 Flash) e o inicia.
+Qwen3.8-Flash-Next, 79 a 114 GB para o GLM 5.3 Flash, 13 a 17 GB para os outros três) e o inicia.
 Se o download parar, rode de novo: ele continua de onde parou. Seu navegador abre o app do PolyStrata em
 `http://127.0.0.1:8080`.
 
-O GLM 5.3 Flash está na lista de modelos do instalador. `./setup.sh --family glm` vai direto para ele
-([o que ele pergunta e grava](docs/GLM.md#install), em inglês).
+Os cinco estão na lista de modelos do instalador. `./setup.sh --family glm`, `qwen36`, `ornith` ou `gemma4` vai
+direto para um deles ([o que ele pergunta e grava](docs/GLM.md#install), em inglês).
 
 > **Enquanto o modelo inicia, seu PC pode ficar lento ou parar de responder por 1-3 minutos** (mais na primeira vez).
 > O PolyStrata carrega 35-55 GB na sua RAM e reserva parte dela para a placa de vídeo. Isso é normal. Espere e não
@@ -199,30 +319,64 @@ Tamanhos, downloads e o que cabe onde: [docs/MODELS.md](docs/MODELS.md). Para ad
 
 ### GLM 5.3 Flash
 
-Dois tamanhos por enquanto. O instalador escolhe o primeiro para o qual a sua RAM é suficiente.
+Três tamanhos por enquanto. O instalador escolhe o primeiro para o qual a sua RAM é suficiente.
 
 | Tamanho | O que é | Download | RAM ao lado de uma placa de 32 GB |
 | --- | --- | ---: | ---: |
-| **3.0BIT** | o modelo inteiro | 114 GB | 96 GB |
+| **3.0BIT** | o modelo inteiro, a cerca de 3 bits ([neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF)) | 114 GB | 96 GB |
+| **UD-IQ2_XXS** | o modelo inteiro, a cerca de 2 bits ([Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)): lê um prompt mais rápido e escreve mais devagar | 102 GB | 82 GB |
 | **REAP50-Q3_K_M** | metade dos experts roteados removida ([REAP50](https://huggingface.co/patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF), de patrickbdevaney) | 79 GB | 60 GB |
 
 A RAM necessária depende da sua placa de vídeo: os experts que não cabem na placa precisam ficar na RAM.
 
-| Sua placa de vídeo | 3.0BIT | REAP50-Q3_K_M | |
-| --- | ---: | ---: | --- |
-| **32 GB** | **96 GB** | **60 GB** | o PC em que ele rodou (120 GB de RAM) |
-| **24 GB** | cerca de 104 GB | cerca de 68 GB | ainda não testado |
-| **16 GB** | cerca de 113 GB | cerca de 77 GB | ainda não testado |
-| **12 GB ou menos** | | | não inicia |
+| Sua placa de vídeo | 3.0BIT | UD-IQ2_XXS | REAP50-Q3_K_M | |
+| --- | ---: | ---: | ---: | --- |
+| **32 GB** | **96 GB** | **82 GB** | **60 GB** | o PC em que ele rodou (120 GB de RAM) |
+| **24 GB** | cerca de 104 GB | cerca de 90 GB | cerca de 68 GB | ainda não testado |
+| **16 GB** | cerca de 113 GB | cerca de 99 GB | cerca de 77 GB | ainda não testado |
+| **12 GB ou menos** | | | | não inicia |
 
 Os números de RAM são a estimativa do instalador, a partir do único PC em que ele rodou. Com menos RAM ele inicia
 mesmo assim, mas lê experts do SSD enquanto responde e fica muito mais lento. O instalador avisa e pergunta antes.
 
 As outras quantizações do GLM 5.3 Flash ainda não são suportadas: [o que falta](docs/GLM.md#what-is-missing) (em inglês).
 
+### Qwen3.6-35B-A3B
+
+Um tamanho por enquanto.
+
+| Tamanho | O que é | Download | RAM ao lado de uma placa de 8 GB |
+| --- | --- | ---: | ---: |
+| **UD-Q3_K_M** | o modelo inteiro com experts de 3 bits ([Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)) | 17 GB | cerca de 21 GB |
+
+Uma placa maior guarda mais do modelo e precisa de menos RAM: cerca de 17 GB ao lado de uma placa de 12 GB, 13 GB ao lado de uma de 16 GB e 10 GB quando a placa guarda tudo. São estimativas do instalador. Elas não foram
+conferidas num PC assim.
+
+### Ornith 1.5
+
+Um tamanho por enquanto.
+
+| Tamanho | O que é | Download | RAM ao lado de uma placa de 8 GB |
+| --- | --- | ---: | ---: |
+| **APEX-I-COMPACT** | o modelo inteiro com experts de 3 e 4 bits ([APEX](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF), de mudler) | 17 GB | cerca de 22 GB |
+
+Uma placa maior guarda mais do modelo e precisa de menos RAM: cerca de 17 GB ao lado de uma placa de 12 GB, 13 GB ao lado de uma de 16 GB e 10 GB quando a placa guarda tudo. São estimativas do instalador. Elas não foram
+conferidas num PC assim.
+
+### Gemma 4 26B-A4B
+
+Um tamanho por enquanto.
+
+| Tamanho | O que é | Download | RAM ao lado de uma placa de 8 GB |
+| --- | --- | ---: | ---: |
+| **UD-Q3_K_M** | o modelo inteiro com experts de 3 bits ([Unsloth](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)), e o modelo de rascunho do Google para ele | 13 GB | cerca de 18 GB |
+
+Uma placa maior guarda mais do modelo e precisa de menos RAM: cerca de 14 GB ao lado de uma placa de 12 GB e 10 GB quando a placa guarda tudo. São estimativas do instalador. Elas não foram
+conferidas num PC assim.
+
 ## Como usar
 
-Os dois modelos são usados do mesmo jeito: o mesmo app, a mesma API.
+Os cinco modelos são usados do mesmo jeito: o mesmo app, a mesma API.
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="A aba Monitor do app PolyStrata ao lado de um agente de programação"><br>
 <sub>O <b>Monitor</b> do app PolyStrata (à esquerda) enquanto um agente de programação escreve o jardim com pagode do vídeo (à direita). Uma captura de tela do <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>
@@ -239,14 +393,14 @@ Os dois modelos são usados do mesmo jeito: o mesmo app, a mesma API.
   mais rápido. High é o melhor para perguntas difíceis.
 - **Do seu celular ou de outro PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Sempre defina uma chave.
 
-Onde os dois diferem:
+Onde eles diferem:
 
-| | Qwen3.8-Flash-Next | GLM 5.3 Flash |
-| --- | --- | --- |
-| **Imagens** | Responda sim para "Images?" na instalação. Depois clique em **Picture** no chat, ou anexe imagens no seu app. Placas AMD entendem imagens no Linux usando o processador; no Windows, ainda não. | Ainda não. |
-| **Uma requisição por vez** | Por padrão, o PolyStrata responde uma requisição e as outras esperam. Para responder várias ao mesmo tempo, defina `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). Numa placa de 12 GB, isso deixa cada resposta mais lenta. | Uma por vez, as outras esperam. |
-| **Várias conversas** | A última é mantida, então as mensagens seguintes começam em segundos. Dois argumentos do motor mantêm várias na RAM ([detalhes](docs/DETAILS.md#using-it)). | A última é mantida. A instalação pergunta se deve manter várias na RAM, para que um agente e seus subagentes se revezem sem que os prompts sejam lidos de novo ([como](docs/GLM.md#several-conversations-at-once)). |
-| **Prompts longos** | O PolyStrata lê a primeira mensagem de uma conversa inteira, cerca de 1 minuto a cada 30,000 tokens. As mensagens seguintes começam em segundos. | A primeira mensagem é lida inteira, cerca de 1,5 minuto a cada 30,000 tokens. |
+| | Qwen3.8-Flash-Next | GLM 5.3 Flash | Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B |
+| --- | --- | --- | --- |
+| **Imagens** | Responda sim para "Images?" na instalação. Depois clique em **Picture** no chat, ou anexe imagens no seu app. Placas AMD entendem imagens no Linux usando o processador; no Windows, ainda não. | Ainda não. | Responda sim para "Images?" na instalação, e depois como no Qwen3.8-Flash-Next. Numa placa com menos de 16 GB, o codificador de imagens roda no processador, e uma imagem leva alguns segundos. |
+| **Uma requisição por vez** | Por padrão, o PolyStrata responde uma requisição e as outras esperam. Para responder várias ao mesmo tempo, defina `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). Numa placa de 12 GB, isso deixa cada resposta mais lenta. | Uma por vez, as outras esperam. | Uma por vez, as outras esperam. |
+| **Várias conversas** | A última é mantida, então as mensagens seguintes começam em segundos. Dois argumentos do motor mantêm várias na RAM ([detalhes](docs/DETAILS.md#using-it)). | A última é mantida. A instalação pergunta se deve manter várias na RAM, para que um agente e seus subagentes se revezem sem que os prompts sejam lidos de novo ([como](docs/GLM.md#several-conversations-at-once)). | Como o GLM 5.3 Flash. |
+| **Prompts longos** | O PolyStrata lê a primeira mensagem de uma conversa inteira, cerca de 1 minuto a cada 30,000 tokens. As mensagens seguintes começam em segundos. | A primeira mensagem é lida inteira, cerca de 1 minuto a cada 30,000 tokens. | A primeira mensagem é lida inteira, cerca de 15 segundos a cada 30,000 tokens. |
 
 Mais: [onde suas conversas ficam salvas](docs/INSTALL.md#where-things-are-stored), [a API](docs/DETAILS.md#using-it).
 
@@ -269,7 +423,7 @@ problema de segurança? Informe em particular: [SECURITY.md](SECURITY.md).
 ## Como funciona?
 
 Modelos como este normalmente rodam em servidores com centenas de gigabytes de memória de vídeo. Sua placa de vídeo
-tem 12-32 GB. O PolyStrata faz o modelo caber **dividindo o trabalho pelo PC inteiro**. Pense numa cozinha: o que você
+tem 8-32 GB. O PolyStrata faz o modelo caber **dividindo o trabalho pelo PC inteiro**. Pense numa cozinha: o que você
 usa o tempo todo fica na bancada, e o resto espera na despensa.
 
 ### Qwen3.8-Flash-Next
@@ -292,21 +446,58 @@ A explicação mais longa: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Cada pa
 ### GLM 5.3 Flash
 
 - **O modelo tem 12,096 experts**, 288 em cada uma de 42 camadas. Cada palavra precisa de 8 de cada camada.
-- **Sua placa de vídeo** guarda os mais usados, cerca de 2,570 numa placa de 32 GB. O motor conta quais o seu
+- **Sua placa de vídeo** guarda os mais usados, cerca de 2,470 numa placa de 32 GB. O motor conta quais o seu
   trabalho usa e escolhe de novo na próxima inicialização.
 - **Enquanto ele escreve**, seu processador calcula os experts que a placa não tem. **Enquanto ele lê um prompt**,
   eles passam pela placa, 1,024 tokens por vez.
+- **Adivinhar e conferir:** um bloco do modelo feito para adivinhar propõe as próximas palavras, e o modelo confere
+  todas de uma vez.
 - **O arquivo do modelo é usado onde está**, sem uma segunda cópia no disco. Uma inicialização leva cerca de
   6 segundos quando o arquivo já está na sua RAM.
 
 Cada parte e seus números: [docs/GLM.md](docs/GLM.md#how-it-uses-the-card) (em inglês).
 
+### Qwen3.6-35B-A3B
+
+- **O modelo tem 10,240 experts**, 256 em cada uma de 40 camadas. Cada palavra precisa de 8 de cada camada.
+- **Sua placa de vídeo** guarda quantos couberem, todos a partir de 24 GB. Limitada a 8 GB, a placa de teste guardou
+  cerca de 1,200, e eles atenderam mais ou menos metade do que uma resposta usou: enquanto ele escreve, o motor traz
+  para a placa os experts que a resposta escolhe sem parar.
+- **Adivinhar e conferir:** o bloco de rascunho do próprio modelo, que está no arquivo dele, propõe as próximas
+  palavras, e o modelo confere todas de uma vez.
+- **O arquivo do modelo é usado onde está**, sem uma segunda cópia no disco.
+
+### Ornith 1.5
+
+- **A arquitetura do Qwen3.6-35B-A3B com outros pesos:** 10,240 experts, 256 em cada uma de 40 camadas, e 8 de cada
+  camada para cada palavra.
+- **Sua placa de vídeo** guarda quantos couberem, todos a partir de 24 GB. Limitada a 8 GB, a placa de teste guardou
+  cerca de 1,600, e eles atenderam mais ou menos metade do que uma resposta usou.
+- **Adivinhar e conferir:** o bloco de rascunho dele também está no arquivo. Ele acerta menos vezes que o do
+  Qwen3.6-35B-A3B.
+- **O arquivo do modelo é usado onde está**, sem uma segunda cópia no disco.
+
+### Gemma 4 26B-A4B
+
+- **O modelo tem 3,840 experts**, 128 em cada uma de 30 camadas. Cada palavra precisa de 8 de cada camada, além de
+  uma parte da camada que todas as palavras usam.
+- **Sua placa de vídeo** guarda quantos couberem, todos a partir de 16 GB pela estimativa do instalador. Limitada a
+  8 GB, a placa de teste guardou cerca de 200, e com os que o motor trouxe enquanto escrevia eles atenderam de um
+  terço à metade do que uma resposta usou.
+- **Adivinhar e conferir:** o pequeno modelo de rascunho do Google para ele, um arquivo de 0.5 GB que o instalador
+  baixa junto com o modelo, propõe as próximas palavras.
+- **O arquivo do modelo é usado onde está**, sem uma segunda cópia no disco.
+
+Cada parte dos três e seus números: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works) (em inglês).
+
 ## Créditos e licença
 
 O Qwen3.8-Flash-Next é da [equipe Qwen](https://huggingface.co/Qwen/Qwen3.8-Flash-Next). Ele foi comprimido por
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) e Unsloth.
-O GLM 5.3 Flash roda a partir dos arquivos de [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF)
-e de patrickbdevaney. O PolyStrata é feito sobre o [Strata](https://github.com/Niko1221/Strata) de Niko1221 e seus colaboradores,
+O GLM 5.3 Flash roda a partir dos arquivos de [neuralll](https://huggingface.co/neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF),
+da Unsloth e de patrickbdevaney. O Qwen3.6-35B-A3B é da equipe Qwen e o Gemma 4 do Google, os dois na quantização da
+[Unsloth](https://huggingface.co/unsloth). O Ornith 1.5 é da ornith-ai, na quantização APEX de
+[mudler](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF). O PolyStrata é feito sobre o [Strata](https://github.com/Niko1221/Strata) de Niko1221 e seus colaboradores,
 e usa partes do [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Todos os créditos:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). O PolyStrata é de código aberto sob a [MIT License](LICENSE).
 Algumas partes e todos os modelos têm licenças próprias ([quais](docs/HOW_IT_WORKS.md#license)).

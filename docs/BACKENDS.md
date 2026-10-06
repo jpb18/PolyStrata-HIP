@@ -377,6 +377,29 @@ last bits. In an earlier round of these runs one was ended by a kill signal whil
 cache), as it was when a GLM start was killed later; the pod's own counter of memory kills stayed at zero, and the
 cause was not found.
 
+### A prompt of 30,000 tokens
+
+The README's numbers are this benchmark with one long prompt, `--prompt-tokens 24000`, which comes to 28,000 to
+31,000 tokens by the models' tokenizers, twice each. The three new models ran as setup installed them, and held to
+8 GB as above but through the server, with the picture encoder on the CPU, where setup puts it for a card under
+16 GB, and a profile of the run's own that a first run had started. GLM ran from its hand-written config.
+
+| Model | Card | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-35B-A3B | whole model on it | 30,126 | 13.7 | 2,214 to 2,218 | 307 to 309 | 92 | 100% |
+| | held to 8 GB | | 15.3 to 15.4 | 1,975 to 1,987 | 149 to 164 | 49 to 51 | 39% to 41% |
+| Ornith 1.5 | whole model on it | 30,126 | 13.6 to 13.8 | 2,209 to 2,230 | 230 | 71 to 73 | 100% |
+| | held to 8 GB | | 15.6 to 15.7 | 1,941 to 1,943 | 136 to 148 | 50 | 48% to 52% |
+| Gemma 4 26B-A4B | whole model on it | 31,211 | 13.1 to 13.3 | 2,389 to 2,408 | 259 to 275 | 99 to 103 | 100% |
+| | held to 8 GB | | 14.1 | 2,240 to 2,251 | 137 | 45 to 46 | 20% to 33% |
+| GLM 5.3 Flash 3.0bit | 32 GB | 28,354 | 53.5 to 53.6 | 529 to 531 | 58 to 59 | 50 to 51 | 50% to 51% |
+
+The three new models read this prompt more slowly than the 10,000-token one of the first table (3,300 to 3,800
+tokens/s), and held to 8 GB nearly as fast as with every expert on the card. Where the long prompt's time goes was
+not measured. The first 8 GB run of each, which started the profile, wrote the short chat at 159, 141 and 133
+tokens/s and read the prompt at 1,984, 1,952 and 2,239. A run with the picture encoder left on the card is not in
+the table: the encoder holds 1.6 GB there, no expert fit beside it, and Qwen3.6 wrote 127 tokens/s.
+
 ## How each backend was checked
 
 Against llama.cpp on the same file: greedy, 64 tokens after five chat prompts of about 25 to 8000 tokens, the

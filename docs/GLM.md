@@ -33,6 +33,12 @@ the 11,673-token one before it, so its first 10,240 tokens are not read again. A
 same way without the draft block, wrote 26.7 to 27.7 tokens/s and read the three prompts at 373, 334 and 312;
 [BACKENDS.md](BACKENDS.md#what-was-tuned) has what changed since. llama.cpp was not run again.
 
+The README's row for 3.0BIT is PolyStrata's own benchmark through the server, the test every model of this engine
+gets ([BACKENDS.md](BACKENDS.md#a-prompt-of-30000-tokens)): a short chat written at 58 to 59 tokens/s, and a prompt
+of 28,354 tokens read whole at 529 to 531, with the first token after 54 s and the answer after it written at 50
+to 51. Of the 29,069-token prompt in the table above only the last 18,829 tokens are read, the ones furthest
+into the context, which is the likely reason it comes out slower.
+
 With greedy sampling the two write the same tokens until two candidates are nearly tied. The model's activations
 are quantized to 8 bits between layers, so a difference in rounding between two correct implementations can decide
 such a tie.
@@ -59,7 +65,9 @@ takes the first size whose estimate the PC meets.
 
 REAP50-Q3_K_M on the machine above, with that earlier build: 27.4 tokens/s, and prompts of 3,059, 11,673 and
 29,069 tokens read at 493, 448 and 384 tokens/s. The card held 20.8 GiB of its experts, 1,869 of 6,048. It was
-not run again: its file is no longer on the test machine. Against llama-server of the llama.cpp
+not run again: its file is no longer on the test machine. Neither is UD-IQ2_XXS's, which another earlier build
+read the 29,069-token prompt with at 347 tokens/s and wrote 33 after it; in that session 3.0BIT read it at 286
+and wrote 37. Against llama-server of the llama.cpp
 fork the file was made for, on a prompt of 1,678 tokens, the first 63 tokens were the same.
 
 ## Install
