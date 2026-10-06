@@ -1561,6 +1561,25 @@ class PcieShare(unittest.TestCase):
         self.assertIn("expert cache 60.0% hit (+20.0% of the routed experts over PCIe)", out.getvalue())
 
 
+class PeerDevice(unittest.TestCase):
+    """#665: several GPUs in the config are a layer split, but --peer-device uses the second card as an expert-cache
+    tier, and the engine refuses it beside --layer-split: the server must not add one then."""
+
+    def test_split_added_for_several_gpus(self):
+        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
+                         ["--native", "x", "--layer-split", "auto"])
+
+    def test_no_split_with_a_peer(self):
+        args = ["--native", "x", "--peer-device", "1"]
+        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
+        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split_skip_if_fits": True}), args)
+
+    def test_both_cards_visible(self):
+        from serve.server import child_env
+        env = child_env({"args": ["--peer-device", "1"], "gpu": [0, 1]})
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
+
+
 class LearnedProfile(unittest.TestCase):
     """#477: "expert_profile_save" in the config: the engine saves its learned profile there, and the next start
     begins from it when it is a profile of the same model; without the key the arguments are unchanged."""
