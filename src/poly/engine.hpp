@@ -298,6 +298,8 @@ protected:
     std::unique_ptr<Workers> workers_;
     int node_ = -1;
     double node_share_ = 0;
+    std::thread mapper_;                  ///< reads the experts' pages once after load, so they are mapped
+    std::atomic<bool> map_quit_{false};
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     void* blas_ = nullptr; ///< cuBLAS on st_
     void* ev_ = nullptr;   ///< marks the router's copy to the host

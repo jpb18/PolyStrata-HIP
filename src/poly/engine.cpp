@@ -143,6 +143,24 @@ int stay_near(const std::vector<std::pair<const uint8_t*, size_t>>& spans, const
 #endif
 }
 
+// The mapped file's pages come into this process's page table as they are first read, a fault every few pages,
+// and an expert read through those faults arrives at half the speed: 21.0 against 11.0 ms a token for GLM 5.3
+// Flash's CPU experts on the two-socket Xeon, while every expert a token meets is new to the process.  So one
+// thread reads a byte of every page of the experts, once, beside whatever the engine is doing: the 100 GiB of a
+// model that the file cache holds take it 4 s.  What the cache does not hold is read from the disk here, not
+// while a token waits.
+void map_pages(const std::vector<std::pair<const uint8_t*, size_t>>& spans, const std::atomic<bool>& quit) {
+    constexpr size_t kPage = 4096, kLook = size_t(1) << 24;   // `quit` is looked at every 16 MiB
+    volatile uint8_t seen = 0;
+    for (const auto& s : spans) {
+        for (size_t at = 0; at < s.second; at += kPage) {
+            if (at % kLook == 0 && quit.load(std::memory_order_relaxed)) return;
+            seen = (uint8_t) (seen + s.first[at]);
+        }
+        if (s.second > 0) seen = (uint8_t) (seen + s.first[s.second - 1]);   // its last page, when it starts in one
+    }
+}
+
 // Lines of "layer expert count".  A missing file is not an error: the first run writes it.
 void read_profile(const std::string& path, int n_layer, int n_expert, std::vector<int64_t>& out) {
     FILE* f = std::fopen(path.c_str(), "r");
@@ -171,6 +189,8 @@ struct Engine::Swap {
 Engine::Engine() = default;
 
 Engine::~Engine() {
+    map_quit_.store(true);
+    if (mapper_.joinable()) mapper_.join();
     if (follower_.joinable()) {
         {
             std::lock_guard<std::mutex> l(swap_m_);
@@ -675,14 +695,14 @@ void Engine::load(const Options& o) {
     if (!opt_.profile.empty()) read_profile(opt_.profile, (int) layers_.size(), n_expert_, prior_);
     fill_expert_cache();
     const int threads = opt_.threads > 0 ? opt_.threads : usable_cpus();
+    std::vector<std::pair<const uint8_t*, size_t>> spans;   // the routed experts in the mapped files
+    for (const Layer& L : layers_) {
+        if (!L.moe) continue;
+        spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
+        if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
+        spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
+    }
     if (opt_.stay_near) {   // before any thread that reads the experts is started
-        std::vector<std::pair<const uint8_t*, size_t>> spans;
-        for (const Layer& L : layers_) {
-            if (!L.moe) continue;
-            spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
-            if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
-            spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
-        }
         std::vector<std::string> files = gg_->paths();
         if (dg_) files.insert(files.end(), dg_->paths().begin(), dg_->paths().end());
         node_ = stay_near(spans, files, threads, node_share_);
@@ -704,6 +724,9 @@ void Engine::load(const Options& o) {
         follower_ = std::thread([this] { follow_loop(); });
     }
     reset();
+    // nothing is read from the files when every expert is in VRAM
+    if (cached_ < total_experts())
+        mapper_ = std::thread([this, spans = std::move(spans)] { map_pages(spans, map_quit_); });
 }
 
 void Engine::load_drafter() {
