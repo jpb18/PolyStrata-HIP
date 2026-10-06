@@ -3864,6 +3864,57 @@ class VisionArgs(unittest.TestCase):
                          ["--max-tokens", "1024", "--min-tokens", "768"])
 
 
+class VisionCacheEviction(unittest.TestCase):
+    """#1072: the cache of encoded images keeps 64; a request's own images are never evicted for a later one."""
+
+    def make(self, d):
+        import serve.server as server
+        v = server.Vision.__new__(server.Vision)
+        v.dir, v.cache, v.lock = d, {}, threading.Lock()
+        v.load = lambda src: src
+
+        class Pipe:
+            def __init__(self):
+                self.last = ""
+
+            def write(self, text):
+                self.last = text
+
+            def flush(self):
+                (d / self.last.split()[2]).write_bytes(b"x")
+
+            def readline(self):
+                return "OK 3" + chr(10)
+
+        pipe = Pipe()
+        v.proc = SimpleNamespace(stdin=pipe, stdout=pipe)
+        v.normalize = staticmethod(lambda data: data)
+        return v
+
+    def test_one_request_with_more_than_64_images_keeps_all_its_files(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            v = self.make(d)
+            done = v.encode_all([f"image {i}".encode() for i in range(70)])
+            self.assertEqual(len(done), 70)
+            self.assertTrue(all(p.exists() for p, _ in done))
+            # the next request's image shrinks the cache back to 64, oldest first
+            p, _ = v.encode(b"another one")
+            self.assertEqual(len(v.cache), 64)
+            self.assertTrue(p.exists())
+            self.assertEqual(len(list(d.glob("*.sve"))), 64)
+
+    def test_plain_encode_still_evicts_the_oldest(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            v = self.make(d)
+            first, _ = v.encode(b"first")
+            for i in range(64):
+                v.encode(f"image {i}".encode())
+            self.assertEqual(len(v.cache), 64)
+            self.assertFalse(first.exists())
+
+
 class VisionShutdown(unittest.TestCase):
     """#914: ending the server removes the encoder's scratch directory; unloading keeps it."""
 

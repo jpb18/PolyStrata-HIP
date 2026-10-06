@@ -1735,12 +1735,23 @@ class Vision:
         im.save(out, format="PNG")
         return out.getvalue()
 
-    def encode(self, source: str | bytes) -> tuple[Path, int]:
-        """-> (embeddings file, number of image tokens).  `source`: what load() reads, or the image's bytes."""
+    def encode_all(self, sources: list) -> list[tuple[Path, int]]:
+        """encode() for every image of one request: the files of this request's earlier images are never evicted to
+        make room for a later one (#1072: with more than 64 unique images the first was deleted before the request
+        had read it)."""
+        out: list[tuple[Path, int]] = []
+        for src in sources:
+            out.append(self.encode(src, keep=[p for p, _ in out]))
+        return out
+
+    def encode(self, source: str | bytes, keep=()) -> tuple[Path, int]:
+        """-> (embeddings file, number of image tokens).  `source`: what load() reads, or the image's bytes.
+        `keep`: files the caller still needs (never evicted by this call)."""
         data = self.normalize(source if isinstance(source, bytes) else self.load(source))
         key = hashlib.sha256(data).hexdigest()[:32]
         with self.lock:
             if key in self.cache:
+                self.cache[key] = self.cache.pop(key)                  # most recently used last
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
             img.write_bytes(data)
@@ -1754,9 +1765,12 @@ class Vision:
                 raise ValueError("the image could not be read: " + (line[4:] if line.startswith("ERR") else
                                                                      "the vision encoder stopped"))
             self.cache[key] = (out, int(line.split()[1]))
-            if len(self.cache) > 64:                                   # oldest first
-                old = next(iter(self.cache))
-                self.cache.pop(old)[0].unlink(missing_ok=True)
+            held = {str(p) for p in keep} | {str(out)}
+            for old in list(self.cache):                               # oldest first, but never one still in use
+                if len(self.cache) <= 64:
+                    break
+                if str(self.cache[old][0]) not in held:
+                    self.cache.pop(old)[0].unlink(missing_ok=True)
             return self.cache[key]
 
     def close(self):
@@ -2765,7 +2779,8 @@ class Service:
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
             # same FIFO as the requests.
             with self.fifo:
-                encoded = [self.vision.encode(src) for src in images]
+                encoded = (self.vision.encode_all(images) if hasattr(self.vision, "encode_all")
+                           else [self.vision.encode(src) for src in images])
             # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
             # (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs,
             # #150) is kept as plain text, or it took an image's place and the counts no longer matched.
