@@ -223,7 +223,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--draft-model FILE.gguf` | | a file of the same model to take that block from, when `--model` has none; setup passes the one it downloaded |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
-| `--stage-ahead N` | 256 | from N tokens, a batch copies those experts before the layer has chosen; 0 = never |
+| `--stage-ahead N` | 256 | from N tokens, a batch copies those experts before the layer has chosen, as does every batch of a prompt that is read several at a time; 0 = never |
 | `--prompt-cache N` | 6 | checkpoints kept of a conversation; 0 = only a next turn is not read again |
 | `--prompt-cache-every N` | 2048 | a checkpoint every N prompt tokens, besides the one at a prompt's end; 0 = none |
 | `--conversation-cache-mib N` | 0 | RAM for parked conversations; 0 = off |

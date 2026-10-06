@@ -265,22 +265,24 @@ after it at 68, 54 and 55; [What was tuned](#what-was-tuned) has the steps betwe
 | Gemma 4 26B-A4B | 26 | 0.16 | 184 | 273 | 100% | 74% |
 | | 2,656 | 0.78 | 3,586 | 224 | 100% | 83% |
 | | 10,393 | 2.6 | 3,329 | 160 | 100% | 73% |
-| GLM 5.3 Flash 3.0bit | 23 | 0.80 | 29 | 60 | 50% | 84% |
-| | 2,424 | 5.1 | 476 | 56 | 49% | 82% |
-| | 9,446 | 13.8 | 535 | 57 | 59% | 87% |
+| GLM 5.3 Flash 3.0bit | 23 | 0.81 | 29 | 60 | 50% | 85% |
+| | 2,424 | 5.1 | 475 | 54 | 48% | 78% |
+| | 9,446 | 12.8 | 579 | 56 | 60% | 86% |
 
 A short prompt is read a few tokens at a time, which is why its reading speed is low. Gemma 4 thinks in this
-table, as the others do, and guesses with its draft model. GLM's second run read at 476 and 533 and wrote at
-58, 55 and 56. Qwen3.6 and Ornith were run once. Gemma 4's row is the third of three runs: the first wrote 249
+table, as the others do, and guesses with its draft model. GLM's second run read at 474 and 582 and wrote at
+59, 57 and 57. Qwen3.6 and Ornith were run once. Gemma 4's row is the third of three runs: the first wrote 249
 after the short prompt and the second 274, and they read the long prompts at 3,000 to 3,430. GLM's longest
-prompt starts like the one before it, so its first 2,048 tokens are not read again: the 13.8 s are for 7,398.
+prompt starts like the one before it, so its first 2,048 tokens are not read again: the 12.8 s are for 7,398.
 
 The last changes in [What was tuned](#what-was-tuned) are to reading a prompt, and only a model with experts
-outside the cache reads another way for them. The last of them, a round of a layer's experts left in the
-staging buffer, changes only GLM's reading, and the other three models' rows are from before it. In the same
-hour the build before it read GLM's two long prompts at 459 to 497 and 511 to 522 tokens/s, with the first
-token after 4.9 to 5.3 and 14.2 to 14.5 s; the middle prompt, read in three calls, is within the spread of its
-runs. The build before the change that lets a read go past checkpoints, when it was measured: 422 to 424 and
+outside the cache reads another way for them. The other three models' rows are from before the last two; run
+again after them, they wrote and read within the spread of their earlier runs. The last change lets a small
+call in a read copy ahead with the others, and GLM's longest prompt ends in one. In the same hour the build
+before it read that prompt at 534 to 539 tokens/s, with the first token after 13.8 to 13.9 s, and the middle
+one as now. The build before a round of a layer's experts stayed in the staging buffer, when it was measured,
+read GLM's two long prompts at 459 to 497 and 511 to 522, with the first token after 4.9 to 5.3 and 14.2 to
+14.5 s. The build before the change that lets a read go past checkpoints, when it was measured: 422 to 424 and
 466 to 472, with the first token after 5.7 and 15.7 to 15.9 s. The build before the first of them, a prompt
 batch's float matrices as cuBLAS products, when it was measured: GLM's at 336 and 325, first token after 7.2
 and 22.8 s, and the three new models' at 3,512 and 3,375, 3,525 and 3,461, and 3,215 and 3,137. It wrote 58 to
@@ -337,21 +339,24 @@ above. 300-token answers, tokens per second; the two numbers are without and wit
 
 | Model | Experts from VRAM | Writes after a short prompt | after about 2,100 tokens | after about 7,700 | Reads about 2,100 tokens | about 7,700 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B | 46% to 59% | 128 to 129, 151 to 164 | 120, 127 | 82, 110 | 2,010 to 2,090 | 3,740 to 3,790 |
-| Ornith 1.5 | 44% to 61% | 148 to 154, 136 to 162 | 143, 134 | 101, 100 | 1,990 to 2,070 | 3,730 |
-| Gemma 4 26B-A4B | 48% to 61% | 118 to 120, 152 | 102, 128 | 88, 92 | 2,060 to 2,100 | 4,030 to 4,040 |
+| Qwen3.6-35B-A3B | 46% to 59% | 131 to 136, 155 to 165 | 105, 129 | 86, 114 | 2,250 to 2,300 | 3,820 to 3,830 |
+| Ornith 1.5 | 44% to 60% | 143 to 156, 131 to 154 | 135, 130 | 102, 92 | 2,230 to 2,280 | 3,670 to 3,730 |
+| Gemma 4 26B-A4B | 47% to 61% | 120 to 122, 154 | 103, 121 | 87, 90 | 2,340 | 3,960 to 4,000 |
 
 The short prompts are the two of three whose answers run to 300 tokens for Qwen3.6 and Gemma 4; one of
-Ornith's two stops after 112 to 115, and its answers after the longest prompt after 234 to 246. With guesses a
-smaller share of the experts comes from VRAM (48% against 58% to 61% for Gemma 4). After its longest prompt
-Ornith writes no faster with guesses than without, and Gemma 4 hardly: each of these runs is a process of its
-own, and the engine asks the block in its first rounds, before it has measured that asking does not pay.
+Ornith's two stops after 113, and its answers after the longest prompt after 233 to 246. With guesses a
+smaller share of the experts comes from VRAM (47% to 49% against 58% to 61% for Gemma 4). After its longest
+prompt Ornith writes no faster with guesses than without, and Gemma 4 hardly: each of these runs is a process of
+its own, and the engine asks the block in its first rounds, before it has measured that asking does not pay.
 
 One read takes the longer prompt whole, and a layer's uncached experts are copied to the card once for it. The
-build before reads went past checkpoints, in the
-same hour, read the two at 1,860 to 1,940 and 2,740 to 2,800 tokens/s for Qwen3.6, 1,890 to 1,920 and 2,750 to
-2,760 for Ornith and 1,940 to 1,990 and 3,180 to 3,190 for Gemma 4, and wrote within 20 tokens/s of this one,
-faster in some runs and slower in others. The build before the two changes to reading before that one, when it
+shorter one ends in a call of 63 tokens, 163 for Gemma 4, after the checkpoint at 2,048. The build before such
+a call copied ahead with the others, in the same hour, read the shorter prompt at 2,060 to 2,080 tokens/s for
+Qwen3.6, 2,020 to 2,050 for Ornith and 2,050 to 2,130 for Gemma 4, and the longer one as this build does. It
+wrote within 25 tokens/s of this one, faster in some runs and slower in others. The build before reads went
+past checkpoints, when it was measured, read the two at 1,860 to 1,940 and 2,740 to 2,800 tokens/s for Qwen3.6,
+1,890 to 1,920 and 2,750 to 2,760 for Ornith and 1,940 to 1,990 and 3,180 to 3,190 for Gemma 4, and wrote within
+20 tokens/s of the build after it. The build before the two changes to reading before that one, when it
 was measured, read them at 1,840 to 1,890 and 2,630 to 2,640, 1,860 to 1,910 and 2,630 to 2,690, and 1,920 to
 1,990 and 2,840 to 2,960. The build before the swaps' one pass and the picks, when it was measured, wrote after
 a short prompt: Qwen3.6 125 to 132 without guesses and 144 to 152 with, Ornith 125 to 140 and 117 to 137, Gemma
@@ -423,12 +428,20 @@ tokens, 3 to 12 a read, and the three new models held to 8 GB and with every exp
 state each, all the same. That check found one difference, in the first version of this reading: a call of
 fewer than 256 tokens does not copy a layer's experts ahead, and when it took the ones the call before it had
 copied, its launch had other matrices in it than alone, the batched kernels divided the work another way, and
-35 of Qwen3.6's 66 MB of state came out with other last bits. Such a call stages its own experts again. The
-check also covers a layer that takes the staging buffer in more than one round and keeps one for its next call:
-GLM's six, and Qwen3.6 held to 8 GB with staging buffers of 256 and 128 MiB and Gemma 4 with 128, which with
-the smaller buffer is two or three rounds in every layer. With the cache left as it was loaded and both builds
-holding the same experts, the 200 tokens after a prompt are those of the build that read call by call: GLM
-after 1,947 and 7,788 tokens, the three new models held to 8 GB after their two long prompts each.
+35 of Qwen3.6's 66 MB of state came out with other last bits. Such a call staged its own experts again, until
+every call in a read of several was made to copy ahead. The calls taken one by one are told to do the same
+since, and the two states are equal with a small call at the end of a read (20, 100 and 230 tokens), alone
+after a checkpoint, and with every call small. The check also covers a layer that takes the staging buffer in
+more than one round and keeps one for its next call: GLM's six, and Qwen3.6 held to 8 GB with staging buffers
+of 256 and 128 MiB and Gemma 4 with 128, which with the smaller buffer is two or three rounds in every layer.
+
+With the cache left as it was loaded and both builds holding the same experts, the 200 tokens after a prompt
+were those of the build that read call by call: GLM after 1,947 and 7,788 tokens, the three new models held to
+8 GB after their two long prompts each. The shorter of those two ends in a call of 63 or 163 tokens, and since
+small calls copy ahead its sums are not the earlier build's: Qwen3.6 writes the same 120 tokens after it
+without guesses and parts at token 77 with them, and Gemma 4 parts at token 75, where the two likeliest tokens
+were at 0.3946 and 0.3933 and are at 0.3562 and 0.4070. After the prompts without a small call the tokens are
+the earlier build's still.
 
 Over the engine's protocol, held to 8 GB or with GLM's half cache: a prompt of about 7,700 tokens cut at 7,000,
 5,000 and 3,000 and continued another way is read from the checkpoints at 6,144, 4,096 and 2,048, which one
@@ -544,6 +557,10 @@ picture in its place, and a prompt without pictures after them.
 | | Gemma 4 held to 8 GB, reading 8,001 tokens | 3,180 to 3,190 | 4,030 to 4,040 |
 | A round of a layer's experts left in the staging buffer for the layer's next call | GLM 5.3 Flash, reading 7,788 tokens | 599 to 602 | 639 to 643 |
 | | GLM 5.3 Flash through the server, 7,398 tokens read: seconds to the first token | 14.2 to 14.5 | 13.8 to 13.9 |
+| A small call in a read of several copies ahead like the others | GLM 5.3 Flash, reading 7,398 tokens that end in a call of 230 | 582 to 585 | 629 to 630 |
+| | GLM 5.3 Flash through the server, the same number read: seconds to the first token | 13.8 to 13.9 | 12.7 to 12.8 |
+| | Qwen3.6 held to 8 GB, reading 2,112 tokens | 2,060 to 2,080 | 2,250 to 2,300 |
+| | Gemma 4 held to 8 GB, reading 2,212 tokens | 2,050 to 2,130 | 2,340 |
 
 All but Gemma 4's draft model and GLM's recurrent step are in the shared runtime or its kernels, so every
 architecture with that kind of layer has them. Gemma 4's row for the routing has the two changes before it in it
@@ -684,9 +701,15 @@ memory, 512 MiB for GLM, and goes through the two halves of the card's buffer in
 stream of its own beside the card's work on the call between. That keeps the VRAM as it was, and GLM reads at
 602 to 616 tokens/s, 3% under what the residual in VRAM gave.
 
-A call at the end of a read can be small, and one of fewer than 256 tokens copies its own experts as it does
-alone (see the checks): GLM's longest benchmark prompt ends in a call of 229 tokens, which copies the experts it
-routes to once more for every layer.
+A call at the end of a read can be small, and one of fewer than 256 tokens copied its own experts as it does
+alone (see the checks): GLM's longest benchmark prompt ends in a call of 229 tokens, which copied the experts it
+routes to once more for every layer. A prompt has such a call whenever fewer than 256 tokens are left after its
+last checkpoint or after a call of 1,024. In a read of several calls every call now copies ahead, whatever its
+size, so a small one finds the layer's experts where the call before left them. GLM reads 7,398 tokens that end
+in a call of 230 at 629 to 630 tokens/s where 582 to 585, and 6,244 that end in a call of 100 after a checkpoint
+at 625 where 550; through the server the benchmark's longest prompt went from 534 to 539 to 579 to 582. The
+small call's launches are a larger call's then, and its sums are split another way than they were, so the
+answer after such a prompt can leave the earlier build's at a near tie.
 
 This page said of an earlier timing that a layer spent 12.5 ms on the shared expert, the rows' quantization and
 the cached experts, and read that as work. Timed part by part, the cached experts' rows are 1.9 ms and the
