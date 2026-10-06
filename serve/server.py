@@ -2206,6 +2206,7 @@ class Service:
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))   # texts that stay text inside a message
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
+        self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
@@ -4450,9 +4451,29 @@ def make_handler(svc: Service):
                 self._note(error=err["error"])
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
+        def _responses_ready(self, req, events):
+            """Send a finished Responses result that did not run on the engine."""
+            if not req.get("stream"):
+                return self._json(200, responses_api.collect(events))
+            self._sse()
+            try:
+                for e in events:
+                    self.wfile.write(f"event: {e['type']}\n".encode() + b"data: " +
+                                     json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
+                    self.wfile.flush()
+            except OSError:
+                self._note(outcome="disconnected")
+
         def _responses(self, req):
             """#451: POST /v1/responses - OpenAI's Responses API, stateless (serve/responses.py), on the chat path.
             Errors use the Responses format; once the stream has started they arrive as a response.failed event."""
+            try:
+                title = (responses_api.thread_title_events(req, svc.model_for(req))
+                         if svc.codex_thread_titles else None)
+            except ResponsesError as e:
+                return self._json(e.status, e.body())
+            if title is not None:
+                return self._responses_ready(req, title)
             try:
                 ids, thinking, tools, max_new, asm, validator, req = self._responses_prepare(req)
             except ResponsesError as e:
@@ -5099,6 +5120,7 @@ def main() -> int:
                   model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
+    svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     try:
         svc.set_aliases(cfg.get("aliases"))             # #297: other names the model answers to
     except ValueError as e:
