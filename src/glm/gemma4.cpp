@@ -255,7 +255,6 @@ void Gemma4::alloc_caches() {
         kv += rows_n;
     }
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), 1, (size_t) rows_);
-    probs_.resize((size_t) n_expert_);
 }
 
 // Per-token buffers hold rows_ tokens, row after row.
@@ -527,23 +526,23 @@ float Gemma4::embed_scale() const { return std::sqrt((float) n_embd_); }
 
 // What ggml's MoE graph does for this model: the router's scores over the root of the width, a softmax over every
 // expert, the n_used most likely with their weights made to sum to one, and each expert's own scale on its output.
-void Gemma4::route(int il, const float* logits, int* ids, float* w) {
+void Gemma4::route(int il, const float* logits, int* ids, float* w, float* probs) const {
     const std::vector<float>& escale = blocks_[(size_t) il].escale;
     const float s = 1.f / std::sqrt((float) n_embd_);
     float mx = logits[0] * s;
     for (int e = 1; e < n_expert_; ++e) mx = std::max(mx, logits[e] * s);
     double all = 0.0;
-    for (int e = 0; e < n_expert_; ++e) all += probs_[(size_t) e] = std::exp(logits[e] * s - mx);
+    for (int e = 0; e < n_expert_; ++e) all += probs[e] = std::exp(logits[e] * s - mx);
     const float inv = (float) (1.0 / all);
     float sum = 0.f;
     for (int k = 0; k < n_used_; ++k) {
         int best = 0;
         for (int e = 1; e < n_expert_; ++e)
-            if (probs_[(size_t) e] > probs_[(size_t) best]) best = e;
+            if (probs[e] > probs[best]) best = e;
         ids[k] = best;
-        w[k] = probs_[(size_t) best] * inv;
+        w[k] = probs[best] * inv;
         sum += w[k];
-        probs_[(size_t) best] = -1.f;
+        probs[best] = -1.f;
     }
     const float denom = std::max(sum, kMinWeightSum);
     for (int k = 0; k < n_used_; ++k) w[k] = w[k] / denom * escale[(size_t) ids[k]];

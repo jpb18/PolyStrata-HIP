@@ -688,6 +688,7 @@ void Engine::load(const Options& o) {
         node_ = stay_near(spans, files, threads, node_share_);
     }
     workers_ = std::make_unique<Workers>(threads);
+    route_tmp_.assign((size_t) workers_->threads() * 2 * n_expert_, 0.f);
     if (cached_ > 0 && opt_.expert_swaps > 0) {
         swap_ = std::make_unique<Swap[]>((size_t) opt_.expert_swaps);
         cudaStream_t up = nullptr;
@@ -938,7 +939,7 @@ void Engine::moe(Layer& L, int il, int n) {
         for (int t = 0; t < m; ++t) {
             int ids[kMaxUsed];
             float w[kMaxUsed];
-            route(il, h_rl_ + (size_t) (at + t) * n_expert_, ids, w);
+            route(il, h_rl_ + (size_t) (at + t) * n_expert_, ids, w, route_tmp_.data());
             for (int k = 0; k < n_used_; ++k) {
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];
@@ -1058,14 +1059,21 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const float* d_w = (const float*) (d_rel + 2 * n_expert_ + 2);
     const int32_t* d_cb = (const int32_t*) (d_w + cap);
 
+    // A token's routing is a softmax over every expert and a search for the largest few.  On one thread it was
+    // 0.9 s of the 2.4 s a 7,709-token prompt took with 40 layers of 256 experts, so the host's threads take a
+    // stretch of tokens each.
+    const int parts = std::min(workers_->threads(), (n + kStageRows - 1) / kStageRows);
+    workers_->run(parts, [&](int p) {
+        float* tmp = route_tmp_.data() + (size_t) p * 2 * n_expert_;
+        const int end = (int) ((int64_t) n * (p + 1) / parts);
+        for (int t = (int) ((int64_t) n * p / parts); t < end; ++t)
+            route(il, h_rl_ + (size_t) t * n_expert_, ids_.data() + (size_t) t * n_used_, w + (size_t) t * n_used_,
+                  tmp);
+    });
     count_.assign((size_t) n_expert_, 0);
-    for (int t = 0; t < n; ++t) {
-        int32_t* ids = ids_.data() + (size_t) t * n_used_;
-        route(il, h_rl_ + (size_t) t * n_expert_, ids, w + (size_t) t * n_used_);
-        for (int k = 0; k < n_used_; ++k) {
-            ++count_[(size_t) ids[k]];
-            ++use_[(size_t) il * n_expert_ + (size_t) ids[k]];
-        }
+    for (int i = 0; i < rr; ++i) {
+        ++count_[(size_t) ids_[(size_t) i]];
+        ++use_[(size_t) il * n_expert_ + (size_t) ids_[(size_t) i]];
     }
     // The cached experts that have rows, class after class and a class's in the order of the slots (chan_ has
     // every cached expert in that order); the experts already on their way; then the others that have rows.

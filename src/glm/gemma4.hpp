@@ -33,7 +33,7 @@ protected:
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
-    void route(int il, const float* logits, int* ids, float* w) override;
+    void route(int il, const float* logits, int* ids, float* w, float* tmp) const override;
     void moe_shared(const Layer& L, int il, int n) override;
     void router_scores(const Layer& L, int n) override;
     void finish_logits(float* logits, int rows) override;
@@ -90,7 +90,6 @@ private:
           *att_ = nullptr, *score_ = nullptr, *mlp_ = nullptr, *rin_ = nullptr;
     float *akeys_ = nullptr, *avals_ = nullptr, *awork_ = nullptr;   ///< a prompt batch's attention (attend_batch)
 
-    std::vector<float> probs_;   ///< route()'s scratch
 
     // the draft model: its width and its MLPs', its layers, the projections in and out, its output norm and its
     // token table, which is its output matrix

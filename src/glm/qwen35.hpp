@@ -30,7 +30,7 @@ protected:
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
-    void route(int il, const float* logits, int* ids, float* w) override;
+    void route(int il, const float* logits, int* ids, float* w, float* tmp) const override;
     void moe_shared(const Layer& L, int il, int n) override;
     void block_attend(int64_t pos, int n) override;
     void block_rows(int64_t pos, int n) override;
@@ -68,7 +68,6 @@ private:
           *score_ = nullptr, *sg_ = nullptr;
     float *akeys_ = nullptr, *avals_ = nullptr, *awork_ = nullptr;   ///< a prompt batch's attention (attend_batch)
 
-    std::vector<float> probs_;   ///< route()'s scratch
 };
 
 }  // namespace strata::glm

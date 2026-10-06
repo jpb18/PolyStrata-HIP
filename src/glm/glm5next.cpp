@@ -304,8 +304,6 @@ void Glm5Next::alloc_caches() {
     sel_ = (int32_t*) dmalloc(n * sel_stride_ * sizeof(int32_t), "scratch");
     h_score_ = (float*) hmalloc(n * score_stride_ * sizeof(float), "pinned memory");
     h_sel_ = (int32_t*) hmalloc(n * sel_stride_ * sizeof(int32_t), "pinned memory");
-    probs_.resize((size_t) n_expert_);
-    pick_.resize((size_t) n_expert_);
 }
 
 size_t Glm5Next::row_bytes() const {
@@ -439,20 +437,21 @@ void Glm5Next::dense_ffn(Block& B, int il, int n) {
 
 // What ggml's MoE graph does for this model: sigmoid gates, the n_used largest of gate + bias, and weights from
 // the bare gates.
-void Glm5Next::route(int il, const float* logits, int* ids, float* w) {
+void Glm5Next::route(int il, const float* logits, int* ids, float* w, float* probs) const {
     const std::vector<float>& bias = blocks_[(size_t) il].probs_b;
+    float* pick = probs + n_expert_;
     for (int e = 0; e < n_expert_; ++e) {
-        probs_[(size_t) e] = 1.f / (1.f + std::exp(-logits[e]));
-        pick_[(size_t) e] = probs_[(size_t) e] + bias[(size_t) e];
+        probs[e] = 1.f / (1.f + std::exp(-logits[e]));
+        pick[e] = probs[e] + bias[(size_t) e];
     }
     float sum = 0.f;
     for (int k = 0; k < n_used_; ++k) {
         int best = 0;
         for (int e = 1; e < n_expert_; ++e)
-            if (pick_[(size_t) e] > pick_[(size_t) best]) best = e;
-        pick_[(size_t) best] = -INFINITY;
+            if (pick[e] > pick[best]) best = e;
+        pick[best] = -INFINITY;
         ids[k] = best;
-        w[k] = probs_[(size_t) best];
+        w[k] = probs[best];
         sum += w[k];
     }
     const float denom = w_norm_ ? std::max(sum, kMinWeightSum) : 1.f;

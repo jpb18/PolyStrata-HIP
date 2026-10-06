@@ -135,7 +135,6 @@ void Qwen35::alloc_caches() {
         }
     }
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), 1, (size_t) rows_);
-    probs_.resize((size_t) n_expert_);
 }
 
 // Per-token buffers hold rows_ tokens, row after row.
@@ -259,21 +258,21 @@ void Qwen35::output_rows(int first, int rows, float* h) {
 
 // What ggml's MoE graph does for this model: a softmax over every expert's score, the n_used most likely, and
 // their weights made to sum to one.
-void Qwen35::route(int, const float* logits, int* ids, float* w) {
+void Qwen35::route(int, const float* logits, int* ids, float* w, float* probs) const {
     float mx = logits[0];
     for (int e = 1; e < n_expert_; ++e) mx = std::max(mx, logits[e]);
     double all = 0.0;
-    for (int e = 0; e < n_expert_; ++e) all += probs_[(size_t) e] = std::exp(logits[e] - mx);
+    for (int e = 0; e < n_expert_; ++e) all += probs[e] = std::exp(logits[e] - mx);
     const float inv = (float) (1.0 / all);
     float sum = 0.f;
     for (int k = 0; k < n_used_; ++k) {
         int best = 0;
         for (int e = 1; e < n_expert_; ++e)
-            if (probs_[(size_t) e] > probs_[(size_t) best]) best = e;
+            if (probs[e] > probs[best]) best = e;
         ids[k] = best;
-        w[k] = probs_[(size_t) best] * inv;
+        w[k] = probs[best] * inv;
         sum += w[k];
-        probs_[(size_t) best] = -1.f;
+        probs[best] = -1.f;
     }
     const float denom = std::max(sum, kMinWeightSum);
     for (int k = 0; k < n_used_; ++k) w[k] /= denom;
