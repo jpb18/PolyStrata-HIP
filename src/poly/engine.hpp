@@ -142,6 +142,11 @@ public:
     /// last one.
     void eval(const int32_t* tokens, int n, bool want_logits);
     const float* logits() const { return h_logits_; }
+    /// Feed n tokens of a prompt, none of them a picture's row, as eval() without logits would in calls of
+    /// max_rows(): the same tokens a call, and the same result.  With experts outside the cache it is faster
+    /// than those calls, the more the more of them n is.
+    int max_read() const { return read_rows_; }
+    void read(const int32_t* tokens, int n);
 
     /// Whether the architecture reads pictures.
     virtual bool sees() const { return false; }
@@ -283,6 +288,7 @@ protected:
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);
     void run(const int32_t* tokens, int n);
+    void layer(int il, int n);
     void moe_router(const Layer& L, int n);
     bool moe(Layer& L, int il, int n, const std::function<void()>* first = nullptr);
     void moe_add(int n);
@@ -328,6 +334,7 @@ protected:
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
+    int read_rows_ = 1;       ///< tokens r_ is sized for: read()'s calls, each of rows_
     float rms_eps_ = 0;
     bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
@@ -386,6 +393,7 @@ protected:
     void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
     void* ev_ahead_ = nullptr;                    ///< marks the last of them
     void* ev_free_ = nullptr;                     ///< marks a layer's last read of the staging buffer
+    int staged_il_ = -1;                          ///< the layer whose `ahead` experts the buffer holds, or -1
     size_t stage_bytes_ = 0, chunk_bytes_ = 0;
     int stage_turn_ = 0;
     std::vector<int32_t> ids_, count_, first_, group_, round_;

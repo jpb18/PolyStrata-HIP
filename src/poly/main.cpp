@@ -358,17 +358,21 @@ struct Session {
         if (s.seed != 0) rng.seed(s.seed);
 
         // The last token goes in alone, for the logits that come with it.  The tokens before it go in as many at
-        // a time as the engine takes, up to the next checkpoint.
+        // a time as the engine takes, up to the next checkpoint: several calls' worth when the prompt has no
+        // pictures, which the engine reads faster than the calls (read()), else a call's, with a picture whole.
+        const bool text = pictures.at.empty();
         for (int64_t i = r.resume; i < n;) {
             if (stop.load()) {
                 r.finish = "cancel";
                 break;
             }
             const bool last = i == n - 1;
-            const int64_t m =
-                last ? 1 : engine.whole(i, kept.until_checkpoint(i, std::min<int64_t>(n - 1 - i, engine.max_rows())));
+            const int64_t room = std::min<int64_t>(n - 1 - i, text ? engine.max_read() : engine.max_rows());
+            const int64_t upto = kept.until_checkpoint(i, room);
+            const int64_t m = last ? 1 : text ? upto : engine.whole(i, upto);
             kept.before(i, last);
-            engine.eval(ids.data() + i, (int) m, last);
+            if (text && !last) engine.read(ids.data() + i, (int) m);
+            else engine.eval(ids.data() + i, (int) m, last);
             kept.read(ids.data() + i, m);
             i += m;
             r.read += m;

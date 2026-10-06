@@ -597,6 +597,7 @@ void Engine::follow(int written) {
             coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
             s.at.store(Swap::kFree);
             ++stats_.swapped_experts;
+            staged_il_ = -1;   // the staging buffer holds what was not cached
         }
         n_free += s.at.load() == Swap::kFree;
     }
@@ -667,6 +668,7 @@ void Engine::follow(int written) {
         s->e = in.e;
         s->slot = given;
         given = nullptr;
+        staged_il_ = -1;
         coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
         s->at.store(Swap::kAsked);
         asked = true;
@@ -792,7 +794,8 @@ void Engine::load_drafter() {
 void Engine::shared_scratch() {
     const size_t n = (size_t) rows_, e = n * n_embd_;
     const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
-    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * e);   // the draft block works in it too (draft_input())
+    // the draft block works in it too (draft_input()); read() keeps each of its calls' rows in it
+    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) read_rows_ * n_embd_);
     cur_ = fbuf(e);
     xn_ = fbuf(e);
     ao_ = fbuf(e);
@@ -817,6 +820,7 @@ void Engine::shared_scratch() {
 void Engine::alloc() {
     // --dump-layers prints one token's stages
     rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
+    read_rows_ = rows_ < kStageRows ? rows_ : std::max(rows_, std::min(kReadRows, opt_.max_context) / rows_ * rows_);
     rec_n_ = recurrent_floats();
     state_n_ = rec_n_ + (draft_ ? (size_t) n_embd_ : 0);
     state_ = (float*) dmalloc((state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0)) * sizeof(float),
@@ -1139,6 +1143,7 @@ void Engine::moe_add(int n) {
 // m experts from the mapped file into the staging buffer: gate and up of each back to back from the start, the
 // downs after them.  The two pinned buffers take turns, so the workers fill one while the other uploads.
 void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream) {
+    staged_il_ = -1;   // whatever the buffer held
     const size_t gu2 = 2 * L.gu_bytes, down_at = pad((size_t) m * gu2);
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
     for (int j0 = 0; j0 < m; j0 += per) {
@@ -1177,14 +1182,18 @@ void Engine::moe_rows(Layer& L, int il, int n) {
 
     moe_shared(L, il, n);
 
-    const bool ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead;
-    if (ahead) plan_ahead(L, il);
+    // read() takes a layer's calls one after the other.  What the call before this one copied ahead is then
+    // still in the buffer, and L.ahead still says what: the copy is made once for all of them.
+    const bool held = staged_il_ == il;
+    const bool ahead = held || (opt_.stage_ahead > 0 && n >= opt_.stage_ahead);
+    if (ahead && !held) plan_ahead(L, il);
     const int n_ahead = ahead ? (int) L.ahead.size() : 0;
-    if (n_ahead > 0) {
+    if (n_ahead > 0 && !held) {
         // the buffer is free once the layer before has read it
         ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
         stage(L, L.ahead.data(), n_ahead, up_);
         ck(cudaEventRecord((cudaEvent_t) ev_ahead_, cs(up_)), "expert staging");
+        staged_il_ = il;
     }
 
     const Clock::time_point t0 = Clock::now();
@@ -1555,6 +1564,82 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
     pos_ += n;
+    stats_.tokens += n;
+}
+
+// A layer for n tokens, as run() hands it to the card when nothing is replayed or printed.
+void Engine::layer(int il, int n) {
+    Layer& L = layers_[(size_t) il];
+    layer_head(L, il, n);
+    if (!L.moe) return;
+    if (mmq_ && n >= kStageRows) {
+        moe_rows(L, il, n);
+    } else {
+        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+        moe_shared(L, il, n);
+        if (moe(L, il, n)) moe_add(n);
+    }
+    layer_tail(L, il, n);
+}
+
+// A prompt's tokens in the calls eval() would get, max_rows() at a time.  With experts outside the cache, each
+// call copies every layer's through the staging buffer, which is most of what reading a prompt takes.  So the
+// calls go through a layer one after the other before any goes on to the next, and the second one finds the
+// layer's experts where the first one's copy left them (moe_rows()).  A call's tokens meet what they met in a
+// call of their own, in the same order, so the result is eval()'s.  All a call needs kept from one layer to the
+// next is its rows of r_, which holds max_read() tokens for this.
+void Engine::read(const int32_t* tokens, int n) {
+    if (n < 1 || n > read_rows_) throw std::logic_error("read takes 1 to max_read() tokens");
+    for (const Image& im : images_)
+        if (im.at < pos_ + n && im.at + im.n > pos_)
+            throw std::logic_error("read takes no rows of a picture: eval() does, a picture a call");
+    if (n <= rows_ || !mmq_ || cached_ == total_experts()) {
+        for (int at = 0; at < n; at += rows_) eval(tokens + at, std::min(rows_, n - at), false);
+        return;
+    }
+    if (pos_ + n > opt_.max_context)
+        throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
+
+    ck(cudaStreamSynchronize(cs(st_)), "read");
+    if (n_swap_ > 0) follow(0);
+    const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row;
+    const size_t part = (size_t) std::max(streams(), draft_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
+    const float scale = embed_scale();
+    float* const r0 = r_;
+    const int64_t pos0 = pos_;
+    for (int at = 0; at < n; at += rows_) {
+        const int m = std::min(rows_, n - at);
+        for (int t = 0; t < m; ++t) {
+            float* r = h_r_ + (size_t) t * r_row;
+            if (!input(tokens[at + t], pos0 + at + t, r) && scale != 1.f)
+                for (size_t i = 0; i < e_row; ++i) r[i] *= scale;
+            for (int h = 1; h < streams(); ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
+        }
+        ck(cudaMemcpyAsync(r0 + (size_t) (at / rows_) * part, h_r_, (size_t) m * r_row * sizeof(float),
+                           cudaMemcpyHostToDevice, cs(st_)),
+           "embed");
+        ck(cudaStreamSynchronize(cs(st_)), "embed");   // h_r_ is filled again
+    }
+    try {
+        for (int il = 0; il <= n_layer_; ++il)   // the last turn: the model's output, for the draft block
+            for (int at = 0; at < n; at += rows_) {
+                const int m = std::min(rows_, n - at);
+                r_ = r0 + (size_t) (at / rows_) * part;
+                pos_ = pos0 + at;
+                if (il < n_layer_) {
+                    layer(il, m);
+                } else if (draft_) {
+                    output_rows(0, m, hn_ + n_embd_);
+                    draft_rows(tokens + at, ahead_pos_ == pos_ && tokens[at] == ahead_tok_ ? 1 : 0, m);
+                }
+            }
+    } catch (...) {
+        r_ = r0;
+        pos_ = pos0;
+        throw;
+    }
+    r_ = r0;
+    pos_ = pos0 + n;
     stats_.tokens += n;
 }
 
