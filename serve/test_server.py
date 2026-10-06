@@ -847,6 +847,53 @@ class StatusNeedsTheKey(unittest.TestCase):
             httpd.server_close()
 
 
+class _Reached(Exception):
+    """raised by the patched serve(): main() got past the API key checks."""
+
+
+class ConfigApiKey(unittest.TestCase):
+    """#569 (and #213): the key in the config, through main(): empty is a warning, a blank one is refused."""
+
+    def run_main(self, cfg):
+        """-> (return code, the API key the service got or None when main() stopped before serving, stderr)."""
+        import serve.server as S
+        seen = {}
+
+        def fake_serve(svc, host=None, port=None):
+            seen["key"] = svc.api_key
+            raise _Reached
+
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ), \
+                mock.patch.object(S, "serve", fake_serve), mock.patch.object(sys, "stderr", new=err):
+            os.environ.pop("STRATA_API_KEY", None)
+            p = Path(d) / "cfg.json"
+            p.write_text(json.dumps(cfg), encoding="utf-8")
+            with mock.patch.object(sys, "argv", ["server.py", "--engine", "mock", "--port", "0", "--config", str(p)]):
+                try:
+                    code = S.main()
+                except _Reached:
+                    code = 0
+        return code, seen.get("key"), err.getvalue()
+
+    def test_an_empty_key_is_a_warning(self):
+        code, key, err = self.run_main({"api_key": ""})
+        self.assertEqual((code, key), (0, ""))
+        self.assertIn("api_key in the config is empty", err)
+
+    def test_a_blank_key_is_refused(self):
+        for value in ("   ", "\r\n"):
+            self.assertEqual(self.run_main({"api_key": value})[:2], (2, None), repr(value))
+
+    def test_a_key_and_no_key(self):
+        code, key, err = self.run_main({"api_key": "cfg"})
+        self.assertEqual((code, key), (0, "cfg"))
+        self.assertNotIn("is empty", err)
+        code, key, err = self.run_main({})
+        self.assertEqual((code, key), (0, ""))
+        self.assertNotIn("is empty", err)
+
+
 class ApiKeyForms(unittest.TestCase):
     """#725: a key no client could send (spaces or a line end around it), and a key outside ASCII."""
 
