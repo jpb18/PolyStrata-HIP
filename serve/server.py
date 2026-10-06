@@ -4115,6 +4115,7 @@ def make_handler(svc: Service):
             params["n_predict"] = svc.shared.get("max_tokens", -1)
             props = {"default_generation_settings": {"n_ctx": svc.engine.max_context, "params": params},
                      "total_slots": 1, "model_alias": svc.model, "chat_template": svc.template.source,
+                     "chat_template_caps": svc.template.caps,
                      "modalities": {"vision": svc.vision is not None}, "models_autoload": hasattr(svc.engine, "restart"),
                      "is_sleeping": not svc.loaded()}
             if getattr(svc.engine, "model_path", None):

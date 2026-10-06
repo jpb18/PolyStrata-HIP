@@ -2123,6 +2123,20 @@ class SharedSettings(unittest.TestCase):
             self.svc.trusted_origins = []
 
 
+class TemplateCaps(unittest.TestCase):
+    def test_probe_errors_are_logged_and_swallowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "chat_template.jinja"
+            path.write_text("{{ missing_global() }}", encoding="utf-8")
+            with self.assertLogs("serve.frontend", level="DEBUG") as logs:
+                caps = ChatTemplate(path).caps
+            self.assertFalse(any(caps.values()))
+            self.assertTrue(any("missing_global" in line for line in logs.output))
+            with mock.patch.object(ChatTemplate, "render", side_effect=RuntimeError("render bug")):
+                caps = ChatTemplate(path).caps       # any error of a probe is a feature that is off, not a crash
+            self.assertFalse(any(caps.values()))
+
+
 class WebApp(unittest.TestCase):
     """The web app (PR #22's dashboard idea, rebuilt): its page and files, and GET /metrics."""
 
@@ -2204,6 +2218,9 @@ class WebApp(unittest.TestCase):
                 self.assertEqual(props["default_generation_settings"]["params"],
                                  {"temperature": 0.7, "repeat_penalty": 1.1, "n_predict": 4096})
                 self.assertEqual(props["chat_template"], (ROOT / "serve/chat_template.jinja").read_text(encoding="utf-8"))
+                for key in ("supports_tools", "supports_tool_calls", "supports_system_role",
+                            "supports_parallel_tool_calls", "supports_preserve_reasoning"):
+                    self.assertIs(props["chat_template_caps"][key], True)
                 self.assertEqual(props["modalities"]["vision"], vision is not None)
                 self.assertEqual(props["total_slots"], 1)
                 self.assertFalse(props["models_autoload"])
@@ -2213,6 +2230,64 @@ class WebApp(unittest.TestCase):
             self.assertEqual(self.get("/props?model=not-loaded&autoload=true")[0], 404)
         finally:
             svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared = previous
+
+    def test_props_caps_follow_the_active_template(self):
+        source = self.svc.template.source
+        cases = [("{# tools tool_calls reasoning_content <tool_call> <function= #}{{ messages[-1].content }}",
+                  {"supports_tools": False, "supports_tool_calls": False, "supports_system_role": False,
+                   "supports_parallel_tool_calls": False, "supports_preserve_reasoning": False}),
+                 ("{% set preserve_thinking = false %}" + source, {"supports_preserve_reasoning": False}),
+                 ("{% for m in messages %}{% if m.tool_calls and m.tool_calls|length > 1 %}"
+                  "{{ raise_exception('Only one tool call is supported.') }}{% endif %}{% endfor %}" + source,
+                  {"supports_tool_calls": True, "supports_parallel_tool_calls": False}),
+                 ("{% if tools or messages[0].role == 'system' %}{{ raise_exception('Unsupported.') }}{% endif %}"
+                  "{{ messages[-1].content }}",
+                  {"supports_tools": False, "supports_tool_calls": False, "supports_system_role": False,
+                   "supports_parallel_tool_calls": False, "supports_preserve_reasoning": False}),
+                 ("{% for m in messages %}{{ m.content }}{% if m.tool_calls %}"
+                  "<tool_call>{{ m.tool_calls|tojson }}</tool_call>{% endif %}{% endfor %}",
+                  {"supports_tools": False, "supports_tool_calls": False, "supports_system_role": True,
+                   "supports_parallel_tool_calls": False, "supports_preserve_reasoning": False}),
+                 ("{% for m in messages %}{% if m.tool_calls %}{% for c in m.tool_calls %}"
+                  "{% set fn = c.function if c.function is defined else c %}"
+                  "{% if not tools or fn.name not in tools|map(attribute='name')|list %}"
+                  "{{ raise_exception('Tool calls require matching tool definitions.') }}"
+                  "{% endif %}{% endfor %}{% endif %}{% endfor %}" + source,
+                  {"supports_tools": True, "supports_tool_calls": True, "supports_parallel_tool_calls": True})]
+        original = self.svc.template
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "chat_template.jinja"
+                for text, expected in cases:
+                    with self.subTest(expected=expected):
+                        path.write_text(text, encoding="utf-8")
+                        self.svc.template = ChatTemplate(path)
+                        code, _, body = self.get("/props")
+                        self.assertEqual(code, 200)
+                        props = json.loads(body)
+                        self.assertEqual(props["chat_template"], text)
+                        for key, value in expected.items():
+                            self.assertIs(props["chat_template_caps"][key], value)
+        finally:
+            self.svc.template = original
+
+    def test_props_caps_are_ready_for_concurrent_requests(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        original = self.svc.template
+        try:
+            self.svc.template = ChatTemplate(ROOT / "serve/chat_template.jinja")
+            with mock.patch.object(self.svc.template, "render", side_effect=AssertionError("render during request")):
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    results = list(pool.map(lambda _: self.get("/props"), range(4)))
+            for code, _, body in results:
+                self.assertEqual(code, 200)
+                caps = json.loads(body)["chat_template_caps"]
+                for key in ("supports_tools", "supports_tool_calls", "supports_system_role",
+                            "supports_parallel_tool_calls", "supports_preserve_reasoning"):
+                    self.assertIs(caps[key], True)
+        finally:
+            self.svc.template = original
 
     def test_discovery_needs_the_api_key(self):
         self.svc.api_key = "secret"
