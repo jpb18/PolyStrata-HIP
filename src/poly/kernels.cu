@@ -26,7 +26,8 @@ __device__ __forceinline__ float warp_sum(float x) {
     return x;
 }
 
-// One value per thread summed over the block.  blockDim.x is a multiple of 32 and at most 256.
+// One value per thread summed over the block.  blockDim.x is a multiple of 32, and `part` has a float a warp: 8
+// where a block is 256 threads at most, 32 where it can be 1024.
 __device__ __forceinline__ float block_sum(float x, float* part) {
     x = warp_sum(x);
     if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = x;
@@ -56,7 +57,7 @@ __device__ __forceinline__ float ldw(const uint16_t* w, size_t i) { return __uin
 template<typename W>
 __global__ void gemv_kernel(const W* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, int n_in,
                             int n_out, int rows_per_x) {
-    __shared__ float part[8];
+    __shared__ float part[32];
     const int o = blockIdx.x;
     const size_t tok = blockIdx.y;
     const W* wr = w + size_t(o) * n_in;
@@ -67,15 +68,25 @@ __global__ void gemv_kernel(const W* __restrict__ w, const float* __restrict__ x
     if (threadIdx.x == 0) y[tok * n_out + o] = acc;
 }
 
+// The threads of a block that sums over n values.  A thread reads its values one after the other, and a kernel
+// this small takes as long as those reads in a row: four a thread at most, while a block has the threads.  With
+// 256 threads for 4096 values, GLM 5.3 Flash's layer norms, small products and stream mixing were 2.7 of the 11
+// ms a token its card worked before a layer's router had its scores.
+int sum_threads(int n) {
+    int threads = 128;
+    while (threads < 1024 && threads * 4 < n) threads *= 2;
+    return threads;
+}
+
 template<typename W>
 void gemv(const W* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows, void* stream) {
-    const int threads = n_in >= 1024 ? 256 : n_in >= 128 ? 128 : 32;
+    const int threads = n_in >= 128 ? sum_threads(n_in) : 32;
     gemv_kernel<W><<<dim3(n_out, rows), threads, 0, (cudaStream_t) stream>>>(w, x, y, n_in, n_out, rows_per_x);
 }
 
 __global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, float* y, int n,
                                 float eps, int y_stride) {
-    __shared__ float part[8];
+    __shared__ float part[32];
     const float* xr = x + size_t(blockIdx.x) * n;
     float* yr = y + size_t(blockIdx.x) * y_stride;
     float ss = 0.0f;
@@ -105,7 +116,7 @@ __global__ void layer_norm_kernel(const float* __restrict__ x, const float* __re
 // mix[o] = fn row o . r for o < n_mix; mix[n_mix] = sum of r^2 (the flat RMS norm's input)
 __global__ void hc_mix_kernel(const float* __restrict__ r, const float* __restrict__ fn, float* __restrict__ mix,
                               int n, int n_mix) {
-    __shared__ float part[8];
+    __shared__ float part[32];
     const int o = blockIdx.x;
     r += size_t(blockIdx.y) * n;
     mix += size_t(blockIdx.y) * (n_mix + 1);
@@ -763,7 +774,7 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
 }
 
 void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream, int y_stride) {
-    rms_norm_kernel<<<rows, n >= 1024 ? 256 : 128, 0, cs(stream)>>>(x, w, y, n, eps, y_stride ? y_stride : n);
+    rms_norm_kernel<<<rows, sum_threads(n), 0, cs(stream)>>>(x, w, y, n, eps, y_stride ? y_stride : n);
 }
 
 void layer_norm(const float* x, const float* w, const float* b, float* y, int n, int rows, float eps, void* stream) {
@@ -773,7 +784,7 @@ void layer_norm(const float* x, const float* w, const float* b, float* y, int n,
 void hc_pre(const float* r, const float* fn, const float* scale, const float* base, float* mix, float* hcw,
             float* cur, int n_embd, int rows, float norm_eps, float hc_eps, int sinkhorn_iters, void* stream) {
     const int n_mix = HC * (2 + HC);
-    hc_mix_kernel<<<dim3(n_mix + 1, rows), 256, 0, cs(stream)>>>(r, fn, mix, HC * n_embd, n_mix);
+    hc_mix_kernel<<<dim3(n_mix + 1, rows), sum_threads(HC * n_embd), 0, cs(stream)>>>(r, fn, mix, HC * n_embd, n_mix);
     hc_read_kernel<<<dim3(grid(n_embd, 256), rows), 256, 0, cs(stream)>>>(r, mix, scale, base, hcw, cur, n_embd,
                                                                          norm_eps, hc_eps, sinkhorn_iters);
 }
