@@ -265,19 +265,18 @@ after it at 68, 54 and 55; [What was tuned](#what-was-tuned) has the steps betwe
 | Gemma 4 26B-A4B | 26 | 0.22 | 133 | 206 | 100% | 67% |
 | | 2,656 | 0.89 | 3,156 | 185 | 100% | 75% |
 | | 10,393 | 2.9 | 3,006 | 127 | 100% | 62% |
-| GLM 5.3 Flash 3.0bit | 23 | 0.89 | 26 | 43 | 48% | 84% |
-| | 2,427 | 7.5 | 325 | 46 | 48% | 89% |
-| | 9,448 | 23.7 | 312 | 46 | 58% | 86% |
+| GLM 5.3 Flash 3.0bit | 23 | 0.85 | 27 | 43 | 49% | 85% |
+| | 2,424 | 7.3 | 331 | 43 | 49% | 77% |
+| | 9,446 | 23.1 | 321 | 46 | 58% | 82% |
 
 A short prompt is read a few tokens at a time, which is why its reading speed is low. Gemma 4 thinks in this
 table, as the others do, and guesses with its draft model. Before the last three changes to writing in
 [What was tuned](#what-was-tuned), the three new models wrote 125, 102 and 122 tokens/s after the short prompt
 and 95, 78 and 93 after the longest.
 
-GLM's rows are of the engine before the changes listed there, which left its speeds about where they were: its
-tokens are bound by the experts on the CPU. The builds after each change to reading wrote 41 to 43 tokens/s after
-the short prompt in the same test, and another size of it with a third of its experts in VRAM (REAP50) wrote 36
-to 37 before and after the last change.
+GLM's speeds are where they were before the changes listed there, when it wrote 43, 46 and 46 tokens/s in the
+same test: half its experts are on the CPU, and they bound its tokens. A second run of the benchmark gave 43, 46
+and 48. GLM runs here from a config written by hand, with its draft block and an expert profile.
 
 GLM is sensitive to what the machine did before. After the other models had run, its first request came out at
 28 to 35 tokens/s until its file was back in the file cache, and its starts were ended by a kill signal while the
