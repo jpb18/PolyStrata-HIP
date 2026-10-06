@@ -2206,6 +2206,7 @@ class Service:
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))   # texts that stay text inside a message
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
+        self.codex_compaction_cache = False           # #924 (opt-in): a Codex compaction is rendered with its conversation's tools
         self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
@@ -4586,13 +4587,24 @@ def make_handler(svc: Service):
             except ValueError as e:
                 raise ResponsesError(str(e), "stop") from None
             svc.load()
+            # #924 (opt-in): a Codex compaction request is rendered with its conversation's tools, so its prompt
+            # starts as the cached one did; the parser and the response keep the request's own tools
+            shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
             try:
-                ids, thinking, max_new = svc.prepare(messages, tools, kw, req.get("max_output_tokens") or 0)
+                try:
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                except ValueError:
+                    if shown is tools:
+                        raise
+                    shown = tools                            # too long with the kept tools: the request as sent
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
             except ResponsesError:
                 raise
             except ValueError as e:                          # too long for the context, an image without vision
                 raise ResponsesError(str(e), "input", "context_length_exceeded" if "context" in str(e) else None) \
                     from None
+            if svc.codex_compaction_cache:
+                responses_api.prompt_made(req, shown)
             _debug_req("responses", req, messages, tools, max_new, thinking, len(ids))
             include = req.get("include") if isinstance(req.get("include"), list) else []
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
@@ -5121,6 +5133,7 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
+    svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
     try:
         svc.set_aliases(cfg.get("aliases"))             # #297: other names the model answers to
     except ValueError as e:

@@ -1031,6 +1031,21 @@ tool descriptions) was 9,443 tokens, read in 10 s; in a tool loop, each later tu
 the cache and read only the new part in 1-2 s. On Windows, Codex's sandbox rejected every shell command in that test
 until it was started with `-c 'windows.sandbox="unelevated"'` (a Codex setting, not Strata's).
 
+**Codex's compaction (opt-in: `"codex_compaction_cache": true` in `strata-<model>.json`).** When the context fills up (or
+on `/compact`), Codex sends the conversation once more with a request to summarize it, and with `tools: []`. The template
+writes the tools at the top of the prompt, so that prompt would share only its first few tokens with the conversation the
+engine holds and be read again from the start, at its longest. With the option on, Strata keeps which Codex conversation
+sent the last prompt other than a compaction (`session_id` and `thread_id` from `client_metadata["x-codex-turn-metadata"]`)
+and the tools that prompt was rendered with; a request Codex marks `"request_kind": "compaction"`, from that same
+conversation and without tools of its own, is rendered with them. Only the prompt: for the output parser and in the
+response the request's tools stay what Codex sent, none, so a tool call the model writes comes back as a plain function
+call without its namespace or custom-tool form. It is one entry, replaced by each such prompt; a compaction of another
+conversation, a request without that metadata (Codex before 0.140) or a restart renders the request as sent, and so does
+one that would not fit the context with the kept tools. Off by default: the prompt of a compaction differs from the
+one the client sent. The author measured, with Codex CLI 0.160.0 and an engine that only counts the shared prompt start,
+that a compaction after an 85,000-token conversation reused 84,895 of its 84,997 tokens and read 102; without it, 41 of
+80,683.
+
 ## Tools from MCP servers
 
 The chat page can give the model tools from [MCP](https://modelcontextprotocol.io) servers, as LM Studio and Claude
