@@ -7,18 +7,86 @@
 #include "strata/sycl_queue.hpp"
 #include "strata/core/expert_cache.hpp"
 
-#if !defined(STRATA_USE_HIP)
+// #533's segmented cache uses CUDA's virtual memory management (cuMem*): not on HIP, neither the RDNA backend nor
+// the gfx906 compat build (PR #638), which compiles this file as HIP without STRATA_USE_HIP
+#define STRATA_EC_NO_VMM 1   // SYCL port: no driver virtual memory management on Level Zero (--vram-elastic is CUDA-only, #533)
+
+#if !defined(STRATA_EC_NO_VMM)
    // #533: the virtual memory management types (the functions come through the
    // runtime's entry points)
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
+#include <cstdlib>
 #include <utility>
 #include <cstring>
 
 namespace strata::core {
+
+// See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
+// not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
+// NVIDIA's reference snippet): an expert cache that pushes the system into swap would be far slower than a smaller one.
+size_t device_free_bytes() try {
+    size_t free_b = 0, total_b = 0;
+    /*
+    DPCT1106: 'cudaMemGetInfo' was migrated with the Intel extensions for
+    device information which may not be supported by all compilers or runtimes.
+    You may need to adjust the code.
+    */
+    dpct::get_current_device().get_memory_info(free_b, total_b);
+#if defined(__linux__) && !defined(STRATA_HIP_GFX906)   // (the gfx906 compat layer has no cudaDevAttrIntegrated; that GPU is discrete)
+    // per device: a box can mix an integrated GPU (an APU) with a discrete one, and the answer is the CURRENT device's
+    static std::atomic<int> uma_cache[64];   // 0 unknown, 1 integrated (unified memory), 2 discrete
+    bool unified_memory = false;
+    {
+        int dev = 0, v = 0;
+        if (DPCT_CHECK_ERROR(dev = dpct::get_current_device_id()) == 0 &&
+            dev >= 0 && dev < 64) {
+            int c = uma_cache[dev].load(std::memory_order_acquire);
+            if (c == 0) {
+                c = DPCT_CHECK_ERROR(
+                        v = dpct::get_device(dev).get_integrated()) == 0 &&
+                            v
+                        ? 1
+                        : 2;
+                uma_cache[dev].store(c, std::memory_order_release);
+            }
+            unified_memory = c == 1;
+        }
+    }
+    if (unified_memory) {
+        if (FILE* m = std::fopen("/proc/meminfo", "r")) {
+            char line[256];
+            unsigned long long kb = 0;
+            while (std::fgets(line, sizeof line, m))
+                if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
+            std::fclose(m);
+            // STRATA_UMA_HEADROOM_GIB: a whole number of GiB, 0..1024; anything else keeps the default 6 (said once)
+            static const long gib = [] {
+                const char* h = std::getenv("STRATA_UMA_HEADROOM_GIB");
+                if (h == nullptr) return 6L;
+                char* end = nullptr;
+                const long v = std::strtol(h, &end, 10);
+                if (end != h && *end == '\0' && v >= 0 && v <= 1024) return v;
+                std::fprintf(stderr, "strata: STRATA_UMA_HEADROOM_GIB=%s is not a whole number of GiB (0-1024): using 6\n", h);
+                return 6L;
+            }();
+            const unsigned long long head = (unsigned long long) gib << 30;
+            const unsigned long long avail = kb << 10;
+            if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
+        }
+    }
+#endif
+    return free_b;
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  std::exit(1);
+}
 
 bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_expert,
                          std::vector<std::pair<int32_t, int32_t>>& ranked, int64_t& slots, std::string& err) {
@@ -154,7 +222,7 @@ ExpertCache::~ExpertCache() { close(); }
 // ---- #533: the segmented arena (--vram-elastic).  The driver API's virtual memory functions, looked up through the
 // runtime (no link against the driver library): one address range for the whole arena, backed by physical segments,
 // and the tail's segments unmapped / mapped again later.  Nothing here runs unless a segment size was set.
-#if 0   // SYCL port: no driver virtual memory management (--vram-elastic is CUDA-only, #533)
+#if !defined(STRATA_EC_NO_VMM)
 namespace {
 struct Vmm {
     int(CUDAAPI *device_get)(int *, int) = nullptr;
@@ -258,7 +326,7 @@ bool map_segment(const Vmm &v, int dev, dpct::device_ptr va, size_t bytes,
 #endif
 
 bool ExpertCache::open_segmented(uint64_t want, std::string &err) try {
-#if 1   // SYCL port: --vram-elastic is CUDA-only (#533)
+#if defined(STRATA_EC_NO_VMM)
     (void) want;
     err = "ExpertCache: --vram-elastic (a segmented expert cache) is CUDA-only for now";
     return false;
@@ -324,7 +392,7 @@ catch (sycl::exception const &exc) {
 }
 
 void ExpertCache::release_segmented() {
-#if 0   // SYCL port: no segmented arena (#533)
+#if !defined(STRATA_EC_NO_VMM)
     const Vmm& v = vmm();
     if (base_ != nullptr) dpct::get_current_device().queues_wait_and_throw();
     const dpct::device_ptr va = reinterpret_cast<dpct::device_ptr>(base_);
@@ -363,7 +431,7 @@ bool ExpertCache::shrink(int64_t keep_bytes, std::string &err) try {
         err = "the expert cache is not segmented (the engine needs --vram-elastic)";
         return false;
     }
-#if 1   // SYCL port: --vram-elastic is CUDA-only (#533)
+#if defined(STRATA_EC_NO_VMM)
     (void) keep_bytes;
     return false;
 #else
@@ -416,7 +484,7 @@ bool ExpertCache::grow(int64_t want_bytes, std::string& err) {
         err = "the expert cache is not segmented (the engine needs --vram-elastic)";
         return false;
     }
-#if 1   // SYCL port: --vram-elastic is CUDA-only (#533)
+#if defined(STRATA_EC_NO_VMM)
     (void) want_bytes;
     return false;
 #else
@@ -464,8 +532,14 @@ bool ExpertCache::ensure_blocking_staging(std::size_t bytes, std::string& err) {
 }
 #endif
 
-bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
-                       int64_t blob_bytes, std::string &err) try {
+namespace {
+bool g_cache_vmm = false;   // set_vmm
+}  // namespace
+
+void ExpertCache::set_vmm(bool enabled) { g_cache_vmm = enabled; }
+
+bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int64_t blob_bytes,
+                       std::string& err) {
     close();
     if (n_slots <= 0) {
         err = "ExpertCache: n_slots must be positive";
@@ -492,6 +566,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
     */
     if (DPCT_CHECK_ERROR(
             dpct::get_current_device().get_memory_info(free_b, total_b)) == 0) {
+        free_b = device_free_bytes();   // unified memory: what the OS can give back counts (see the header)
         if ((uint64_t) free_b < want) {
             char buf[320];
             std::snprintf(buf, sizeof buf,
@@ -507,6 +582,18 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
 
     if (seg_req_ > 0) {   // #533: --vram-elastic: physical segments behind one address range (zeroed below)
         if (!open_segmented(want, err)) return false;
+    } else if (g_cache_vmm && vmm_available()) {
+        // the elastic K/V: every chunk mapped now; the K/V may later take some of them (and give them back)
+        auto r = std::make_unique<VmmRange>();
+        if (!r->reserve(want) || !r->map_range(0, r->chunks(), [] { return (VmmChunk) 0; })) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "ExpertCache: mapping %.2f GiB of VRAM failed: out of memory",
+                          (double) want / 1073741824.0);
+            err = buf;
+            return false;
+        }
+        base_ = r->base();
+        vmm_ = std::move(r);
     } else if (DPCT_CHECK_ERROR(
                    base_ = (uint8_t *)sycl::malloc_device(
                        (size_t)want, dpct::get_in_order_queue())) != 0) {
@@ -563,11 +650,6 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert,
     }
     return true;
 }
-catch (sycl::exception const &exc) {
-  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
-            << ", line:" << __LINE__ << std::endl;
-  std::exit(1);
-}
 
 bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_layers, int64_t n_expert,
                              std::string& err) {
@@ -611,6 +693,9 @@ void ExpertCache::close() {
     off_.clear();
     if (!segs_.empty()) {
         release_segmented();
+    } else if (vmm_) {
+        vmm_.reset();   // unmaps and frees every chunk it still holds
+        base_ = nullptr;
     } else if (base_ != nullptr) {
         sycl::free(base_, dpct::get_in_order_queue());
         base_ = nullptr;
