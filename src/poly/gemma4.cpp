@@ -498,6 +498,12 @@ void Gemma4::layer_tail(Layer&, int il, int n) {
     if (B.out_scale != 1.f) axpy(r_, B.out_scale, r_, all, false, st_);
 }
 
+// The MLP's output is the head's, and the tail adds it to the experts'.
+void Gemma4::shift_rows(ptrdiff_t by) {
+    Engine::shift_rows(by);
+    mlp_ += by * n_embd_;
+}
+
 void Gemma4::output_rows(int first, int rows, float* h) {
     rms_norm(r_ + (size_t) first * n_embd_, fp(out_norm_), h, n_embd_, rows, rms_eps_, st_);
 }

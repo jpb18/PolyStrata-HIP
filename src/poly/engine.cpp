@@ -206,7 +206,9 @@ Engine::~Engine() {
     mmq_.reset();
     for (void* p : dev_allocs_) cudaFree(p);
     for (void* p : host_allocs_) cudaFreeHost(p);
-    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_})
+    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_})
+        if (e) cudaEventDestroy((cudaEvent_t) e);
+    for (void* e : ev_row_)
         if (e) cudaEventDestroy((cudaEvent_t) e);
     for (int j = 0; j < n_swap_; ++j)
         if (swap_[(size_t) j].done) cudaEventDestroy(swap_[(size_t) j].done);
@@ -654,9 +656,12 @@ void Engine::load(const Options& o) {
     cudaStream_t st = nullptr;
     ck(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking), "cudaStreamCreate");
     st_ = st;
-    cudaEvent_t ev = nullptr;
-    ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
-    ev_ = ev;
+    for (int r = 0; r < opt_.window; ++r) {
+        cudaEvent_t ev = nullptr;
+        ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+        ev_row_[r] = ev;
+    }
+    ev_ = ev_row_[0];
     blas_ = blas_create(st_);
 
     // the token table stays in the file, a row a token, and embed() reads a row in whatever type it has
@@ -812,8 +817,8 @@ void Engine::alloc() {
     q8_ = dmalloc(n * kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
 
     h_r_ = (float*) hmalloc(n * streams() * n_embd_ * sizeof(float), "pinned memory");
-    at_ = (long long*) dmalloc(2 * sizeof(long long), "scratch");
-    h_at_ = (long long*) hmalloc(2 * sizeof(long long), "pinned memory");
+    at_ = (long long*) dmalloc((size_t) opt_.window * 2 * sizeof(long long), "scratch");
+    h_at_ = (long long*) hmalloc((size_t) opt_.window * 2 * sizeof(long long), "pinned memory");
     h_rl_ = (float*) hmalloc(n * n_expert_ * sizeof(float), "pinned memory");
     h_x_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
     h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
@@ -968,9 +973,11 @@ void Engine::moe_router(const Layer& L, int n) {
     ck(cudaMemcpyAsync(h_x_, xn_, rows * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
 }
 
-// The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.
-void Engine::moe(Layer& L, int il, int n) {
-    const size_t e_row = (size_t) n_embd_, rows = (size_t) n;
+// The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.  True
+// when experts were computed on the CPU: their sum waits in h_cpu_ for moe_add().  `first` is run once, by the
+// thread that hands the cached experts to the card and ahead of them.
+bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+    const size_t e_row = (size_t) n_embd_;
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
     stats_.route_wait_ms += ms_since(t0);
@@ -1013,6 +1020,7 @@ void Engine::moe(Layer& L, int il, int n) {
         // Nothing else goes to the stream until the CPU experts are done, so one of their threads hands these to
         // the card meanwhile: on this thread they held the CPU experts up.
         const std::function<void()> launch = [&] {
+            if (first && at == 0) (*first)();
             const size_t ff = (size_t) n_ff_exp_, q8_row = kernels::native_q8_1_bytes(n_ff_exp_);
             const int per = rows_ >= kSlots ? kSlots : 1;   // the scratch holds rows_ experts' values
             ScaledRows sum{};
@@ -1061,11 +1069,16 @@ void Engine::moe(Layer& L, int il, int n) {
         any_host = true;
         t0 = Clock::now();
         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
-                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, n_cached > 0 ? &launch : nullptr);
+                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu,
+                    n_cached > 0 || (first && at == 0) ? &launch : nullptr);
         stats_.cpu_ms += ms_since(t0);
     }
-    if (!any_host) return;
-    ck(cudaMemcpyAsync(cpu_, h_cpu_, rows * e_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
+    return any_host;
+}
+
+// The CPU's experts of n tokens into the routed experts' sum.
+void Engine::moe_add(int n) {
+    ck(cudaMemcpyAsync(cpu_, h_cpu_, (size_t) n * n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
        "host experts");
     axpy(cpu_, 1.f, fo_, n * n_embd_, true, st_);
 }
@@ -1341,31 +1354,124 @@ void Engine::run(const int32_t* tokens, int n) {
         if (!made[key]) made[key] = record(work);
         ck(cudaGraphLaunch((cudaGraphExec_t) made[key], cs(st_)), "layer graph");
     };
-    if (replay) {
-        h_at_[0] = pos_;
-        h_at_[1] = turn(pos_);
-        ck(cudaMemcpyAsync(at_, h_at_, 2 * sizeof(long long), cudaMemcpyHostToDevice, cs(st_)), "position");
+    if (replay) {   // a pair a token: a window's tokens may go one by one, each from its own
+        for (int t = 0; t < n; ++t) {
+            h_at_[2 * t] = pos_ + t;
+            h_at_[2 * t + 1] = turn(pos_ + t);
+        }
+        ck(cudaMemcpyAsync(at_, h_at_, (size_t) n * 2 * sizeof(long long), cudaMemcpyHostToDevice, cs(st_)),
+           "position");
     }
-    const size_t by_rows = (size_t) n - 1;
+    // A layer's launches around its routed experts.  up(): to its router's copy, with the shared expert behind it.
+    // tail(): what the layer does with the experts' sum.  `rec` numbers the recording of m tokens' launches: a
+    // call's tokens together are [0, window) by their number, and a window's row alone comes after those.
+    const size_t recs = 3 * (size_t) opt_.window;
+    const auto up = [&](int il, int m, size_t rec) {
+        Layer& L = layers_[(size_t) il];
+        const size_t head = (size_t) head_key(il, m) * recs + rec;
+        if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, m); });
+        else layer_head(L, il, m);
+        if (!L.moe || (mmq_ && m >= kStageRows)) return;
+        ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
+        if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, m); });
+        else moe_shared(L, il, m);
+    };
+    const auto tail = [&](int il, int m, size_t rec) {
+        Layer& L = layers_[(size_t) il];
+        dbg("ffn", il, fo_, n_embd_);
+        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, m); });
+        else layer_tail(L, il, m);
+    };
+
+    // A window's tokens, with experts on the CPU, go through the layers a token at a time and one behind the
+    // other.  With the tokens together the card's part of a layer and the CPU's take turns: the card waits out
+    // the CPU's experts and the CPU the card's layer, and for such a model each is as long as the other.  A token
+    // alone has nothing else to do.  A window has: this thread does nothing but route a token and compute its
+    // experts, token after token, and while it does, one of the experts' threads hands the card the token before:
+    // its experts' sum, the rest of its layer and the next layer up to the router.  That token's scores are there
+    // when its turn comes again.  A token's launches are the ones it has alone, at its own rows of the buffers
+    // (shift_rows()), so it comes out as it would alone.
+    if (n > 1 && n_snap_ == n - 1 && cached_ < total_experts()) {
+        int at = 0;
+        const auto row = [&](int r) {
+            shift_rows(r - at);
+            at = r;
+            n_snap_ = r < n - 1 ? 1 : 0;   // its launches leave the recurrent state after it, but the last one's
+            ev_ = ev_row_[r];
+        };
+        // Token r on from layer il, whose experts it has (-1: from its start), to the next router's copy.
+        const auto go_on = [&](int r, int il, bool add) {
+            const size_t rec = (size_t) opt_.window + 2 * (size_t) r + (r < n - 1 ? 1 : 0);
+            row(r);
+            if (il >= 0) {
+                if (add) moe_add(1);
+                tail(il, 1, rec);
+            }
+            for (int j = il + 1; j < n_layer_; ++j) {
+                up(j, 1, rec);
+                if (layers_[(size_t) j].moe) break;
+            }
+        };
+        struct {
+            int r = -1, il = -1;
+            bool add = false;
+        } late;   // the token whose experts are computed and that has not gone on
+        std::exception_ptr failed;
+        try {
+            for (int r = 0; r < n; ++r) go_on(r, -1, false);
+            for (int il = 0; il < n_layer_; ++il) {
+                Layer& L = layers_[(size_t) il];
+                if (!L.moe) continue;
+                for (int r = 0; r < n; ++r) {
+                    // by another thread while this one computes: it must leave the rows as it found them
+                    const std::function<void()> other = [&] {
+                        try {
+                            go_on(late.r, late.il, late.add);
+                            row(r);
+                        } catch (...) {
+                            failed = std::current_exception();
+                        }
+                    };
+                    row(r);
+                    const bool add = moe(L, il, 1, late.r >= 0 ? &other : nullptr);
+                    if (failed) std::rethrow_exception(failed);
+                    late = {r, il, add};
+                }
+            }
+            if (late.r >= 0) go_on(late.r, late.il, late.add);
+        } catch (...) {
+            row(0);
+            n_snap_ = n - 1;
+            throw;
+        }
+        row(0);
+        n_snap_ = n - 1;
+        return;
+    }
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
-        if (replay && L.fixed)
-            replayed(L.heads, (size_t) head_key(il, n) * opt_.window + by_rows, [&] { layer_head(L, il, n); });
-        else
-            layer_head(L, il, n);
+        up(il, n, (size_t) n - 1);
         if (!L.moe) continue;
-        if (mmq_ && n >= kStageRows) {
-            moe_rows(L, il, n);
-        } else {
-            ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
-            if (replay) replayed(L.shared, by_rows, [&] { moe_shared(L, il, n); });
-            else moe_shared(L, il, n);
-            moe(L, il, n);
-        }
-        dbg("ffn", il, fo_, n_embd_);
-        if (replay && L.fixed) replayed(L.tail, by_rows, [&] { layer_tail(L, il, n); });
-        else layer_tail(L, il, n);
+        if (mmq_ && n >= kStageRows) moe_rows(L, il, n);
+        else if (moe(L, il, n)) moe_add(n);
+        tail(il, n, (size_t) n - 1);
     }
+}
+
+void Engine::shift_rows(ptrdiff_t by) {
+    const ptrdiff_t e = n_embd_;
+    r_ += by * streams() * e;
+    xn_ += by * e;
+    fo_ += by * e;
+    cpu_ += by * e;
+    rl_ += by * n_expert_;
+    xq_ = (uint8_t*) xq_ + by * (ptrdiff_t) kernels::native_q8_1_bytes(n_embd_);
+    h_rl_ += by * n_expert_;
+    h_x_ += by * e;
+    h_cpu_ += by * e;
+    at_ += by * 2;
+    if (snap_) snap_ += by * (ptrdiff_t) rec_n_;
+    pos_ += by;
 }
 
 void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
@@ -1481,7 +1587,7 @@ void Engine::draft_step(int32_t token, int i) {
     moe_router(L, 1);
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
     moe_shared(L, n_layer_, 1);
-    moe(L, n_layer_, 1);
+    if (moe(L, n_layer_, 1)) moe_add(1);
     axpy(fo_, 1.f, x, n_embd_, true, st_);
     rms_norm(x, fp(d_head_), own, n_embd_, 1, rms_eps_, st_);
     lin(output_, own, logits_, 1);

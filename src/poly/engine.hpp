@@ -11,6 +11,7 @@
 
 #include "cpu_experts.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -249,6 +250,10 @@ protected:
     /// The rotary position of a row of text: its place in the sequence, unless pictures before it took fewer
     /// positions than rows.
     virtual int64_t turn(int64_t row) const { return row; }
+    /// The buffers that hold a row a token, and pos(), moved `by` rows on (back, when negative): a call for one
+    /// token then works in the place of another row of a window (run()).  An architecture adds its own buffers
+    /// that a layer's head leaves for the layer's tail.
+    virtual void shift_rows(ptrdiff_t by);
     /// The other names of a tensor or a metadata key in the files of this architecture, or null.
     virtual const Names* tensor_alias(const char* name) const { (void) name; return nullptr; }
     virtual const Names* meta_alias(const char* key) const { (void) key; return nullptr; }
@@ -276,7 +281,8 @@ protected:
     void plan_ahead(Layer& L, int il);
     void run(const int32_t* tokens, int n);
     void moe_router(const Layer& L, int n);
-    void moe(Layer& L, int il, int n);
+    bool moe(Layer& L, int il, int n, const std::function<void()>* first = nullptr);
+    void moe_add(int n);
     template <class F>
     void* record(F&& work);
     void moe_rows(Layer& L, int il, int n);
@@ -302,13 +308,14 @@ protected:
     std::atomic<bool> map_quit_{false};
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     void* blas_ = nullptr; ///< cuBLAS on st_
-    void* ev_ = nullptr;   ///< marks the router's copy to the host
+    void* ev_ = nullptr;   ///< marks the router's copy to the host: ev_row_'s first, or a window's row's own
+    void* ev_row_[8] = {}; ///< one for each token a window can have
     std::vector<void*> dev_allocs_, host_allocs_;
     std::vector<void*> graphs_;   ///< every recorded graph, to destroy
     void* tail_ = nullptr;        ///< one token's launches from the last layer to the logits, recorded
     // A recorded launch cannot be given the position as an argument: it reads it here when it runs.  eval() writes
     // the token's place in the sequence and its rotary position before it replays the layers.
-    long long* at_ = nullptr;     ///< on the card: {pos(), turn(pos())}
+    long long* at_ = nullptr;     ///< on the card: {pos(), turn(pos())}, and the same for a window's later tokens
     long long* h_at_ = nullptr;   ///< pinned
     bool recording_ = false;      ///< a layer's launches are being recorded: positions are read from at_
     bool recorded_ = false;       ///< took_record()

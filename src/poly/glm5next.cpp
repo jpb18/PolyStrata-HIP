@@ -85,6 +85,12 @@ int Glm5Next::streams() const { return kHc; }
 // The routed experts' sum goes back into the residual streams.
 void Glm5Next::layer_tail(Layer&, int, int n) { hc_post(fo_, hcw_, r_, n_embd_, n, st_); }
 
+// The weights a layer's head mixes the streams with are the ones its tail puts the experts' sum back with.
+void Glm5Next::shift_rows(ptrdiff_t by) {
+    Engine::shift_rows(by);
+    hcw_ += by * (kHc + kHc * kHc);
+}
+
 // The model's output for `rows` tokens from row `first` of the call: the streams' mean, normed.
 void Glm5Next::output_rows(int first, int rows, float* h) {
     hc_mean(r_ + (size_t) first * kHc * n_embd_, cur_, n_embd_, rows, st_);
