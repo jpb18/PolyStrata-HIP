@@ -265,25 +265,28 @@ after it at 68, 54 and 55; [What was tuned](#what-was-tuned) has the steps betwe
 | Gemma 4 26B-A4B | 26 | 0.16 | 184 | 273 | 100% | 74% |
 | | 2,656 | 0.78 | 3,586 | 224 | 100% | 83% |
 | | 10,393 | 2.6 | 3,329 | 160 | 100% | 73% |
-| GLM 5.3 Flash 3.0bit | 23 | 0.81 | 29 | 57 | 50% | 79% |
-| | 2,424 | 5.3 | 460 | 56 | 48% | 87% |
-| | 9,446 | 14.6 | 508 | 57 | 59% | 88% |
+| GLM 5.3 Flash 3.0bit | 23 | 0.80 | 29 | 60 | 50% | 84% |
+| | 2,424 | 5.1 | 476 | 56 | 49% | 82% |
+| | 9,446 | 13.8 | 535 | 57 | 59% | 87% |
 
 A short prompt is read a few tokens at a time, which is why its reading speed is low. Gemma 4 thinks in this
-table, as the others do, and guesses with its draft model. GLM's second run read at 459 and 511 and wrote at
-60, 57 and 57. Qwen3.6 and Ornith were run once. Gemma 4's row is the third of three runs: the first wrote 249
+table, as the others do, and guesses with its draft model. GLM's second run read at 476 and 533 and wrote at
+58, 55 and 56. Qwen3.6 and Ornith were run once. Gemma 4's row is the third of three runs: the first wrote 249
 after the short prompt and the second 274, and they read the long prompts at 3,000 to 3,430. GLM's longest
-prompt starts like the one before it, so its first 2,048 tokens are not read again: the 14.6 s are for 7,398.
+prompt starts like the one before it, so its first 2,048 tokens are not read again: the 13.8 s are for 7,398.
 
 The last changes in [What was tuned](#what-was-tuned) are to reading a prompt, and only a model with experts
-outside the cache reads another way for them. In the same hour, the build before the last of them, which lets a
-read go past checkpoints, read GLM's two long prompts at 422 to 424 and 466 to 472 tokens/s, with the first
-token after 5.7 and 15.7 to 15.9 s. The build before the first of them, a prompt batch's float matrices as
-cuBLAS products, when it was measured: GLM's at 336 and 325, first token after 7.2 and 22.8 s, and the three
-new models' at 3,512 and 3,375, 3,525 and 3,461, and 3,215 and 3,137. It wrote 58 to 59, 55 and 55 to 59 for
-GLM, and 302, 228 and 275 after the short prompt, 236, 199 and 230 after the middle one and 185, 133 and 160
-after the longest for the three. Ornith's speed after its longest prompt moves from run to run: 133, 151, 148
-and 141 in four of them.
+outside the cache reads another way for them. The last of them, a round of a layer's experts left in the
+staging buffer, changes only GLM's reading, and the other three models' rows are from before it. In the same
+hour the build before it read GLM's two long prompts at 459 to 497 and 511 to 522 tokens/s, with the first
+token after 4.9 to 5.3 and 14.2 to 14.5 s; the middle prompt, read in three calls, is within the spread of its
+runs. The build before the change that lets a read go past checkpoints, when it was measured: 422 to 424 and
+466 to 472, with the first token after 5.7 and 15.7 to 15.9 s. The build before the first of them, a prompt
+batch's float matrices as cuBLAS products, when it was measured: GLM's at 336 and 325, first token after 7.2
+and 22.8 s, and the three new models' at 3,512 and 3,375, 3,525 and 3,461, and 3,215 and 3,137. It wrote 58 to
+59, 55 and 55 to 59 for GLM, and 302, 228 and 275 after the short prompt, 236, 199 and 230 after the middle one
+and 185, 133 and 160 after the longest for the three. Ornith's speed after its longest prompt moves from run to
+run: 133, 151, 148 and 141 in four of them.
 
 The build before the two changes before those, the swaps' one pass and the picks, when it was measured: GLM 55
 and 57, 53 and 54, 55 and 52 tokens/s in its two runs, and the three new models 267, 214 and 232, 222, 189 and
@@ -420,10 +423,12 @@ tokens, 3 to 12 a read, and the three new models held to 8 GB and with every exp
 state each, all the same. That check found one difference, in the first version of this reading: a call of
 fewer than 256 tokens does not copy a layer's experts ahead, and when it took the ones the call before it had
 copied, its launch had other matrices in it than alone, the batched kernels divided the work another way, and
-35 of Qwen3.6's 66 MB of state came out with other last bits. Such a call stages its own experts again. With
-the cache left as it was loaded and both builds holding the same experts, the 200 tokens after a prompt are
-those of the build that read call by call: GLM after 1,947 and 7,788 tokens, the three new models held to 8 GB
-after their two long prompts each.
+35 of Qwen3.6's 66 MB of state came out with other last bits. Such a call stages its own experts again. The
+check also covers a layer that takes the staging buffer in more than one round and keeps one for its next call:
+GLM's six, and Qwen3.6 held to 8 GB with staging buffers of 256 and 128 MiB and Gemma 4 with 128, which with
+the smaller buffer is two or three rounds in every layer. With the cache left as it was loaded and both builds
+holding the same experts, the 200 tokens after a prompt are those of the build that read call by call: GLM
+after 1,947 and 7,788 tokens, the three new models held to 8 GB after their two long prompts each.
 
 Over the engine's protocol, held to 8 GB or with GLM's half cache: a prompt of about 7,700 tokens cut at 7,000,
 5,000 and 3,000 and continued another way is read from the checkpoints at 6,144, 4,096 and 2,048, which one
@@ -535,6 +540,8 @@ picture in its place, and a prompt without pictures after them.
 | | GLM 5.3 Flash through the server, 7,398 tokens read: seconds to the first token | 15.7 to 15.9 | 14.5 to 14.6 |
 | | Qwen3.6 held to 8 GB, reading 7,709 tokens | 2,740 to 2,800 | 3,740 to 3,790 |
 | | Gemma 4 held to 8 GB, reading 8,001 tokens | 3,180 to 3,190 | 4,030 to 4,040 |
+| A round of a layer's experts left in the staging buffer for the layer's next call | GLM 5.3 Flash, reading 7,788 tokens | 599 to 602 | 639 to 643 |
+| | GLM 5.3 Flash through the server, 7,398 tokens read: seconds to the first token | 14.2 to 14.5 | 13.8 to 13.9 |
 
 All but Gemma 4's draft model and GLM's recurrent step are in the shared runtime or its kernels, so every
 architecture with that kind of layer has them. Gemma 4's row for the routing has the two changes before it in it
@@ -662,9 +669,9 @@ the layer's experts in the staging buffer. Only the rows of the residual have to
 two layers, 64 MiB a call for GLM. A read ended at a conversation's next checkpoint then, 2,048 tokens on, so
 it was two calls of the default size; with calls of 512 tokens it was four, and GLM read at 371 tokens/s where
 235.
-Its six layers of Q4_K and Q3_K experts need the buffer twice a call and copy as before. Reading with calls of
-2,048 tokens (`--prompt-batch`) was 710 tokens/s before this change, for 185 experts fewer in the cache; it is
-the same copy for twice the tokens.
+Its six layers of Q4_K and Q3_K experts need the buffer twice a call, and went on copying both times for every
+call. Reading with calls of 2,048 tokens (`--prompt-batch`) was 710 tokens/s before this change, for 185 experts
+fewer in the cache; it is the same copy for twice the tokens.
 
 A read stopped at a checkpoint because a checkpoint is the state between two calls, and a read's calls are not
 one after the other. Reads of 8,192 tokens, tried with every call's residual in VRAM, were 630 tokens/s where
@@ -686,7 +693,25 @@ card but the routing tables' copy: a small copy, which appears to wait on the li
 holds up is the cached experts' rows, which could have run meanwhile. What is left of a 1,024-token call, with
 the copies made once in up to eight calls: 9 ms a recurrent layer and 29 a sparse one up to the router, of
 which 8.6 are the indexer's scores, 6.6 the host's sort of them and 11.4 the attention; 9 for the experts; and
-the six layers of larger experts, whose copies are still made for every call, 70 to 95 ms each.
+the six layers of larger experts, whose copies were made for every call then, 70 to 95 ms each.
+
+Those six pass their experts through the staging buffer in two rounds, and a read of eight calls copied both
+for each: 96 copies. The buffer still holds a call's last round when the layer's next call comes, so that call
+now takes the round first, without a copy, if its experts are exactly one of its own rounds. The experts copied
+ahead are the same for every call. The second round is what a call routes to of the rest, so the next call has
+it only if it routes to the same experts; when it does not, it copies both, the experts that go ahead last, and
+the call after finds them. Of the 42 calls after a layer's first, 18 found the experts that go ahead, 15 the
+other round and 9 neither, which is 63 copies, and GLM reads 7,788 tokens at 639 to 643 tokens/s where 599 to
+602. With calls of 512 tokens the other round is there for 6 of the 42 calls that look for it, and GLM reads at
+447 to 449 where 409 to 411. Those 7,788 tokens are one document of 1,947 four times over. The benchmark's
+longest prompt, 7,398 tokens read through the server, went from 511 to 522 tokens/s to 533 to 535.
+
+A call that looks at its routing first copies nothing ahead, and the copy ahead is free while the card is busy
+up to the routing. With a staging buffer of 128 MiB (`--stage-mib`) every layer of Qwen3.6 held to 8 GB has two
+or three rounds and almost never the same later one, and a build that always kept the round read 7,709 tokens
+at 1,920 to 2,000 tokens/s where 2,180 to 2,230. So the engine times both, and keeps a round only if the card got to the
+routing in under half the time the layer's copy ahead took. Qwen3.6 with that buffer copies ahead in all but a
+few calls and reads as it did.
 
 A cache that an answer has swapped experts into reads a prompt a little slower. A prompt batch takes a layer's
 cached experts in runs of adjacent slots, and swaps scatter a layer's: after a 300-token answer a layer's cached
