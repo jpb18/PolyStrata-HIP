@@ -3753,8 +3753,8 @@ int main(int argc, char** argv) {
             src.set_io_prefetch(true, th != nullptr ? std::atoi(th) : 0);
             if (src.io_prefetch())
                 std::fprintf(stderr, "strata generate: file tier io prefetch ON (STRATA_IO_PREFETCH=1): whole-blob preads, "
-                                     "predicted experts read ahead on %s I/O threads (STRATA_IO_PF_THREADS, default 4)\n",
-                             th != nullptr ? th : "4");
+                                     "the layer's uncached experts and the predicted ones read by %s I/O threads (STRATA_IO_PF_THREADS, default 8)\n",
+                             th != nullptr ? th : "8");
             else
                 std::fprintf(stderr, "strata generate: STRATA_IO_PREFETCH=1 is not available here (Linux mapped file tier "
                                      "only, not with unbuffered reads); the file tier reads as before\n");

@@ -615,6 +615,7 @@ public:
     struct IoCounters {
         uint64_t cached_bytes = 0, uncached_bytes = 0;       ///< file reads at hand-out, by page-cache residency
         uint64_t pread_bytes = 0, pread_us = 0, pread_n = 0; ///< bytes read with pread, thread time, calls
+        uint64_t pf_demand = 0;                              ///< blobs the layer asked for that the workers were handed
         uint64_t pf_jobs = 0, pf_read_blobs = 0, pf_resident_skips = 0, pf_dropped = 0;   ///< prefetch workers
         uint64_t pf_used = 0, pf_unused = 0;                 ///< prefetched blobs a layer then used / never used
         uint64_t crit_us = 0;                                ///< wall time the decode waited on file reads (prefetch + staged_blob)
@@ -685,6 +686,7 @@ private:
     std::atomic<uint64_t> file_read_bytes_{0};
     // ---- the Linux I/O path (set_io_prefetch)
     bool io_pf_ = false;
+    bool io_fill_ = false;                            ///< experts.bin: the workers only fill the page cache (large preads), no staging, nothing waits
     bool io_ahead_ = true;                            ///< STRATA_IO_PF_AHEAD=0: no read-ahead workers' queue, demand preads only
     bool io_stats_ = false;
     int io_threads_ = 4;
@@ -696,13 +698,14 @@ private:
     std::vector<char> stage_pf_;                      ///< per stage buffer: filled ahead, not yet used by a layer
     std::vector<int> io_fds_;                         ///< per mapped file: a plain descriptor (POSIX_FADV_RANDOM) for the preads
     mutable std::atomic<uint64_t> io_cached_{0}, io_uncached_{0}, io_pread_bytes_{0}, io_pread_us_{0}, io_pread_n_{0};
-    std::atomic<uint64_t> io_pf_jobs_{0}, io_pf_blobs_{0}, io_pf_skips_{0}, io_pf_dropped_{0}, io_pf_used_{0}, io_pf_unused_{0},
+    std::atomic<uint64_t> io_pf_jobs_{0}, io_pf_demand_{0}, io_pf_blobs_{0}, io_pf_skips_{0}, io_pf_dropped_{0}, io_pf_used_{0}, io_pf_unused_{0},
         io_crit_us_{0}, io_crit_n_{0};
     struct Span { const uint8_t* p; uint64_t n; int fd; uint64_t off; uint64_t at; };
     /// The (up to 3) file ranges of a blob: pointer in the mapping, size, descriptor and file offset, offset in the blob.
     int spans(int64_t layer, int64_t expert, Span* out) const;
     /// Bytes of the blob's pages in the page cache (mincore); `total` the blob's bytes.
-    uint64_t cached_bytes(int64_t layer, int64_t expert, uint64_t& total) const;
+    /// `exact` false: four sampled pages (a blob is cached when they are; a handful of syscalls, not hundreds of pages' walk).
+    uint64_t cached_bytes(int64_t layer, int64_t expert, uint64_t& total, bool exact = true) const;
     void io_worker();
     void io_enqueue(int64_t layer, int64_t expert);
     void io_stop();

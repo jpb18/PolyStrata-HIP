@@ -429,6 +429,19 @@ uint64_t resident_in(const uint8_t* p, uint64_t n) {
     for (unsigned char c : vec) pages += c & 1;
     return std::min<uint64_t>(n, pages * 4096);
 }
+/// A cheap residency probe: the first, last and two inner pages; the bytes of the range when all four are cached, else 0.
+uint64_t resident_sampled(const uint8_t* p, uint64_t n) {
+    if (n == 0) return 0;
+    const uintptr_t a = (uintptr_t) p & ~(uintptr_t) 4095, e = ((uintptr_t) p + (uintptr_t) n - 1) & ~(uintptr_t) 4095;
+    const uintptr_t pages = (e - a) / 4096;
+    const uintptr_t at[4] = {a, a + (pages / 3) * 4096, a + (pages * 2 / 3) * 4096, e};
+    for (uintptr_t x : at) {
+        unsigned char v = 0;
+        if (mincore((void*) x, 4096, &v) != 0 || (v & 1) == 0) return 0;
+    }
+    return n;
+}
+bool resident_sampled_n(const uint8_t* p, uint64_t n) { return resident_sampled(p, n) >= n; }
 /// The whole range with pread (a short read continues); false on an error or an end of file.
 bool pread_full(int fd, uint8_t* dst, uint64_t n, uint64_t off) {
     uint64_t done = 0;
@@ -463,7 +476,7 @@ int FileExpertSource::spans(int64_t layer, int64_t expert, Span* out) const {
     return 1;
 }
 
-uint64_t FileExpertSource::cached_bytes(int64_t layer, int64_t expert, uint64_t& total) const {
+uint64_t FileExpertSource::cached_bytes(int64_t layer, int64_t expert, uint64_t& total, bool exact) const {
     total = 0;
 #if defined(__linux__)
     Span sp[3];
@@ -471,7 +484,7 @@ uint64_t FileExpertSource::cached_bytes(int64_t layer, int64_t expert, uint64_t&
     uint64_t res = 0;
     for (int i = 0; i < ns; ++i) {
         total += sp[i].n;
-        res += resident_in(sp[i].p, sp[i].n);
+        res += exact ? resident_in(sp[i].p, sp[i].n) : resident_sampled(sp[i].p, sp[i].n);
     }
     return res;
 #else
@@ -488,6 +501,7 @@ FileExpertSource::IoCounters FileExpertSource::io_counters() const {
     c.pread_us = io_pread_us_.load(std::memory_order_relaxed);
     c.pread_n = io_pread_n_.load(std::memory_order_relaxed);
     c.pf_jobs = io_pf_jobs_.load(std::memory_order_relaxed);
+    c.pf_demand = io_pf_demand_.load(std::memory_order_relaxed);
     c.pf_read_blobs = io_pf_blobs_.load(std::memory_order_relaxed);
     c.pf_resident_skips = io_pf_skips_.load(std::memory_order_relaxed);
     c.pf_dropped = io_pf_dropped_.load(std::memory_order_relaxed);
@@ -519,8 +533,12 @@ void FileExpertSource::set_io_prefetch(bool on, int threads) {
         for (uint64_t b : layer_blob_bytes_) stage_blob_ = std::max(stage_blob_, b);
     }
     if (!warm_stamp_) warm_stamp_.reset(new std::atomic<uint32_t>[(size_t) (n_layers_ * n_expert_)]());
-    io_threads_ = threads > 0 ? threads : 4;
+    io_threads_ = threads > 0 ? threads : 8;
     if (const char* v = std::getenv("STRATA_IO_PF_AHEAD")) io_ahead_ = std::atoi(v) != 0;
+    {   // experts.bin: fill the page cache from the workers and let the kernels read the mapping (STRATA_IO_PF_STAGE=1: stage)
+        const char* v = std::getenv("STRATA_IO_PF_STAGE");
+        io_fill_ = role_ptr_.empty() && !(v != nullptr && std::atoi(v) != 0);
+    }
     io_pf_ = true;
     io_stats_ = true;
     io_quit_ = false;
@@ -577,8 +595,31 @@ void FileExpertSource::io_worker() {
         const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
         if (complement_ready_ && resident_blob(index) != nullptr) continue;
         if (!override_.empty() && override_[index] != nullptr) continue;
+        if (io_fill_) {   // read what is not cached into a scratch buffer: the pages stay in the page cache for the kernels
+#if defined(__linux__)
+            static thread_local std::vector<uint8_t> scratch;
+            Span sp[3];
+            const int ns = spans(layer, expert, sp);
+            bool any = false;
+            for (int i = 0; i < ns; ++i) {
+                if (sp[i].fd < 0 || resident_sampled_n(sp[i].p, sp[i].n)) continue;
+                if (scratch.size() < sp[i].n) scratch.resize((size_t) sp[i].n);
+                const auto t0 = std::chrono::steady_clock::now();
+                if (pread_full(sp[i].fd, scratch.data(), sp[i].n, sp[i].off)) {
+                    io_pread_bytes_.fetch_add(sp[i].n, std::memory_order_relaxed);
+                    io_pread_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
+                                           std::memory_order_relaxed);
+                    io_pread_n_.fetch_add(1, std::memory_order_relaxed);
+                    any = true;
+                }
+            }
+            if (any) io_pf_blobs_.fetch_add(1, std::memory_order_relaxed);
+            else io_pf_skips_.fetch_add(1, std::memory_order_relaxed);
+#endif
+            continue;
+        }
         uint64_t total = 0;
-        if (cached_bytes(layer, expert, total) >= total) {
+        if (cached_bytes(layer, expert, total, false) >= total) {
             io_pf_skips_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
@@ -614,21 +655,27 @@ void FileExpertSource::io_worker() {
 // pread into a staging buffer, not faulted in by the kernels one small request at a time.
 const uint8_t* FileExpertSource::io_blob(int64_t layer, int64_t expert) {
     const int64_t key = layer * n_expert_ + expert;
+    if (io_fill_) {
+        const uint8_t* b = mapped_blob(layer, expert);
+        if (b != nullptr) {
+            const uint64_t total = layer_blob_bytes_[(size_t) layer];
+            file_read_bytes_.fetch_add(total, std::memory_order_relaxed);
+        }
+        return b;
+    }
     bool have;
     {
         std::lock_guard<std::mutex> lk(stage_mu_);
         have = stage_of_.find(key) != stage_of_.end();
     }
     if (!have) {
-        uint64_t total = 0;
-        const uint64_t cached = cached_bytes(layer, expert, total);
-        if (total > 0 && cached >= total) {
-            const uint8_t* b = mapped_blob(layer, expert);
-            if (b != nullptr) {
-                io_cached_.fetch_add(total, std::memory_order_relaxed);
-                file_read_bytes_.fetch_add(total, std::memory_order_relaxed);
-                return b;
-            }
+        // prefetch() (every decode layer calls it first) staged what was not cached: what is not staged is cached
+        const uint8_t* b = mapped_blob(layer, expert);
+        if (b != nullptr) {
+            const uint64_t total = layer_blob_bytes_[(size_t) layer];
+            io_cached_.fetch_add(total, std::memory_order_relaxed);
+            file_read_bytes_.fetch_add(total, std::memory_order_relaxed);
+            return b;
         }
     }
     return staged_blob(layer, expert);
@@ -1160,6 +1207,20 @@ const uint8_t* FileExpertSource::staged_blob(int64_t layer, int64_t expert) {
 
 void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n) {
     if (!staged() || n <= 0 || layer < 0 || layer >= n_layers_) return;
+    if (io_fill_ && io_pf_ && direct_.empty()) {   // hand the layer's uncached blobs to the workers and go on: the kernels
+        for (int64_t i = 0; i < n; ++i) {          // that reach one before it lands wait on its pages, the rest compute
+            const int64_t e = experts[i];
+            if (e < 0 || e >= n_expert_) continue;
+            const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) e;
+            if (complement_ready_ && resident_blob(index) != nullptr) continue;
+            if (!override_.empty() && override_[index] != nullptr) continue;
+            uint64_t total = 0;
+            if (cached_bytes(layer, e, total, false) >= total) continue;
+            io_pf_demand_.fetch_add(1, std::memory_order_relaxed);
+            io_enqueue(layer, e);
+        }
+        return;
+    }
     std::vector<Fill> todo;
     // experts.bin with io prefetch: a blob whose pages are cached is handed out as the mapping (io_blob); only the
     // uncached ones are read here, together, on the fetch threads
@@ -1171,7 +1232,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
             const int64_t e = experts[i];
             if (e < 0 || e >= n_expert_) continue;
             uint64_t total = 0;
-            cold[(size_t) i] = cached_bytes(layer, e, total) < total ? 1 : 0;
+            cold[(size_t) i] = cached_bytes(layer, e, total, false) < total ? 1 : 0;
         }
     }
     const auto t0 = std::chrono::steady_clock::now();
