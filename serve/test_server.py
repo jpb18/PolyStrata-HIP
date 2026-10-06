@@ -1363,6 +1363,75 @@ class SamplingKeys(unittest.TestCase):
         self.assertFalse([k for k in self.keys(temperature=0.7) if k.startswith("penalty")])
 
 
+class SharedPrefix(unittest.TestCase):
+    """R1: "strata_prefix" marks the first messages as a shared prefix; the engine gets pin=N."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.tok = tok
+
+    def keys(self, **sampling):
+        return StrataEngine.sampling_keys(sampling).split()
+
+    MSGS = [{"role": "system", "content": "You answer questions about the document."},
+            {"role": "user", "content": "DOC " * 40},
+            {"role": "user", "content": "Which word repeats?"}]
+
+    def test_pin_key(self):
+        self.assertIn("pin=1234", self.keys(strata_prefix={"tokens": 1234}))
+        for absent in ({}, {"strata_prefix": {}}, {"strata_prefix": {"messages": 2}}, {"strata_prefix": {"tokens": 0}},
+                       {"strata_prefix": {"tokens": True}}, {"strata_prefix": "x"}):
+            self.assertFalse([k for k in self.keys(**absent) if k.startswith("pin=")], absent)
+
+    def test_messages_resolve_to_the_boundary_token(self):
+        req = {"strata_prefix": {"messages": 2}}
+        ids, _, _ = self.svc.prepare(self.MSGS, None, {}, 16, req=req)
+        n = req["strata_prefix"]["tokens"]
+        text = self.tok.decode(ids[:n], errors="replace")
+        self.assertTrue(text.endswith("DOC<|im_end|>\n"), text[-40:])   # right where the next message's turn starts
+        self.assertEqual(self.tok.decode(ids[n:n + 1]), "<|im_start|>")
+        head = self.svc.encode_prompt(self.MSGS[:2], None, {"add_generation_prompt": False})
+        self.assertEqual(ids[:n], head[:n])
+
+    def test_tokens_and_unusable_prefixes(self):
+        ids, _, _ = self.svc.prepare(self.MSGS, None, {}, 16)
+        req = {"strata_prefix": {"tokens": 100}}
+        self.svc.prepare(self.MSGS, None, {}, 16, req=req)
+        self.assertEqual(req["strata_prefix"], {"tokens": 100})
+        for spec in ({"messages": 3}, {"messages": 9}, {"tokens": len(ids)},       # leaves no last message / no suffix
+                     {"message": 1, "chars": 5000}, {"message": 7, "chars": 3}):   # more text than the message has
+            req = {"strata_prefix": spec}
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.svc.prepare(self.MSGS, None, {}, 16, req=req)
+            self.assertEqual(req["strata_prefix"], {}, spec)                     # said in the log, never a refusal
+        for bad in ({"messages": 0}, {"messages": "2"}, {"messages": True}, {"tokens": 1.5}, {"x": 1},
+                    {"messages": 1, "tokens": 2}, {"message": 1}, {"chars": 3}, {"message": -1, "chars": 3}, [], "pin", {}):
+            with self.assertRaises(ValueError, msg=bad):
+                self.svc.prepare(self.MSGS, None, {}, 16, req={"strata_prefix": bad})
+
+    def test_chars_end_inside_a_message(self):
+        # a document and its question in ONE message: the prefix is the first 160 characters of it
+        text = "DOC " * 40 + "Which word repeats?"
+        msgs = [{"role": "user", "content": text}]
+        req = {"strata_prefix": {"message": 0, "chars": 160}}
+        ids, _, _ = self.svc.prepare(msgs, None, {}, 16, req=req)
+        n = req["strata_prefix"]["tokens"]
+        self.assertEqual(self.tok.decode(ids[:n]).split("user\n", 1)[1], "DOC " * 40)   # exactly those characters
+        # a system message first: message 1 is the user's
+        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": text}]
+        req = {"strata_prefix": {"message": 1, "chars": 160}}
+        ids, _, _ = self.svc.prepare(msgs, None, {}, 16, req=req)
+        self.assertEqual(self.tok.decode(ids[:req["strata_prefix"]["tokens"]]).split("user\n", 1)[1], "DOC " * 40)
+
+    def test_without_the_field_nothing_changes(self):
+        req = {"temperature": 0}
+        ids, _, _ = self.svc.prepare(self.MSGS, None, {}, 16, req=req)
+        self.assertEqual(req, {"temperature": 0})
+        self.assertEqual(ids, self.svc.prepare(self.MSGS, None, {}, 16)[0])
+
+
 class GpuChoice(unittest.TestCase):
     """Issue #51: the config's \"gpu\" reaches the engine as CUDA_VISIBLE_DEVICES, numbered like nvidia-smi."""
 
