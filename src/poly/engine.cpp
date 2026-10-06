@@ -789,6 +789,8 @@ void Engine::alloc() {
     q8_ = dmalloc(n * kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
 
     h_r_ = (float*) hmalloc(n * streams() * n_embd_ * sizeof(float), "pinned memory");
+    at_ = (long long*) dmalloc(2 * sizeof(long long), "scratch");
+    h_at_ = (long long*) hmalloc(2 * sizeof(long long), "pinned memory");
     h_rl_ = (float*) hmalloc(n * n_expert_ * sizeof(float), "pinned memory");
     h_x_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
     h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
@@ -1251,17 +1253,30 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     moe_sum(dx_, d_w, fo_, n_embd_, n_used_, n, st_);
 }
 
+// The rows a recorded attention launch is sized for, for n tokens from pos(): the power of two from 1024 that
+// holds their rows and the ones before them, or the context if that is less.  room_key() numbers the sizes.
+int Engine::room(int n) const { return (int) std::min<int64_t>(int64_t(1024) << room_key(n), opt_.max_context); }
+
+int Engine::room_key(int n) const {
+    int key = 0;
+    for (int64_t r = 1024; r < pos_ + n; r *= 2) ++key;
+    return key;
+}
+
 // Records what `work` hands to the stream, as a graph that is launched with one call from then on.
 template <class F>
 void* Engine::record(F&& work) {
     cudaGraph_t g = nullptr;
     ck(cudaStreamBeginCapture(cs(st_), cudaStreamCaptureModeThreadLocal), "cudaStreamBeginCapture");
+    recording_ = true;
     try {
         work();
     } catch (...) {
+        recording_ = false;
         if (cudaStreamEndCapture(cs(st_), &g) == cudaSuccess && g) cudaGraphDestroy(g);
         throw;
     }
+    recording_ = false;
     ck(cudaStreamEndCapture(cs(st_), &g), "cudaStreamEndCapture");
     cudaGraphExec_t exec = nullptr;
     const cudaError_t made = cudaGraphInstantiateWithFlags(&exec, g, 0);
@@ -1290,33 +1305,43 @@ void Engine::run(const int32_t* tokens, int n) {
     }
     ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
 
-    // A token alone hands the card the same launches every time, some thirty a layer up to the router, and they
-    // cost this thread more than the card.  They are recorded once, a graph a layer, and replayed with one call.
-    // Only for the layers whose launches are the same at every position (Layer::fixed).
-    const bool replay = opt_.graphs && n == 1 && !opt_.dump;
+    // A token alone, or a window of guessed ones, hands the card the same launches every time, some thirty a
+    // layer up to the router, and they cost this thread more than the card.  They are recorded once, a graph a
+    // layer and a number of tokens, and replayed with one call.  Only for the layers that can be (Layer::fixed).
+    // What a launch needs of the position it reads at at_; an attention over the rows so far is recorded again
+    // when the rows outgrow what it was sized for (head_key()).  A prompt's few tokens are not a window: they
+    // leave no snapshots of the recurrent state, so their launches are others.
+    bool replay = opt_.graphs && n <= opt_.window && n_snap_ == n - 1 && !opt_.dump;
+    for (int t = 0; t < n && replay; ++t) replay = !image_at(pos_ + t);
+    const auto replayed = [&](std::vector<void*>& made, size_t key, auto&& work) {
+        if (made.size() <= key) made.resize(key + 1, nullptr);
+        if (!made[key]) made[key] = record(work);
+        ck(cudaGraphLaunch((cudaGraphExec_t) made[key], cs(st_)), "layer graph");
+    };
+    if (replay) {
+        h_at_[0] = pos_;
+        h_at_[1] = turn(pos_);
+        ck(cudaMemcpyAsync(at_, h_at_, 2 * sizeof(long long), cudaMemcpyHostToDevice, cs(st_)), "position");
+    }
+    const size_t by_rows = (size_t) n - 1;
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
-        if (replay && L.fixed) {
-            if (!L.head) L.head = record([&] { layer_head(L, il, 1); });
-            ck(cudaGraphLaunch((cudaGraphExec_t) L.head, cs(st_)), "layer graph");
-        } else {
+        if (replay && L.fixed)
+            replayed(L.heads, (size_t) head_key(il, n) * opt_.window + by_rows, [&] { layer_head(L, il, n); });
+        else
             layer_head(L, il, n);
-        }
         if (!L.moe) continue;
         if (mmq_ && n >= kStageRows) {
             moe_rows(L, il, n);
         } else {
             ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
-            if (replay) {
-                if (!L.shared) L.shared = record([&] { moe_shared(L, il, 1); });
-                ck(cudaGraphLaunch((cudaGraphExec_t) L.shared, cs(st_)), "layer graph");
-            } else {
-                moe_shared(L, il, n);
-            }
+            if (replay) replayed(L.shared, by_rows, [&] { moe_shared(L, il, n); });
+            else moe_shared(L, il, n);
             moe(L, il, n);
         }
         dbg("ffn", il, fo_, n_embd_);
-        layer_tail(L, il, n);
+        if (replay && L.fixed) replayed(L.tail, by_rows, [&] { layer_tail(L, il, n); });
+        else layer_tail(L, il, n);
     }
 }
 

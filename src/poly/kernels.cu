@@ -288,6 +288,15 @@ __global__ void store_f16_kernel(const float* __restrict__ x, half* __restrict__
     if (i < n) dst[i] = __float2half(x[i]);
 }
 
+// Rows from the position the card holds when the launch runs.
+__global__ void store_f16_at_kernel(const float* __restrict__ x, half* __restrict__ cache, int n, int rows,
+                                    const long long* __restrict__ at, int ring) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n * rows) return;
+    const long long row = ring > 0 ? (*at + i / n) % ring : *at + i / n;
+    cache[size_t(row) * n + i % n] = __float2half(x[i]);
+}
+
 // How many cache rows token `tok` of a call from position pos attends to: every row up to its own while it is
 // dense, then its list.
 __host__ __device__ inline int dsa_keys(int tok, long long pos, int dense_rows, int top_rows, int kpool) {
@@ -445,10 +454,12 @@ __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__
 
 // One block per head and token.  The pairs of the rotation are i and i + n_rot / 2 for i below n_rot / 2.  With
 // axes, a token has a position on each of three axes, and pair j turns by the one on axis (j % sections) % 3.
+// With `at`, the first token's position is what the card holds there when the launch runs.
 __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride, const float* __restrict__ w,
                                       float* __restrict__ y, int dim, int heads, int n_rot, float theta_scale,
                                       const float* __restrict__ freq, long long pos, float eps,
-                                      const int* __restrict__ axes, int sections) {
+                                      const int* __restrict__ axes, int sections,
+                                      const long long* __restrict__ at) {
     __shared__ float part[8];
     const float* xr = x + size_t(blockIdx.x) * x_stride;
     float* yr = y + size_t(blockIdx.x) * dim;
@@ -457,7 +468,7 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
     ss = block_sum(ss, part);
     const float scale = 1.0f / sqrtf(ss / float(dim) + eps);
     const int tok = blockIdx.x / heads;
-    const float own = float(pos + tok);
+    const float own = float((at ? *at : pos) + tok);
     const int half = n_rot / 2;
     for (int i = threadIdx.x; i < dim; i += blockDim.x) {
         if (i >= n_rot) {
@@ -485,11 +496,12 @@ __device__ __forceinline__ int attn_rows(long long p, int window, long long last
 // has the token first + blockIdx.y and blockDim.x / n_head rows; a thread is a row and a head.
 __global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
                                   float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, float scale, int window, int ring, long long last) {
+                                  long long pos, int first, float scale, int window, int ring, long long last,
+                                  const long long* __restrict__ at) {
     const int tok = first + blockIdx.y;
     const int key = blockIdx.x * (blockDim.x / n_head) + threadIdx.x / n_head, h = threadIdx.x % n_head;
     long long lo;
-    if (key >= attn_rows(pos + tok, window, last, &lo)) return;
+    if (key >= attn_rows((at ? *at : pos) + tok, window, last, &lo)) return;
     const long long row = ring > 0 ? (lo + key) % ring : lo + key;
     const float* qh = q + (size_t(tok) * n_head + h) * dim;
     const half* k = kcache + (size_t(row) * kv_heads + h / (n_head / kv_heads)) * dim;
@@ -499,10 +511,11 @@ __global__ void attn_score_kernel(const float* __restrict__ q, const half* __res
 }
 
 // Softmax in place over a head's scores of the rows its token attends.  One block per head and token.
-__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int window, long long last) {
+__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int window, long long last,
+                                    const long long* __restrict__ at) {
     __shared__ float part[8];
     long long lo;
-    const int n = attn_rows(pos + first + blockIdx.y, window, last, &lo);
+    const int n = attn_rows((at ? *at : pos) + first + blockIdx.y, window, last, &lo);
     float* row = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
     float mx = -INFINITY;
     for (int j = threadIdx.x; j < n; j += blockDim.x) mx = fmaxf(mx, row[j]);
@@ -522,7 +535,8 @@ __global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int
 // otherwise be one thread's walk over every row.  The shares are added in their order.
 __global__ void attn_value_kernel(const float* __restrict__ score, const half* __restrict__ vcache,
                                   float* __restrict__ out, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, int per, int window, int ring, long long last) {
+                                  long long pos, int first, int per, int window, int ring, long long last,
+                                  const long long* __restrict__ at) {
     __shared__ float share[VALUE_SHARES][VALUE_DIMS];
     const int tok = first + blockIdx.y, h = blockIdx.x / per;
     const int dl = threadIdx.x % VALUE_DIMS, s = threadIdx.x / VALUE_DIMS;
@@ -530,7 +544,7 @@ __global__ void attn_value_kernel(const float* __restrict__ score, const half* _
     float acc = 0.0f;
     if (d < dim) {
         long long lo;
-        const int n = attn_rows(pos + tok, window, last, &lo);
+        const int n = attn_rows((at ? *at : pos) + tok, window, last, &lo);
         const float* p = score + (size_t(blockIdx.y) * n_head + h) * n_keys;
         const half* v = vcache + size_t(h / (n_head / kv_heads)) * dim + d;
         const size_t width = size_t(kv_heads) * dim;
@@ -791,6 +805,10 @@ void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, vo
     store_f16_kernel<<<grid(all, 256), 256, 0, cs(stream)>>>(x, (half*) cache + size_t(pos) * n, int(all));
 }
 
+void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream) {
+    store_f16_at_kernel<<<grid(size_t(n) * rows, 256), 256, 0, cs(stream)>>>(x, (half*) cache, n, rows, at, ring);
+}
+
 void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows,
                 int kpool, int64_t pos, int rows, int dense_rows, float* keys, float* score, int chunk, float* out,
                 int rank, int n_head, float scale, void* stream) {
@@ -871,31 +889,33 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream) {
 
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
                     float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq,
-                    const int32_t* axes, int sections) {
+                    const int32_t* axes, int sections, const long long* at) {
     head_norm_rope_kernel<<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
-        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps, axes, sections);
+        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps, axes, sections, at);
 }
 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window,
-            int ring, bool whole) {
+            int ring, bool whole, const long long* at, int room) {
+    if (at && (whole || room < 1)) throw std::invalid_argument("attend: a position on the card needs its room");
     const long long last = whole ? pos + rows - 1 : -1;
     // the rows the token at position p attends, which are the most among the tokens after it too
     const auto most = [&](long long p) {
         return int((whole ? last : p) - (window > 0 && p >= window ? p - window + 1 : 0)) + 1;
     };
-    const int n_keys = most(whole ? pos : pos + rows - 1), key_block = std::max(1, 256 / n_head);
+    const int n_keys = at ? room : most(whole ? pos : pos + rows - 1), key_block = std::max(1, 256 / n_head);
     const int per = grid(dim, VALUE_DIMS);
     for (int first = 0; first < rows; first += chunk) {
-        const int c = std::min(chunk, rows - first), keys = most(whole ? pos + first : pos + first + c - 1);
+        const int c = std::min(chunk, rows - first);
+        const int keys = at ? room : most(whole ? pos + first : pos + first + c - 1);
         attn_score_kernel<<<dim3(grid(keys, key_block), c), key_block * n_head, 0, cs(stream)>>>(
             q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale, window,
-            ring, last);
+            ring, last, at);
         attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window,
-                                                                    last);
+                                                                    last, at);
         attn_value_kernel<<<dim3(n_head * per, c), VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
             score, (const half*) vcache, out, n_keys, dim, n_head, kv_heads, (long long) pos, first, per, window,
-            ring, last);
+            ring, last, at);
     }
 }
 

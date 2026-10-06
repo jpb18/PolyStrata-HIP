@@ -84,7 +84,7 @@ void Qwen35::load_layer(int il) {
     L.attn_norm = f32("attn_norm.weight", n_embd_);
     L.ffn_norm = f32("post_attention_norm.weight", n_embd_);
     B.gdn = tensor(il, "attn_qkv.weight") != nullptr;
-    L.fixed = B.gdn;   // the attention's launches take the position
+    L.fixed = true;   // the attention's launches read the position on the card when they are recorded
     if (B.gdn) {
         B.wqkv = mat("attn_qkv.weight", n_embd_, conv_dim_);
         B.wz = mat("attn_gate.weight", n_embd_, d_inner_);
@@ -258,20 +258,36 @@ const int32_t* Qwen35::turns(int64_t pos, int n, int64_t* first) {
 void Qwen35::attn_store(Block& B, int64_t pos, int n) {
     int64_t first;
     const int32_t* axes = turns(pos, n, &first);
+    const long long* at = recording_ ? at_ : nullptr;   // a recorded launch: the tokens from what at_ holds
     lin(B.wk, xn_, kraw_, n, xq_);
     head_norm_rope(kraw_, head_dim_, fp(B.k_norm), k_, head_dim_, n_kv_, n_rot_, theta_scale_, first, n, rms_eps_, st_,
-                   nullptr, axes, sections_);
-    store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_);
+                   nullptr, axes, sections_, at ? at + 1 : nullptr);
     lin(B.wv, xn_, v_, n, xq_);
-    store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_);
+    if (at) {
+        store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_);
+        store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_);
+    } else {
+        store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_);
+        store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_);
+    }
+}
+
+// The recordings of an attention layer's head are numbered by the rows they are sized for.
+int Qwen35::head_key(int il, int n) const { return blocks_[(size_t) il].gdn ? 0 : room_key(n); }
+
+int64_t Qwen35::turn(int64_t row) const {
+    int32_t thw[3];
+    turn_of(row, thw);
+    return thw[0];
 }
 
 void Qwen35::attn(Block& B, int64_t pos, int n) {
     int64_t first;
     const int32_t* axes = turns(pos, n, &first);
+    const long long* at = recording_ ? at_ : nullptr;
     lin(B.wq, xn_, qg_, n, xq_);
     head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, first, n, rms_eps_,
-                   st_, nullptr, axes, sections_);
+                   st_, nullptr, axes, sections_, at ? at + 1 : nullptr);
     attn_store(B, pos, n);
     const float scale = 1.f / std::sqrt((float) head_dim_);
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
@@ -279,7 +295,8 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
         attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_, awork_, chunk_, att_, head_dim_,
                      n_head_, n_kv_, scale, st_);
     else
-        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_);
+        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
+               at, at ? room(n) : 0);
     mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
     lin(B.wo, att_, ao_, n);
 }

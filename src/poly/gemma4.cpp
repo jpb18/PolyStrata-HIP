@@ -192,7 +192,7 @@ void Gemma4::load_layer(int il) {
     B.n_kv = kv_[(size_t) il];
     B.n_rot = B.swa ? rot_swa_ : rot_full_;
     B.theta_scale = std::pow(B.swa ? base_swa_ : base_full_, -2.f / (float) B.n_rot);
-    L.fixed = false;   // the attention's launches take the position
+    L.fixed = true;   // the attention's launches read the position on the card when they are recorded
 
     L.attn_norm = f32("attn_norm.weight", n_embd_);
     B.wq = mat("attn_q.weight", n_embd_, (int64_t) n_head_ * B.dim);
@@ -375,9 +375,15 @@ void Gemma4::load_extra(const uint8_t* src, int64_t pos) {
     }
 }
 
-// n tokens' rows from position `pos` into a layer's cache.  A ring's rows may end and go on from its start.
+// The recordings of a full layer's head are numbered by the rows they are sized for; a window layer's never
+// reads more than its window.
+int Gemma4::head_key(int il, int n) const { return swa_[(size_t) il] ? 0 : room_key(n); }
+
+// n tokens' rows from position `pos` into a layer's cache.  A ring's rows may end and go on from its start.  A
+// recorded launch stores them from the position at_ holds when it runs.
 void Gemma4::store(const float* x, uint16_t* cache, const Block& B, int64_t pos, int n) {
     const int width = B.n_kv * B.dim;
+    if (recording_) return store_f16_at(x, cache, width, at_, n, B.swa ? ring_ : 0, st_);
     if (!B.swa) return store_f16(x, cache, width, pos, n, st_);
     const int at = (int) (pos % ring_), head = std::min(n, ring_ - at);
     store_f16(x, cache, width, at, head, st_);
@@ -409,12 +415,13 @@ void Gemma4::attn(Block& B, int64_t pos, int n) {
             throw std::logic_error("a picture's rows in a call with other rows");
     const bool sees_all = B.swa && im != nullptr;
     const float* freq = B.swa ? nullptr : fp(freq_);
+    const long long* at = recording_ ? at_ : nullptr;   // a recorded launch: the tokens from what at_ holds
     lin(B.wq, xn_, qraw_, n, xq_);
     head_norm_rope(qraw_, B.dim, fp(B.q_norm), q_, B.dim, n_head_, B.n_rot, B.theta_scale, pos, n, rms_eps_, st_,
-                   freq);
+                   freq, nullptr, 1, at);
     lin(B.wk, xn_, kraw_, n, xq_);
     head_norm_rope(kraw_, B.dim, fp(B.k_norm), k_, B.dim, B.n_kv, B.n_rot, B.theta_scale, pos, n, rms_eps_, st_,
-                   freq);
+                   freq, nullptr, 1, at);
     const float* values = kraw_;   // a layer without a value projection takes the keys'
     if (B.wv.p) {
         lin(B.wv, xn_, vraw_, n, xq_);
@@ -430,7 +437,7 @@ void Gemma4::attn(Block& B, int64_t pos, int n) {
                      B.n_kv, 1.f, st_, window, ring, sees_all);
     else
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, B.dim, n_head_, B.n_kv, 1.f, st_, window, ring,
-               sees_all);
+               sees_all, at, !at ? 0 : B.swa ? std::min(window_, opt_.max_context) : room(n));
     lin(B.wo, att_, ao_, n);
 }
 

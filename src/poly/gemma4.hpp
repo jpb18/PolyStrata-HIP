@@ -45,6 +45,7 @@ protected:
     void load_extra(const uint8_t* src, int64_t pos) override;
     void load_drafter() override;
     void draft_step(int32_t token, int i) override;
+    int head_key(int il, int n) const override;
 
 private:
     /// A layer's weights beside the ones every architecture has (Layer), and its caches.

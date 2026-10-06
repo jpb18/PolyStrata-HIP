@@ -53,6 +53,8 @@ void kda_step(const float* qkv, const float* g1, const float* a, const float* be
 
 /// Stores the tokens' MLA latents (n values each) as fp16 from row `pos` of the layer's cache.
 void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream);
+/// The same from the row the card holds at `at` when the launch runs; with `ring`, a row is its number % ring.
+void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream);
 /// Attention over cached latents for the tokens from position `pos`.  q: n_head * rank absorbed queries a token.
 /// The first dense_rows tokens attend to every cache row up to their own.  The others each have a list in sel
 /// (sel_stride apart): top_rows cache rows, then the rows of the pool their own position is still filling.
@@ -113,9 +115,11 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream);
 /// The position is the token's place in the call counted from `pos`.  With `axes` (three numbers a token) it is
 /// the token's position on one of three axes instead: pair i takes axis (i % sections) % 3, ggml's interleaved
 /// rope_multi, which is how a picture's rows get a line and a column.
+/// With `at`, the first token's position is not `pos` but what the card holds at `at` when the launch runs: a
+/// launch recorded once can then be replayed for every position (attend() and store_f16_at() take it too).
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
                     float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq = nullptr,
-                    const int32_t* axes = nullptr, int sections = 1);
+                    const int32_t* axes = nullptr, int sections = 1, const long long* at = nullptr);
 /// Causal attention for the tokens from position `pos`: token t attends the rows 0 to pos + t, or with `window`
 /// only the last `window` of them.  q: n_head * dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the
 /// heads read a row's keys and values in turn, n_head / kv_heads heads each.  With `ring`, the sequence's row p
@@ -124,9 +128,11 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 /// comes out the same whatever tokens the call has beside it.
 /// With `whole` the call's tokens see each other: each attends up to the call's last row, so a token can attend
 /// window - 1 + rows of them.
+/// With `at`, the tokens start at the position the card holds there; the launches are sized for `room` rows,
+/// which must be no fewer than the last token attends, and score has room for them.
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
-            int ring = 0, bool whole = false);
+            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0);
 /// attend() for a prompt batch: the same attention with cuBLAS products, a few times faster on many tokens.  A
 /// token's result depends on the tokens beside it in the last bits, so the windows of guessed tokens use attend().
 /// keys and vals: scratch for the rows a chunk reads as floats, kv_heads * dim each: pos + rows of them, or

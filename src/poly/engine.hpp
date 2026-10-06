@@ -66,7 +66,8 @@ struct Dev {
 /// What a layer has in every architecture.  Its attention's weights, and a dense FFN's, are the architecture's.
 struct Layer {
     bool moe = false;
-    bool fixed = false;   ///< its launches are the same for every token, so one token's can be recorded (eval())
+    bool fixed = false;   ///< one token's launches can be recorded and replayed for the next ones (eval()): they
+                          ///< are the same for every token, or read the position on the card (Engine::at_)
     Dev attn_norm, ffn_norm;   ///< the norms ahead of the attention and of the FFN
     // MoE
     Dev gate_inp, sh_gate, sh_up, sh_down;
@@ -81,8 +82,11 @@ struct Layer {
     size_t slot_bytes = 0;             ///< from a slot of the layer to the one behind it: whole blocks of both types
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
     int trade = -1;                    ///< layers with the same number can take each other's slots: same size
-    void* head = nullptr;              ///< one token's launches up to the router, recorded (eval())
-    void* shared = nullptr;            ///< and the shared expert's
+    // What a call of a few tokens hands the card, recorded (Engine::run()): by the call's tokens, and the head
+    // also by Engine::head_key()
+    std::vector<void*> heads;          ///< up to the router
+    std::vector<void*> shared;         ///< the shared expert
+    std::vector<void*> tail;           ///< after the experts
 };
 
 /// A routed expert is run from the VRAM cache or on the CPU when tokens come a few at a time, as an answer's do
@@ -235,6 +239,12 @@ protected:
     /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
     virtual void block_attend(int64_t pos, int n) { (void) pos, (void) n; }
     virtual void block_rows(int64_t pos, int n) { (void) pos, (void) n; }
+    /// Which recording of a layer's head fits n tokens from pos().  Launches that are sized by the rows they read
+    /// are recorded once for each size (room()), and the architecture numbers the sizes from 0.
+    virtual int head_key(int il, int n) const { (void) il, (void) n; return 0; }
+    /// The rotary position of a row of text: its place in the sequence, unless pictures before it took fewer
+    /// positions than rows.
+    virtual int64_t turn(int64_t row) const { return row; }
     /// The other names of a tensor or a metadata key in the files of this architecture, or null.
     virtual const Names* tensor_alias(const char* name) const { (void) name; return nullptr; }
     virtual const Names* meta_alias(const char* key) const { (void) key; return nullptr; }
@@ -272,6 +282,8 @@ protected:
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
+    int room(int n) const;
+    int room_key(int n) const;
     void* dmalloc(size_t bytes, const char* what);
     void* hmalloc(size_t bytes, const char* what);
 
@@ -288,6 +300,11 @@ protected:
     std::vector<void*> dev_allocs_, host_allocs_;
     std::vector<void*> graphs_;   ///< every recorded graph, to destroy
     void* tail_ = nullptr;        ///< one token's launches from the last layer to the logits, recorded
+    // A recorded launch cannot be given the position as an argument: it reads it here when it runs.  eval() writes
+    // the token's place in the sequence and its rotary position before it replays the layers.
+    long long* at_ = nullptr;     ///< on the card: {pos(), turn(pos())}
+    long long* h_at_ = nullptr;   ///< pinned
+    bool recording_ = false;      ///< a layer's launches are being recorded: positions are read from at_
 
     // geometry
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;

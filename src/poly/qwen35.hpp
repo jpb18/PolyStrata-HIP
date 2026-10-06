@@ -35,6 +35,8 @@ protected:
     void moe_shared(const Layer& L, int il, int n) override;
     void block_attend(int64_t pos, int n) override;
     void block_rows(int64_t pos, int n) override;
+    int head_key(int il, int n) const override;
+    int64_t turn(int64_t row) const override;
 
 private:
     /// A layer's weights beside the ones every architecture has (Layer), and its places in the state and caches.
