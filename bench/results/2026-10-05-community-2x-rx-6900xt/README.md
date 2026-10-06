@@ -167,7 +167,7 @@ What the tables show:
   which is where the decode time goes on one card.
 
 **Memory and power**, from each configuration's `telemetry.jsonl` (one-second samples from the server's start through
-the recall checks; the raw files, 5 MB in all, are not kept in this repository):
+the recall checks; the raw files, 4 MB in all, are not kept in this repository):
 
 - VRAM peak: 15.9 GiB on the primary card in every configuration (`mem_info_vram_used`, the whole card); 15.9-16.0 GiB
   on the second card in the split and helper modes. In `single-stock`, the idle second card showed 9.5 GiB in use for

@@ -64,9 +64,13 @@ How to read the table:
 | [2026-10-05-community-2x-p40](2026-10-05-community-2x-p40/) | 2x Tesla P40 22 GB, 2x Xeon E5-2698 v4 | IQ2_XS | 353 (4K) / 501 (16K), both cards; 348 / 388 one card | 34.8 both cards, 19.6 one card | 0.1.39 | #1028 |
 | [2026-10-05-community-2x-rtx-4060ti](2026-10-05-community-2x-rtx-4060ti/) | 2x RTX 4060 Ti 16 GB, Threadripper PRO 3975WX | UD-IQ4_XS | 880 / 1,917 / 2,221 | 54.4 / 56.6 / 54.7 | 0.1.39 | #1062 |
 | [2026-10-06-community-rx-6800m](2026-10-06-community-rx-6800m/) | RX 6800M (gfx1031), Windows, self-built HIP | Flash-Next quants (see README) | 50-114 | 9-27 | 0.1.40 | #1078 |
+| [2026-10-05-community-2x-rx-6900xt](2026-10-05-community-2x-rx-6900xt/) | 2x RX 6900 XT 16 GB (gfx1030), Ryzen 5 5600X, 128 GB | IQ3_S, 131K | one card stock 457 / 474 / 459, with #835 + #849 + #854 868 / 1,100 / 1,023; layer split with them 853 / 1,616 / 1,823 | 40-43 one card, 57-61 layer split | 0.1.39 stock and with #835, #849, #854 | #927 |
+| [2026-10-05-community-gfx1151](2026-10-05-community-gfx1151/) | Radeon 8060S (gfx1151), Ryzen AI Max+ 395, 128 GB unified memory | Q2_0, UD-IQ4_XS | 250.9 to 528.9 with the hipBLASLt table (matched synthetic prompts) | 45.6 to 46.8 (shared-expert stream on) | 0.1.39 + #895, #820 | #917 |
+| [2026-10-05-community-arc-b65](2026-10-05-community-arc-b65/) | Intel Arc Pro B65 32 GB (SYCL), Core i5-12600K, 128 GB | IQ2_XS, 8K | 307-359 (512 and 7,000-token tasks) | 36-49 by task; medians of the five tasks 40.4-41.3 / 39.8-40.9 | 0.1.40 source + 6 local patches | #955 |
 
 Notes:
 
+- #927 ran seven configurations; the table shows the one-card stock and PR sets and the layer split with the PRs (#835 is opt-in in 0.1.40, so those are not the release default), and its README has the helper-mode rows. #917 is 0.1.39 plus then-unmerged #895 and #820, and 0.1.40 turned the shared-expert stream off on HIP (#826). #955's patches 3, 5 and 6 are source changes in 0.1.40.2.
 - #1016 ran its engine at the 0.1.35 commit and the table shows the numbers as submitted.
 - #995 also changed the canonical `2026-09-29-speed-0126` report (matrix.json rewritten, README extended with another host's rows); that part was not ported, only the two new folders.
 - #777 and #811 are the same machine on two quants, kept as two folders.

@@ -21,17 +21,6 @@ and their limits. Report what you actually measured and label estimates separate
 - [2026-10-04: 2x Intel Arc Pro B60 24 GB, Ryzen 5 5600, 64 GB RAM](../bench/results/2026-10-04-community-2x-arc-pro-b60/README.md):
   the SYCL port at `6f32ec0` with two fixes, Coder IQ1_M and Flash-Next IQ2_XS, 8,192-token context, layer split across both cards;
   short prompts and 2K-token prompts, plus one run on a single B60. Intel's SYCL engine, no 4,096/32,768/128,000-token sweep.
-- [2026-10-05: 2x AMD Radeon RX 6900 XT 16 GB (gfx1030), Ryzen 5 5600X, 128 GB RAM](../bench/results/2026-10-05-community-2x-rx-6900xt/README.md):
-  Strata 0.1.39 stock and with the then-unmerged #835, #849 and #854 (#835 is opt-in in 0.1.40, so the second set is not the release
-  default), original Flash-Next IQ3_S, 131,072-token context, one card, a layer split and the expert-helper mode (seven
-  configurations); three runs each at 4,096, 32,768, and 128,000 prompt tokens, plus six recall checks per configuration.
-- [2026-10-05: Radeon 8060S (gfx1151), Ryzen AI Max+ 395, 128 GB unified memory](../bench/results/2026-10-05-community-gfx1151/README.md):
-  engine 0.1.39 plus the then-unmerged #895 (gfx1151 enablement), #820 and a hipBLASLt tuning table, so not the 0.1.40 release build;
-  Q2_0 and UD-IQ4_XS; interactive chats against llama.cpp Vulkan, then matched synthetic prompts (A-E): the tuning table gives 250.9
-  to 528.9 prompt tok/s (2.1x), the shared-expert stream +2.5% decode (8 requests; 0.1.40 turned that stream off on HIP, #826).
-- [2026-10-06: Intel Arc Pro B65 32 GB, Core i5-12600K, 128 GB RAM](../bench/results/2026-10-05-community-arc-b65/README.md):
-  the SYCL port built from the v0.1.40 source with six local patches (three of them are in 0.1.40.2), original Flash-Next IQ2_XS,
-  8,192-token context; three fresh launches, five fixed tasks at 512 and 7,000 prompt tokens: decode medians 40.4-41.3 and 39.8-40.9 tok/s.
 
 ## What to record
 
