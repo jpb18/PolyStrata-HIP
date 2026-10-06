@@ -19,6 +19,12 @@ namespace strata::poly {
 void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows, void* stream);
 void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                void* stream);
+/// The same for the many rows of a prompt batch, as a cuBLAS product on the stream of `blas` (blas_create), one
+/// for each group of rows_per_x outputs.  It sums in another order than gemv_f32, so a row does not come out
+/// to the last bit as it does there.  Throws std::runtime_error.
+void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows);
+/// n BF16 values as floats, for gemm_f32.
+void bf16_to_f32(const uint16_t* w, float* out, size_t n, void* stream);
 
 /// RMS norm over each of `rows` groups of n values: y = x / sqrt(mean(x^2) + eps) * w.  `w` (n values, shared by the
 /// rows) may be null.  A row of y starts y_stride values after the one before it (0: n), so two calls can fill
@@ -66,7 +72,7 @@ void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, i
 void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows,
                 int kpool, int64_t pos, int rows, int dense_rows, float* keys, float* score, int chunk, float* out,
                 int rank, int n_head, float scale, void* stream);
-/// A cuBLAS handle that enqueues on `stream`, for dsa_attend.  Throws std::runtime_error.
+/// A cuBLAS handle that enqueues on `stream`, for dsa_attend and gemm_f32.  Throws std::runtime_error.
 void* blas_create(void* stream);
 void blas_destroy(void* blas);
 

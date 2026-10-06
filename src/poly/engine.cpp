@@ -433,6 +433,7 @@ Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, i
                                 (want == kAnyMat && kernels::native_mmvq_supported((int) t->type)));
     const uint32_t type = as_is ? t->type : want == kF32 ? kTypeF32 : kTypeBF16;
     const size_t out = as_is ? bytes : count * (type == kTypeF32 ? sizeof(float) : sizeof(uint16_t));
+    if (type == kTypeBF16) bf16_max_ = std::max(bf16_max_, count);
     const Dev d{dense_ ? dense_ + dense_at_ : nullptr, type, (int) n_in, (int) n_out};
     dense_at_ += pad(out) + kTail;
     if (!dense_) return d;
@@ -803,6 +804,7 @@ void Engine::shared_scratch() {
     cpu_ = fbuf(e);
     rl_ = fbuf(n * n_expert_);
     logits_ = fbuf((size_t) n_vocab_);
+    if (rows_ >= kStageRows && bf16_max_ > 0) wf_ = fbuf(bf16_max_);   // a BF16 matrix as floats, for lin()
     if (mmq_) {
         const size_t rr = n * n_used_;
         gu_ = fbuf(rr * 2 * n_ff_exp_);
@@ -981,10 +983,22 @@ void Engine::dbg(const char* name, int il, const float* dev, int n) {
 // y = w x for n tokens.  xq is x already in Q8_1, when the caller has it.  rows_per_x below n_out gives each group
 // of rows its own input (see gemv_f32); only the float types take it.
 void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x) {
-    if (w.type == kTypeF32)
-        return gemv_f32(fp(w), x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
-    if (w.type == kTypeBF16)
-        return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, rows_per_x ? rows_per_x : w.n_out, n, st_);
+    if (w.type == kTypeF32 || w.type == kTypeBF16) {
+        const int per = rows_per_x ? rows_per_x : w.n_out;
+        const size_t count = (size_t) w.n_in * w.n_out;
+        // A prompt batch: one matrix product.  The kernel below has a block for every output of every token,
+        // and GLM 5.3 Flash's per-head projections are 32,768 outputs a token.
+        if (n >= kStageRows && (w.type == kTypeF32 || (wf_ && count <= bf16_max_))) {
+            const float* wf = fp(w);
+            if (w.type == kTypeBF16) {
+                bf16_to_f32((const uint16_t*) w.p, wf_, count, st_);
+                wf = wf_;
+            }
+            return gemm_f32(blas_, wf, x, y, w.n_in, w.n_out, per, n);
+        }
+        if (w.type == kTypeF32) return gemv_f32(fp(w), x, y, w.n_in, w.n_out, per, n, st_);
+        return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, per, n, st_);
+    }
     // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens
     if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out, w.n_in)) {
         Mmq::quantize(x, nullptr, mqx_, (int) w.type, w.n_in, w.n_in, n, st_);

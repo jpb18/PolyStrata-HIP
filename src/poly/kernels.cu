@@ -90,6 +90,11 @@ void gemv(const W* w, const float* x, float* y, int n_in, int n_out, int rows_pe
     gemv_kernel<W><<<dim3(n_out, rows), threads, 0, (cudaStream_t) stream>>>(w, x, y, n_in, n_out, rows_per_x);
 }
 
+__global__ void bf16_to_f32_kernel(const uint16_t* __restrict__ w, float* __restrict__ out, size_t n) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = ldw(w, i);
+}
+
 __global__ void rms_norm_kernel(const float* __restrict__ x, const float* __restrict__ w, float* y, int n,
                                 float eps, int y_stride) {
     __shared__ float part[32];
@@ -785,6 +790,27 @@ void gemv_f32(const float* w, const float* x, float* y, int n_in, int n_out, int
 void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows,
                void* stream) {
     gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
+}
+
+// A buffer of rows is its transpose to cuBLAS, so y[row] = w x[row] is Y = W^T X.  A group's rows of w, its part
+// of every token's x and of every token's y are each a matrix with a stride.
+void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows) {
+    const cublasHandle_t h = (cublasHandle_t) blas;
+    const float one = 1.0f, zero = 0.0f;
+    const int groups = n_out / rows_per_x;
+    if (groups == 1) {
+        blas_ck(cublasSgemm(h, CUBLAS_OP_T, CUBLAS_OP_N, n_out, rows, n_in, &one, w, n_in, x, n_in, &zero, y, n_out),
+                "a batch's projection");
+        return;
+    }
+    blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, rows_per_x, rows, n_in, &one, w, n_in,
+                                      (long long) rows_per_x * n_in, x, groups * n_in, n_in, &zero, y, n_out,
+                                      rows_per_x, groups),
+            "a batch's projections");
+}
+
+void bf16_to_f32(const uint16_t* w, float* out, size_t n, void* stream) {
+    bf16_to_f32_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(w, out, n);
 }
 
 void rms_norm(const float* x, const float* w, float* y, int n, int rows, float eps, void* stream, int y_stride) {
