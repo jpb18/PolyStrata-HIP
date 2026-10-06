@@ -671,6 +671,41 @@ def gpu_drives_display(g) -> bool:
     return text.strip().lower() == "enabled"
 
 
+def pcie_link(index: int) -> dict | None:
+    """The NVIDIA card's PCIe link: {"gen": the generation card and board both run (an idle card drops to a lower
+    one, so the current generation is not asked), "gpu_gen", "host_gen", "width", "max_width"}; None when nvidia-smi
+    does not say."""
+    s = out(["nvidia-smi", "-i", str(index), "--query-gpu=pcie.link.gen.max,pcie.link.gen.gpumax,pcie.link.gen.hostmax,"
+             "pcie.link.width.current,pcie.link.width.max", "--format=csv,noheader,nounits"])
+    try:
+        gen, gpu_gen, host_gen, width, max_width = (int(x.strip()) for x in s.strip().splitlines()[0].split(","))
+    except (ValueError, IndexError):
+        return None
+    return {"gen": gen, "gpu_gen": gpu_gen, "host_gen": host_gen, "width": width, "max_width": max_width}
+
+
+PCIE_GBPS = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.97, 5: 3.94}    # GB/s per lane, each direction
+
+
+def pcie_lines(link: dict) -> tuple[str, str | None]:
+    """(the ok line, a warning or None) for step 1.  The copy rate the engine measures is about 75% of the link's."""
+    lim = []
+    if link["gpu_gen"] > link["gen"]:
+        lim.append(f"the card supports {link['gpu_gen']}.0, the board {link['host_gen']}.0")
+    line = f"PCIe: {link['gen']}.0 x{link['width']}" + (f" ({'; '.join(lim)})" if lim else "")
+    rate = PCIE_GBPS.get(link["gen"], 0) * link["width"]
+    if 0 < rate < 12:
+        line += (f" - up to ~{rate:.0f} GB/s to the GPU: long prompts are read slower than on a PCIe 4.0 x16 PC (their "
+                 "experts are copied over it); the engine measures the link at start for the output speed")
+    warn_line = None
+    if link["width"] < link["max_width"]:
+        # (#912) the width is read now, and some cards and laptops narrow the link while idle: a hint, not a verdict
+        warn_line = (f"the GPU's PCIe link reads {link['width']} of its {link['max_width']} lanes right now (some cards "
+                     "narrow it when idle); if it stays narrow under load: is it in the right slot (the one wired "
+                     "x16), fully seated, and not sharing lanes with an M.2 drive? (the BIOS can say)")
+    return line, warn_line
+
+
 GPU_PICK = None                                         # --gpu N (issue #51); None: the card with the most VRAM
 SPLIT_MIN_VRAM_GB = 8                                   # a card sharing a model holds the dense weights and its own
                                                         # prompt buffers too (docs/MULTI_GPU.md)
@@ -4354,6 +4389,12 @@ def main() -> int:
              "the model may not start or may use less VRAM. Set it to \"System managed\": System > About > "
              "Advanced system settings > Performance > Advanced > Virtual memory")
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
+    link = None if hip else pcie_link(int(gpu.get("index", 0)))
+    if link is not None:
+        line, problem = pcie_lines(link)
+        ok(line)
+        if problem:
+            warn(problem)
     floor = cpu_floor(avx2)
     if floor == "unsupported":
         fail("this CPU has neither AVX2 nor SSE4.2; Strata needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
