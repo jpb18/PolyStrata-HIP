@@ -105,6 +105,17 @@ void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream);
 
+// Up to 8 matrices of one format and shape in one launch: matrix i times its own Q8_1 column x[i] into y[i], as
+// native_mmvq(type, w[i], x[i], y[i], n_in, n_out, 1, stream) would each.  A launch costs the calling thread more
+// than a small product costs the card, which is what this saves.  False, with nothing launched: the format has
+// no kernel for it (Q2_K), and the caller launches the matrices one by one.
+struct MmvqSlots {
+    const void* w[8];
+    const void* x[8];
+    float* y[8];
+};
+bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
+
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
 // dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13,
 // Q6_K=14, IQ4_NL=20, IQ4_XS=23, Q2_0=42. Unsupported IDs throw in the byte-count

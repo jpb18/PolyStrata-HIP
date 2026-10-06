@@ -981,26 +981,48 @@ void Engine::moe(Layer& L, int il, int n) {
         }
         stats_.gpu_experts += n_cached;
         stats_.cpu_experts += n_host;
-        // Four launches a cached expert, and one that adds up to kSumRows of them into their tokens' rows, in the
-        // order they came.  The launches cost this thread more than they cost the card, so each one less counts.
+        // The launches cost this thread more than they cost the card, so each one less counts.  The cached experts
+        // go kSlots at a time, a launch a stage for all of them: gate and up, the activation, its quantization,
+        // down.  Then one launch adds up to kSumRows of them into their tokens' rows, in the order they came.  A
+        // format without a kernel for several matrices gets the four launches an expert.
         // Nothing else goes to the stream until the CPU experts are done, so one of their threads hands these to
         // the card meanwhile: on this thread they held the CPU experts up.
         const std::function<void()> launch = [&] {
+            const size_t ff = (size_t) n_ff_exp_, q8_row = kernels::native_q8_1_bytes(n_ff_exp_);
+            const int per = rows_ >= kSlots ? kSlots : 1;   // the scratch holds rows_ experts' values
             ScaledRows sum{};
-            for (int i = 0; i < n_cached; ++i) {
-                const Cached& c = cached[i];
-                const int k = i % kSumRows;
-                float* d = d_ + (size_t) k * e_row;
-                const void* xq = (const uint8_t*) xq_ + (size_t) c.row * xq_row;
-                kernels::native_mmvq((int) L.gu_type, c.slot, xq, g_, n_embd_, 2 * n_ff_exp_, 1, st_);
-                if (gelu_) geglu(g_, g_ + n_ff_exp_, h_, n_ff_exp_, st_);
-                else swiglu_clamp(g_, g_ + n_ff_exp_, h_, n_ff_exp_, limit, st_);
-                kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, 1, st_);
-                kernels::native_mmvq((int) L.d_type, c.slot + 2 * L.gu_bytes, q8_, d, n_ff_exp_, n_embd_, 1, st_);
-                sum.x[k] = d;
-                sum.acc[k] = fo_ + (size_t) c.row * e_row;
-                sum.w[k] = c.w;
-                if (k == kSumRows - 1 || i == n_cached - 1) add_scaled(sum, k + 1, n_embd_, st_);
+            for (int i0 = 0; i0 < n_cached; i0 += per) {
+                const int m = std::min(per, n_cached - i0);
+                kernels::MmvqSlots gate_up{}, down{};
+                for (int j = 0; j < m; ++j) {
+                    const Cached& c = cached[i0 + j];
+                    gate_up.w[j] = c.slot;
+                    gate_up.x[j] = (const uint8_t*) xq_ + (size_t) c.row * xq_row;
+                    gate_up.y[j] = g_ + (size_t) j * 2 * ff;
+                    down.w[j] = c.slot + 2 * L.gu_bytes;
+                    down.x[j] = (const uint8_t*) q8_ + (size_t) j * q8_row;
+                    down.y[j] = d_ + (size_t) ((i0 + j) % kSumRows) * e_row;
+                }
+                const bool one = m > 1 && kernels::native_mmvq_slots((int) L.gu_type, gate_up, m, n_embd_,
+                                                                      2 * n_ff_exp_, st_);
+                for (int j = 0; j < m && !one; ++j)
+                    kernels::native_mmvq((int) L.gu_type, gate_up.w[j], gate_up.x[j], gate_up.y[j], n_embd_,
+                                         2 * n_ff_exp_, 1, st_);
+                if (gelu_) geglu_rows(g_, h_, n_ff_exp_, m, st_);
+                else swiglu_clamp_rows(g_, h_, n_ff_exp_, m, limit, st_);
+                kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
+                if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
+                    for (int j = 0; j < m; ++j)
+                        kernels::native_mmvq((int) L.d_type, down.w[j], down.x[j], down.y[j], n_ff_exp_, n_embd_, 1,
+                                             st_);
+                for (int j = 0; j < m; ++j) {
+                    const Cached& c = cached[i0 + j];
+                    const int k = (i0 + j) % kSumRows;
+                    sum.x[k] = down.y[j];
+                    sum.acc[k] = fo_ + (size_t) c.row * e_row;
+                    sum.w[k] = c.w;
+                    if (k == kSumRows - 1 || i0 + j == n_cached - 1) add_scaled(sum, k + 1, n_embd_, st_);
+                }
             }
         };
 

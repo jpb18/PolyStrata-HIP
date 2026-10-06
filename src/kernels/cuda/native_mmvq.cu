@@ -1178,6 +1178,57 @@ void launch_multi(const void* weights, const void* x_q8_1, float* y, int n_in, i
     }
 }
 
+// Several matrices of one format and shape in one launch (native_mmvq_slots): blockIdx.y is the matrix, and the
+// rest is native_mmvq_multi_kernel for one column in its EXACT layout.
+template<typename F, int ROWS>
+__launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 1))
+__global__ void native_mmvq_slots_kernel(MmvqSlots slots, int n_in, int n_out) {
+    const auto* w = static_cast<const typename F::Block*>(slots.w[blockIdx.y]);
+    const auto* x = static_cast<const Q81Block*>(slots.x[blockIdx.y]);
+    float* y = slots.y[blockIdx.y];
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / F::DIV;
+    float tmp[ROWS] = {};
+    for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += F::BPI) {
+        const int kby = kbx * F::KBY;
+        const int kqs = F::kqs(tid);
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                tmp[i] += F::apply(F::load(w + block, kqs), x + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        tmp[i] = warp_sum(tmp[i]);
+        if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
+    }
+}
+
+template<typename F>
+void launch_slots(const MmvqSlots& slots, int count, int n_in, int n_out, cudaStream_t s) {
+    const dim3 threads(WARP, WARPS);
+    if (n_in / F::DIV < F::BPI) {
+        constexpr int ROWS = 2;
+        const dim3 blocks(unsigned((std::size_t(n_out) + ROWS - 1) / ROWS), unsigned(count));
+        native_mmvq_slots_kernel<F, ROWS><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+    } else {
+        native_mmvq_slots_kernel<F, 1><<<dim3(unsigned(n_out), unsigned(count)), threads, 0, s>>>(slots, n_in, n_out);
+    }
+}
+
 void validate_shape(int n_in, int ncols, int block_elems = Q8K) {
     if (n_in <= 0 || n_in % block_elems != 0) {
         throw std::invalid_argument("native MMVQ requires n_in > 0 and divisible by its block element count");
@@ -1711,6 +1762,48 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
         iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     default: throw std::invalid_argument("unsupported native MMVQ GGML type");
     }
+}
+
+bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+#if defined(STRATA_HIP_GFX906)
+    (void) ggml_type, (void) slots, (void) count, (void) n_in, (void) n_out, (void) stream;
+    return false;   // the wave layout has no kernel for it
+#else
+    const bool small = ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 20;
+    const bool k = ggml_type == 11 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 23;
+    // the formats native_mmvq() hands to iq_mmvq()
+    const bool iq = ggml_type == 7 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 || ggml_type == 21 ||
+                    ggml_type == 22 || ggml_type == 29;
+    if (!small && !k && !iq && ggml_type != 42) return false;
+    validate_shape(n_in, 1, small || ggml_type == 7 ? 32 : ggml_type == 42 ? 64 : 256);
+    if (n_out <= 0 || count < 1 || count > MAX_NCOLS)
+        throw std::invalid_argument("native MMVQ requires n_out > 0 and 1 to 8 matrices");
+    for (int i = 0; i < count; ++i) {
+        validate_pointer(slots.w[i]);
+        validate_pointer(slots.x[i]);
+        validate_pointer(slots.y[i]);
+    }
+    validate_stream(stream);
+    if (iq) {
+        iq_mmvq_slots(ggml_type, slots, count, n_in, n_out, stream);
+        return true;
+    }
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ggml_type) {
+    case 2: launch_slots<SmallTraits<Q40Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 6: launch_slots<SmallTraits<Q50Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 8: launch_slots<SmallTraits<Q80Block, 8>>(slots, count, n_in, n_out, s); break;
+    case 20: launch_slots<SmallTraits<IQ4NLBlock, 4>>(slots, count, n_in, n_out, s); break;
+    case 11: launch_slots<Q3KTraits>(slots, count, n_in, n_out, s); break;
+    case 12: launch_slots<Q4KTraits>(slots, count, n_in, n_out, s); break;
+    case 13: launch_slots<Q5KTraits>(slots, count, n_in, n_out, s); break;
+    case 14: launch_slots<Q6KTraits>(slots, count, n_in, n_out, s); break;
+    case 23: launch_slots<IQ4XSTraits>(slots, count, n_in, n_out, s); break;
+    default: launch_slots<Q20Traits>(slots, count, n_in, n_out, s); break;
+    }
+    launch_check();
+    return true;
+#endif
 }
 
 } // namespace strata::kernels

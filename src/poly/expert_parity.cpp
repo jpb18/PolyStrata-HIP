@@ -3,7 +3,8 @@
 //   poly_expert_parity MODEL.gguf
 //
 // For a few experts of every tensor type the file uses, the GPU path (native_mmvq over the GGUF blocks) and the
-// CPU path (cpu_experts) are compared with a double-precision product over ggml's dequantized weights.  Then
+// CPU path (cpu_experts) are compared with a double-precision product over ggml's dequantized weights, and the
+// GPU path with two experts a launch (native_mmvq_slots) must give the bits it gives with one.  Then
 // every kind of matrix in the file (a type and a shape) takes a batch of tokens through the two GPU products,
 // native_mmvq and MMQ.  All of them quantize their input to 8 bits, so none is exact; the test fails when one is
 // far from the reference.  A model in several files: give the file that holds the tensors to check.
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <random>
 #include <set>
@@ -102,12 +104,14 @@ int main(int argc, char** argv) {
         ck(cudaStreamCreate(&st));
         float *d_x, *d_gu, *d_h, *d_out;
         void *d_xq, *d_hq;
+        // room for two experts: the second check below takes two in a launch
+        const size_t hq_bytes = kernels::native_q8_1_bytes(n_ff);
         ck(cudaMalloc(&d_x, (size_t) n_embd * 4));
-        ck(cudaMalloc(&d_gu, (size_t) 2 * n_ff * 4));
-        ck(cudaMalloc(&d_h, (size_t) n_ff * 4));
-        ck(cudaMalloc(&d_out, (size_t) n_embd * 4));
+        ck(cudaMalloc(&d_gu, (size_t) 4 * n_ff * 4));
+        ck(cudaMalloc(&d_h, (size_t) 2 * n_ff * 4));
+        ck(cudaMalloc(&d_out, (size_t) 2 * n_embd * 4));
         ck(cudaMalloc(&d_xq, kernels::native_q8_1_bytes(n_embd)));
-        ck(cudaMalloc(&d_hq, kernels::native_q8_1_bytes(n_ff)));
+        ck(cudaMalloc(&d_hq, 2 * hq_bytes));
         ck(cudaMemcpy(d_x, x.data(), (size_t) n_embd * 4, cudaMemcpyHostToDevice));
         kernels::native_quantize_q8_1(d_x, d_xq, n_embd, 1, st);
 
@@ -158,10 +162,39 @@ int main(int argc, char** argv) {
                     ck(cudaStreamSynchronize(st));
                     e_gpu = rel_error(dev.data(), want);
                 }
-                const bool pass = e_cpu < 0.05 && e_gpu < 0.05;
+                // The expert twice in one launch a stage, as the engine takes a token's cached experts: each copy
+                // must come out with the bits the launches above gave.
+                const char* together = "";
+                bool same = true;
+                if (gpu) {
+                    kernels::MmvqSlots gu{}, dn{};
+                    for (int j = 0; j < 2; ++j) {
+                        gu.w[j] = d_w;
+                        gu.x[j] = d_xq;
+                        gu.y[j] = d_gu + (size_t) j * 2 * n_ff;
+                        dn.w[j] = d_w + 2 * gu_bytes;
+                        dn.x[j] = (const uint8_t*) d_hq + (size_t) j * hq_bytes;
+                        dn.y[j] = d_out + (size_t) j * n_embd;
+                    }
+                    together = ", two in a launch: no kernel";
+                    if (kernels::native_mmvq_slots((int) tg.type, gu, 2, n_embd, 2 * n_ff, st)) {
+                        poly::swiglu_clamp_rows(d_gu, d_h, n_ff, 2, limit, st);
+                        kernels::native_quantize_q8_1(d_h, d_hq, n_ff, 2, st);
+                        if (kernels::native_mmvq_slots((int) td.type, dn, 2, n_ff, n_embd, st)) {
+                            std::vector<float> two((size_t) 2 * n_embd);
+                            ck(cudaMemcpyAsync(two.data(), d_out, two.size() * 4, cudaMemcpyDeviceToHost, st));
+                            ck(cudaStreamSynchronize(st));
+                            same = std::memcmp(two.data(), dev.data(), (size_t) n_embd * 4) == 0 &&
+                                   std::memcmp(two.data() + n_embd, dev.data(), (size_t) n_embd * 4) == 0;
+                            together = same ? ", two in a launch: the same bits" : ", two in a launch: OTHER BITS";
+                        }
+                    }
+                    ck(cudaStreamSynchronize(st));
+                }
+                const bool pass = e_cpu < 0.05 && e_gpu < 0.05 && same;
                 ok = ok && pass;
-                std::printf("blk.%d expert %3d  %s/%s  relative error: CPU %.4f, GPU %s%s\n", il, e, tg.type_name(),
-                            td.type_name(), e_cpu, gpu ? std::to_string(e_gpu).c_str() : "(no kernel)",
+                std::printf("blk.%d expert %3d  %s/%s  relative error: CPU %.4f, GPU %s%s%s\n", il, e, tg.type_name(),
+                            td.type_name(), e_cpu, gpu ? std::to_string(e_gpu).c_str() : "(no kernel)", together,
                             pass ? "" : "  FAIL");
             }
             ck(cudaFree(d_w));
