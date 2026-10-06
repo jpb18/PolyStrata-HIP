@@ -1228,13 +1228,16 @@ def find_nvcc(below=None):
     return best
 
 
-def find_vcvars():
+def find_vcvars(cuda_v=None):
+    """Visual Studio's vcvars64.bat.  #985: CUDA 13.0-13.2 accept Visual Studio 2019 and 2022 only, so a newer one
+    (2026 = version 18) is taken only with CUDA 13.3 or newer (`cuda_v`, the toolkit's (major, minor))."""
     vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
     if not vswhere.exists():
         return None
     # CUDA 13 accepts Visual Studio 2019 and 2022 only: a newer one (2026 = version 18) installed next to them
     # must not be picked ("unsupported Microsoft Visual Studio version"); with only a newer one there is none
-    p = out([str(vswhere), "-latest", "-products", "*", "-version", "[16.0,18.0)", "-requires",
+    upper = "19.0" if cuda_v is not None and tuple(cuda_v) >= (13, 3) else "18.0"
+    p = out([str(vswhere), "-latest", "-products", "*", "-version", f"[16.0,{upper})", "-requires",
              "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]).strip()
     v = Path(p) / "VC/Auxiliary/Build/vcvars64.bat" if p else None
     return v if v and v.exists() else None
@@ -2652,7 +2655,7 @@ def install_build_tools(gpu, yes):
              "and run it again (STRATA_NVCC=<its nvcc> picks one toolkit)")
     # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220)
     need_cuda = need12 if old else (13, 0) if max(archs) >= 120 else (12, 0)
-    vcvars = find_vcvars() if WIN else None
+    vcvars = find_vcvars(cuda_v) if WIN else None
     have_cc = vcvars is not None if WIN else shutil.which("g++") is not None
     missing = []
     if not have_cc:
@@ -2679,7 +2682,7 @@ def install_build_tools(gpu, yes):
                 check=False)
         if nvcc is None or cuda_v < need_cuda:
             run([*wg, "--id", "Nvidia.CUDA", "--version", "13.0"], check=False)
-        vcvars = find_vcvars()
+        vcvars = find_vcvars(cuda_v)
     else:
         apt = shutil.which("apt-get")
         if apt is None:
@@ -2701,12 +2704,12 @@ def install_build_tools(gpu, yes):
             run(["sudo", "apt-get", "update"])
             run(["sudo", "apt-get", "install", "-y", "cuda-toolkit-13-0"])
     nvcc, cuda_v = find_nvcc(below=(13, 0)) if old else find_nvcc()
-    if (WIN and find_vcvars() is None) or (not WIN and shutil.which("g++") is None):
+    if (WIN and find_vcvars(cuda_v) is None) or (not WIN and shutil.which("g++") is None):
         fail("the C++ build tools did not install", "install them by hand (README.md) and run it again")
     if nvcc is None or cuda_v < need_cuda:
         fail("the CUDA Toolkit did not install", "install it from https://developer.nvidia.com/cuda-downloads, then run it again")
     ok(f"build tools installed (CUDA {cuda_v[0]}.{cuda_v[1]})")
-    return nvcc, find_vcvars() if WIN else None
+    return nvcc, find_vcvars(cuda_v) if WIN else None
 
 
 def cmake_build(src, bdir, target, defs, vcvars, bat_name):

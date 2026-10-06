@@ -184,6 +184,23 @@ class ReadOnlyGgufDir(unittest.TestCase):
             self.assertFalse(setup.done(Path(tmp) / "x.gguf"))
 
 
+class VsRange(unittest.TestCase):
+    """#985: Visual Studio 2026 (version 18) is looked for only with CUDA 13.3 or newer."""
+
+    def asked(self, cuda_v):
+        seen = []
+        with mock.patch.object(setup.Path, "exists", lambda self: True),                 mock.patch.object(setup, "out", lambda cmd, *a, **k: seen.append(cmd) or "C:/VS"):
+            setup.find_vcvars(cuda_v)
+        return seen[0][seen[0].index("-version") + 1]
+
+    def test_the_range_follows_the_toolkit(self):
+        self.assertEqual(self.asked(None), "[16.0,18.0)")
+        self.assertEqual(self.asked((13, 0)), "[16.0,18.0)")
+        self.assertEqual(self.asked((13, 2)), "[16.0,18.0)")
+        self.assertEqual(self.asked((13, 3)), "[16.0,19.0)")
+        self.assertEqual(self.asked((14, 0)), "[16.0,19.0)")
+
+
 class ExperimentalSm60(unittest.TestCase):
     """#295: Pascal (6.x) and Volta (7.0) only with STRATA_EXPERIMENTAL_SM60=1, built with -DSTRATA_EXPERIMENTAL_SM60=ON
     and a CUDA 12.x toolkit; nothing changes without the variable."""
@@ -248,7 +265,7 @@ class ExperimentalSm60(unittest.TestCase):
             seen.append(below)
             return nvcc(below)
 
-        with mock.patch.object(setup, "find_nvcc", find), mock.patch.object(setup, "find_vcvars", lambda: "vcvars"), \
+        with mock.patch.object(setup, "find_nvcc", find), mock.patch.object(setup, "find_vcvars", lambda cuda_v=None: "vcvars"), \
                 mock.patch.object(setup.shutil, "which", lambda n: "/usr/bin/" + n):
             got, _ = quiet(setup.install_build_tools, {"arch": str(archs[0]), "archs": archs}, True)
         return got, seen
