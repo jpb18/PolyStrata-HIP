@@ -1268,7 +1268,7 @@ template <class F>
 void* Engine::record(F&& work) {
     cudaGraph_t g = nullptr;
     ck(cudaStreamBeginCapture(cs(st_), cudaStreamCaptureModeThreadLocal), "cudaStreamBeginCapture");
-    recording_ = true;
+    recording_ = recorded_ = true;
     try {
         work();
     } catch (...) {

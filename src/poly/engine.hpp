@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace strata {
@@ -166,6 +167,9 @@ public:
     /// block (draft_step()); the calls are the same.
     bool drafts() const { return draft_; }
     int32_t draft(int32_t token, int i, float* prob);
+    /// Whether a call since the last time this was asked recorded launches for replaying, which takes far longer
+    /// than the call does afterwards: its time says nothing of the calls to come.
+    bool took_record() { return std::exchange(recorded_, false); }
 
     // A sequence's state, to leave the sequence and come back to it.  The recurrent layers have a state that
     // every token changes.  Each token also leaves a row in the attention caches, which stays as it was written.
@@ -305,6 +309,7 @@ protected:
     long long* at_ = nullptr;     ///< on the card: {pos(), turn(pos())}
     long long* h_at_ = nullptr;   ///< pinned
     bool recording_ = false;      ///< a layer's launches are being recorded: positions are read from at_
+    bool recorded_ = false;       ///< took_record()
 
     // geometry
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
