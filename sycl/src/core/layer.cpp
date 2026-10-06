@@ -987,29 +987,29 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     const int64_t live_slots = st.kv_elastic >= 0 ? pool_slots_mapped(*g_pools[(size_t) st.kv_elastic]) : st.n_slots;
     const size_t rows = (size_t) live_slots * s.n_head_kv * s.page_size;
     if (st.kv_hybrid) {
-        cs->memset(st.k_q, 0, rows * s.head_dim);
-        cs->memset(st.k_scale, 0,
+        strata::big_fill_zero(*cs, st.k_q, rows * s.head_dim);
+        strata::big_fill_zero(*cs, st.k_scale,
                    rows * (s.head_dim / strata::kernels::KV_Q8_GROUP) * 2);
-        cs->memset(st.v_q4, 0,
+        strata::big_fill_zero(*cs, st.v_q4,
                    rows *
                        strata::kernels::kv_q4_bytes_per_head((int)s.head_dim));
     } else if (st.kv_q4) {
-        cs->memset(st.k_q4, 0,
+        strata::big_fill_zero(*cs, st.k_q4,
                    rows *
                        strata::kernels::kv_q4_bytes_per_head((int)s.head_dim));
-        cs->memset(st.v_q4, 0,
+        strata::big_fill_zero(*cs, st.v_q4,
                    rows *
                        strata::kernels::kv_q4_bytes_per_head((int)s.head_dim));
     } else if (st.kv_int8) {
-        cs->memset(st.k_q, 0, rows * s.head_dim);
-        cs->memset(st.v_q, 0, rows * s.head_dim);
-        cs->memset(st.k_scale, 0,
+        strata::big_fill_zero(*cs, st.k_q, rows * s.head_dim);
+        strata::big_fill_zero(*cs, st.v_q, rows * s.head_dim);
+        strata::big_fill_zero(*cs, st.k_scale,
                    rows * (s.head_dim / strata::kernels::KV_Q8_GROUP) * 2);
-        cs->memset(st.v_scale, 0,
+        strata::big_fill_zero(*cs, st.v_scale,
                    rows * (s.head_dim / strata::kernels::KV_Q8_GROUP) * 2);
     } else {
-        cs->memset(st.k_pool, 0, rows * s.head_dim * 2);
-        cs->memset(st.v_pool, 0, rows * s.head_dim * 2);
+        strata::big_fill_zero(*cs, st.k_pool, rows * s.head_dim * 2);
+        strata::big_fill_zero(*cs, st.v_pool, rows * s.head_dim * 2);
     }
     // A streamed state starts over with nothing resident. Its host copy is not cleared (GBs over PCIe per new
     // conversation): no reader names a cell before this sequence has written it, and a block copied in whole

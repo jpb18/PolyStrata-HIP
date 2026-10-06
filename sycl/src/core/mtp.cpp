@@ -2,6 +2,7 @@
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include "strata/sycl_queue.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/on_device.hpp"
@@ -468,7 +469,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
                              count.used, dpct::get_in_order_queue())) != 0) {
         err = "mtp: buffers do not fit"; return false;
     }
-    dpct::get_in_order_queue().memset(arena_, 0, count.used).wait();
+    strata::big_fill_zero(dpct::get_in_order_queue(), arena_, count.used);
     Bump real;
     real.base = (uint8_t*) arena_;
     carve(real);

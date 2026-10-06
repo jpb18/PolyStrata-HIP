@@ -2,6 +2,7 @@
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#include "strata/sycl_queue.hpp"
 #include "strata/core/verify.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/dma_batch.hpp"
@@ -529,7 +530,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
         err = "verify: the device arena (" + std::to_string(count.used >> 20) + " MiB) does not fit";
         return false;
     }
-    dpct::get_in_order_queue().memset(arena_, 0, count.used).wait();
+    strata::big_fill_zero(dpct::get_in_order_queue(), arena_, count.used);
     if (g_trace && trace_h_ == nullptr) {   // #649: the breadcrumbs, mapped so they read while the GPU hangs
         trace_n_ = (size_t) (g.n_layers + 1) * kProfPer * 2;
         if (!mapped(trace_n_ * 8, (void**) &trace_h_, (void**) &trace_m_)) {
