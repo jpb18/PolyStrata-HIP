@@ -216,12 +216,13 @@ Engine::~Engine() {
     }
     if (swap_st_) cudaStreamSynchronize(cs(swap_st_));
     if (up_) cudaStreamSynchronize(cs(up_));
+    if (rs_) cudaStreamSynchronize(cs(rs_));
     if (st_) cudaStreamSynchronize(cs(st_));
     workers_.reset();
     mmq_.reset();
     for (void* p : dev_allocs_) cudaFree(p);
     for (void* p : host_allocs_) cudaFreeHost(p);
-    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_})
+    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1]})
         if (e) cudaEventDestroy((cudaEvent_t) e);
     for (void* e : ev_row_)
         if (e) cudaEventDestroy((cudaEvent_t) e);
@@ -231,6 +232,7 @@ Engine::~Engine() {
     blas_destroy(blas_);
     if (swap_st_) cudaStreamDestroy(cs(swap_st_));
     if (up_) cudaStreamDestroy(cs(up_));
+    if (rs_) cudaStreamDestroy(cs(rs_));
     if (st_) cudaStreamDestroy(cs(st_));
 }
 
@@ -794,8 +796,8 @@ void Engine::load_drafter() {
 void Engine::shared_scratch() {
     const size_t n = (size_t) rows_, e = n * n_embd_;
     const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
-    // the draft block works in it too (draft_input()); read() keeps each of its calls' rows in it
-    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) read_rows_ * n_embd_);
+    // the draft block works in it too (draft_input()); read() keeps two calls' rows in it
+    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_);
     cur_ = fbuf(e);
     xn_ = fbuf(e);
     ao_ = fbuf(e);
@@ -896,6 +898,15 @@ void Engine::alloc() {
         up_ = up;
         ids_.resize(rr);
         first_.resize((size_t) n_expert_);
+
+        for (void** e : {&ev_in_[0], &ev_in_[1], &ev_out_[0], &ev_out_[1]}) {   // read()
+            cudaEvent_t ev = nullptr;
+            ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+            *e = ev;
+        }
+        cudaStream_t rs = nullptr;
+        ck(cudaStreamCreateWithFlags(&rs, cudaStreamNonBlocking), "cudaStreamCreate");
+        rs_ = rs;
     }
     use_.assign(layers_.size() * n_expert_, 0);
 }
@@ -1596,15 +1607,39 @@ void Engine::layer(int il, int n) {
 // call copies every layer's through the staging buffer, which is most of what reading a prompt takes.  So the
 // calls go through a layer one after the other before any goes on to the next, and the second one finds the
 // layer's experts where the first one's copy left them (moe_rows()).  A call's tokens meet what they met in a
-// call of their own, in the same order, so the result is eval()'s.  All a call needs kept from one layer to the
-// next is its rows of r_, which holds max_read() tokens for this.
-void Engine::read(const int32_t* tokens, int n) {
+// call of their own, in the same order, so the result is eval()'s.
+//
+// All a call needs kept from one layer to the next is its rows of the residual.  r_ holds two calls' rows.  With
+// more calls, a call's rows go to host memory when the card is done with them and come back before the call's
+// turn at the next layer, in the half of r_ the call two before it has left: both copies are on a stream of
+// their own, beside the card's work on the call between.
+//
+// A checkpoint inside the read (a mark) is taken a layer at a time: when a layer has run the tokens before it,
+// the layer's state is what save_state() would find there, and it is copied before the next call changes it.
+void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) {
     if (n < 1 || n > read_rows_) throw std::logic_error("read takes 1 to max_read() tokens");
     for (const Image& im : images_)
         if (im.at < pos_ + n && im.at + im.n > pos_)
             throw std::logic_error("read takes no rows of a picture: eval() does, a picture a call");
-    if (n <= rows_ || !mmq_ || cached_ == total_experts()) {
-        for (int at = 0; at < n; at += rows_) eval(tokens + at, std::min(rows_, n - at), false);
+    for (int k = 0; k < n_marks; ++k)
+        if (marks[k].at <= (k ? marks[k - 1].at : 0) || marks[k].at >= n)
+            throw std::logic_error("read: the marks rise, above 0 and below the tokens read");
+
+    // the calls: up to max_rows() tokens each, and none across a mark
+    calls_.clear();
+    for (int at = 0, k = 0; at < n;) {
+        const int m = std::min(rows_, (k < n_marks ? marks[k].at : n) - at);
+        const bool ends = k < n_marks && at + m == marks[k].at;
+        calls_.push_back({at, m, ends ? k : -1});
+        at += m;
+        k += ends;
+    }
+    const int n_calls = (int) calls_.size();
+    if (n_calls == 1 || !mmq_ || cached_ == total_experts()) {
+        for (const Call& c : calls_) {
+            eval(tokens + c.at, c.m, false);
+            if (c.mark >= 0 && marks[c.mark].state) save_state(marks[c.mark].state);
+        }
         return;
     }
     if (pos_ + n > opt_.max_context)
@@ -1612,38 +1647,79 @@ void Engine::read(const int32_t* tokens, int n) {
 
     ck(cudaStreamSynchronize(cs(st_)), "read");
     if (n_swap_ > 0) follow(0);
-    const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row;
+    const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row, r_bytes = r_row * sizeof(float);
     const size_t part = (size_t) std::max(streams(), draft_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
     const float scale = embed_scale();
     float* const r0 = r_;
     const int64_t pos0 = pos_;
-    for (int at = 0; at < n; at += rows_) {
-        const int m = std::min(rows_, n - at);
-        for (int t = 0; t < m; ++t) {
-            float* r = h_r_ + (size_t) t * r_row;
-            if (!input(tokens[at + t], pos0 + at + t, r) && scale != 1.f)
+    const bool host = n_calls > 2;
+    if (host && !h_res_) h_res_ = (float*) hmalloc((size_t) read_rows_ * r_bytes, "pinned memory");
+    const auto home = [&](int c) { return h_res_ + (size_t) calls_[(size_t) c].at * r_row; };
+    const auto half = [&](int c) { return r0 + (size_t) (host ? c % 2 : c) * part; };
+    // call c's rows back into its half of r_, behind whatever the stream has there of the half's last call
+    const auto fetch = [&](int c) {
+        ck(cudaMemcpyAsync(half(c), home(c), (size_t) calls_[(size_t) c].m * r_bytes, cudaMemcpyHostToDevice,
+                           cs(rs_)),
+           "read");
+        ck(cudaEventRecord((cudaEvent_t) ev_in_[c % 2], cs(rs_)), "read");
+    };
+    for (int c = 0; c < n_calls; ++c) {
+        const Call& call = calls_[(size_t) c];
+        float* rows = host ? home(c) : h_r_;
+        for (int t = 0; t < call.m; ++t) {
+            float* r = rows + (size_t) t * r_row;
+            if (!input(tokens[call.at + t], pos0 + call.at + t, r) && scale != 1.f)
                 for (size_t i = 0; i < e_row; ++i) r[i] *= scale;
             for (int h = 1; h < streams(); ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
         }
-        ck(cudaMemcpyAsync(r0 + (size_t) (at / rows_) * part, h_r_, (size_t) m * r_row * sizeof(float),
-                           cudaMemcpyHostToDevice, cs(st_)),
-           "embed");
+        if (host) continue;
+        ck(cudaMemcpyAsync(half(c), h_r_, (size_t) call.m * r_bytes, cudaMemcpyHostToDevice, cs(st_)), "embed");
         ck(cudaStreamSynchronize(cs(st_)), "embed");   // h_r_ is filled again
     }
+    if (host) {
+        fetch(0);
+        fetch(1);
+    }
+    // a turn for each layer, and one for the model's output, which the draft block keeps a row of
+    const int turns = n_layer_ + (draft_ ? 1 : 0);
     try {
-        for (int il = 0; il <= n_layer_; ++il)   // the last turn: the model's output, for the draft block
-            for (int at = 0; at < n; at += rows_) {
-                const int m = std::min(rows_, n - at);
-                r_ = r0 + (size_t) (at / rows_) * part;
-                pos_ = pos0 + at;
+        for (int il = 0; il < turns; ++il)
+            for (int c = 0; c < n_calls; ++c) {
+                const Call& call = calls_[(size_t) c];
+                r_ = half(c);
+                pos_ = pos0 + call.at;
+                if (host) ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_in_[c % 2], 0), "read");
                 if (il < n_layer_) {
-                    layer(il, m);
-                } else if (draft_) {
-                    output_rows(0, m, hn_ + n_embd_);
-                    draft_rows(tokens + at, ahead_pos_ == pos_ && tokens[at] == ahead_tok_ ? 1 : 0, m);
+                    layer(il, call.m);
+                } else {
+                    output_rows(0, call.m, hn_ + n_embd_);
+                    draft_rows(tokens + call.at, ahead_pos_ == pos_ && tokens[call.at] == ahead_tok_ ? 1 : 0, call.m);
                 }
+                if (uint8_t* state = call.mark >= 0 ? marks[call.mark].state : nullptr) {
+                    ck(cudaStreamSynchronize(cs(st_)), "read");
+                    const int64_t pos = pos_ + call.m;
+                    if (il < n_layer_) save_layer(il, pos, state);
+                    if (il == turns - 1) {   // what no turn is for: a layer behind the model's, the last output
+                        for (int j = n_layer_; j < (int) layers_.size(); ++j) save_layer(j, pos, state);
+                        save_last(state);
+                    }
+                }
+                // The card's work on the next call starts now.  This call's rows leave beside it, unless this was
+                // the last turn, and the half is the next call's that uses it: the one two on, or the one with
+                // this half at the next turn.
+                const bool last = il == turns - 1;
+                if (!host || (last && c + 2 >= n_calls)) continue;
+                ck(cudaEventRecord((cudaEvent_t) ev_out_[c % 2], cs(st_)), "read");
+                ck(cudaStreamWaitEvent(cs(rs_), (cudaEvent_t) ev_out_[c % 2], 0), "read");
+                if (!last)
+                    ck(cudaMemcpyAsync(home(c), half(c), (size_t) call.m * r_bytes, cudaMemcpyDeviceToHost,
+                                       cs(rs_)),
+                       "read");
+                fetch(c + 2 < n_calls ? c + 2 : c % 2);
             }
+        if (host) ck(cudaStreamSynchronize(cs(rs_)), "read");
     } catch (...) {
+        if (host) cudaStreamSynchronize(cs(rs_));
         r_ = r0;
         pos_ = pos0;
         throw;

@@ -61,10 +61,15 @@ struct Fake {
     }
 };
 
+// Above zero: the prompts are read this many tokens at a time, past the checkpoints inside (inside()), as an
+// engine does that reads several calls together.  Zero: a call at a time, up to the next checkpoint.
+int64_t far = 0;
+
 struct Chat {
     Fake e;
     Conversations<Fake> kept;
     std::mt19937 rng{7};
+    std::vector<std::pair<int64_t, uint8_t*>> due;
     explicit Chat(const CacheOptions& o) : kept(e, o) {}
 
     // A request as the server makes it: the prompt, then `reply` generated tokens.  Returns where the prompt was
@@ -74,9 +79,21 @@ struct Chat {
         check(from >= 0 && from < n && e.at == from, "a prompt is taken up before its last token");
         for (int64_t i = from; i < n;) {
             const bool last = i == n - 1;
-            const int64_t m = last ? 1 : kept.until_checkpoint(i, std::min<int64_t>(n - 1 - i, 100));
+            const int64_t room = std::min<int64_t>(n - 1 - i, far > 0 ? far : 100);
+            const int64_t m = last ? 1 : far > 0 ? room : kept.until_checkpoint(i, room);
             kept.before(i, last);
-            e.eval(ids.data() + i, m);
+            if (far > 0 && !last) {
+                kept.inside(i, m, due);
+                int64_t done = 0;
+                for (const auto& d : due) {   // the engine writes a state when it has read up to it
+                    e.eval(ids.data() + i + done, d.first - done);
+                    done = d.first;
+                    if (d.second) e.save_state(d.second);
+                }
+                e.eval(ids.data() + i + done, m - done);
+            } else {
+                e.eval(ids.data() + i, m);
+            }
             kept.read(ids.data() + i, m);
             i += m;
         }
@@ -239,11 +256,14 @@ void any_order() {
 }  // namespace
 
 int main() {
-    one_conversation();
-    two_conversations();
-    shared_start();
-    limits();
-    any_order();
+    for (const int64_t f : {0, 6000, 700}) {   // 700: reads that start and end between checkpoints
+        far = f;
+        one_conversation();
+        two_conversations();
+        shared_start();
+        limits();
+        any_order();
+    }
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }

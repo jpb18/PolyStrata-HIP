@@ -358,9 +358,12 @@ struct Session {
         if (s.seed != 0) rng.seed(s.seed);
 
         // The last token goes in alone, for the logits that come with it.  The tokens before it go in as many at
-        // a time as the engine takes, up to the next checkpoint: several calls' worth when the prompt has no
-        // pictures, which the engine reads faster than the calls (read()), else a call's, with a picture whole.
+        // a time as the engine takes.  A prompt without pictures goes in several calls' worth at once, which the
+        // engine reads faster than the calls (read()), and the checkpoints due inside are the engine's to write.
+        // One with pictures goes in a call at a time up to the next checkpoint, a picture whole.
         const bool text = pictures.at.empty();
+        std::vector<std::pair<int64_t, uint8_t*>> due;
+        std::vector<Engine::Mark> marks;
         for (int64_t i = r.resume; i < n;) {
             if (stop.load()) {
                 r.finish = "cancel";
@@ -368,11 +371,16 @@ struct Session {
             }
             const bool last = i == n - 1;
             const int64_t room = std::min<int64_t>(n - 1 - i, text ? engine.max_read() : engine.max_rows());
-            const int64_t upto = kept.until_checkpoint(i, room);
-            const int64_t m = last ? 1 : text ? upto : engine.whole(i, upto);
+            const int64_t m = last ? 1 : text ? room : engine.whole(i, kept.until_checkpoint(i, room));
             kept.before(i, last);
-            if (text && !last) engine.read(ids.data() + i, (int) m);
-            else engine.eval(ids.data() + i, (int) m, last);
+            if (text && !last) {
+                kept.inside(i, m, due);
+                marks.clear();
+                for (const auto& d : due) marks.push_back({(int) d.first, d.second});
+                engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size());
+            } else {
+                engine.eval(ids.data() + i, (int) m, last);
+            }
             kept.read(ids.data() + i, m);
             i += m;
             r.read += m;

@@ -80,23 +80,22 @@ public:
     /// due.  One sits before the last token of every prompt, so coming back to it leaves a token to read and the
     /// logits that come with it.
     void before(int64_t at, bool last) {
-        Slot& s = cur();
         if (o_.checkpoints < 1 || at < 1 || (!last && (o_.every < 1 || at % o_.every != 0))) return;
-        if (!s.marks.empty() && s.marks.back().pos == at) return;
-        const BlobPtr b = blob(e_.state_bytes());
-        if (!b) return;
-        e_.save_state(b->p.get());
-        s.marks.push_back({at, b});
-        while (s.marks.size() > (size_t) o_.checkpoints) {
-            // The one whose neighbours are closest together goes; the last two stay, the end of this prompt and
-            // of the one before being where a client most often comes back to.
-            size_t drop = 0;
-            int64_t gap = INT64_MAX;
-            for (size_t k = 0; k + 2 < s.marks.size(); ++k) {
-                const int64_t g = s.marks[k + 1].pos - (k ? s.marks[k - 1].pos : 0);
-                if (g < gap) gap = g, drop = k;
-            }
-            s.marks.erase(s.marks.begin() + (std::ptrdiff_t) drop);
+        if (const BlobPtr b = mark(at)) e_.save_state(b->p.get());
+    }
+
+    /// For an engine that reads past checkpoints in one go, of n tokens from `at`: the checkpoints due after the
+    /// read's first token, each taken as before() takes one but for its state, which the engine writes when it
+    /// has it.  `out` gets, for each, how many of the read's tokens come before it and where its state_bytes()
+    /// go; null where no state is wanted, and the engine still breaks its work there as if one were.  The bytes
+    /// stay until the next call of this.
+    void inside(int64_t at, int64_t n, std::vector<std::pair<int64_t, uint8_t*>>& out) {
+        out.clear();
+        due_.clear();
+        if (o_.checkpoints < 1 || o_.every < 1) return;
+        for (int64_t p = (at / o_.every + 1) * o_.every; p < at + n; p += o_.every) {
+            due_.push_back(mark(p));
+            out.emplace_back(p - at, due_.back() ? due_.back()->p.get() : nullptr);
         }
     }
 
@@ -172,6 +171,28 @@ private:
         b->p.reset(new (std::nothrow) uint8_t[bytes]);
         b->bytes = bytes;
         return b->p ? b : nullptr;
+    }
+
+    // A checkpoint of the current conversation at `at`, its state still to be written.  Null: there is one there,
+    // or no memory for it.
+    BlobPtr mark(int64_t at) {
+        Slot& s = cur();
+        if (!s.marks.empty() && s.marks.back().pos == at) return nullptr;
+        const BlobPtr b = blob(e_.state_bytes());
+        if (!b) return nullptr;
+        s.marks.push_back({at, b});
+        while (s.marks.size() > (size_t) o_.checkpoints) {
+            // The one whose neighbours are closest together goes; the last two stay, the end of this prompt and
+            // of the one before being where a client most often comes back to.
+            size_t drop = 0;
+            int64_t gap = INT64_MAX;
+            for (size_t k = 0; k + 2 < s.marks.size(); ++k) {
+                const int64_t g = s.marks[k + 1].pos - (k ? s.marks[k - 1].pos : 0);
+                if (g < gap) gap = g, drop = k;
+            }
+            s.marks.erase(s.marks.begin() + (std::ptrdiff_t) drop);
+        }
+        return b;
     }
 
     static void cut(Slot& s, int64_t at) {
@@ -313,6 +334,7 @@ private:
     size_t cur_ = 0;
     uint64_t clock_ = 0;
     size_t evictions_ = 0;
+    std::vector<BlobPtr> due_;   // inside()'s states, held while the engine writes them
 };
 
 }  // namespace strata::poly

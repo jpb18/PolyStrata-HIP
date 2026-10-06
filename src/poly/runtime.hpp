@@ -27,9 +27,11 @@ constexpr int kCpuRows = 8;         // tokens whose CPU experts one call compute
 // From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
 constexpr int kStageRows = 32;
-// The tokens Engine::read() takes: the calls up to a conversation's next checkpoint, which is this far on unless
-// the caller chose otherwise (conversations.hpp).  Each call past the first is its rows of the residual in VRAM.
-constexpr int kReadRows = 2048;
+// The tokens Engine::read() takes.  With experts outside the cache a layer's are copied to the card once for
+// all of them, so more is faster: GLM 5.3 Flash reads 7,788 tokens at 606 to 616 tokens/s in one read and at
+// 517 to 531 in reads of 2,048.  A read of more than two calls keeps its rows of the residual in pinned host
+// memory, which is allocated for this many tokens when the first such read comes (64 KiB a token for GLM).
+constexpr int kReadRows = 8192;
 constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
 // Zero bytes behind every matrix the batched kernels may multiply (Mmq::fits): they read up to a step of 256
 // columns past a row that ends inside one, which is at most 7 blocks of 34 bytes.

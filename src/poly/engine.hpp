@@ -145,8 +145,16 @@ public:
     /// Feed n tokens of a prompt, none of them a picture's row, as eval() without logits would in calls of
     /// max_rows(): the same tokens a call, and the same result.  With experts outside the cache it is faster
     /// than those calls, the more the more of them n is.
+    ///
+    /// A mark is a place inside the read where the caller would have stopped between two calls: `at` of the
+    /// read's tokens come before it.  The calls end there as they would have, and `state`, when it is not null,
+    /// gets what save_state() gives at that place.  The marks rise, each above 0 and below n.
+    struct Mark {
+        int at;
+        uint8_t* state;
+    };
     int max_read() const { return read_rows_; }
-    void read(const int32_t* tokens, int n);
+    void read(const int32_t* tokens, int n, const Mark* marks = nullptr, int n_marks = 0);
 
     /// Whether the architecture reads pictures.
     virtual bool sees() const { return false; }
@@ -249,7 +257,8 @@ protected:
     virtual void load_extra(const uint8_t* src, int64_t pos) { (void) src, (void) pos; }
     /// Layer il's part of what save_state() writes, to its place in dst: the layer's recurrent state, and what
     /// extra_bytes() counts for it, as they are once the layer has run every token before `pos`.  The card is
-    /// done with the layer when this is called.  save_state() is this for every layer.
+    /// done with the layer when this is called.  save_state() is this for every layer; read() calls it for a
+    /// layer when the layer gets to a checkpoint, which is before the layers after it do.
     virtual void save_layer(int il, int64_t pos, uint8_t* dst) = 0;
     /// The draft block's attention for n tokens from position `pos`.  xn_ and xq_ hold its normed input; ao_ gets
     /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
@@ -338,7 +347,17 @@ protected:
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
-    int read_rows_ = 1;       ///< tokens r_ is sized for: read()'s calls, each of rows_
+    int read_rows_ = 1;       ///< the most tokens read() takes
+    // read()'s calls between two layers: r_ holds two calls' rows, and with more calls than that the others'
+    // wait in host memory, copied out and in beside the card's work on the call between
+    struct Call {
+        int at, m, mark;      ///< its first token, how many, and the mark it ends at or -1
+    };
+    std::vector<Call> calls_;
+    float* h_res_ = nullptr;  ///< read_rows_ tokens' rows, pinned; allocated by the first read that needs it
+    void* rs_ = nullptr;      ///< the stream of those copies
+    void* ev_in_[2] = {};     ///< marks a call's rows in each half of r_
+    void* ev_out_[2] = {};    ///< marks the card done with a call in each half
     float rms_eps_ = 0;
     bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
