@@ -208,6 +208,32 @@ rounding). `STRATA_HIP_ADAPT_KERNEL_COPY=1` (#884) copies the adaptive tier's sw
 engine, a workaround for the gfx1030 hang seen with the MMQ prompt path and adaptive swaps (untested on the reporter's
 machine). Windows HIP: the doorbell kernels fence their store (#697), and the shared-expert fork is off on HIP (#816).
 
+## Linux: verify timeouts while the kernel reclaims host memory (experimental workarounds)
+
+A `verify: timed out at layer N` or "no progress for 60 s" message does not by itself mean a kernel or handshake bug. Two
+community reports found the same mechanism: the GPU's queues are suspended while the kernel reclaims host pages the GPU
+has pinned through a KFD userptr, and a restore that keeps returning `-EAGAIN` leaves them suspended for tens of seconds.
+Each report is one machine, one workaround, and the cause is not confirmed on either; neither is a default or a general
+speed claim, and neither is known to matter on Windows or on other ROCm versions.
+
+- **Paged host allocations (#750, two Radeon AI PRO R9700, ROCm 7.2):** tracing correlated a timeout with about 31 s of
+  USERPTR queue suspension on both cards. ROCr uses USERPTR for paged host allocations unless `HSA_USERPTR_FOR_PAGED_MEM=0`.
+  With it in the server JSON `env`, five paired runs gave the same outputs and the same median (7 requests: 16.65 s against
+  16.63 s), without the 29.8 s and 42.2 s outliers; solo requests were a little slower (3.55 s to 3.69 s).
+- **`--mmap-experts` (#920, RX 6800 gfx1030, ROCm 7.2.4, 31 GiB RAM, IQ3_XXS):** every run stalled until
+  `GPU_PINNED_MIN_XFER_SIZE=1048576` was in the `env`, and none has since. HIP pins the pageable source pages of large
+  copies, here the mapped expert file. (The engine already sets this variable for `STRATA_ARENA_MMAP=1`.)
+
+```json
+"env": { "GPU_PINNED_MIN_XFER_SIZE": "1048576" }
+```
+
+Change one setting at a time with the rest of the configuration the same, restart the engine so the runtime reads it, and
+remove it to go back to the default. Check free RAM and the driver's GTT limit before large-context tests. If the engine
+runs in a systemd unit, limit it with `MemoryMax`, never `MemoryHigh`: `MemoryHigh` counts the page cache that
+`--mmap-experts` reads from, and a 16K prompt stalled in `pread` for 8 minutes under it. In a report, give the runtime and
+kernel versions, whether reclaim coincides with KFD queue eviction, and paired timings.
+
 ## RDNA4 (gfx1201)
 
 The RX 9070 / 9070 XT and the Radeon AI PRO R9700 run the same kernels as gfx1100: wave32, 64 KiB of LDS per
