@@ -136,8 +136,8 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
 /// heads' v, dim values each; value head h reads key head h % k_heads.  alpha and beta: n_head a token, as their
 /// projections give them.  dt, a: n_head.  The state decays by exp(softplus(alpha + dt) * a) and takes
 /// sigmoid(beta) of the error.  s: n_head * dim * dim, updated.  z: n_head * dim a token.
-/// out = rms_norm(o) * o_norm * silu(z), n_head * dim values a token.
-void gdn_step(const float* qkv, const float* alpha, const float* beta, const float* dt, const float* a, float* s,
+/// out = rms_norm(o) * o_norm * silu(z), n_head * dim values a token.  qkv, alpha and beta are overwritten.
+void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s,
               const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
               float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 

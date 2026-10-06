@@ -623,47 +623,84 @@ __global__ void conv4_silu_kernel(const float* __restrict__ x, float* __restrict
     st[2] = s2;
 }
 
-// One block per value head, one thread per value dimension j; the block walks the tokens.  s[i + dim * j] holds
-// key dimension i of column j.
-__global__ void gdn_step_kernel(const float* __restrict__ qkv, const float* __restrict__ alpha,
-                                const float* __restrict__ beta, const float* __restrict__ dt,
-                                const float* __restrict__ a, float* __restrict__ s, const float* __restrict__ z,
-                                const float* __restrict__ o_norm, float* __restrict__ out, int dim, int n_head,
-                                int k_heads, int rows, float norm_eps, float* __restrict__ snap, size_t stride,
-                                int n_snap) {
+// The gated delta net's step, in four launches.  A token's queries and keys are normed without the state, its
+// decay and its share of the error are a head's alone, and its output is normed without the tokens after it: all
+// of that is done for every token at once, and only the state's update walks the tokens.
+//
+// One block a token and key head: the head's q and k, normed in place.
+__global__ void gdn_norm_kernel(float* __restrict__ qkv, int dim, int k_heads, size_t row_n, float norm_eps) {
     __shared__ float part[8];
-    __shared__ float qn[256], kn[256];
-    const int h = blockIdx.x, j = threadIdx.x, hk = h % k_heads;
+    const int hk = blockIdx.x % k_heads, j = threadIdx.x;
+    float* x = qkv + size_t(blockIdx.x / k_heads) * row_n;
+    float* qp = x + size_t(hk) * dim + j;
+    float* kp = x + size_t(dim) * k_heads + size_t(hk) * dim + j;
+    const float q = *qp, k = *kp;
+    const float qs = block_sum(q * q, part);
+    const float ks = block_sum(k * k, part);
+    *qp = q / sqrtf(qs + norm_eps) * (1.0f / sqrtf(float(dim)));
+    *kp = k / sqrtf(ks + norm_eps);
+}
+
+// A token's decay and its share of the error for each head, in place of alpha and beta.
+__global__ void gdn_gates_kernel(float* __restrict__ alpha, float* __restrict__ beta, const float* __restrict__ dt,
+                                 const float* __restrict__ a, int n_head, int n) {
+    const int at = blockIdx.x * blockDim.x + threadIdx.x;
+    if (at >= n) return;
+    const int h = at % n_head;
+    const float g = alpha[at] + dt[h];
+    alpha[at] = expf((g > 20.0f ? g : logf(1.0f + expf(g))) * a[h]);
+    beta[at] = sigmoid(beta[at]);
+}
+
+// The state's update, a warp a column: the blocks of a head share its columns among their warps, and a lane holds
+// every 32nd value of its warp's column, so a column is read and written as whole lines and its two sums are a
+// few terms a lane and a sum over the warp.  The block walks the tokens, and no warp waits for another.
+// s[i + dim * j] holds key dimension i of column j.  out gets the output before its norm.  decay and share are
+// what gdn_gates_kernel left.  dim is a multiple of 32.
+__global__ void gdn_state_kernel(const float* __restrict__ qkv, const float* __restrict__ decay,
+                                 const float* __restrict__ share, float* __restrict__ s, float* __restrict__ out,
+                                 int dim, int n_head, int k_heads, int rows, float* __restrict__ snap, size_t stride,
+                                 int n_snap) {
+    const int per_head = dim / int(blockDim.x / WARP);   // blocks a head
+    const int h = blockIdx.x / per_head, hk = h % k_heads;
+    const int j = (blockIdx.x % per_head) * int(blockDim.x / WARP) + int(threadIdx.x / WARP);
+    const int lane = threadIdx.x & (WARP - 1);
+    if (j >= dim) return;   // a whole warp: the last block of a head whose columns do not fill it
     const size_t keys = size_t(dim) * k_heads, d_inner = size_t(dim) * n_head, row_n = 2 * keys + d_inner;
-    float* col = s + (size_t(h) * dim + j) * dim;
+    const size_t mine = (size_t(h) * dim + j) * dim;
+    float* col = s + mine;
     for (int row = 0; row < rows; ++row) {
         const float* x = qkv + size_t(row) * row_n;
-        const float q = x[size_t(hk) * dim + j], k = x[keys + size_t(hk) * dim + j];
+        const float* qn = x + size_t(hk) * dim;
+        const float* kn = x + keys + size_t(hk) * dim;
         const float v = x[2 * keys + size_t(h) * dim + j];
-        const float qs = block_sum(q * q, part);
-        const float ks = block_sum(k * k, part);
-        qn[j] = q / sqrtf(qs + norm_eps) * (1.0f / sqrtf(float(dim)));
-        kn[j] = k / sqrtf(ks + norm_eps);
-        __syncthreads();
-        const float g = alpha[size_t(row) * n_head + h] + dt[h];
-        const float decay = expf((g > 20.0f ? g : logf(1.0f + expf(g))) * a[h]);
+        const float dc = decay[size_t(row) * n_head + h];
         float sk = 0.0f;
-        for (int i = 0; i < dim; ++i) sk += col[i] * decay * kn[i];
-        const float d = (v - sk) * sigmoid(beta[size_t(row) * n_head + h]);
+        for (int i = lane; i < dim; i += WARP) sk += col[i] * dc * kn[i];
+        sk = warp_sum(sk);
+        const float d = (v - sk) * share[size_t(row) * n_head + h];
         float o = 0.0f;
-        float* m = row < n_snap ? snap + size_t(row) * stride + (size_t(h) * dim + j) * dim : nullptr;
-        for (int i = 0; i < dim; ++i) {
-            const float n = col[i] * decay + kn[i] * d;
+        float* m = row < n_snap ? snap + size_t(row) * stride + mine : nullptr;
+        for (int i = lane; i < dim; i += WARP) {
+            const float n = col[i] * dc + kn[i] * d;
             col[i] = n;
             if (m) m[i] = n;
             o += n * qn[i];
         }
-        // the sum's last barrier also ends this token's reads of qn and kn
-        const float os = block_sum(o * o, part);
-        const size_t at = size_t(row) * d_inner + size_t(h) * dim + j;
-        const float gate = z[at];
-        out[at] = o / sqrtf(os / float(dim) + norm_eps) * o_norm[j] * (gate * sigmoid(gate));
+        o = warp_sum(o);
+        if (lane == 0) out[size_t(row) * d_inner + size_t(h) * dim + j] = o;
     }
+}
+
+// One block a token and value head: the output's norm, its weights and the gate.
+__global__ void gdn_out_kernel(float* __restrict__ out, const float* __restrict__ z,
+                               const float* __restrict__ o_norm, int dim, float norm_eps) {
+    __shared__ float part[8];
+    const size_t at = size_t(blockIdx.x) * dim + threadIdx.x;
+    const float o = out[at];
+    const float os = block_sum(o * o, part);
+    const float gate = z[at];
+    out[at] = o / sqrtf(os / float(dim) + norm_eps) * o_norm[threadIdx.x] * (gate * sigmoid(gate));
 }
 
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
@@ -890,11 +927,17 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
                                                                   snap ? n_snap : 0);
 }
 
-void gdn_step(const float* qkv, const float* alpha, const float* beta, const float* dt, const float* a, float* s,
-              const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
-              float norm_eps, void* stream, float* snap, size_t stride, int n_snap) {
-    gdn_step_kernel<<<n_head, dim, 0, cs(stream)>>>(qkv, alpha, beta, dt, a, s, z, o_norm, out, dim, n_head, k_heads,
-                                                   rows, norm_eps, snap, stride, snap ? n_snap : 0);
+void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s, const float* z,
+              const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows, float norm_eps, void* stream,
+              float* snap, size_t stride, int n_snap) {
+    if (dim % WARP != 0 || dim > 256) throw std::invalid_argument("gdn_step: a head of 32 to 256 values, in 32s");
+    const size_t row_n = (2 * size_t(k_heads) + n_head) * dim;
+    const int gates = rows * n_head, columns = std::min(dim, 1024 / WARP);   // a block's columns: a warp each
+    gdn_norm_kernel<<<rows * k_heads, dim, 0, cs(stream)>>>(qkv, dim, k_heads, row_n, norm_eps);
+    gdn_gates_kernel<<<grid(gates, 256), 256, 0, cs(stream)>>>(alpha, beta, dt, a, n_head, gates);
+    gdn_state_kernel<<<n_head * ((dim + columns - 1) / columns), columns * WARP, 0, cs(stream)>>>(
+        qkv, alpha, beta, s, out, dim, n_head, k_heads, rows, snap, stride, snap ? n_snap : 0);
+    gdn_out_kernel<<<rows * n_head, dim, 0, cs(stream)>>>(out, z, o_norm, dim, norm_eps);
 }
 
 }  // namespace strata::glm
