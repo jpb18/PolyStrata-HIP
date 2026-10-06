@@ -2636,6 +2636,29 @@ def pip_cuda_libs(toolkit=13) -> None:
         pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
 
 
+CUDA_SM120_SUSPECT = (13, 2)   # #892 #968: nvcc 13.2.51 for sm_120 made garbage answers (IQ1_S / IQ2_S / IQ3_S) and prompts
+                               # (K-quant MMQ) that the same source compiled with 13.0.88 answers correctly (llama.cpp hit it too)
+
+
+def sm120_nvcc(nvcc, cuda_v, archs):
+    """#892 / #968: CUDA 13.2's nvcc for an RTX 50 card (sm_120).  Returns (nvcc, cuda_v): an older 13.x toolkit when one is
+    installed and the user did not name a compiler (STRATA_NVCC), else the one found, with a warning that says what to
+    do.  Recommends, never forces: a user who picked 13.2 keeps it."""
+    if not nvcc or cuda_v != CUDA_SM120_SUSPECT or max(archs) < 120:
+        return nvcc, cuda_v
+    if not os.environ.get("STRATA_NVCC"):
+        alt, alt_v = find_nvcc(below=CUDA_SM120_SUSPECT)
+        if alt and alt_v and alt_v >= (13, 0):
+            ok(f"CUDA {alt_v[0]}.{alt_v[1]} is used for the RTX 50 card (sm_120): CUDA 13.2's compiler made wrong answers "
+               "there (#892, #968); STRATA_NVCC=<nvcc> picks another")
+            return alt, alt_v
+    warn("CUDA 13.2's compiler (nvcc) made garbage prompts and answers for RTX 50 cards (sm_120) in two reports "
+         "(#892, #968): the same source compiled with CUDA 13.0 or 13.1 is right. If the engine answers with "
+         "nonsense, install CUDA 13.0 next to it (https://developer.nvidia.com/cuda-toolkit-archive) and set "
+         "STRATA_NVCC to its nvcc; the ready-made engine is built with 13.0")
+    return nvcc, cuda_v
+
+
 def install_build_tools(gpu, yes):
     """The compiler and the CUDA toolkit, installed for the user (asks once).  Returns (nvcc, vcvars)."""
     archs = [int(x) for x in gpu.get("archs", [gpu["arch"]])]
@@ -2663,6 +2686,7 @@ def install_build_tools(gpu, yes):
     if nvcc is None or cuda_v < need_cuda:
         missing.append("the NVIDIA CUDA Toolkit 13.0")
     if not missing:
+        nvcc, cuda_v = sm120_nvcc(nvcc, cuda_v, archs)
         ok(f"build tools present (CUDA {cuda_v[0]}.{cuda_v[1]})")
         return nvcc, vcvars
     say("  The engine has to be compiled for your PC, which needs: " + " and ".join(missing) + ".")
@@ -2708,6 +2732,7 @@ def install_build_tools(gpu, yes):
         fail("the C++ build tools did not install", "install them by hand (README.md) and run it again")
     if nvcc is None or cuda_v < need_cuda:
         fail("the CUDA Toolkit did not install", "install it from https://developer.nvidia.com/cuda-downloads, then run it again")
+    nvcc, cuda_v = sm120_nvcc(nvcc, cuda_v, archs)
     ok(f"build tools installed (CUDA {cuda_v[0]}.{cuda_v[1]})")
     return nvcc, find_vcvars(cuda_v) if WIN else None
 

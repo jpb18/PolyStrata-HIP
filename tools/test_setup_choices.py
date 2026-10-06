@@ -277,6 +277,27 @@ class ExperimentalSm60(unittest.TestCase):
         got, seen = self.tools([86, 120], lambda below: ("nvcc13", (13, 0)))
         self.assertEqual((got[0], seen), ("nvcc13", [None]))           # the default: unchanged
 
+    def test_cuda_132_on_sm120(self):
+        """#892 / #968: nvcc 13.2 for an RTX 50 card: an older 13.x is taken when there is one, else a warning; never an
+        error, and no other card or toolkit is touched."""
+        def nvcc(below):
+            return ("nvcc130", (13, 0)) if below == (13, 2) else ("nvcc132", (13, 2))
+
+        got, seen = self.tools([120], nvcc)
+        self.assertEqual(got[0], "nvcc130")
+        self.assertEqual(seen, [None, (13, 2)])
+        with mock.patch.dict(os.environ, {"STRATA_NVCC": "x"}):          # the user's own pick is kept
+            got, seen = self.tools([120], nvcc)
+            self.assertEqual((got[0], seen), ("nvcc132", [None]))
+        only132 = lambda below: (None, None) if below == (13, 2) else ("nvcc132", (13, 2))
+        with mock.patch.object(setup, "warn") as warn:                   # nothing older: the one found, with a warning
+            got, _ = self.tools([120], only132)
+        self.assertEqual(got[0], "nvcc132")
+        self.assertIn("#892", warn.call_args[0][0])
+        for archs in ([86], [89, 86]):                                   # not an sm_120 card: as before
+            got, seen = self.tools(archs, nvcc)
+            self.assertEqual((got[0], seen), ("nvcc132", [None]))
+
     def test_pascal_without_cuda_12_stops(self):
         for archs in ([61], [70, 120]):
             with self.subTest(archs=archs), self.assertRaises(SystemExit):
