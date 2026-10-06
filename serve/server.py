@@ -2330,6 +2330,12 @@ class Service:
         asked = req.get("model") if isinstance(req, dict) else None
         return asked if isinstance(asked, str) and asked in self.aliases else self.model
 
+    def reported_ctx(self) -> int:
+        """The context the endpoints report (/v1/status, /v1/models, /props, /health, /slots, /metrics): the engine's,
+        or the last one it reported while it restarts (max_context is 0 until READY, and a client that sizes its
+        prompt from it would send nothing, #351).  Reporting only: requests are checked in prepare()."""
+        return int(getattr(self.engine, "max_context", 0) or getattr(self.engine, "known_ctx", 0) or 0)
+
     def reasoning_budget(self, req) -> int | None:
         """#123: the most tokens this request may think, or None: the request's `reasoning_budget_tokens`, else the
         config's.  0 (or less) means no budget, so a request can turn a configured one off.  ValueError (a 400) for
@@ -2656,7 +2662,7 @@ class Service:
                         waiting=int(getattr(self.engine, "waiting", 0) or 0))
             if running and state == "idle":
                 live["state"] = "generating"
-        engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
+        engine = {"model": self.model, "max_context": self.reported_ctx(), "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
@@ -2679,7 +2685,7 @@ class Service:
         def scaled(v, unit, digits=0):
             return round(v / unit, digits) if isinstance(v, (int, float)) else None
 
-        busy, ctx = bool(s.get("busy")), self.engine.max_context
+        busy, ctx = bool(s.get("busy")), self.reported_ctx()
         images = self.vision is not None
         return {
             "service": "strata", "model": self.model,
@@ -3950,7 +3956,7 @@ def make_handler(svc: Service):
                 self.end_headers()
                 self.wfile.write(body)
             elif path in ("/health", "/api/health"):
-                self._json(200, {"status": "ok", "max_context": svc.engine.max_context, "model": svc.model,
+                self._json(200, {"status": "ok", "max_context": svc.reported_ctx(), "model": svc.model,
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key),
                                  "loaded": svc.loaded(), "service": "strata"})
             elif path == "/status":
@@ -3971,7 +3977,7 @@ def make_handler(svc: Service):
                 if self._authorized():
                     loaded = svc.loaded()
                     model = {"id": svc.model, "object": "model", "status": {"value": "loaded"},
-                             "meta": {"n_ctx": svc.engine.max_context},
+                             "meta": {"n_ctx": svc.reported_ctx()},
                              "architecture": {"input_modalities": ["text", "image"] if svc.vision is not None else ["text"],
                                               "output_modalities": ["text"]}}
                     if not loaded and (svc.idle_unload_s or getattr(svc.engine, "unloaded", False)):
@@ -3995,12 +4001,12 @@ def make_handler(svc: Service):
                         in_use = int(svc.status.get("prompt_tokens") or 0)
                     if getattr(svc.engine, "batch", 0) and hasattr(svc.engine, "slots_view"):
                         # --batch: one entry per slot (the same view /metrics has), not one for the whole engine
-                        n_ctx = svc.engine.max_context
+                        n_ctx = svc.reported_ctx()
                         slots = [{"id": s["slot"], "n_ctx": n_ctx, "is_processing": s["state"] != "idle",
                                   "n_prompt_tokens": int(s.get("prompt_tokens") or s.get("held_tokens") or 0)}
                                  for s in svc.engine.slots_view()]
                     else:
-                        slots = [{"id": 0, "n_ctx": svc.engine.max_context, "is_processing": busy,
+                        slots = [{"id": 0, "n_ctx": svc.reported_ctx(), "is_processing": busy,
                                   "n_prompt_tokens": in_use}]
                     self._json(200, slots if loaded else [])
             elif path == "/v1/status":
@@ -4161,7 +4167,7 @@ def make_handler(svc: Service):
                       if k in ("temperature", "top_p", "top_k", "min_p", "seed", "repetition_penalty",
                                "presence_penalty", "frequency_penalty", "penalty_last_n")}
             params["n_predict"] = svc.shared.get("max_tokens", -1)
-            props = {"default_generation_settings": {"n_ctx": svc.engine.max_context, "params": params},
+            props = {"default_generation_settings": {"n_ctx": svc.reported_ctx(), "params": params},
                      "total_slots": max(1, int(getattr(svc.engine, "batch", 0) or 0)),   # #1004: the batch slots
                      "model_alias": svc.model, "chat_template": svc.template.source,
                      "chat_template_caps": svc.template.caps,

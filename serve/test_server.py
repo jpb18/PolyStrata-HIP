@@ -2439,6 +2439,19 @@ class WebApp(unittest.TestCase):
         self.assertEqual(slots, [{"id": 0, "n_ctx": CTX, "is_processing": True, "n_prompt_tokens": 500},
                                  {"id": 1, "n_ctx": CTX, "is_processing": False, "n_prompt_tokens": 77}])
 
+    def test_the_endpoints_keep_the_context_while_the_engine_restarts(self):
+        """#351: max_context is 0 until READY; the endpoints report the last known one."""
+        engine = self.svc.engine
+        had = engine.max_context
+        engine.max_context, engine.known_ctx = 0, CTX
+        try:
+            self.assertEqual(json.loads(self.get("/props")[2])["default_generation_settings"]["n_ctx"], CTX)
+            self.assertEqual(json.loads(self.get("/health")[2])["max_context"], CTX)
+            self.assertEqual(json.loads(self.get("/v1/status")[2])["cache_max_tokens"], CTX)
+        finally:
+            engine.max_context = had
+            del engine.known_ctx
+
     def test_props_total_slots_follows_the_batch_slots(self):
         # llama.cpp clients read total_slots as the number of requests the server runs at once
         engine, had = self.svc.engine, hasattr(self.svc.engine, "batch")
