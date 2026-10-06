@@ -78,6 +78,7 @@ struct Layer {
     size_t gu_stride = 0;              ///< from an expert's gate to the next one's: twice gu_bytes in a file that
                                        ///< keeps an expert's gate and up in one tensor
     std::vector<uint8_t*> slot;        ///< per expert: gate | up | down in VRAM, or null
+    size_t slot_bytes = 0;             ///< from a slot of the layer to the one behind it: whole blocks of both types
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
     int trade = -1;                    ///< layers with the same number can take each other's slots: same size
     void* head = nullptr;              ///< one token's launches up to the router, recorded (eval())
@@ -330,6 +331,11 @@ protected:
     size_t stage_bytes_ = 0, chunk_bytes_ = 0;
     int stage_turn_ = 0;
     std::vector<int32_t> ids_, count_, first_, group_, round_;
+    struct Run {
+        int c, j, m, most;   ///< the rows' class, its first cached expert and how many, the most rows one has
+    };
+    std::vector<Run> runs_;        ///< a layer's launches over cached experts whose slots lie one behind the other
+    std::vector<int32_t> chan_;    ///< a layer's cached experts in the order of their slots
     std::vector<uint8_t> sent_;
 
     // The cache follows what is written (follow()).  It is filled for the average answer; while one is written,

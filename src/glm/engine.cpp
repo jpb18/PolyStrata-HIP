@@ -32,6 +32,18 @@
 namespace strata::glm {
 namespace {
 
+// A launch's tiles are as wide as the most rows one of its matrices has, up to 128, and every matrix in it
+// computes whole tiles.  So a prompt batch's cached experts go by how many rows they have (moe_rows()): a launch
+// for the experts of each of these widths, and one for the experts with more rows than the widest.
+constexpr int kTile[] = {8, 16, 24, 32, 48, 64, 96, 128};
+constexpr int kClasses = (int) (sizeof(kTile) / sizeof(kTile[0])) + 1;
+
+int tile_class(int rows) {
+    int c = 0;
+    while (c < kClasses - 1 && rows > kTile[c]) ++c;
+    return c;
+}
+
 // A container's CPU quota is not in the affinity mask: a 25-CPU pod on a 208-thread host shows 208.
 int usable_cpus() {
     long long n = (long long) std::thread::hardware_concurrency();
@@ -431,7 +443,14 @@ void Engine::fill_expert_cache() {
         if (!L.moe || !kernels::native_mmvq_supported((int) L.gu_type) ||
             !kernels::native_mmvq_supported((int) L.d_type))
             continue;
-        const size_t bytes = pad(2 * L.gu_bytes + L.d_bytes + kTail);
+        // A slot is a whole number of blocks of both of the experts' types, so the slots of a layer that lie one
+        // behind the other are the matrices of one launch (moe_rows()), and of 8 bytes, which keeps every block
+        // where its type may be read.
+        const size_t unit = std::lcm(std::lcm(ggml_type_size((ggml_type) L.gu_type),
+                                              ggml_type_size((ggml_type) L.d_type)),
+                                     size_t(8));
+        const size_t bytes = (2 * L.gu_bytes + L.d_bytes + kTail + unit - 1) / unit * unit;
+        L.slot_bytes = bytes;
         if (std::find(sizes.begin(), sizes.end(), bytes) == sizes.end()) sizes.push_back(bytes);
         L.trade = (int) (std::find(sizes.begin(), sizes.end(), bytes) - sizes.begin());
         slot_max_ = std::max(slot_max_, bytes);
@@ -449,8 +468,17 @@ void Engine::fill_expert_cache() {
     if (arena == 0) return;
     exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
     ck(cudaMemset(exp_, 0, arena + 256), "the expert cache");   // the slots' tails stay zero (kTail)
+    // Which experts is by value; where they go is by layer, a layer's side by side in the experts' order.
+    std::vector<Cand> taken;
+    size_t room = arena;
     for (const Cand& c : cands) {
-        if (exp_at_ + c.bytes > arena) continue;   // a smaller expert of another layer may still fit
+        if (c.bytes > room) continue;   // a smaller expert of another layer may still fit
+        room -= c.bytes;
+        taken.push_back(c);
+    }
+    std::sort(taken.begin(), taken.end(),
+              [](const Cand& a, const Cand& b) { return a.il != b.il ? a.il < b.il : a.e < b.e; });
+    for (const Cand& c : taken) {
         Layer& L = layers_[(size_t) c.il];
         uint8_t* s = exp_ + exp_at_;
         exp_at_ += c.bytes;
@@ -766,7 +794,8 @@ void Engine::alloc() {
     h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
 
     if (mmq_) {
-        const size_t rr = n * n_used_, tab = (3 * rr + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t);
+        const size_t rr = n * n_used_,
+                     tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1)) * sizeof(int32_t);
         mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
         mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
         mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
@@ -1020,11 +1049,14 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     int32_t* bounds = place + cap;
     int32_t* rel = bounds + n_expert_ + 1;
     float* w = (float*) (rel + 2 * n_expert_ + 2);
+    int32_t* cb = (int32_t*) (w + cap);   // per class: the cached experts' first rows, in the order of the slots
+    const size_t cb_row = (size_t) n_expert_ + 1;
     const int32_t* d_tok = tab_;
     const int32_t* d_place = d_tok + cap;
     const int32_t* d_bounds = d_place + cap;
     const int32_t* d_rel = d_bounds + n_expert_ + 1;
     const float* d_w = (const float*) (d_rel + 2 * n_expert_ + 2);
+    const int32_t* d_cb = (const int32_t*) (d_w + cap);
 
     count_.assign((size_t) n_expert_, 0);
     for (int t = 0; t < n; ++t) {
@@ -1035,10 +1067,18 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ++use_[(size_t) il * n_expert_ + (size_t) ids[k]];
         }
     }
-    // the cached experts that have rows, the experts already on their way, then the others that have rows
-    group_.clear();
+    // The cached experts that have rows, class after class and a class's in the order of the slots (chan_ has
+    // every cached expert in that order); the experts already on their way; then the others that have rows.
+    chan_.clear();
     for (int e = 0; e < n_expert_; ++e)
-        if (count_[(size_t) e] > 0 && L.slot[(size_t) e]) group_.push_back(e);
+        if (L.slot[(size_t) e]) chan_.push_back(e);
+    std::sort(chan_.begin(), chan_.end(),
+              [&](int32_t a, int32_t b) { return L.slot[(size_t) a] < L.slot[(size_t) b]; });
+    const int n_chan = (int) chan_.size();
+    group_.clear();
+    for (int c = 0; c < kClasses; ++c)
+        for (const int32_t e : chan_)
+            if (count_[(size_t) e] > 0 && tile_class(count_[(size_t) e]) == c) group_.push_back(e);
     const int n_cached = (int) group_.size();
     group_.insert(group_.end(), L.ahead.begin(), L.ahead.begin() + n_ahead);
     sent_.assign((size_t) n_expert_, 0);
@@ -1070,7 +1110,19 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     for (int r = 0; r < n_round; ++r)
         for (int g = round_[(size_t) r]; g <= round_[(size_t) r + 1]; ++g)
             rel[g - n_cached + r] = bounds[g] - bounds[round_[(size_t) r]];
-    ck(cudaMemcpyAsync(tab_, h_tab_, (3 * cap + 3 * (size_t) n_expert_ + 3) * sizeof(int32_t),
+    // A class's launch runs over every cached expert of a run of slots, and the others must have no rows in it:
+    // cb has, for each class, where an expert's rows start when only that class's experts have any.
+    for (int c = 0, at = 0; c < kClasses; ++c) {
+        int32_t* b = cb + (size_t) c * cb_row;
+        for (int j = 0; j < n_chan; ++j) {
+            b[j] = at;
+            const int rows = count_[(size_t) chan_[(size_t) j]];
+            if (rows > 0 && tile_class(rows) == c) at += rows;
+        }
+        b[n_chan] = at;
+    }
+    ck(cudaMemcpyAsync(tab_, h_tab_,
+                       (3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row) * sizeof(int32_t),
                        cudaMemcpyHostToDevice, cs(st_)),
        "expert rows");
 
@@ -1083,17 +1135,34 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int64_t ff = n_ff_exp_, ff2 = 2 * ff;
     Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rr, st_);
 
-    for (int g = 0; g < n_cached; ++g)
-        mmq_->mul(L.slot[(size_t) group_[(size_t) g]], gt, ff2, n_embd_, gu2, 1, mq_, d_bounds + g, iota_, rr,
-                  rows_of(g), gu_, ff2, st_);
+    // The cached experts whose slots lie one behind the other are the matrices of one launch, as the experts of
+    // a staging round are; a launch for each class that has rows among them.  The cache is filled a layer's
+    // experts side by side, so that is the whole layer until experts trade slots (follow()).  A launch for each
+    // expert was a sixth of a long prompt's time in a model with 256 experts a layer.
+    auto slot_of = [&](int j) { return L.slot[(size_t) chan_[(size_t) j]]; };
+    runs_.clear();
+    for (int j = 0; j < n_chan;) {
+        int m = 1, most[kClasses] = {};
+        while (j + m < n_chan && slot_of(j + m) == slot_of(j + m - 1) + L.slot_bytes) ++m;
+        for (int i = j; i < j + m; ++i) {
+            const int rows = count_[(size_t) chan_[(size_t) i]];
+            if (rows > 0) most[tile_class(rows)] = std::max(most[tile_class(rows)], rows);
+        }
+        for (int c = 0; c < kClasses; ++c)
+            if (most[c] > 0) runs_.push_back({c, j, m, most[c]});
+        j += m;
+    }
+    for (const Run& r : runs_)
+        mmq_->mul(slot_of(r.j), gt, ff2, n_embd_, L.slot_bytes, r.m, mq_, d_cb + (size_t) r.c * cb_row + r.j, iota_,
+                  rr, r.most, gu_, ff2, st_);
     if (rc > 0) {
         if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_);
         else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_);
         Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
     }
-    for (int g = 0; g < n_cached; ++g)
-        mmq_->mul(L.slot[(size_t) group_[(size_t) g]] + gu2, dt, n_embd_, ff, L.d_bytes, 1, mq2_, d_bounds + g,
-                  d_place, rc, rows_of(g), dx_, n_embd_, st_);
+    for (const Run& r : runs_)
+        mmq_->mul(slot_of(r.j) + gu2, dt, n_embd_, ff, L.slot_bytes, r.m, mq2_, d_cb + (size_t) r.c * cb_row + r.j,
+                  d_place, rc, r.most, dx_, n_embd_, st_);
 
     for (int r = 0; r < n_round; ++r) {
         const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
