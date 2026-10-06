@@ -1183,9 +1183,11 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     moe_shared(L, il, n);
 
     // read() takes a layer's calls one after the other.  What the call before this one copied ahead is then
-    // still in the buffer, and L.ahead still says what: the copy is made once for all of them.
-    const bool held = staged_il_ == il;
-    const bool ahead = held || (opt_.stage_ahead > 0 && n >= opt_.stage_ahead);
+    // still in the buffer, and L.ahead still says what: the copy is made once for all of them.  A call too
+    // small to copy ahead leaves it: with the experts of another launch its sums would be split another way
+    // (the batched kernels divide a launch's work among their blocks), and it would not come out as it does alone.
+    const bool ahead = opt_.stage_ahead > 0 && n >= opt_.stage_ahead;
+    const bool held = ahead && staged_il_ == il;
     if (ahead && !held) plan_ahead(L, il);
     const int n_ahead = ahead ? (int) L.ahead.size() : 0;
     if (n_ahead > 0 && !held) {
