@@ -1,4 +1,4 @@
-// src/glm/qwen35.hpp - Qwen3.5 and Qwen3.6 with routed experts (llama.cpp architecture "qwen35moe"), and the models
+// src/poly/qwen35.hpp - Qwen3.5 and Qwen3.6 with routed experts (llama.cpp architecture "qwen35moe"), and the models
 // trained from them.
 //
 // One residual stream.  Three layers in four have a recurrent attention, the gated delta net; the fourth has
@@ -9,7 +9,7 @@
 
 #include "engine.hpp"
 
-namespace strata::glm {
+namespace strata::poly {
 
 class Qwen35 final : public Engine {
 public:
@@ -70,4 +70,4 @@ private:
 
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

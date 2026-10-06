@@ -1,16 +1,16 @@
-// src/glm/qwen35.cpp - the layers of Qwen3.5 and Qwen3.6 with routed experts.  The reference for the math is
+// src/poly/qwen35.cpp - the layers of Qwen3.5 and Qwen3.6 with routed experts.  The reference for the math is
 // llama.cpp's qwen35moe graph.
 #include "qwen35.hpp"
 
 #include "runtime.hpp"
-#include "strata/glm/kernels.hpp"
+#include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 constexpr int kConv = 4;   // what conv4_silu is written for; checked at load
@@ -292,4 +292,4 @@ void Qwen35::moe_shared(const Layer& L, int il, int n) {
 void Qwen35::block_attend(int64_t pos, int n) { attn(blocks_[(size_t) n_layer_], pos, n); }
 void Qwen35::block_rows(int64_t pos, int n) { attn_store(blocks_[(size_t) n_layer_], pos, n); }
 
-}  // namespace strata::glm
+}  // namespace strata::poly

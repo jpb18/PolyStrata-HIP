@@ -163,8 +163,8 @@ MODELS = {
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38),
                   "vision": True},
-    # GLM 5.3 Flash (docs/GLM.md): a GGUF read in place by its own engine (glm_setup).  "arena_gb" is the routed
-    # experts; the ones the GPU does not hold come through the OS file cache.  "ram_gb" is glm_ram_need() for a
+    # GLM 5.3 Flash (docs/GLM.md): a GGUF read in place by its own engine (poly_setup).  "arena_gb" is the routed
+    # experts; the ones the GPU does not hold come through the OS file cache.  "ram_gb" is poly_ram_need() for a
     # 32 GB card, an estimate: it has run with 120 GB of RAM only.  A size may have its own repository ("hf"),
     # expert profile and VRAM beside the experts ("vram_beside_gb", measured at 32K on that card).  "draft": "own":
     # the file carries the model's draft block; a size without the key gets the block from FAMILIES["glm"]["draft"].
@@ -250,14 +250,14 @@ FAMILIES = {
                 "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-unsloth",
                 "vision": False, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
-    # GLM 5.3 Flash: another architecture (llama.cpp's glm5-next), run by strata-glm from its one GGUF - no pack,
-    # no image encoder.  "engine": its setup is glm_setup, not main()'s steps (docs/GLM.md).  "draft": the model's
+    # GLM 5.3 Flash: another architecture (llama.cpp's glm5-next), run by strata-poly from its one GGUF - no pack,
+    # no image encoder.  "engine": its setup is poly_setup, not main()'s steps (docs/GLM.md).  "draft": the model's
     # draft block in the data folder, one for every size whose file has none (tools/glm_draft_fetch.py)
     "glm": {"title": "GLM 5.3 Flash", "by": "files from neuralll, Unsloth and patrickbdevaney",
             "about": "another model, with its own engine: Linux, one NVIDIA card (run on 32 GB), 64-128 GB of RAM",
             "hf": hf("neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF"),
             "file": "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf", "shards": 1, "tag": "glm-",
-            "name": "glm-5.3-flash", "engine": "glm", "vision": False, "experimental": True,
+            "name": "glm-5.3-flash", "engine": "poly", "vision": False, "experimental": True,
             "profile": "expert-profile-glm.txt",
             "draft": "mtp/glm-5.3-flash/draft-block.gguf", "draft_gb": 2.8,
             "sha256": {"GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf":
@@ -272,17 +272,17 @@ FAMILIES = {
                        (49248507840, "89180f13784dc1128586b98adf1ca876279881a20bc4f01747703ce352563372"),
                        "GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf":
                        (2690716000, "9e0ef47daa1fdffce3cf2ac1594ce4634d176ad018be6e692729757f38d5fbf6")}},
-    # The models the GLM engine also runs, each from one GGUF (docs/BACKENDS.md): "engine": "glm" gives them
-    # glm_setup's steps.  "models": the family's own sizes, as MODELS has them for the others: Unsloth calls a
+    # The models strata-poly also runs, each from one GGUF (docs/BACKENDS.md): "engine": "poly" gives them
+    # poly_setup's steps.  "models": the family's own sizes, as MODELS has them for the others: Unsloth calls a
     # quantization the same for every model, so two families' sizes share a name.  A size's "arena_gb" (its routed
     # experts) is from its file, "vram_beside_gb" was measured on an RTX 5090 at 32K, and "row_bytes" is the VRAM a
-    # context token takes, measured from 8K to 131K there.  "ram_gb" is glm_ram_need() for an 8 GB card.  They ship
+    # context token takes, measured from 8K to 131K there.  "ram_gb" is poly_ram_need() for an 8 GB card.  They ship
     # no expert profile: the engine starts one.  "draft_model": a file of the size's repository that guesses ahead
     # for it, a model of its own; it is downloaded beside the model's and its VRAM is in "vram_beside_gb".
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
-               "about": "on GLM's engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card",
+               "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
-               "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "glm", "vision": False, "experimental": True,
+               "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": False, "experimental": True,
                "row_bytes": 26624,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6,
@@ -292,7 +292,7 @@ FAMILIES = {
     "ornith": {"title": "Ornith 1.5 35B-A3B", "by": "ornith-ai; APEX quantization by mudler",
                "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, ~22 GB of RAM beside an 8 GB card",
                "hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf",
-               "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "glm", "vision": False,
+               "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "poly", "vision": False,
                "experimental": True, "row_bytes": 26624,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the file",
                                              "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8,
@@ -301,9 +301,9 @@ FAMILIES = {
                "sha256": {"Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf":
                           (17437861408, "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165")}},
     "gemma4": {"title": "Gemma 4 26B-A4B", "by": "Google; quantized by Unsloth",
-               "about": "on GLM's engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card; text only here",
+               "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card; text only here",
                "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
-               "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "glm", "vision": False, "experimental": True,
+               "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "poly", "vision": False, "experimental": True,
                "row_bytes": 28672,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
                                         "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3,
@@ -324,16 +324,20 @@ VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
           "cpu": {"max_tokens": 300, "reserve_mib": 700}}
 EXE = "strata.exe" if WIN else "strata"
 VEXE = "strata-vision.exe" if WIN else "strata-vision"
-# GLM 5.3 Flash's engine.  No release ships it yet: it is compiled here, into a folder of its own like the CUDA 12
-# engine's, so the ready-made engine beside it stays as it was downloaded
-GEXE = "strata-glm.exe" if WIN else "strata-glm"
-ENGINE_GLM_DIR = "engine-glm"
-GLM_CONTEXTS = [8192, 32768, 65536, 131072]
+# The engine of GLM 5.3 Flash and of the models that are read from one GGUF (docs/BACKENDS.md).  No release ships
+# it yet: it is compiled here, into a folder of its own like the CUDA 12 engine's, so the ready-made engine beside it
+# stays as it was downloaded.  It was called strata-glm, after its first model, and an install from then has that
+# name and folder in its run config (poly_config(), update_poly_engine()).
+POLY_EXE = "strata-poly.exe" if WIN else "strata-poly"
+ENGINE_POLY_DIR = "engine-poly"
+OLD_POLY_EXE = "strata-glm.exe" if WIN else "strata-glm"
+OLD_ENGINE_POLY_DIR = "engine-glm"
+POLY_CONTEXTS = [8192, 32768, 65536, 131072]
 GLM_ROW_BYTES = 28160           # VRAM per context token: a row in each of the 11 sparse attention layers' caches
 GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve):
                                 # the 3.0BIT file's; a size with other dense weights has its own "vram_beside_gb"
-GLM_RAM_BESIDE_GB = 10          # RAM beside the experts in the file cache: the OS, the server, the engine's buffers
-GLM_CONV_CACHE_MIB = 8192       # --conversation-cache-mib when setup turns it on
+POLY_RAM_BESIDE_GB = 10          # RAM beside the experts in the file cache: the OS, the server, the engine's buffers
+POLY_CONV_CACHE_MIB = 8192       # --conversation-cache-mib when setup turns it on
 
 
 # ------------------------------------------------------------------------------------------------ output
@@ -2273,7 +2277,7 @@ def install_build_tools(gpu, yes):
              "install CUDA 12.9 (it can sit next to a newer one) from https://developer.nvidia.com/cuda-toolkit-archive "
              "and run it again (STRATA_NVCC=<its nvcc> picks one toolkit)")
     # RTX 50 (sm_120): CUDA 13.0 - an engine built with 12.8 crashed in the prompt path on Linux (#220).
-    # gpu["need_cuda"]: another engine's own floor (strata-glm, which is another prompt path: build_engine_glm)
+    # gpu["need_cuda"]: another engine's own floor (strata-poly, which is another prompt path: build_engine_poly)
     need_cuda = need12 if old else gpu.get("need_cuda") or ((13, 0) if max(archs) >= 120 else (12, 0))
     vcvars = find_vcvars() if WIN else None
     have_cc = vcvars is not None if WIN else shutil.which("g++") is not None
@@ -3155,8 +3159,8 @@ def update_install(have: list, a) -> int:
         update_installed_engine(a.prebuilt)
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
-        if glm_config(cfg):
-            update_glm_engine(cfg)
+        if poly_config(cfg):
+            update_poly_engine(cfg, cfg_path=cfg_path)
         if "--mtp" in cfg["args"][:-1]:
             refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
         if cfg.get("backend") == "hip" and WIN:
@@ -3202,12 +3206,12 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
-    glm = glm_config(cfg)                              # GLM 5.3 Flash: one card, and an engine compiled here
+    glm = poly_config(cfg)                              # a model of strata-poly: one card, an engine compiled here
     if glm:
         if isinstance(gpu, list):
             warn(f"{cfg.get('model_name', 'this model')} runs on one GPU: GPU {gpu[0]} alone")
             gpu = gpu[0]
-        update_glm_engine(cfg, yes)
+        update_poly_engine(cfg, yes, cfg_path)
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
     reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
     if reserve is not None:
@@ -3647,48 +3651,48 @@ def resolve_rope(ctx: int, scaling, scale, trained: int = 262144):
 
 
 # ------------------------------------------------------------------------------------------------ GLM 5.3 Flash
-def glm_config(cfg: dict) -> bool:
-    """A run config of the GLM engine."""
-    return Path(str(cfg.get("exe", ""))).name == GEXE
+def poly_config(cfg: dict) -> bool:
+    """A run config of strata-poly, under this name or the one it had."""
+    return Path(str(cfg.get("exe", ""))).name in (POLY_EXE, OLD_POLY_EXE)
 
 
 # The estimates below take a size's entry: what MODELS, or a family's own "models", says of it (family_models()).
-def glm_beside_gb(d) -> float:
+def poly_beside_gb(d) -> float:
     """The GiB of VRAM a size takes before any expert, at a 32K context."""
     return d.get("vram_beside_gb", GLM_VRAM_BESIDE_GB)
 
 
-def glm_held_gb(d, vram_gb) -> float:
+def poly_held_gb(d, vram_gb) -> float:
     """About the GB of a size's experts a card with this much VRAM (GiB) holds at a 32K context."""
-    return min(d["arena_gb"], max(0.0, vram_gb - glm_beside_gb(d)) * 1.073741824)
+    return min(d["arena_gb"], max(0.0, vram_gb - poly_beside_gb(d)) * 1.073741824)
 
 
-def glm_default(sizes, ram, vram_gb) -> str:
+def poly_default(sizes, ram, vram_gb) -> str:
     """The size setup takes when none is named: the first whose RAM estimate this PC meets, else the one that wants
     the least."""
-    return next((m for m, d in sizes.items() if ram >= glm_ram_need(d, vram_gb) - 4),
-                min(sizes, key=lambda m: glm_ram_need(sizes[m], vram_gb)))
+    return next((m for m, d in sizes.items() if ram >= poly_ram_need(d, vram_gb) - 4),
+                min(sizes, key=lambda m: poly_ram_need(sizes[m], vram_gb)))
 
 
-def glm_ram_need(d, vram_gb) -> float:
+def poly_ram_need(d, vram_gb) -> float:
     """About the GB of RAM a size wants on that card: the experts the card does not hold, in the OS file cache,
     and room for the rest.  An estimate from one machine (32 GB of VRAM, 120 GB of RAM)."""
-    return d["arena_gb"] - glm_held_gb(d, vram_gb) + GLM_RAM_BESIDE_GB
+    return d["arena_gb"] - poly_held_gb(d, vram_gb) + POLY_RAM_BESIDE_GB
 
 
-def glm_verdict(d, ram, vram_gb, hip) -> str:
-    """--check's line for a size of the GLM engine's models."""
+def poly_verdict(d, ram, vram_gb, hip) -> str:
+    """--check's line for a size of strata-poly's models."""
     if hip:
         return "does not run on AMD cards (its engine is a CUDA program)"
-    if vram_gb < glm_beside_gb(d) + 2:
-        return f"does not fit: it takes about {glm_beside_gb(d)} GB of VRAM before any expert"
-    need = glm_ram_need(d, vram_gb)
+    if vram_gb < poly_beside_gb(d) + 2:
+        return f"does not fit: it takes about {poly_beside_gb(d)} GB of VRAM before any expert"
+    need = poly_ram_need(d, vram_gb)
     return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN else "") + (
         f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)" if ram >= need - 4 else
         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
 
 
-def glm_saved_conv(paths) -> int | None:
+def poly_saved_conv(paths) -> int | None:
     """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is), 0 when that
     config has none; None without an earlier config: setup then asks."""
     for p in paths:
@@ -3704,62 +3708,72 @@ def glm_saved_conv(paths) -> int | None:
     return None
 
 
-def build_engine_glm(gpu, yes, llama) -> Path:
-    """Compile strata-glm for this GPU; the result goes to engine-glm/.  It is compiled again when its source
+def build_engine_poly(gpu, yes, llama) -> Path:
+    """Compile strata-poly for this GPU; the result goes to engine-poly/.  It is compiled again when its source
     changed (a `git pull`) or the card is one it has no code for."""
-    eng = ROOT / ENGINE_GLM_DIR
+    eng = ROOT / ENGINE_POLY_DIR
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
     src = source_hash(ENGINE_SOURCES)
     built = {int(x) for x in meta.get("archs", [])}
     archs = sorted(built | {int(x) for x in gpu.get("archs", [gpu["arch"]])})
-    have = (eng / GEXE).exists()
+    have = (eng / POLY_EXE).exists()
     if have and meta.get("src") == src and set(archs) == built:
-        ok("GLM engine already built for this PC")
+        ok("strata-poly already built for this PC")
         return eng
     # CUDA 12.8 is the toolkit it was written and measured with, on an RTX 5090: the Qwen engine's reason to want 13.0
     # there (#220, its prompt path) is not this engine's
     nvcc, vcvars = install_build_tools({**gpu, "archs": archs, "toolkit": 13,
                                         "need_cuda": (12, 8) if max(archs) >= 120 else (12, 0)}, yes)
-    say("  The GLM engine's source changed: compiling it again (only what changed, a few minutes) ..."
-        if have and set(archs) == built else "  Compiling the GLM engine for your GPU (some minutes, once) ...")
-    bdir = ROOT / "build-glm"
-    cmake_build(ROOT, bdir, "strata-glm",
+    say("  strata-poly's source changed: compiling it again (only what changed, a few minutes) ..."
+        if have and set(archs) == built else "  Compiling the strata-poly engine for your GPU (some minutes, once) ...")
+    bdir = ROOT / "build-poly"
+    cmake_build(ROOT, bdir, "strata-poly",
                 ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
                  f"-DCMAKE_CUDA_ARCHITECTURES={';'.join(str(x) for x in archs)}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
-                 f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata-glm.bat")
-    shutil.copy2(bdir / GEXE, eng / GEXE)
+                 f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata-poly.bat")
+    shutil.copy2(bdir / POLY_EXE, eng / POLY_EXE)
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(x) for x in (bindir, bindir / "x64", bindir.parent / "lib64") if x.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs, "cuda_dirs": dirs,
                                  "src": src}, indent=1))
-    ok(f"GLM engine compiled: {eng / GEXE}")
+    ok(f"strata-poly compiled: {eng / POLY_EXE}")
     return eng
 
 
-def update_glm_engine(cfg: dict, yes=False) -> None:
-    """Before a GLM model starts: the engine setup compiled is compiled again when its source changed (a `git pull`)
-    or the card is another generation.  A compile that fails must not stop the start: the installed one runs."""
+def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> None:
+    """Before a model of strata-poly starts: the engine setup compiled is compiled again when its source changed (a
+    `git pull`) or the card is another generation.  A compile that fails must not stop the start: the installed one
+    runs.  An install from before the engine was renamed has the old engine in its config: the engine is compiled
+    under its new name and, with cfg_path, the config is moved to it."""
     eng = Path(cfg["exe"]).parent
+    renamed = eng == ROOT / OLD_ENGINE_POLY_DIR and Path(cfg["exe"]).name == OLD_POLY_EXE
+    if renamed:
+        eng = ROOT / ENGINE_POLY_DIR
     stamp = eng / "BUILD.json"
-    if eng != ROOT / ENGINE_GLM_DIR or not stamp.exists():   # an engine of the user's own
+    if eng != ROOT / ENGINE_POLY_DIR or not (stamp.exists() or renamed):   # an engine of the user's own
         return
     try:
-        meta = json.loads(stamp.read_text())
+        meta = json.loads(stamp.read_text()) if stamp.exists() else {}
         gpu = gpu_info(cfg["gpu"] if isinstance(cfg.get("gpu"), int) else None)
         if gpu is None:
             raise RuntimeError("no NVIDIA GPU found")
-        if meta.get("src") == source_hash(ENGINE_SOURCES) and int(gpu["arch"]) in [int(x) for x in meta.get("archs", [])]:
-            return
-        build_engine_glm(gpu, yes, get_llama_cpp())
+        if not (meta.get("src") == source_hash(ENGINE_SOURCES) and (eng / POLY_EXE).exists()
+                and int(gpu["arch"]) in [int(x) for x in meta.get("archs", [])]):
+            build_engine_poly(gpu, yes, get_llama_cpp())
+        if renamed:
+            cfg["exe"] = str(eng / POLY_EXE)
+            if cfg_path is not None:
+                cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+            ok(f"this install's engine is {POLY_EXE} now (it was {OLD_POLY_EXE}); {OLD_ENGINE_POLY_DIR}/ can be deleted")
     except (Exception, SystemExit) as e:
-        warn(f"could not compile the updated GLM engine{'' if isinstance(e, SystemExit) else f' ({e})'}: "
+        warn(f"could not compile the updated strata-poly{'' if isinstance(e, SystemExit) else f' ({e})'}: "
              "starting the installed one")
 
 
-def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted) -> int:
-    """Steps 2 to 7 for a model of the GLM engine (docs/GLM.md, docs/BACKENDS.md): its questions, the Python
+def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted) -> int:
+    """Steps 2 to 7 for a model of strata-poly (docs/GLM.md, docs/BACKENDS.md): its questions, the Python
     packages, the engine (compiled here), the model file, its tokenizer and expert profile, the run config and the
     start script."""
     fam = FAMILIES[family]
@@ -3793,18 +3807,18 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
     if a.model and a.model not in names:
         fail(f"{title} has no {a.model} model file", "choose one of: " + ", ".join(names))
     vram = gpu["vram_gb"]
-    model = a.model or glm_default(sizes, ram, vram)
+    model = a.model or poly_default(sizes, ram, vram)
     if not a.model and len(names) > 1:
         say()
         say("  Which size?  The RAM is setup's estimate for this card: the experts it does not hold stay in RAM.")
         for i, m in enumerate(names, 1):
             say(f"  {i}) {m:14s} {sizes[m]['about']}; download {sizes[m]['download_gb']:.0f} GB, "
-                f"~{glm_ram_need(sizes[m], vram):.0f} GB of RAM")
+                f"~{poly_ram_need(sizes[m], vram):.0f} GB of RAM")
         model = names[int(ask("Size?", [str(i) for i in range(1, len(names) + 1)], str(names.index(model) + 1),
                               a.yes)) - 1]
     d = sizes[model]
-    beside = glm_beside_gb(d)
-    held, need_ram = glm_held_gb(d, vram), glm_ram_need(d, vram)
+    beside = poly_beside_gb(d)
+    held, need_ram = poly_held_gb(d, vram), poly_ram_need(d, vram)
     say()
     say(f"  {model}: {d['about']}; download {d['download_gb']:.0f} GB. The file is read in place: about {held:.0f} of")
     say(f"  its {d['arena_gb']:.0f} GB of experts fit this card, the rest stay in RAM (the OS file cache).")
@@ -3816,7 +3830,7 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
         warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
     elif vram < 30:
         warn(f"{title} has run on a 32 GB card only. On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of its "
-             f"experts fit in VRAM ({100 * glm_held_gb(d, 31.84) / d['arena_gb']:.0f}% there): more of every "
+             f"experts fit in VRAM ({100 * poly_held_gb(d, 31.84) / d['arena_gb']:.0f}% there): more of every "
              "answer is computed on the CPU, so it is slower")
     if ram < need_ram - 4:
         confirm_risk(f"RAM: {ram:.0f} GB. {title} wants about {need_ram:.0f} GB on this card by setup's estimate: the "
@@ -3838,24 +3852,24 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
         say("  Context length = how much text the model can see at once (your chat, files, tool output).")
         say("  Longer takes VRAM from the expert cache:")
         row = fam.get("row_bytes", GLM_ROW_BYTES)
-        for i, c in enumerate(GLM_CONTEXTS, 1):
+        for i, c in enumerate(POLY_CONTEXTS, 1):
             note = "   (recommended: the one it was measured with)" if c == 32768 else \
                 f"   ({(c - 32768) * row / 1e9:.1f} GB more VRAM; started, no long prompt run)" if c > 32768 else ""
             say(f"  {i}) {c // 1024}K tokens{note}")
-        ctx = GLM_CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(GLM_CONTEXTS) + 1)],
-                                   str(GLM_CONTEXTS.index(32768) + 1), a.yes)) - 1]
+        ctx = POLY_CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(POLY_CONTEXTS) + 1)],
+                                   str(POLY_CONTEXTS.index(32768) + 1), a.yes)) - 1]
     ok(f"context: {ctx} tokens")
 
     # the conversation cache: asked once, then kept as the model's run config has it
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
-    conv = glm_saved_conv([cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None])
+    conv = poly_saved_conv([cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None])
     if conv is None:
         say()
         say("  Conversation cache: a coding agent sends several conversations in turn (the main one, its subagents,")
         say("  short side requests). With the cache, one that makes room for another is kept in RAM and comes back")
-        say(f"  without being read again. It takes what it holds, up to {GLM_CONV_CACHE_MIB // 1024} GB of RAM.")
-        room = ram >= need_ram + GLM_CONV_CACHE_MIB / 1024
-        conv = GLM_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
+        say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM.")
+        room = ram >= need_ram + POLY_CONV_CACHE_MIB / 1024
+        conv = POLY_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
                                          a.yes) == "y" else 0
     ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
 
@@ -3894,12 +3908,12 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
-    step(4, "the GLM engine")
+    step(4, "the strata-poly engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml)")
-    eng = build_engine_glm(gpu, a.yes, llama)
+    eng = build_engine_poly(gpu, a.yes, llama)
     lib_dirs = json.loads((eng / "BUILD.json").read_text()).get("cuda_dirs") or cuda_lib_dirs(13)
-    ok(f"engine: {eng / GEXE}")
+    ok(f"engine: {eng / POLY_EXE}")
 
     step(5, f"downloading {title} {model}")
     if not have_model:
@@ -3960,7 +3974,7 @@ def glm_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, a
         args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
         ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
            "that much less)")
-    cfg = {"exe": str(eng / GEXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+    cfg = {"exe": str(eng / POLY_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "display_name": f"{title} {model}",
            "log": str(ROOT / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
     if gpu["count"] > 1 or a.gpu is not None:
@@ -4177,9 +4191,9 @@ def main() -> int:
             for i, c in enumerate(have, 1):
                 say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        if glm_config(json.loads(pick_cfg.read_text(encoding="utf-8-sig"))):
-            warn("--calibrate measures settings of the Qwen engine: GLM 5.3 Flash's engine has none of them, so "
-                 "nothing is tuned")
+        if poly_config(json.loads(pick_cfg.read_text(encoding="utf-8-sig"))):
+            warn("--calibrate measures settings of the Qwen engine: strata-poly has none of them, so nothing is "
+                 "tuned")
         elif not calibrate_config(pick_cfg):           # #447: said again where it is not lost above the start
             say()
             warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
@@ -4292,8 +4306,8 @@ def main() -> int:
     cpu, avx2, avx512 = cpu_info()
     need = min(d["ram_gb"] for d in MODELS.values())
     low_ok = low_ram_fits("IQ1_M", ram, gpu["vram_gb"]) and a.low_ram != "off"   # the smallest model, mapped
-    # a family of the GLM engine has its own estimate of the RAM it wants, by size and card (glm_setup)
-    own_ram = bool(a.family) and FAMILIES[a.family].get("engine") == "glm"
+    # a family of strata-poly has its own estimate of the RAM it wants, by size and card (poly_setup)
+    own_ram = bool(a.family) and FAMILIES[a.family].get("engine") == "poly"
     if ram < need - 4 and not a.check and not low_ok and not own_ram:
         # every model keeps ALL its experts in RAM (23+ GB); VRAM only holds a copy of the most-used ones, so a
         # bigger GPU does not lower this.  The owner's rule: a stop by default, a risk the user can take (--model
@@ -4335,7 +4349,7 @@ def main() -> int:
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
             if "glm" in d.get("families", ()):
-                verdict = glm_verdict(d, ram, gpu["vram_gb"], hip)
+                verdict = poly_verdict(d, ram, gpu["vram_gb"], hip)
             elif d.get("budget"):
                 verdict = (("EXPERIMENTAL, " if d.get("experimental") else "") +
                            f"fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
@@ -4349,7 +4363,7 @@ def main() -> int:
             say(f"  {m:8s} needs ~{d['ram_gb']} GB RAM: {verdict}")
         for f, fd in FAMILIES.items():                  # the families with sizes of their own
             for m, d in fd.get("models", {}).items():
-                say(f"  {fd['title']} {m}: {glm_verdict(d, ram, gpu['vram_gb'], hip)}")
+                say(f"  {fd['title']} {m}: {poly_verdict(d, ram, gpu['vram_gb'], hip)}")
         say("\nThis PC can run PolyStrata. Run it again without --check to install.")
         return 0
 
@@ -4367,8 +4381,8 @@ def main() -> int:
     ok(f"model: {fam['title']}")
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
-    if fam.get("engine") == "glm":                     # another engine: its own questions and steps
-        return glm_setup(a, family, gpu, hip, cuda_tk, bool(multi), ram, data, elsewhere, port, adopted)
+    if fam.get("engine") == "poly":                     # another engine: its own questions and steps
+        return poly_setup(a, family, gpu, hip, cuda_tk, bool(multi), ram, data, elsewhere, port, adopted)
     say()
     names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
     names.sort(key=lambda m: bool(MODELS[m].get("experimental")))   # an experimental size last, never the default

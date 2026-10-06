@@ -80,21 +80,21 @@ class Pins(unittest.TestCase):
 class Estimates(unittest.TestCase):
     def test_the_measured_card(self):
         # an RTX 5090 lists 31.8 GiB; its cache held 19.9 GiB of experts at 32K
-        self.assertAlmostEqual(setup.glm_held_gb(setup.MODELS[M], 31.84) / 1.073741824, 19.9, delta=0.2)
-        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[M], 31.84), 96, delta=1)
+        self.assertAlmostEqual(setup.poly_held_gb(setup.MODELS[M], 31.84) / 1.073741824, 19.9, delta=0.2)
+        self.assertAlmostEqual(setup.poly_ram_need(setup.MODELS[M], 31.84), 96, delta=1)
 
     def test_the_half_expert_size(self):
         # the same card held 20.8 GiB of its experts
-        self.assertAlmostEqual(setup.glm_held_gb(setup.MODELS[HALF], 31.84) / 1.073741824, 20.8, delta=0.2)
-        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[HALF], 31.84), 60, delta=1)
+        self.assertAlmostEqual(setup.poly_held_gb(setup.MODELS[HALF], 31.84) / 1.073741824, 20.8, delta=0.2)
+        self.assertAlmostEqual(setup.poly_ram_need(setup.MODELS[HALF], 31.84), 60, delta=1)
 
     def test_the_size_taken_when_none_is_named(self):
         sizes = setup.family_models("glm")
         self.assertEqual(list(sizes), [M, SPLIT, HALF])                  # the whole model before the half of it
-        self.assertEqual(setup.glm_default(sizes, 128, 31.84), M)
-        self.assertEqual(setup.glm_default(sizes, 88, 31.84), SPLIT)     # 3.0BIT wants 96 GB there
-        self.assertEqual(setup.glm_default(sizes, 64, 31.84), HALF)
-        self.assertEqual(setup.glm_default(sizes, 32, 31.84), HALF)      # none fits: the one that wants least
+        self.assertEqual(setup.poly_default(sizes, 128, 31.84), M)
+        self.assertEqual(setup.poly_default(sizes, 88, 31.84), SPLIT)     # 3.0BIT wants 96 GB there
+        self.assertEqual(setup.poly_default(sizes, 64, 31.84), HALF)
+        self.assertEqual(setup.poly_default(sizes, 32, 31.84), HALF)      # none fits: the one that wants least
 
     def test_the_split_size(self):
         fam, d = setup.FAMILIES["glm"], setup.MODELS[SPLIT]
@@ -103,38 +103,68 @@ class Estimates(unittest.TestCase):
         self.assertRegex(d["hf"], r"^https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF/resolve/[0-9a-f]{40}/UD-IQ2_XXS/$")
         self.assertAlmostEqual(sum(fam["sha256"][f][0] for f in SPLIT_FILES) / 1e9, d["download_gb"], delta=0.1)
         # the same card held 19.3 GiB of its experts
-        self.assertAlmostEqual(setup.glm_held_gb(setup.MODELS[SPLIT], 31.84) / 1.073741824, 19.3, delta=0.1)
-        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[SPLIT], 31.84), d["ram_gb"], delta=1)
+        self.assertAlmostEqual(setup.poly_held_gb(setup.MODELS[SPLIT], 31.84) / 1.073741824, 19.3, delta=0.1)
+        self.assertAlmostEqual(setup.poly_ram_need(setup.MODELS[SPLIT], 31.84), d["ram_gb"], delta=1)
 
     def test_a_card_that_holds_none(self):
-        self.assertEqual(setup.glm_held_gb(setup.MODELS[M], 8.0), 0.0)
-        self.assertAlmostEqual(setup.glm_ram_need(setup.MODELS[M], 8.0), 117.2, delta=0.1)
+        self.assertEqual(setup.poly_held_gb(setup.MODELS[M], 8.0), 0.0)
+        self.assertAlmostEqual(setup.poly_ram_need(setup.MODELS[M], 8.0), 117.2, delta=0.1)
 
     def test_check_lines(self):
-        self.assertIn("AMD", setup.glm_verdict(setup.MODELS[M], 256, 24.0, True))
-        self.assertIn("does not fit", setup.glm_verdict(setup.MODELS[M], 256, 12.0, False))
-        self.assertIn("fits by setup's estimate", setup.glm_verdict(setup.MODELS[M], 128, 31.84, False))
-        self.assertIn("read from the SSD", setup.glm_verdict(setup.MODELS[M], 64, 31.84, False))
+        self.assertIn("AMD", setup.poly_verdict(setup.MODELS[M], 256, 24.0, True))
+        self.assertIn("does not fit", setup.poly_verdict(setup.MODELS[M], 256, 12.0, False))
+        self.assertIn("fits by setup's estimate", setup.poly_verdict(setup.MODELS[M], 128, 31.84, False))
+        self.assertIn("read from the SSD", setup.poly_verdict(setup.MODELS[M], 64, 31.84, False))
 
 
 class Config(unittest.TestCase):
     def test_choices_from_config(self):
         with tempfile.TemporaryDirectory() as t:
             p = Path(t) / "strata-glm-3.0bit.json"
-            p.write_text(json.dumps({"exe": "/x/engine-glm/" + setup.GEXE, "args": ["--max-context", "65536"]}))
+            p.write_text(json.dumps({"exe": "/x/engine-poly/" + setup.POLY_EXE, "args": ["--max-context", "65536"]}))
             ch = setup.choices_from_config(p)
             self.assertEqual((ch["family"], ch["model"], ch["context"], ch["vision"]), ("glm", M, 65536, "none"))
-            self.assertTrue(setup.glm_config(json.loads(p.read_text())))
-        self.assertFalse(setup.glm_config({"exe": "/x/engine/" + setup.EXE}))
+            self.assertTrue(setup.poly_config(json.loads(p.read_text())))
+
+    def test_an_install_from_before_the_engine_was_renamed(self):
+        # its config has strata-glm in engine-glm/: it is this engine's, and an update moves it to the new one
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            p = root / "strata-glm-3.0bit.json"
+            cfg = {"exe": str(root / setup.OLD_ENGINE_POLY_DIR / setup.OLD_POLY_EXE), "args": ["--max-context", "32768"]}
+            p.write_text(json.dumps(cfg))
+            self.assertTrue(setup.poly_config(cfg))
+            self.assertEqual(setup.choices_from_config(p)["family"], "glm")
+
+            def build(gpu, yes, llama, works=True):
+                if not works:
+                    raise RuntimeError("no compiler")
+                (root / setup.ENGINE_POLY_DIR).mkdir(exist_ok=True)
+                (root / setup.ENGINE_POLY_DIR / setup.POLY_EXE).write_text("")
+                return root / setup.ENGINE_POLY_DIR
+
+            with mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "get_llama_cpp", lambda: root), \
+                    mock.patch.object(setup, "gpu_info", lambda i=None: {"arch": "89"}):
+                # a compile that fails leaves the install as it was: the old engine still starts
+                with mock.patch.object(setup, "build_engine_poly", lambda *a: build(*a, works=False)):
+                    _code, out = quiet(setup.update_poly_engine, dict(cfg), False, p)
+                self.assertIn("could not compile", out)
+                self.assertEqual(json.loads(p.read_text())["exe"], cfg["exe"])
+                with mock.patch.object(setup, "build_engine_poly", build):
+                    _code, out = quiet(setup.update_poly_engine, cfg, False, p)
+            new = root / setup.ENGINE_POLY_DIR / setup.POLY_EXE
+            self.assertEqual((Path(cfg["exe"]), Path(json.loads(p.read_text())["exe"])), (new, new))
+            self.assertIn(setup.OLD_ENGINE_POLY_DIR + "/ can be deleted", out)
+        self.assertFalse(setup.poly_config({"exe": "/x/engine/" + setup.EXE}))
 
     def test_saved_conversation_cache(self):
         with tempfile.TemporaryDirectory() as t:
             p = Path(t) / "c.json"
-            self.assertIsNone(setup.glm_saved_conv([p, None]))
+            self.assertIsNone(setup.poly_saved_conv([p, None]))
             p.write_text(json.dumps({"args": ["--model", "m.gguf"]}))
-            self.assertEqual(setup.glm_saved_conv([None, p]), 0)
+            self.assertEqual(setup.poly_saved_conv([None, p]), 0)
             p.write_text(json.dumps({"args": ["--conversation-cache-mib", "4096", "--model", "m.gguf"]}))
-            self.assertEqual(setup.glm_saved_conv([p]), 4096)
+            self.assertEqual(setup.poly_saved_conv([p]), 4096)
 
 
 class Main(unittest.TestCase):
@@ -173,7 +203,7 @@ class Main(unittest.TestCase):
 
         def fake_build(gpu, yes, llama):
             self.built.append(gpu["archs"])
-            eng = self.t / setup.ENGINE_GLM_DIR
+            eng = self.t / setup.ENGINE_POLY_DIR
             eng.mkdir(exist_ok=True)
             (eng / "BUILD.json").write_text(json.dumps({"source": "local", "cuda_dirs": ["/cuda/lib64"]}))
             return eng
@@ -193,7 +223,7 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "pip_install", lambda *a, **k: None),
             mock.patch.object(setup, "get_llama_cpp", lambda: self.t / "llama.cpp"),
             mock.patch.object(setup, "get_prebuilt", mock.Mock(side_effect=AssertionError("the Qwen engine"))),
-            mock.patch.object(setup, "build_engine_glm", fake_build),
+            mock.patch.object(setup, "build_engine_poly", fake_build),
             mock.patch.object(setup, "download", fake_download),
             mock.patch.object(setup, "whole_shard", lambda s: False),
             mock.patch.object(setup, "check_shards", lambda shards: None),
@@ -230,7 +260,7 @@ class Main(unittest.TestCase):
         self.assertEqual(self.runs[1][2:], ["fetch", "--out", str(block)])
         self.assertEqual((pack / "expert-profile.txt").read_text(), "3 0 7\n")
         args = cfg["args"]
-        self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_GLM_DIR / setup.GEXE)
+        self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE)
         self.assertEqual(Path(args[args.index("--model") + 1]), self.t / "models" / "glm-3.0BIT" / FILE)
         self.assertEqual(args[args.index("--max-context") + 1], "32768")
         self.assertEqual(Path(args[args.index("--expert-profile") + 1]), pack / "expert-profile.txt")

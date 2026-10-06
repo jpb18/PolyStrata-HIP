@@ -1,4 +1,4 @@
-// src/glm/cpu_experts.hpp - routed experts computed on the CPU from their GGUF bytes.
+// src/poly/cpu_experts.hpp - routed experts computed on the CPU from their GGUF bytes.
 //
 // The dot products and the activation quantizers are ggml-cpu's (ggml_get_type_traits_cpu), so an expert here
 // computes what llama.cpp's CPU backend computes for the same tensor.  The workers are this file's own: the pool
@@ -14,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-namespace strata::glm {
+namespace strata::poly {
 
 /// Runs fn(0..n-1) on the workers and the calling thread, and returns when all of them are done.
 class Workers {
@@ -69,4 +69,4 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                  int n_ff, const float* x, float limit, bool gelu, float* out,
                  const std::function<void()>* meanwhile = nullptr);
 
-}  // namespace strata::glm
+}  // namespace strata::poly

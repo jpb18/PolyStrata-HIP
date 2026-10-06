@@ -101,7 +101,7 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(conversation_memory_test src/core/conversation_memory_test.cpp src/core/conversation_memory.cpp)
   target_include_directories(conversation_memory_test PRIVATE include)
   add_test(NAME conversation_memory_test COMMAND conversation_memory_test)
-  add_executable(glm_conversations_test src/glm/conversations_test.cpp)
+  add_executable(glm_conversations_test src/poly/conversations_test.cpp)
   add_test(NAME glm_conversations_test COMMAND glm_conversations_test)
 endif()
 
@@ -1235,40 +1235,40 @@ if(STRATA_BUILD_TESTS)
   endif()
 endif()
 
-# ---- strata-glm: GLM 5.3 Flash (llama.cpp's glm5-next), read from its GGUF ----
+# ---- strata-poly: GLM 5.3 Flash (llama.cpp's glm5-next), read from its GGUF ----
 #
 # A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
 # CPU experts' dot products from ggml-cpu.
 if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
   # The prompt path's quantized products: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the types the model's
-  # GGUFs keep their matrices in (the list in src/glm/mmq.cu), from the checkout strata_mmq is compiled from and
+  # GGUFs keep their matrices in (the list in src/poly/mmq.cu), from the checkout strata_mmq is compiled from and
   # with the same host symbols.  A library of its own, so that what `strata` multiplies with MMQ stays as it is.
-  set(_strata_glm_mmq_instances "")
+  set(_strata_poly_mmq_instances "")
   foreach(_t q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq1_s iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl
              iq4_xs)
-    list(APPEND _strata_glm_mmq_instances ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
+    list(APPEND _strata_poly_mmq_instances ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
   endforeach()
-  add_library(strata_glm_mmq STATIC src/glm/mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu
-              ${_strata_glm_mmq_instances})
-  target_include_directories(strata_glm_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+  add_library(strata_poly_mmq STATIC src/poly/mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu
+              ${_strata_poly_mmq_instances})
+  target_include_directories(strata_poly_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
                                                     ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_compile_options(strata_glm_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+  target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
   if(MSVC)
-    target_compile_options(strata_glm_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+    target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
   endif()
-  target_link_libraries(strata_glm_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
+  target_link_libraries(strata_poly_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
 
-  add_executable(strata-glm src/glm/main.cpp src/glm/engine.cpp src/glm/glm5next.cpp src/glm/qwen35.cpp
-                            src/glm/gemma4.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu
+  add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
+                            src/poly/gemma4.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
                             src/core/conversation_memory.cpp)
-  target_include_directories(strata-glm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-  target_link_libraries(strata-glm PRIVATE strata_glm_mmq strata_kernels strata_spec ggml-cpu ggml-base
+  target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
+  target_link_libraries(strata-poly PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
                                            ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target} Threads::Threads)
-  # needs the model file, so it is run by hand: glm_expert_parity MODEL.gguf
-  add_executable(glm_expert_parity src/glm/expert_parity.cpp src/glm/cpu_experts.cpp src/glm/kernels.cu)
-  target_include_directories(glm_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+  # needs the model file, so it is run by hand: poly_expert_parity MODEL.gguf
+  add_executable(poly_expert_parity src/poly/expert_parity.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu)
+  target_include_directories(poly_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                        ${_strata_gpu_include_directories})
-  target_link_libraries(glm_expert_parity PRIVATE strata_glm_mmq strata_kernels ggml-cpu ggml-base
+  target_link_libraries(poly_expert_parity PRIVATE strata_poly_mmq strata_kernels ggml-cpu ggml-base
                                                   ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
                                                   Threads::Threads)
 endif()

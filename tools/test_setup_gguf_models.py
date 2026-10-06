@@ -30,7 +30,7 @@ class Pins(unittest.TestCase):
     def test_the_files(self):
         for family, (size, file, repo, n) in NEW.items():
             fam = setup.FAMILIES[family]
-            self.assertEqual(fam["engine"], "glm", family)
+            self.assertEqual(fam["engine"], "poly", family)
             self.assertRegex(fam["hf"], rf"^https://huggingface.co/{repo}/resolve/[0-9a-f]{{40}}/$")
             self.assertEqual(list(setup.family_models(family)), [size])
             self.assertEqual((setup.model_file(fam, size, 1), setup.model_shards(fam, size)), (file, 1))
@@ -60,12 +60,12 @@ class Estimates(unittest.TestCase):
     def test_a_32_gb_card_holds_every_expert(self):
         for family in NEW:
             for d in setup.family_models(family).values():
-                self.assertEqual(setup.glm_held_gb(d, 31.84), d["arena_gb"], family)
-                self.assertEqual(setup.glm_ram_need(d, 31.84), setup.GLM_RAM_BESIDE_GB)
+                self.assertEqual(setup.poly_held_gb(d, 31.84), d["arena_gb"], family)
+                self.assertEqual(setup.poly_ram_need(d, 31.84), setup.POLY_RAM_BESIDE_GB)
 
     def test_an_8_gb_card(self):
         # what the families' menu lines say of an 8 GB card
-        need = {f: setup.glm_ram_need(next(iter(setup.family_models(f).values())), 8.0) for f in NEW}
+        need = {f: setup.poly_ram_need(next(iter(setup.family_models(f).values())), 8.0) for f in NEW}
         self.assertAlmostEqual(need["qwen36"], 21, delta=0.5)
         self.assertAlmostEqual(need["ornith"], 22, delta=0.5)
         self.assertAlmostEqual(need["gemma4"], 18, delta=0.5)
@@ -75,10 +75,10 @@ class Estimates(unittest.TestCase):
 
     def test_check_lines(self):
         d = setup.FAMILIES["qwen36"]["models"]["UD-Q3_K_M"]
-        self.assertIn("fits by setup's estimate (~21 GB of RAM", setup.glm_verdict(d, 32, 8.0, False))
-        self.assertIn("read from the SSD", setup.glm_verdict(d, 12, 8.0, False))
-        self.assertIn("does not fit", setup.glm_verdict(d, 64, 6.0, False))
-        self.assertIn("AMD", setup.glm_verdict(d, 64, 24.0, True))
+        self.assertIn("fits by setup's estimate (~21 GB of RAM", setup.poly_verdict(d, 32, 8.0, False))
+        self.assertIn("read from the SSD", setup.poly_verdict(d, 12, 8.0, False))
+        self.assertIn("does not fit", setup.poly_verdict(d, 64, 6.0, False))
+        self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True))
 
 
 class Config(unittest.TestCase):
@@ -86,7 +86,7 @@ class Config(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             for family, (size, *_rest) in NEW.items():
                 p = Path(t) / f"strata-{setup.FAMILIES[family]['tag']}{size.lower()}.json"
-                p.write_text(json.dumps({"exe": "/x/engine-glm/" + setup.GEXE, "args": ["--max-context", "8192"]}))
+                p.write_text(json.dumps({"exe": "/x/engine-poly/" + setup.POLY_EXE, "args": ["--max-context", "8192"]}))
                 ch = setup.choices_from_config(p)
                 self.assertEqual((ch["family"], ch["model"], ch["context"]), (family, size, 8192))
 
@@ -122,7 +122,7 @@ class Main(unittest.TestCase):
                     self.assertNotIn("--draft-model", args)        # theirs is in the model's file
                 self.assertEqual(cfg["model_name"], f"{fam['name']}-{size.lower()}")
                 self.assertEqual(cfg["display_name"], f"{fam['title']} {size}")
-                self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_GLM_DIR / setup.GEXE)
+                self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE)
                 self.assertIn("% of its experts fit in VRAM (100% there)", out)
 
     def test_the_draft_model_beside_files_of_ones_own(self):

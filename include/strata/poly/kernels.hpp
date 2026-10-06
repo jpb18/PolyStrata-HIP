@@ -1,4 +1,4 @@
-// include/strata/glm/kernels.hpp - the float kernels of the forward passes.
+// include/strata/poly/kernels.hpp - the float kernels of the forward passes.
 //
 // Every call enqueues on the given CUDA stream and returns; nothing here but blas_create allocates or waits.
 // Pointers are device pointers.  The math follows llama.cpp's graphs (src/models/glm5-next.cpp, qwen35moe.cpp and
@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace strata::glm {
+namespace strata::poly {
 
 /// y[o] = sum_i w[o * n_in + i] * x[(o / rows_per_x) * n_in + i], o in [0, n_out).  With rows_per_x == n_out it is
 /// a plain matrix-vector product; a smaller value gives each group of rows its own input (the per-head MLA
@@ -149,4 +149,4 @@ void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const floa
               const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
               float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 
-}  // namespace strata::glm
+}  // namespace strata::poly

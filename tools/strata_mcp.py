@@ -84,21 +84,21 @@ FALLBACK_FAMILIES = {
                                                                   "(UD-Q4_K_XL, 111 GB: experimental)",
                 "tag": "unsloth-", "vision": False},
     "glm": {"title": "GLM 5.3 Flash", "about": "another model, with its own engine: Linux, one NVIDIA card (run on "
-                                               "32 GB), 64-128 GB of RAM", "tag": "glm-", "engine": "glm",
+                                               "32 GB), 64-128 GB of RAM", "tag": "glm-", "engine": "poly",
             "vision": False, "experimental": True},
     # a family with sizes of its own ("models"): two of these have a size of one name
-    "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on GLM's engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB "
-                                                     "of RAM beside an 8 GB card", "tag": "qwen36-", "engine": "glm",
+    "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB "
+                                                     "of RAM beside an 8 GB card", "tag": "qwen36-", "engine": "poly",
                "vision": False, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6}}},
     "ornith": {"title": "Ornith 1.5 35B-A3B", "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, "
                                                         "~22 GB of RAM beside an 8 GB card", "tag": "ornith-",
-               "engine": "glm", "vision": False, "experimental": True,
+               "engine": "poly", "vision": False, "experimental": True,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the "
                                                       "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8}}},
-    "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on GLM's engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB "
-                                                     "card; text only here", "tag": "gemma4-", "engine": "glm",
+    "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB "
+                                                     "card; text only here", "tag": "gemma4-", "engine": "poly",
                "vision": False, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
                                         "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3}}},
@@ -1265,9 +1265,9 @@ class Tools:
             model = rec["model"] if rec.get("family") == family else ("IQ3_XXS" if "IQ3_XXS" in sizes and
                                                                      hw.get("ram_gb", 0) >= 60 else next(iter(sizes)))
             S = s.setup_module()
-            if families[family].get("engine") == "glm" and S and hw.get("ram_gb"):   # setup's own pick for this PC
+            if families[family].get("engine") == "poly" and S and hw.get("ram_gb"):   # setup's own pick for this PC
                 cards = [g["vram_gb"] for g in hw.get("gpus", []) if g.get("usable")]
-                model = S.glm_default(sizes, hw["ram_gb"], max(cards, default=0.0))
+                model = S.poly_default(sizes, hw["ram_gb"], max(cards, default=0.0))
         elif family is None:
             fams = [f for f in families if model in s.sizes(f)]
             if len(fams) > 1 and "qwen" not in fams:
@@ -1284,7 +1284,7 @@ class Tools:
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
             if d.get("budget"):
                 context = 8192 if vram < 14 else 32768
-            if families[family].get("engine") == "glm":
+            if families[family].get("engine") == "poly":
                 context = 32768                         # the one it was measured with, setup's own default
         if vision in ("yes", "gpu", "cpu") and d.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")

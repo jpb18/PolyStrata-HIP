@@ -1,4 +1,4 @@
-// src/glm/mmq.hpp - llama.cpp's quantized matrix products (ggml-cuda mmq.cuh, MIT) for the prompt path: the rows
+// src/poly/mmq.hpp - llama.cpp's quantized matrix products (ggml-cuda mmq.cuh, MIT) for the prompt path: the rows
 // of many tokens against matrices that stay in their GGUF type.  Built for the types the model's GGUFs keep
 // their matrices in: the K-quants, the I-quants and the older Q4, Q5 and Q8.
 //
@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace strata::glm {
+namespace strata::poly {
 
 class Mmq {
 public:
@@ -41,4 +41,4 @@ private:
     void* ctx_ = nullptr;   ///< llama.cpp's launch context: a small scratch pool
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

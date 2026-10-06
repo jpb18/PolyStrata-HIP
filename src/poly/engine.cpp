@@ -1,4 +1,4 @@
-// src/glm/engine.cpp - see the header.  What every architecture shares: the files, the weights' way to VRAM, the
+// src/poly/engine.cpp - see the header.  What every architecture shares: the files, the weights' way to VRAM, the
 // routed experts (the cache, the CPU, a prompt batch), the sequence's state, and the calls that feed tokens.
 #include "engine.hpp"
 
@@ -7,7 +7,7 @@
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
-#include "strata/glm/kernels.hpp"
+#include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include "ggml.h"
@@ -29,7 +29,7 @@
 #include <unistd.h>
 #endif
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 // A launch's tiles are as wide as the most rows one of its matrices has, up to 128, and every matrix in it
@@ -1419,4 +1419,4 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
     return best;
 }
 
-}  // namespace strata::glm
+}  // namespace strata::poly

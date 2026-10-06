@@ -1,8 +1,8 @@
-// src/glm/gemma4.cpp - Gemma 4's layers.  The reference for the math is llama.cpp's gemma4 graph.
+// src/poly/gemma4.cpp - Gemma 4's layers.  The reference for the math is llama.cpp's gemma4 graph.
 #include "gemma4.hpp"
 
 #include "runtime.hpp"
-#include "strata/glm/kernels.hpp"
+#include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <algorithm>
@@ -10,7 +10,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
@@ -548,4 +548,4 @@ void Gemma4::route(int il, const float* logits, int* ids, float* w, float* probs
     for (int k = 0; k < n_used_; ++k) w[k] = w[k] / denom * escale[(size_t) ids[k]];
 }
 
-}  // namespace strata::glm
+}  // namespace strata::poly

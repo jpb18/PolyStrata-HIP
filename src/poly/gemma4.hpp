@@ -1,4 +1,4 @@
-// src/glm/gemma4.hpp - Gemma 4 with routed experts (llama.cpp architecture "gemma4"), as 26B-A4B is.
+// src/poly/gemma4.hpp - Gemma 4 with routed experts (llama.cpp architecture "gemma4"), as 26B-A4B is.
 //
 // One residual stream and attention in every layer.  Five layers in six attend only the last tokens (a sliding
 // window) and keep their keys and values in a ring; the sixth attends every token so far, with wider heads.  A
@@ -13,7 +13,7 @@
 
 #include "engine.hpp"
 
-namespace strata::glm {
+namespace strata::poly {
 
 class Gemma4 final : public Engine {
 public:
@@ -100,4 +100,4 @@ private:
     float *dxh_ = nullptr, *dg_gate_ = nullptr, *dg_up_ = nullptr, *dg_h_ = nullptr;   ///< its scratch
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

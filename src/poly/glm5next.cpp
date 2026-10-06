@@ -1,9 +1,9 @@
-// src/glm/glm5next.cpp - GLM 5.3 Flash's layers.  The reference for the math is llama.cpp's glm5-next graph.
+// src/poly/glm5next.cpp - GLM 5.3 Flash's layers.  The reference for the math is llama.cpp's glm5-next graph.
 #include "glm5next.hpp"
 
 #include "mmq.hpp"
 #include "runtime.hpp"
-#include "strata/glm/kernels.hpp"
+#include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include "ggml.h"
@@ -14,7 +14,7 @@
 #include <numeric>
 #include <stdexcept>
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 constexpr int kHc = 4, kConv = 4;   // what kernels.cu is written for; checked at load
@@ -501,4 +501,4 @@ void Glm5Next::layer_head(Layer& L, int il, int n) {
 void Glm5Next::block_attend(int64_t pos, int n) { dsa(blocks_[(size_t) n_layer_], pos, n); }
 void Glm5Next::block_rows(int64_t pos, int n) { dsa_store(blocks_[(size_t) n_layer_], pos, n); }
 
-}  // namespace strata::glm
+}  // namespace strata::poly

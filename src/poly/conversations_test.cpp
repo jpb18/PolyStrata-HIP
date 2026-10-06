@@ -1,15 +1,15 @@
-// src/glm/conversations_test.cpp - Conversations against an engine whose state can be checked: after every
+// src/poly/conversations_test.cpp - Conversations against an engine whose state can be checked: after every
 // request the engine must hold exactly what reading the prompt from its first token gives.
 //
-//   g++ -std=c++20 src/glm/conversations_test.cpp -o conversations_test && ./conversations_test
+//   g++ -std=c++20 src/poly/conversations_test.cpp -o conversations_test && ./conversations_test
 #include "conversations.hpp"
 
 #include <cstdlib>
 #include <cstring>
 #include <random>
 
-using strata::glm::CacheOptions;
-using strata::glm::Conversations;
+using strata::poly::CacheOptions;
+using strata::poly::Conversations;
 
 namespace {
 

@@ -1,4 +1,4 @@
-// src/glm/cpu_experts.cpp - see the header.
+// src/poly/cpu_experts.cpp - see the header.
 #include "cpu_experts.hpp"
 
 #include "ggml.h"
@@ -9,7 +9,7 @@
 #include <immintrin.h>
 #include <numeric>
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 constexpr int kRowsPerTask = 64;
@@ -199,4 +199,4 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     });
 }
 
-}  // namespace strata::glm
+}  // namespace strata::poly

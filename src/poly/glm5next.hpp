@@ -1,4 +1,4 @@
-// src/glm/glm5next.hpp - GLM 5.3 Flash (llama.cpp architecture "glm5-next").
+// src/poly/glm5next.hpp - GLM 5.3 Flash (llama.cpp architecture "glm5-next").
 //
 // 45 layers with four residual streams joined by hyper-connections.  A layer's attention is a recurrent one (KDA)
 // or a sparse one over cached latents with an indexer (DSA); its FFN is dense in the first layers and routed
@@ -7,7 +7,7 @@
 
 #include "engine.hpp"
 
-namespace strata::glm {
+namespace strata::poly {
 
 class Glm5Next final : public Engine {
 public:
@@ -87,4 +87,4 @@ private:
 
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

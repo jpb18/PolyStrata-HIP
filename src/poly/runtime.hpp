@@ -1,4 +1,4 @@
-// src/glm/runtime.hpp - what the engine's source files share and its users do not see.
+// src/poly/runtime.hpp - what the engine's source files share and its users do not see.
 #pragma once
 
 #include "engine.hpp"
@@ -17,7 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace strata::glm {
+namespace strata::poly {
 
 constexpr uint32_t kTypeF32 = 0, kTypeBF16 = 30;
 constexpr int kMaxUsed = 32;
@@ -141,4 +141,4 @@ private:
     std::unordered_map<std::string, Where> where_;
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

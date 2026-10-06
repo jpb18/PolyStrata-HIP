@@ -1,6 +1,6 @@
-// src/glm/expert_parity.cpp - the engine's products on the model's own weights, against ggml's dequantized ones.
+// src/poly/expert_parity.cpp - the engine's products on the model's own weights, against ggml's dequantized ones.
 //
-//   glm_expert_parity MODEL.gguf
+//   poly_expert_parity MODEL.gguf
 //
 // For a few experts of every tensor type the file uses, the GPU path (native_mmvq over the GGUF blocks) and the
 // CPU path (cpu_experts) are compared with a double-precision product over ggml's dequantized weights.  Then
@@ -11,7 +11,7 @@
 #include "mmq.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
-#include "strata/glm/kernels.hpp"
+#include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include "ggml.h"
@@ -66,7 +66,7 @@ double rel_error(const float* got, const std::vector<double>& want) {
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::fprintf(stderr, "usage: glm_expert_parity MODEL.gguf\n");
+        std::fprintf(stderr, "usage: poly_expert_parity MODEL.gguf\n");
         return 2;
     }
     try {
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
         ck(cudaMemcpy(d_x, x.data(), (size_t) n_embd * 4, cudaMemcpyHostToDevice));
         kernels::native_quantize_q8_1(d_x, d_xq, n_embd, 1, st);
 
-        glm::Workers workers(8);
+        poly::Workers workers(8);
         bool ok = true;
         for (const auto& [types, il] : layers) {
             const std::string b = "blk." + std::to_string(il) + ".";
@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
             const size_t gu_bytes = tensor_payload_bytes(tg) / (size_t) n_expert,
                          d_bytes = tensor_payload_bytes(td) / (size_t) n_expert;
             std::string err;
-            if (!glm::cpu_expert_types_ok((int) tg.type, (int) td.type, n_embd, n_ff, err)) throw std::runtime_error(err);
+            if (!poly::cpu_expert_types_ok((int) tg.type, (int) td.type, n_embd, n_ff, err)) throw std::runtime_error(err);
             const bool gpu = kernels::native_mmvq_supported((int) tg.type) && kernels::native_mmvq_supported((int) td.type);
             uint8_t* d_w = nullptr;
             ck(cudaMalloc(&d_w, 2 * gu_bytes + d_bytes + 256));
@@ -141,8 +141,8 @@ int main(int argc, char** argv) {
                 const std::vector<double> want = matvec(dequant(td.type, down, n_ff, n_embd), h, n_ff, n_embd);
 
                 std::vector<float> cpu((size_t) n_embd), dev((size_t) n_embd);
-                const glm::CpuExpert ce{gate, up, down, 1.f};
-                glm::cpu_experts(workers, &ce, 1, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit, false,
+                const poly::CpuExpert ce{gate, up, down, 1.f};
+                poly::cpu_experts(workers, &ce, 1, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit, false,
                                  cpu.data());
                 const double e_cpu = rel_error(cpu.data(), want);
                 double e_gpu = 0.0;
@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
                     ck(cudaMemcpy(d_w + gu_bytes, up, gu_bytes, cudaMemcpyHostToDevice));
                     ck(cudaMemcpy(d_w + 2 * gu_bytes, down, d_bytes, cudaMemcpyHostToDevice));
                     kernels::native_mmvq((int) tg.type, d_w, d_xq, d_gu, n_embd, 2 * n_ff, 1, st);
-                    glm::swiglu_clamp(d_gu, d_gu + n_ff, d_h, n_ff, limit, st);
+                    poly::swiglu_clamp(d_gu, d_gu + n_ff, d_h, n_ff, limit, st);
                     kernels::native_quantize_q8_1(d_h, d_hq, n_ff, 1, st);
                     kernels::native_mmvq((int) td.type, d_w + 2 * gu_bytes, d_hq, d_out, n_ff, n_embd, 1, st);
                     ck(cudaMemcpyAsync(dev.data(), d_out, (size_t) n_embd * 4, cudaMemcpyDeviceToHost, st));
@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
         for (const TensorInfo& t : g.tensors())
             if ((t.shape.size() == 2 || t.shape.size() == 3) && kernels::native_mmvq_supported((int) t.type))
                 kinds.emplace(std::make_tuple(t.type, t.shape[0], t.shape[1]), &t);
-        glm::Mmq mmq;
+        poly::Mmq mmq;
         for (const auto& [key, t] : kinds) {
             const int n_in = (int) t->shape[0], n_out = (int) t->shape[1];
             const size_t bytes = tensor_payload_bytes(*t) / (t->shape.size() == 3 ? (size_t) t->shape[2] : 1);
@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
             ck(cudaMalloc(&d_xb, xb.size() * 4));
             ck(cudaMalloc(&d_y, (size_t) kBatch * n_out * 4));
             ck(cudaMalloc(&d_q, (size_t) kBatch * token));
-            ck(cudaMalloc(&d_mq, glm::Mmq::q8_bytes(kBatch, n_in)));
+            ck(cudaMalloc(&d_mq, poly::Mmq::q8_bytes(kBatch, n_in)));
             ck(cudaMemcpy(d_xb, xb.data(), xb.size() * 4, cudaMemcpyHostToDevice));
 
             std::vector<float> y((size_t) kBatch * n_out), got(want.size());
@@ -231,11 +231,11 @@ int main(int argc, char** argv) {
                 kernels::native_mmvq((int) t->type, d_w, (const uint8_t*) d_q + (size_t) at * token,
                                      d_y + (size_t) at * n_out, n_in, n_out, std::min(8, kBatch - at), st);
             const double e_vec = error();
-            const bool tile = glm::Mmq::fits((int) t->type, n_out, n_in);
+            const bool tile = poly::Mmq::fits((int) t->type, n_out, n_in);
             double e_mat = 0.0;
             if (tile) {
                 ck(cudaMemsetAsync(d_y, 0, y.size() * 4, st));
-                glm::Mmq::quantize(d_xb, nullptr, d_mq, (int) t->type, n_in, n_in, kBatch, st);
+                poly::Mmq::quantize(d_xb, nullptr, d_mq, (int) t->type, n_in, n_in, kBatch, st);
                 mmq.mul(d_w, (int) t->type, n_out, n_in, 0, 1, d_mq, nullptr, nullptr, kBatch, kBatch, d_y, n_out, st);
                 e_mat = error();
             }
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
         }
         return ok ? 0 : 1;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "glm_expert_parity: %s\n", e.what());
+        std::fprintf(stderr, "poly_expert_parity: %s\n", e.what());
         return 1;
     }
 }

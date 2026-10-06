@@ -1,4 +1,4 @@
-// src/glm/mmq.cu - see the header.  The kernels are compiled from the llama.cpp checkout the build already takes
+// src/poly/mmq.cu - see the header.  The kernels are compiled from the llama.cpp checkout the build already takes
 // ggml from; src/prefill/ggml_cuda_host.cu supplies the host symbols of ggml-cuda.cu they use.
 #include "mmq.hpp"
 
@@ -9,11 +9,11 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 // The types with kernels in this build: one template instance each in CMakeLists.txt.
-#define STRATA_GLM_MMQ_TYPES(X)                                                                                \
+#define STRATA_POLY_MMQ_TYPES(X)                                                                                \
     X(Q4_0) X(Q4_1) X(Q5_0) X(Q5_1) X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K)                             \
     X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS)
 
@@ -41,7 +41,7 @@ bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
     const ggml_type t = (ggml_type) type;
     switch (t) {
 #define X(T) case GGML_TYPE_##T:
-        STRATA_GLM_MMQ_TYPES(X)
+        STRATA_POLY_MMQ_TYPES(X)
 #undef X
         break;
         default: return false;
@@ -100,11 +100,11 @@ void Mmq::mul(const void* w, int type, int64_t w_rows, int64_t w_cols, size_t st
     const cudaStream_t s = (cudaStream_t) stream;
     switch (t) {
 #define X(T) case GGML_TYPE_##T: mul_mat_q_case<GGML_TYPE_##T>(ctx, a, s); break;
-        STRATA_GLM_MMQ_TYPES(X)
+        STRATA_POLY_MMQ_TYPES(X)
 #undef X
         default: throw std::runtime_error("mmq: tensor type " + std::to_string(type) + " is not built");
     }
     ck("mmq product");
 }
 
-}  // namespace strata::glm
+}  // namespace strata::poly

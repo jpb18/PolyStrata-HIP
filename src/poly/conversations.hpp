@@ -1,4 +1,4 @@
-// src/glm/conversations.hpp - the conversations a server has read, kept so that a prompt which starts like one of
+// src/poly/conversations.hpp - the conversations a server has read, kept so that a prompt which starts like one of
 // them is not read again from its first token.
 //
 // The engine holds one sequence at a time.  Coming back to an earlier point of a sequence takes two things: the
@@ -24,7 +24,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata::glm {
+namespace strata::poly {
 
 struct CacheOptions {
     int checkpoints = 6;       ///< kept per conversation; 0: a prompt is reread unless it goes on from the last token
@@ -302,7 +302,7 @@ private:
         if (!o_.log) return;
         const Held h = held(with);
         std::fprintf(o_.log,
-                     "strata-glm: conversation cache: %s %lld tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu\n",
+                     "strata-poly: conversation cache: %s %lld tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu\n",
                      what, (long long) tokens, std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
                      h.count, h.bytes, evictions_);
     }
@@ -315,4 +315,4 @@ private:
     size_t evictions_ = 0;
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

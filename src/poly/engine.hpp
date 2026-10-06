@@ -1,4 +1,4 @@
-// src/glm/engine.hpp - the engine that runs a model from its GGUF.
+// src/poly/engine.hpp - the engine that runs a model from its GGUF.
 //
 // The engine reads the GGUF in place, in one file or in the numbered files of a split one.  Everything but the
 // routed experts goes to VRAM; as many routed experts as fit go there too, and the rest are computed on the CPU
@@ -21,7 +21,7 @@ struct TensorInfo;
 struct MetaValue;
 }
 
-namespace strata::glm {
+namespace strata::poly {
 
 class Shards;
 
@@ -367,4 +367,4 @@ protected:
     Stats stats_;
 };
 
-}  // namespace strata::glm
+}  // namespace strata::poly

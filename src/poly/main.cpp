@@ -1,7 +1,7 @@
-// src/glm/main.cpp - strata-glm: GLM 5.3 Flash from its GGUF.
+// src/poly/main.cpp - strata-poly: GLM 5.3 Flash from its GGUF.
 //
-//   strata-glm --model M.gguf --tokens 1,2,3 [--max-new N]   one prompt; prints the generated ids
-//   strata-glm --model M.gguf --serve                        the line protocol serve/server.py speaks
+//   strata-poly --model M.gguf --tokens 1,2,3 [--max-new N]   one prompt; prints the generated ids
+//   strata-poly --model M.gguf --serve                        the line protocol serve/server.py speaks
 //
 // The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, STOP and QUIT in, and RESUME,
 // PP, T, DONE and ERR out.
@@ -35,10 +35,10 @@
 
 namespace {
 
-using strata::glm::CacheOptions;
-using strata::glm::Conversations;
-using strata::glm::Engine;
-using strata::glm::Options;
+using strata::poly::CacheOptions;
+using strata::poly::Conversations;
+using strata::poly::Engine;
+using strata::poly::Options;
 using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
@@ -412,7 +412,7 @@ int serve(Session& ss) {
             continue;
         }
 
-        const strata::glm::Stats before = engine.stats();
+        const strata::poly::Stats before = engine.stats();
         int64_t resume = 0;
         Session::Result r;
         try {
@@ -442,7 +442,7 @@ int serve(Session& ss) {
         }
         // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused>
         //      <experts from VRAM> <experts> <RAM blobs> <file blobs> <file MB> <prompt tokens read> <offloaded>
-        const strata::glm::Stats& now = engine.stats();
+        const strata::poly::Stats& now = engine.stats();
         // the cache's share of the experts looked up while answering: a prompt batch's go through VRAM either way
         const long long hits = now.gpu_experts - before.gpu_experts;
         const long long misses = now.cpu_experts - before.cpu_experts;
@@ -451,7 +451,7 @@ int serve(Session& ss) {
                     (long long) r.resume, hits, hits + misses, (long long) r.read);
         std::fflush(stdout);
     }
-    std::fprintf(stderr, "strata-glm: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
+    std::fprintf(stderr, "strata-poly: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
                          "parked in %zu MiB, %zu pushed out\n",
                  ss.reused, ss.asked, ss.asked > 0 ? 100.0 * (double) ss.reused / (double) ss.asked : 0.0,
                  ss.kept.parked(), ss.kept.parked_bytes() >> 20, ss.kept.evictions());
@@ -486,7 +486,7 @@ int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const 
         },
         [](int64_t, int64_t, double, bool) {});
     std::printf("%s\n", out.c_str());
-    const strata::glm::Stats& st = ss.engine.stats();
+    const strata::poly::Stats& st = ss.engine.stats();
     const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
     std::fprintf(stderr,
                  "prompt %lld tokens %.1f tok/s, generated %lld tokens %.2f tok/s (%s); experts from VRAM %.1f%%, "
@@ -502,7 +502,7 @@ int once(Session& ss, const std::vector<int32_t>& ids, long long max_new, const 
 
 void usage() {
     std::fprintf(stderr,
-                 "usage: strata-glm --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
+                 "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
                  "  --max-context N        tokens the attention caches hold (default 8192)\n"
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default 1024)\n"
@@ -558,7 +558,7 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         auto val = [&]() -> const char* {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "strata-glm: %s needs a value\n", a.c_str());
+                std::fprintf(stderr, "strata-poly: %s needs a value\n", a.c_str());
                 std::exit(2);
             }
             return argv[++i];
@@ -596,11 +596,11 @@ int main(int argc, char** argv) {
         else if (a == "--seed") s.seed = std::strtoull(val(), nullptr, 10);
         else if (a == "--tokens" || a == "--eos-ids") {
             if (!parse_ids(val(), a == "--tokens" ? ids : eos)) {
-                std::fprintf(stderr, "strata-glm: %s takes token ids separated by commas\n", a.c_str());
+                std::fprintf(stderr, "strata-poly: %s takes token ids separated by commas\n", a.c_str());
                 return 2;
             }
         } else {
-            if (a != "--help" && a != "-h") std::fprintf(stderr, "strata-glm: unknown option %s\n", a.c_str());
+            if (a != "--help" && a != "-h") std::fprintf(stderr, "strata-poly: unknown option %s\n", a.c_str());
             usage();
             return 2;
         }
@@ -613,7 +613,7 @@ int main(int argc, char** argv) {
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
         cache.min_free_mib > most) {
-        std::fprintf(stderr, "strata-glm: a cache option is negative or too large\n");
+        std::fprintf(stderr, "strata-poly: a cache option is negative or too large\n");
         return 2;
     }
 
@@ -622,11 +622,11 @@ int main(int argc, char** argv) {
         const Clock::time_point t0 = Clock::now();
         loaded = Engine::open(o);
         Engine& engine = *loaded;
-        std::fprintf(stderr, "strata-glm: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
+        std::fprintf(stderr, "strata-poly: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
         if (engine.numa_node() >= 0)
-            std::fprintf(stderr, "strata-glm: the CPU threads stay on NUMA node %d, which has %.0f%% of the experts' "
+            std::fprintf(stderr, "strata-poly: the CPU threads stay on NUMA node %d, which has %.0f%% of the experts' "
                                  "pages\n", engine.numa_node(), 100.0 * engine.numa_share());
         if (eos.empty())
             for (const char* key : {"tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",
@@ -646,7 +646,7 @@ int main(int argc, char** argv) {
         engine.save_profile();
         return rc;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "strata-glm: %s\n", e.what());
+        std::fprintf(stderr, "strata-poly: %s\n", e.what());
         if (want_serve) {
             std::printf("ERR %s\n", e.what());
             std::fflush(stdout);

@@ -1,6 +1,6 @@
-// src/glm/kernels.cu - see the header.  The reference for every formula is llama.cpp's graph of the model and the
+// src/poly/kernels.cu - see the header.  The reference for every formula is llama.cpp's graph of the model and the
 // ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
-#include "strata/glm/kernels.hpp"
+#include "strata/poly/kernels.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::glm {
+namespace strata::poly {
 namespace {
 
 constexpr int WARP = 32;
@@ -952,4 +952,4 @@ void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const floa
     gdn_out_kernel<<<rows * n_head, dim, 0, cs(stream)>>>(out, z, o_norm, dim, norm_eps);
 }
 
-}  // namespace strata::glm
+}  // namespace strata::poly
