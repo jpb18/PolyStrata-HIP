@@ -3758,6 +3758,23 @@ int main(int argc, char** argv) {
             else
                 std::fprintf(stderr, "strata generate: STRATA_IO_PREFETCH=1 is not available here (Linux mapped file tier "
                                      "only, not with unbuffered reads); the file tier reads as before\n");
+            if (src.io_prefetch()) {   // recommend, never force: the engine runs as asked
+                const char* st = std::getenv("STRATA_IO_PF_STAGE");
+                if (st != nullptr && std::atoi(st) != 0)
+                    std::fprintf(stderr, "strata generate: note: STRATA_IO_PF_STAGE=1 (staging) measured faster only on a 32 GB-class "
+                                         "box (+25%% on an RTX 3060, 32 GB); it was slower at 16 GB and on an iGPU (docs/DETAILS.md, file tier I/O)\n");
+#if defined(STRATA_USE_HIP)
+                int igpu_dev = 0;
+                cudaDeviceProp igpu_p{};
+                if (cudaGetDevice(&igpu_dev) == cudaSuccess && cudaGetDeviceProperties(&igpu_p, igpu_dev) == cudaSuccess &&
+                    igpu_p.integrated != 0 && o.adapt_every > 0 && o.adapt_swaps > 0)
+                    std::fprintf(stderr, "strata generate: WARNING: STRATA_IO_PREFETCH=1 with the adaptive tier on an AMD iGPU (%s): "
+                                         "GPU resets were seen with this combination under memory pressure (Radeon 780M); "
+                                         "--adapt-every 100000 avoided them. Continuing as asked.\n", igpu_p.gcnArchName);
+                else
+                    (void) cudaGetLastError();
+#endif
+            }
         } else if (const char* sv = std::getenv("STRATA_IO_STATS"); sv != nullptr && std::atoi(sv) != 0) {
             src.set_io_stats(true);
         }
