@@ -171,7 +171,8 @@ def run_pe(path, mapf):
     for (b, sym, obj), (n, first, guarded) in sorted(wide.items()):
         why = judge(sym, obj.split(":")[-1], "", guarded, False, False)
         # an inline function defined in a header comes out of the map as `f i`; the wide-ISA files must have none
-        if why is None and re.search(r"std@@|\?\$", sym) and not ("?A0x" in sym):
+        in_wide_obj = any(o in obj for o in WIDE_OBJECTS)
+        if why is None and in_wide_obj and not guarded and re.search(r"std@@|\?\$", sym) and not ("?A0x" in sym):
             why = "template / std:: instantiation inside a wide-ISA object (COMDAT: the linker may share it)"
         if why:
             bad.append((sym, n, first, why + " [rva %x, %s]" % (b, obj)))
