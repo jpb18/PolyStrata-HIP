@@ -219,9 +219,20 @@ PP_SLACK = 3.0
 # fire and every later request queued behind it (the "lost step" class of #481).  Generous on purpose: a cold model
 # load, a slow disk or a slow CPU encode is not a hang.  Only a process that says nothing at all for this long is
 # ended; the next request starts it again.
-VISION_READY_S = 300.0
-VISION_ENCODE_S = 300.0
-ENGINE_READY_S = 900.0
+# STRATA_ENGINE_READY_S / STRATA_VISION_READY_S / STRATA_VISION_ENCODE_S override them (0 = wait for ever, as before).
+
+
+def _timeout_env(name: str, default: float) -> float | None:
+    try:
+        v = float(os.environ.get(name, default))
+    except ValueError:
+        v = default
+    return None if v <= 0 else v
+
+
+VISION_READY_S = _timeout_env("STRATA_VISION_READY_S", 300.0)
+VISION_ENCODE_S = _timeout_env("STRATA_VISION_ENCODE_S", 300.0)
+ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -623,11 +634,11 @@ class StrataEngine:
         # stays for _pump (one reader at a time)
         ready_q: queue.Queue = queue.Queue()
         threading.Thread(target=self._ready_pump, args=(self.proc, ready_q), daemon=True).start()
-        ready_deadline = time.monotonic() + ENGINE_READY_S
+        ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
         timed_out = False
         while True:
-            left = ready_deadline - time.monotonic()
-            if left <= 0:
+            left = None if ready_deadline is None else ready_deadline - time.monotonic()
+            if left is not None and left <= 0:
                 timed_out = True
                 break
             try:
