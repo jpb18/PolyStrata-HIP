@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))
 
 MIN_GAIN = 0.03                    # a setting must beat the default by this much to be kept
-PCIE_FRACS = (0.0, 0.2, 0.35, 0.55, 0.75)
+PCIE_FRACS = (0.0, 0.2, 0.35, 0.55, 0.75, 0.9, 1.0)   # 1.0: every miss over PCIe, the CPU pool gets no expert
 SPEC_MIN_PS = (0.3, 0.5, 0.7)
 # the adaptive tier's candidates (every, swaps, decay) against the engine's own (None): swapping more and remembering
 # longer, the rest of the set as the engine has it
