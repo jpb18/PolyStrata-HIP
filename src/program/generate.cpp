@@ -3113,13 +3113,37 @@ int main(int argc, char** argv) {
     // smaller, which measured cost no decode (K=28 on 9070 XT + R9700: 58.4 tok/s own vs 58.5 borrowing), while a
     // search with the reserve moved the boundary to K=32 and decode to 54.8. STRATA_SPLIT_OWN_PLACE=reserve: the
     // search sees the reserve.
-    // ---- `--layer-split auto` with the trim asked: a later stage's weights load after this search, so its arena is
-    // not in `cudaMemGetInfo` yet.  Price it from the pack index as the full (untrimmed) copy the search has always
-    // seen on the card (`pool_bytes` reads the index and allocates nothing), so the split it picks is the split it
-    // has always picked: this buys cache, not a different placement.  Every other run has its weights loaded: 0.
-    std::vector<uint64_t> stage_pool(stages.size() + 1, 0);
-    if (late_weights)
-        for (size_t i = 1; i < stage_pool.size(); ++i) stage_pool[i] = pool_bytes;
+    // ---- `--layer-split auto` with the trim asked: a later stage's weights load after this search, so they are not in
+    // `cudaMemGetInfo` yet and are priced from the pack for each candidate range [lb, le): `pool_bytes` of the trimmed
+    // arena (reads the index, allocates nothing) and `NativeDense::weight_bytes_for` for the projections, which `load`
+    // makes one cudaMalloc each (a 2 MiB granule per matrix of a MiB or more).  Priced as the full copy and without the
+    // projections, a small card was over-credited and `auto` gave it layers it could not hold: P40 24 GB + RTX 3070
+    // 8 GB picked K=2 where K=16 is right (#1238, #880).  Every other run has its weights loaded already, so its
+    // `cap` is net of them and this is 0 (nothing about those placements moves); CUDA0's are loaded too.
+    bool carve_ok = true;
+    std::map<std::pair<int64_t, int64_t>, uint64_t> carve_memo;
+    auto carve_bytes = [&](int64_t lb, int64_t le) -> uint64_t {
+        if (!late_weights) return 0;
+        const std::pair<int64_t, int64_t> key(lb, le);
+        if (const auto it = carve_memo.find(key); it != carve_memo.end()) return it->second;
+        std::set<std::string> sk = skip_base;
+        add_foreign(lb, le, sk, false);
+        uint64_t total = 0;
+        if (!strata::core::WeightTable::pool_bytes(o.pack, total, err, sk.empty() ? nullptr : &sk)) {
+            carve_ok = false;
+            return 0;
+        }
+        if (!o.native_dense_gguf.empty()) {
+            uint64_t dense = 0;
+            if (!strata::core::NativeDense::weight_bytes_for(o.native_dense_gguf, wt, o.native_ple_key, lb, le, dense, err)) {
+                carve_ok = false;
+                return 0;
+            }
+            total += dense;
+        }
+        carve_memo.emplace(key, total);
+        return total;
+    };
     static const bool place_with_reserve = [] {
         const char* v = std::getenv("STRATA_SPLIT_OWN_PLACE");
         return v != nullptr && std::string(v) == "reserve";
@@ -3141,11 +3165,15 @@ int main(int argc, char** argv) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         const int ns = (int) stages.size() + 1;
         std::vector<int64_t> cap((size_t) ns), used((size_t) ns);
+        // what stage i has left for experts if it runs [lb, le): its room, minus its session and (a later stage) its weights
+        auto stage_left = [&](int i, int64_t lb, int64_t le) -> int64_t {
+            return cap[(size_t) i] - (int64_t) strata::core::session_bytes(g, o.max_context, K, lb, le) -
+                   (i == 0 ? 0 : (int64_t) carve_bytes(lb, le));
+        };
         std::vector<double> layer_ms((size_t) ns);
         for (int i = 0; i < ns; ++i) {
             const int dev = i == 0 ? 0 : stages[(size_t) i - 1]->dev;
             cap[(size_t) i] = stage_room(i == 0 ? -1 : dev, i > 0, i + 1 == ns, true);
-            if (late_weights) cap[(size_t) i] = std::max<int64_t>(cap[(size_t) i] - (int64_t) stage_pool[(size_t) i], 0);
             int sms = 0, khz = 0;
             cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
             if (cudaDeviceGetAttribute(&khz, cudaDevAttrClockRate, dev) != cudaSuccess || khz <= 0) khz = 1800000;
@@ -3216,7 +3244,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < ns; ++i) {
                 const int64_t lb = i == 0 ? 0 : at[(size_t) i - 1];
                 const int64_t le = i + 1 < ns ? at[(size_t) i] : g.n_layers;
-                capr[(size_t) i] = cap[(size_t) i] - (int64_t) strata::core::session_bytes(g, o.max_context, K, lb, le);
+                capr[(size_t) i] = stage_left(i, lb, le);
             }
             std::fill(used.begin(), used.end(), 0);
             std::fill(held_cnt.begin(), held_cnt.end(), 0);
@@ -3376,7 +3404,7 @@ int main(int argc, char** argv) {
                 parts[i].le = i + 1 < ns ? at[i] : g.n_layers;
                 parts[i].used = used[i];
                 parts[i].cnt = held_cnt[i];
-                parts[i].cap = cap[i] - (int64_t) strata::core::session_bytes(g, o.max_context, K, parts[i].lb, parts[i].le);
+                parts[i].cap = stage_left(i, parts[i].lb, parts[i].le);
             }
             return parts;
         };
@@ -3446,8 +3474,7 @@ int main(int argc, char** argv) {
                 const size_t key = ((size_t) i * (size_t) L + (size_t) lb) * stride + (size_t) le;
                 if (held_mass_at[key] < 0.0) {
                     // one stage's own carve, exactly as `predict` prices it
-                    const int64_t room = cap[(size_t) i] -
-                        (int64_t) strata::core::session_bytes(g, o.max_context, K, lb, le);
+                    const int64_t room = stage_left(i, lb, le);
                     double hm = 0;
                     int64_t used = 0, cnt = 0;
                     for (size_t r = 0; r < profile.size(); ++r) {
@@ -3487,8 +3514,7 @@ int main(int argc, char** argv) {
                                 parts[i].le = les[i];
                                 parts[i].used = used_at[key];
                                 parts[i].cnt = held_at[key];
-                                parts[i].cap = cap[(size_t) i] -
-                                    (int64_t) strata::core::session_bytes(g, o.max_context, K, lbs[i], les[i]);
+                                parts[i].cap = stage_left(i, lbs[i], les[i]);
                             }
                             if (!can_start(parts)) continue;
                         }
@@ -3516,8 +3542,7 @@ int main(int argc, char** argv) {
                 const int64_t lb = i == 0 ? 0 : at[(size_t) i - 1];
                 const int64_t le = i + 1 < ns ? at[(size_t) i] : g.n_layers;
                 const uint64_t cn = chunk_bytes(lb, c);
-                const int64_t room_mib = (int64_t) ((cap[(size_t) i] -
-                    (int64_t) strata::core::session_bytes(g, o.max_context, K, lb, le)) >> 20);
+                const int64_t room_mib = (int64_t) (stage_left(i, lb, le) >> 20);
                 std::fprintf(stderr, "strata generate:   CUDA%d: a 512-token prompt needs %lld MiB of its own buffers "
                                      "(+512 MiB headroom); %lld MiB is left for them after its session and cache\n",
                              dev, (long long) (cn >> 20), (long long) room_mib);
@@ -3538,6 +3563,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: --layer-split auto: no valid split for %d GPUs (this model has %lld layers)\n",
                          ns, (long long) g.n_layers);
             return 2;
+        }
+        if (!carve_ok) {   // `carve_bytes` reports through `err`; it is called from the search, which cannot return
+            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            return 1;
         }
         split_at = best;
         std::string ks;
@@ -3584,9 +3613,21 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < stages.size(); ++i) {
             GpuStage& st = *stages[i];
             const strata::core::OnDevice on(st.dev);
+            size_t before = 0, total_b = 0;   // what this stage's load really costs, against what the search priced
+            cudaMemGetInfo(&before, &total_b);
             if (!load_stage_weights(st, st.lb, st.le, true)) return 1;
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
+            {
+                // under-pricing is what put layers on a card that could not hold them (#1238); a little over-pricing is
+                // by design (a granule per matrix runs ~0.8% high).  Past 5% the pricing has drifted from the loading.
+                const uint64_t took = before > fb ? (uint64_t) (before - fb) : 0;
+                const uint64_t priced = carve_bytes(st.lb, st.le);
+                if (priced < took || priced - took > took / 20)
+                    std::fprintf(stderr, "strata generate: layer split, CUDA%d: WARNING the split search priced this "
+                                         "stage's weights at %llu MiB, it took %llu MiB\n", st.dev,
+                                 (unsigned long long) (priced >> 20), (unsigned long long) (took >> 20));
+            }
             std::fprintf(stderr, "strata generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
                                  "follows)\n", st.dev, (double) fb / 1073741824.0);
         }
