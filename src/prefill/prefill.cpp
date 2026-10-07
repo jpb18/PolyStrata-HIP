@@ -3384,9 +3384,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             return c;
                         };
                         // (fused: GU and H hold the grouping tables and int8 rows, not floats)
-                        const int64_t bgu = fused_l ? 0 : bad(m.GU, T * K * 1280), bdm = bad(m.Dm, T * K * N),
+                        // (the CPU's rows, the last rows_cpu of GU and H, are never written by the GPU: not checked)
+                        const int64_t gpu_rows = T * K - rows_cpu;
+                        const int64_t bgu = fused_l ? 0 : bad(m.GU, gpu_rows * 1280), bdm = bad(m.Dm, T * K * N),
                                       bbo = bad(m.bo, T * N);
-                        const int64_t bh = m.H && !fused_l ? bad(m.H, T * K * 640) : -1;
+                        const int64_t bh = m.H && !fused_l ? bad(m.H, gpu_rows * 640) : -1;
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;
