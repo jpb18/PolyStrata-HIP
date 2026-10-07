@@ -1060,15 +1060,17 @@ Setup knows the files in the table above. Another file of one of these architect
 - A picture of Gemma 4's goes into the model in one prompt batch, 1,024 rows unless `--prompt-batch` says more;
   one with more rows is refused. Setup holds pictures to 1,024 rows (`--vision-tokens` changes it).
 - Video and audio are not read.
-- With everything in VRAM, llama.cpp reads prompts about twice as fast on the same card, 6,000 to 9,000
-  tokens/s against 3,000 to 3,700. It writes 165 to 180 tokens/s; this engine writes 150 to 205 a token at a
+- With everything in VRAM, llama.cpp reads prompts faster on the same card, 6,000 to 9,000 tokens/s against
+  4,100 to 5,800. It writes 165 to 180 tokens/s; this engine writes 150 to 205 a token at a
   time and more with guesses ([Benchmark](#benchmark)). The router's scores still go to the host and back in
   every layer, which a model that fits does not need.
-- Ornith's guessed tokens pay less than Qwen3.6's, though the two are one architecture and its guesses are
-  right as often, nine in ten: its answers came out slower with the block than without. Their matrices are of
-  other formats. Why was not looked into; the engine asks Ornith's block less instead.
-- GLM's recurrent layers still use the step the delta net had before it was rewritten for Qwen3.6. GLM's prompts
-  are bound by the experts that are not in VRAM, so it was left.
+- Ornith's guessed tokens pay less than Qwen3.6's, though the two are one architecture. Its block offers fewer
+  guesses and fewer of them are right: in a 256-token answer about code 127 of 153, at 291 tokens/s, where
+  Qwen3.6 has 166 of 190 and 342, and in a short story 28 of 41 and 237 against 160 of 187 and 335. Their
+  matrices are of other formats too, and what a window costs each of them was not compared.
+- GLM's recurrent layers use the step the delta net had before it was rewritten for Qwen3.6 in every call of
+  fewer than 32 tokens, which is all of them while it writes. Its writing is bound by the experts that are not
+  in VRAM, so it was left.
 - No test runs the engine without a GPU and the model files: what is said of it here was measured by hand on the
   one machine.
 - The benchmark's VRAM and RAM figures are the machine's, not the engine's alone.
