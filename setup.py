@@ -1123,6 +1123,18 @@ def recommend_remote_expert_opt(cfg: dict, off: bool = False) -> None:
         if REMOTE_EXPERT_OPT in args:
             args.remove(REMOTE_EXPERT_OPT)
         return
+    # #1352: --pipeline-windows (the first card starts the next window) is switched off by --remote-expert-opt (the
+    # helper caches), so a config that asks for it keeps its pipeline: one of the two, not both (docs/MULTI_GPU.md)
+    pw = args.index("--pipeline-windows") if "--pipeline-windows" in args else -1
+    if pw >= 0 and pw + 1 < len(args) and args[pw + 1] != "0":
+        if REMOTE_EXPERT_OPT in args:
+            warn("--pipeline-windows and --remote-expert-opt are both in this config: the engine turns the pipeline off "
+                 "beside the helper caches. Keep one - remove --remote-expert-opt for the pipeline "
+                 "(docs/MULTI_GPU.md, #1352)")
+        else:
+            ok("multi-GPU: --pipeline-windows is set, so --remote-expert-opt is not added (the helper caches turn the "
+               "pipeline off; docs/MULTI_GPU.md)")
+        return
     if REMOTE_EXPERT_OPT not in args:
         args.append(REMOTE_EXPERT_OPT)
         ok("multi-GPU: --remote-expert-opt (helper expert caches complementary to the main GPU's, #578; "
