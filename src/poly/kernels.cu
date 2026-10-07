@@ -507,6 +507,21 @@ __global__ void idx_score_kernel(const float* __restrict__ q, const float* __res
     if (threadIdx.x == 0) score[tok * score_stride + blockIdx.x] = acc;
 }
 
+// idx_score_kernel's sum over the heads for a prompt batch, whose products cuBLAS made: dot holds q[h] . pooled(p)
+// for a token and head's n_pool pools together.  A thread a pool, blockIdx.y the token.
+__global__ void idx_weigh_kernel(const float* __restrict__ dot, const float* __restrict__ w,
+                                 float* __restrict__ score, int score_stride, int n_pool, int n_head, int kpool,
+                                 long long pos, float wscale) {
+    const int p = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t tok = blockIdx.y;
+    if (p >= (pos + tok + 1) / kpool) return;   // not a whole pool at this token yet
+    dot += tok * n_head * n_pool + p;
+    w += tok * n_head;
+    float acc = 0.0f;
+    for (int h = 0; h < n_head; ++h) acc += fmaxf(dot[size_t(h) * n_pool], 0.0f) * (w[h] * wscale);
+    score[tok * score_stride + p] = acc;
+}
+
 __global__ void swiglu_clamp_kernel(const float* __restrict__ gate, const float* __restrict__ up,
                                     float* __restrict__ out, int n, float limit) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1038,6 +1053,28 @@ void idx_score(const float* q, const float* w, const float* cache, float* score,
     idx_score_kernel<<<dim3(n_pool, rows), WARP, 0, cs(stream)>>>(q, w, cache, score, score_stride, dim, n_head,
                                                                  kpool, (long long) pos,
                                                                  1.0f / std::sqrt(float(dim) * float(n_head)));
+}
+
+void idx_score_batch(void* blas, const float* q, const float* w, const float* cache, float* score, int score_stride,
+                     int dim, int n_head, int kpool, int64_t pos, int rows, float* work, size_t work_floats,
+                     void* stream) {
+    const float one = 1.0f, zero = 0.0f;
+    const int n_pool = int((pos + rows) / kpool);   // the last token sees the most
+    if (n_pool == 0) return;
+    const int chunk = (int) std::min<size_t>(65535, work_floats / (size_t(n_pool) * n_head));
+    if (chunk < 1) throw std::invalid_argument("idx_score_batch: no room for a token's products");
+    // Pool p's key is the third part of cache row kpool * p + kpool - 1: to cuBLAS the pools' keys are a matrix
+    // whose columns lie kpool rows apart.
+    const float* keys = cache + (size_t(kpool) * 3 - 1) * dim;
+    for (int first = 0; first < rows; first += chunk) {
+        const int c = std::min(chunk, rows - first);
+        blas_ck(cublasSgemm((cublasHandle_t) blas, CUBLAS_OP_T, CUBLAS_OP_N, n_pool, c * n_head, dim, &one, keys,
+                            kpool * 3 * dim, q + size_t(first) * n_head * dim, dim, &zero, work, n_pool),
+                "indexer scores");
+        idx_weigh_kernel<<<dim3(grid(n_pool, 256), c), 256, 0, cs(stream)>>>(
+            work, w + size_t(first) * n_head, score + size_t(first) * score_stride, score_stride, n_pool, n_head,
+            kpool, (long long) pos + first, 1.0f / std::sqrt(float(dim) * float(n_head)));
+    }
 }
 
 void swiglu_clamp(const float* gate, const float* up, float* out, int n, float limit, void* stream) {

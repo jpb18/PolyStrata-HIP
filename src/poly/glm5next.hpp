@@ -81,6 +81,7 @@ private:
     float *t1_ = nullptr, *qr_ = nullptr, *q_ = nullptr, *t2_ = nullptr, *kv_ = nullptr, *qabs_ = nullptr,
           *kqv_ = nullptr, *vout_ = nullptr, *ikr_ = nullptr, *ik_ = nullptr, *ig_ = nullptr, *iq_ = nullptr,
           *iw_ = nullptr, *score_ = nullptr, *akeys_ = nullptr, *ascore_ = nullptr;
+    size_t akeys_n_ = 0;   ///< floats in akeys_
     int32_t* sel_ = nullptr;
 
     // pinned host buffers

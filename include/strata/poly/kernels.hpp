@@ -88,6 +88,13 @@ void idx_pool(float* cache, const float* ape, int dim, int kpool, int64_t pos, i
 /// score_stride apart.  w is the raw indexer_proj output; the 1/sqrt(dim * n_head) factor is applied here.
 void idx_score(const float* q, const float* w, const float* cache, float* score, int score_stride, int dim,
                int n_head, int kpool, int64_t pos, int rows, void* stream);
+/// idx_score() for a prompt batch: the products of the queries and the pools' keys through cuBLAS, as many tokens
+/// at a time as have theirs in the work_floats floats of `work`, n_head for each pool of the call's last token.
+/// A score has other last bits than idx_score()'s.  Throws std::runtime_error, and std::invalid_argument when
+/// work has no room for a token.
+void idx_score_batch(void* blas, const float* q, const float* w, const float* cache, float* score, int score_stride,
+                     int dim, int n_head, int kpool, int64_t pos, int rows, float* work, size_t work_floats,
+                     void* stream);
 
 /// out = silu(min(gate, limit)) * clamp(up, -limit, limit).
 void swiglu_clamp(const float* gate, const float* up, float* out, int n, float limit, void* stream);

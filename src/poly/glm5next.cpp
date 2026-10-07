@@ -271,7 +271,8 @@ void Glm5Next::assign_scratch() {
     iw_ = fbuf(n * idx_heads_);
     score_ = fbuf(n * score_stride_);
     const size_t keys = (size_t) std::min(opt_.max_context, idx_top_k_ + kpool_ - 1);
-    akeys_ = fbuf(std::min(n, (size_t) kAttnRows) * keys * kv_rank_);
+    akeys_n_ = std::min(n, (size_t) kAttnRows) * keys * kv_rank_;
+    akeys_ = fbuf(akeys_n_);
     ascore_ = fbuf(std::min(n, (size_t) kAttnRows) * keys * n_head_);
 }
 
@@ -384,7 +385,13 @@ void Glm5Next::dsa_select(Block& B, int64_t at, int first, int n) {
     lin(B.idx_q_b, qr_ + (size_t) first * q_rank_, iq_, n);
     lin(B.idx_proj, xn_ + (size_t) first * n_embd_, iw_, n,
         (const uint8_t*) xq_ + (size_t) first * kernels::native_q8_1_bytes(n_embd_));
-    idx_score(iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
+    // a prompt batch through cuBLAS, with the attention's scratch for the products; a few tokens with the kernel
+    // that gives a token the same bits in any company
+    if (n >= kStageRows)
+        idx_score_batch(blas_, iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, akeys_,
+                        akeys_n_, st_);
+    else
+        idx_score(iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
     ck(cudaMemcpyAsync(h_score_, score_, (size_t) n * score_stride_ * sizeof(float), cudaMemcpyDeviceToHost,
                        cs(st_)),
        "indexer scores");
