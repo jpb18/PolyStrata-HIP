@@ -1898,6 +1898,18 @@ class PeerDevice(unittest.TestCase):
     """#665: several GPUs in the config are a layer split, but --peer-device uses the second card as an expert-cache
     tier, and the engine refuses it beside --layer-split: the server must not add one then."""
 
+    def test_a_vision_section_starts_the_engine_with_images_1322(self):
+        args = ["--native", "x"]
+        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": True}})
+        self.assertEqual(got, args + ["--vision", "--vram-reserve-mib", "700"])
+        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": False}})
+        self.assertEqual(got, args + ["--vision"])
+        mine = args + ["--vram-reserve-mib", "1500"]
+        self.assertEqual(engine_args({"args": list(mine), "vision": {"gpu": True}}), mine + ["--vision"])
+        done = args + ["--vision", "--vram-reserve-mib", "700"]                  # setup wrote it: unchanged
+        self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
+        self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
+
     def test_split_added_for_several_gpus(self):
         self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
                          ["--native", "x", "--layer-split", "auto"])
