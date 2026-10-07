@@ -52,8 +52,9 @@ void kda_conv(const float* proj, float* state, const float* wq, const float* wk,
 /// The delta-rule step of every head and the gated output, token after token.  qkv: the conv outputs.  g1:
 /// f_b(f_a(x)) + dt bias (d_inner); it gates the state's decay per key dimension, as in ggml's gated_delta_net op.
 /// a: per head.  beta: per head, before the sigmoid.  s: n_head * head_dim * head_dim, updated.  g2: g_b(g_a(x))
-/// (d_inner).  out = rms_norm(o) * o_norm * sigmoid(g2), d_inner values.
-void kda_step(const float* qkv, const float* g1, const float* a, const float* beta, float* s, const float* g2,
+/// (d_inner).  out = rms_norm(o) * o_norm * sigmoid(g2), d_inner values.  A call of 32 rows or more without snap
+/// takes three launches for the same bits, and leaves its work in qkv and g1.
+void kda_step(float* qkv, float* g1, const float* a, const float* beta, float* s, const float* g2,
               const float* o_norm, float* out, int head_dim, int n_head, int rows, float gate_lower_bound,
               float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 

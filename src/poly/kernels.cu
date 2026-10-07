@@ -19,6 +19,7 @@ constexpr int WARP = 32;
 constexpr int HC = 4;   // hyper-connection streams; the model's hc_mult, checked at load
 constexpr int KEY_BLOCK = 16;   // cache rows one block of dsa_keys_kernel copies
 constexpr int VALUE_DIMS = 32, VALUE_SHARES = 8;   // attn_value_kernel: a block's value dimensions, a sum's shares
+constexpr int KDA_TERMS = 16, KDA_COLUMNS = 16;   // kda_state_kernel: a thread's values, a block's columns
 
 __device__ __forceinline__ float warp_sum(float x) {
 #pragma unroll
@@ -294,23 +295,111 @@ __global__ void kda_step_kernel(const float* __restrict__ qkv, const float* __re
             decay[j] = expf(lower_bound / (1.0f + expf(g1[at] * a[h])));
         }
         __syncthreads();
+        // Which product is fused into which sum is spelled out, here and in kda_state_kernel: left to the
+        // compiler, the two came out with other last bits.
         float sk = 0.0f;
-        for (int i = lane; i < hd; i += lanes) sk += col[i] * decay[i] * kn[i];
+        for (int i = lane; i < hd; i += lanes) sk = fmaf(__fmul_rn(col[i], decay[i]), kn[i], sk);
         sk = lanes_sum(sk, lanes);
         const float d = (v - sk) * sigmoid(beta[size_t(row) * n_head + h]);
         float o = 0.0f;
         float* m = row < n_snap ? snap + size_t(row) * stride + (size_t(h) * hd + j) * hd : nullptr;
         for (int i = lane; i < hd; i += lanes) {
-            const float n = col[i] * decay[i] + kn[i] * d;
+            const float n = fmaf(col[i], decay[i], __fmul_rn(kn[i], d));
             col[i] = n;
             if (m) m[i] = n;
-            o += n * qn[i];
+            o = fmaf(n, qn[i], o);
         }
         o = lanes_sum(o, lanes);
         // the sum's last barrier also ends this token's reads of qn, kn and decay
         const float os = block_sum(first ? o * o : 0.0f, part);
         if (first) out[at] = o / sqrtf(os / float(hd) + norm_eps) * o_norm[j] * sigmoid(g2[at]);
     }
+}
+
+// kda_step_kernel in three for a prompt batch.  There a head's block walks the tokens with every column's values
+// in the card's memory, and waits for its warps three times a token, for sums that need no token before them.
+// Here the norms of q and k come first for every token at once, the state's columns walk the tokens in registers,
+// a few columns a block so that the blocks spread over the card, and the output's norm comes last.  The sums add
+// in kda_step_kernel's order, so a token comes out with the same bits.
+
+// The sum over a head's values that kda_step_kernel's block_sum makes of them, a thread a value here.  There they
+// lie `lanes` threads apart, so a warp sums WARP / lanes of them (`group`) and the block adds the warps' sums in
+// turn.  part has a float a group.
+__device__ __forceinline__ float kda_head_sum(float x, float* part, int group) {
+    x = lanes_sum(x, group);
+    if (threadIdx.x % group == 0) part[threadIdx.x / group] = x;
+    __syncthreads();
+    float s = 0.0f;
+    for (int k = 0; k < int(blockDim.x) / group; ++k) s += part[k];
+    __syncthreads();   // part is free again
+    return s;
+}
+
+// One block a token and head, a thread a value: q and k normed in place, and g1 made the decay of its key
+// dimension.
+__global__ void kda_gates_kernel(float* __restrict__ qkv, float* __restrict__ g1, const float* __restrict__ a,
+                                 int n_head, int rows, float lower_bound, int group) {
+    __shared__ float part[32];
+    const int hd = blockDim.x;
+    const size_t at = size_t(blockIdx.x) * hd + threadIdx.x, plane = size_t(hd) * n_head * rows;
+    const float q = qkv[at], k = qkv[plane + at];
+    // the squares are rounded before they are added, as there
+    const float qs = kda_head_sum(__fmul_rn(q, q), part, group);
+    const float ks = kda_head_sum(__fmul_rn(k, k), part, group);
+    qkv[at] = q / sqrtf(qs + 1e-6f) * (1.0f / sqrtf(float(hd)));
+    qkv[plane + at] = k / sqrtf(ks + 1e-6f);
+    g1[at] = expf(lower_bound / (1.0f + expf(g1[at] * a[blockIdx.x % n_head])));
+}
+
+// The state's update with what kda_gates_kernel left.  A column has `lanes` threads as in kda_step_kernel, each
+// with KDA_TERMS of its values, and a block has KDA_COLUMNS of a head's columns.  out gets the output before its
+// norm.
+__global__ void kda_state_kernel(const float* __restrict__ qkv, const float* __restrict__ decay,
+                                 const float* __restrict__ beta, float* __restrict__ s, float* __restrict__ out,
+                                 int n_head, int rows) {
+    const int lanes = int(blockDim.x) / KDA_COLUMNS, hd = lanes * KDA_TERMS;
+    const int per_head = hd / KDA_COLUMNS;   // blocks a head
+    const int h = blockIdx.x / per_head, j = (blockIdx.x % per_head) * KDA_COLUMNS + threadIdx.x / lanes;
+    const int lane = threadIdx.x % lanes;
+    const size_t d_inner = size_t(hd) * n_head, plane = d_inner * rows;
+    float* col = s + (size_t(h) * hd + j) * hd + lane;
+    float c[KDA_TERMS];
+#pragma unroll
+    for (int t = 0; t < KDA_TERMS; ++t) c[t] = col[t * lanes];
+    for (int row = 0; row < rows; ++row) {
+        const size_t head = size_t(row) * d_inner + size_t(h) * hd;
+        const float* qn = qkv + head + lane;
+        const float* kn = qkv + plane + head + lane;
+        const float* dc = decay + head + lane;
+        const float v = qkv[2 * plane + head + j];
+        float sk = 0.0f;   // kda_step_kernel's fused products
+#pragma unroll
+        for (int t = 0; t < KDA_TERMS; ++t) sk = fmaf(__fmul_rn(c[t], dc[t * lanes]), kn[t * lanes], sk);
+        sk = lanes_sum(sk, lanes);
+        const float d = (v - sk) * sigmoid(beta[size_t(row) * n_head + h]);
+        float o = 0.0f;
+#pragma unroll
+        for (int t = 0; t < KDA_TERMS; ++t) {
+            const float n = fmaf(c[t], dc[t * lanes], __fmul_rn(kn[t * lanes], d));
+            c[t] = n;
+            o = fmaf(n, qn[t * lanes], o);
+        }
+        o = lanes_sum(o, lanes);
+        if (lane == 0) out[head + j] = o;
+    }
+#pragma unroll
+    for (int t = 0; t < KDA_TERMS; ++t) col[t * lanes] = c[t];
+}
+
+// One block a token and head, a thread a value: the output's norm, its weights and the gate.
+__global__ void kda_out_kernel(float* __restrict__ out, const float* __restrict__ g2,
+                               const float* __restrict__ o_norm, float norm_eps, int group) {
+    __shared__ float part[32];
+    const int hd = blockDim.x;
+    const size_t at = size_t(blockIdx.x) * hd + threadIdx.x;
+    const float o = out[at];
+    const float os = kda_head_sum(__fmul_rn(o, o), part, group);
+    out[at] = o / sqrtf(os / float(hd) + norm_eps) * o_norm[threadIdx.x] * sigmoid(g2[at]);
 }
 
 __global__ void store_f16_kernel(const float* __restrict__ x, half* __restrict__ dst, int n) {
@@ -876,16 +965,25 @@ void kda_conv(const float* proj, float* state, const float* wq, const float* wk,
                                                                     snap, stride, snap ? n_snap : 0);
 }
 
-void kda_step(const float* qkv, const float* g1, const float* a, const float* beta, float* s, const float* g2,
+void kda_step(float* qkv, float* g1, const float* a, const float* beta, float* s, const float* g2,
               const float* o_norm, float* out, int head_dim, int n_head, int rows, float gate_lower_bound,
               float norm_eps, void* stream, float* snap, size_t stride, int n_snap) {
     if (head_dim % WARP != 0 || head_dim > 256)
         throw std::invalid_argument("kda_step: a head of 32 to 256 values, in 32s");
     int lanes = WARP;   // threads a column, while a block has them
     while (head_dim * lanes > 1024) lanes /= 2;
-    kda_step_kernel<<<n_head, head_dim * lanes, 0, cs(stream)>>>(qkv, g1, a, beta, s, g2, o_norm, out, head_dim,
-                                                                n_head, rows, gate_lower_bound, norm_eps, snap,
-                                                                stride, snap ? n_snap : 0);
+    // a few tokens, or a head that is not kda_state_kernel's size: one launch
+    if (rows < 32 || snap || head_dim != KDA_TERMS * lanes) {
+        kda_step_kernel<<<n_head, head_dim * lanes, 0, cs(stream)>>>(qkv, g1, a, beta, s, g2, o_norm, out, head_dim,
+                                                                    n_head, rows, gate_lower_bound, norm_eps, snap,
+                                                                    stride, snap ? n_snap : 0);
+        return;
+    }
+    const int group = WARP / lanes;
+    kda_gates_kernel<<<rows * n_head, head_dim, 0, cs(stream)>>>(qkv, g1, a, n_head, rows, gate_lower_bound, group);
+    kda_state_kernel<<<n_head * (head_dim / KDA_COLUMNS), KDA_COLUMNS * lanes, 0, cs(stream)>>>(qkv, g1, beta, s, out,
+                                                                                               n_head, rows);
+    kda_out_kernel<<<rows * n_head, head_dim, 0, cs(stream)>>>(out, g2, o_norm, norm_eps, group);
 }
 
 void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream) {
