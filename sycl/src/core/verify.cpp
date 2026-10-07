@@ -147,19 +147,7 @@ bool one_token_self_commit() {
 }
 
 // True when the GPU runs under the i915 kernel driver (Arc Alchemist: A310-A770), read from sysfs.
-bool intel_i915_gpu() {
-    static const bool v = [] {
-        std::error_code ec;
-        for (const auto& e : std::filesystem::directory_iterator("/sys/class/drm", ec)) {
-            const std::string n = e.path().filename().string();
-            if (n.rfind("card", 0) != 0 || n.find('-') != std::string::npos) continue;
-            const auto drv = std::filesystem::read_symlink(e.path() / "device" / "driver", ec);
-            if (!ec && drv.filename() == "i915") return true;
-        }
-        return false;
-    }();
-    return v;
-}
+bool intel_i915_gpu() { return strata::intel_gpu_driver() == "i915"; }
 
 // How long the host waits for a layer's doorbell before it gives the window up (#267).  20 s by default; the first
 // window of a run on a card that JIT-compiles its kernels (no AOT: an Arc A750 needs FP64 emulation) can take longer

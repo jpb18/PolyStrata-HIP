@@ -90,3 +90,28 @@ inline void host_free_polled(void* p, sycl::queue& q) {
     sycl::free(p, q);
 }
 }  // namespace strata
+
+// The kernel driver of the Intel GPU ("xe", "i915", or "" when unknown), from sysfs.  The driver decides what the GPU
+// may read: an Arc A750 (i915) reads ordinary host memory a kernel is handed; an Arc Pro B70 (xe) page-faults on it
+// (ccs0, FaultType 0, address in the CPU's mmap range) and the card times the job out.
+#include <filesystem>
+#include <fstream>
+#include <string>
+namespace strata {
+inline const std::string& intel_gpu_driver() {
+    static const std::string drv = [] {
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator("/sys/class/drm", ec)) {
+            const std::string n = e.path().filename().string();
+            if (n.rfind("card", 0) != 0 || n.find('-') != std::string::npos) continue;
+            std::ifstream vf(e.path() / "device" / "vendor");
+            std::string vendor;
+            if (!(vf >> vendor) || vendor != "0x8086") continue;
+            const auto d = std::filesystem::read_symlink(e.path() / "device" / "driver", ec);
+            if (!ec) return d.filename().string();
+        }
+        return std::string();
+    }();
+    return drv;
+}
+}  // namespace strata
