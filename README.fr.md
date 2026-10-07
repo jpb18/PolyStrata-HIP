@@ -22,10 +22,10 @@ Les quatre autres tournent sur un moteur écrit pour PolyStrata, sous Linux avec
 expérimentaux : ils n'ont tourné que sur un seul PC, avec une carte de 32 Go.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, le plus grand : un fichier de 79 à 114 Go, dont la plus grande part reste en RAM.
-- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, un fichier de 17 Go. Il lit aussi les images.
-- **[Ornith 1.5](docs/BACKENDS.md)**, qui a l'architecture de Qwen3.6-35B-A3B et d'autres poids : un fichier de 17 Go.
+- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, un fichier de 13 à 23 Go. Il lit aussi les images.
+- **[Ornith 1.5](docs/BACKENDS.md)**, qui a l'architecture de Qwen3.6-35B-A3B et d'autres poids : un fichier de 14 à 24 Go.
   Il lit aussi les images.
-- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, un fichier de 13 Go. Il lit aussi les images.
+- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, un fichier de 11 à 17 Go. Il lit aussi les images.
 
 Le serveur peut passer d'un modèle installé à un autre pendant qu'il tourne
 ([comment](docs/BACKENDS.md#changing-the-model), en anglais).
@@ -104,12 +104,16 @@ modèle entier. À droite, la même carte est limitée à 8 Go, et la plupart de
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 302-313 tokens/s | 5,110-5,170 tokens/s |
+| **UD-Q2_K_XL** | 321-335 tokens/s | 5,290-5,380 tokens/s |
+| **UD-Q4_K_M** | 306-312 tokens/s | 5,370-5,450 tokens/s |
 
 </td><td>
 
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 149-155 tokens/s | 3,920-4,000 tokens/s |
+| **UD-Q2_K_XL** | 155-160 tokens/s | 3,880-3,890 tokens/s |
+| **UD-Q4_K_M** | 150-156 tokens/s | 3,710-3,820 tokens/s |
 
 </td></tr>
 </table>
@@ -130,12 +134,16 @@ Mesuré de la même façon, avec le même prompt de 30K tokens.
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **APEX-I-COMPACT** | 229-230 tokens/s | 5,190-5,200 tokens/s |
+| **APEX-I-MINI** | 231 tokens/s | 5,190-5,200 tokens/s |
+| **APEX-I-QUALITY** | 219-223 tokens/s | 5,180-5,260 tokens/s |
 
 </td><td>
 
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **APEX-I-COMPACT** | 150-155 tokens/s | 3,760-3,820 tokens/s |
+| **APEX-I-MINI** | 131-133 tokens/s | 3,720-3,790 tokens/s |
+| **APEX-I-QUALITY** | 127-131 tokens/s | 3,540-3,630 tokens/s |
 
 </td></tr>
 </table>
@@ -154,12 +162,16 @@ Mesuré de la même façon, avec un prompt de 31K tokens.
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 272-276 tokens/s | 5,530-5,710 tokens/s |
+| **UD-Q2_K_XL** | 246-261 tokens/s | 5,440-5,540 tokens/s |
+| **UD-Q4_K_M** | 269-270 tokens/s | 5,800-5,810 tokens/s |
 
 </td><td>
 
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 134-138 tokens/s | 4,640-4,730 tokens/s |
+| **UD-Q2_K_XL** | 149-156 tokens/s | 4,660-4,730 tokens/s |
+| **UD-Q4_K_M** | 132-139 tokens/s | 4,310-4,370 tokens/s |
 
 </td></tr>
 </table>
@@ -211,8 +223,8 @@ La liste complète : [docs/GLM.md](docs/GLM.md#what-you-need) (en anglais).
 | | |
 | --- | --- |
 | **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 5 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, et sur cette carte limitée à 8 Go. |
-| **RAM** | Environ **21 Go** à côté d'une carte de 8 Go, d'après l'estimation de l'installeur. Une carte de 24 Go contient le modèle entier. |
-| **Disque** | 17 Go pour le fichier du modèle, 1 Go de plus pour lire les images. |
+| **RAM** | Environ **17, 21 ou 27 Go** à côté d'une carte de 8 Go pour les trois tailles, d'après l'estimation de l'installeur. Une carte de 24 Go contient en entier les deux plus petites. |
+| **Disque** | 13, 17 ou 23 Go pour le fichier du modèle, 1 Go de plus pour lire les images. |
 | **Système** | Linux, et un pilote NVIDIA récent. |
 
 L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : Windows, les cartes AMD, plusieurs cartes.
@@ -222,8 +234,8 @@ L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : W
 | | |
 | --- | --- |
 | **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 4 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, et sur cette carte limitée à 8 Go. |
-| **RAM** | Environ **22 Go** à côté d'une carte de 8 Go, d'après l'estimation de l'installeur. Une carte de 24 Go contient le modèle entier. |
-| **Disque** | 17 Go pour le fichier du modèle, 1 Go de plus pour lire les images. |
+| **RAM** | Environ **18, 22 ou 28 Go** à côté d'une carte de 8 Go pour les trois tailles, d'après l'estimation de l'installeur. Une carte de 24 Go contient en entier les deux plus petites. |
+| **Disque** | 14, 17 ou 24 Go pour le fichier du modèle, 1 Go de plus pour lire les images. |
 | **Système** | Linux, et un pilote NVIDIA récent. |
 
 L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : Windows, les cartes AMD, plusieurs cartes.
@@ -233,8 +245,8 @@ L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : W
 | | |
 | --- | --- |
 | **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 6 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, et sur cette carte limitée à 8 Go. |
-| **RAM** | Environ **18 Go** à côté d'une carte de 8 Go, d'après l'estimation de l'installeur. D'après la même estimation, une carte de 16 Go contient le modèle entier. |
-| **Disque** | 13 Go pour le fichier du modèle et son modèle brouillon, 1 Go de plus pour lire les images. |
+| **RAM** | Environ **15, 18 ou 21 Go** à côté d'une carte de 8 Go pour les trois tailles, d'après l'estimation de l'installeur. D'après la même estimation, une carte de 16 Go contient en entier les deux plus petites. |
+| **Disque** | 11, 13 ou 17 Go pour le fichier du modèle et son modèle brouillon, 1 Go de plus pour lire les images. |
 | **Système** | Linux, et un pilote NVIDIA récent. |
 
 L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : Windows, les cartes AMD, plusieurs cartes.
@@ -268,7 +280,7 @@ Il vous pose quelques questions :
 - s'il doit lire les images (GLM 5.3 Flash n'en lit pas).
 
 Appuyez sur Entrée à chaque fois pour garder la réponse recommandée. Ensuite il télécharge le modèle (environ 70 Go pour
-Qwen3.8-Flash-Next, 79 à 114 Go pour GLM 5.3 Flash, 13 à 17 Go pour les trois autres)
+Qwen3.8-Flash-Next, 79 à 114 Go pour GLM 5.3 Flash, 11 à 24 Go pour les trois autres)
 et le démarre. Si le téléchargement s'arrête, relancez-le : il reprend là où il s'était arrêté. Votre navigateur
 ouvre l'application PolyStrata à l'adresse `http://127.0.0.1:8080`.
 
@@ -342,35 +354,41 @@ Les autres quantifications de GLM 5.3 Flash ne sont pas encore prises en charge 
 
 ### Qwen3.6-35B-A3B
 
-Une taille pour l'instant.
+Trois tailles pour l'instant. L'installeur prend UD-Q3_K_M, ou UD-Q2_K_XL sur un PC qui a moins de RAM. UD-Q4_K_M se choisit par son nom : `--model UD-Q4_K_M`.
 
 | Taille | Ce que c'est | Téléchargement | RAM à côté d'une carte de 8 Go |
 | --- | --- | ---: | ---: |
 | **UD-Q3_K_M** | le modèle entier avec des experts à 3 bits ([Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)) | 17 Go | environ 21 Go |
+| **UD-Q2_K_XL** | le même avec des experts à 2 et 3 bits : celui qui demande le moins de RAM | 13 Go | environ 17 Go |
+| **UD-Q4_K_M** | le même avec des experts à 4 bits | 23 Go | environ 27 Go |
 
-Une carte plus grande contient une plus grande part du modèle et demande moins de RAM : environ 17 Go à côté d'une carte de 12 Go, 13 Go à côté d'une carte de 16 Go, et 10 Go dès que la carte contient tout. Ce sont les estimations
+Une carte plus grande contient une plus grande part du modèle et demande moins de RAM : avec UD-Q3_K_M, environ 17 Go à côté d'une carte de 12 Go, 13 Go à côté d'une carte de 16 Go, et 10 Go dès que la carte contient tout. Ce sont les estimations
 de l'installeur. Elles n'ont pas été vérifiées sur un tel PC.
 
 ### Ornith 1.5
 
-Une taille pour l'instant.
+Trois tailles pour l'instant. L'installeur prend APEX-I-COMPACT, ou APEX-I-MINI sur un PC qui a moins de RAM. APEX-I-QUALITY se choisit par son nom : `--model APEX-I-QUALITY`.
 
 | Taille | Ce que c'est | Téléchargement | RAM à côté d'une carte de 8 Go |
 | --- | --- | ---: | ---: |
 | **APEX-I-COMPACT** | le modèle entier avec des experts à 3 et 4 bits ([APEX](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF) de mudler) | 17 Go | environ 22 Go |
+| **APEX-I-MINI** | le même avec des experts à 2 et 3 bits : celui qui demande le moins de RAM | 14 Go | environ 18 Go |
+| **APEX-I-QUALITY** | le même avec des experts de 4 à 6 bits | 24 Go | environ 28 Go |
 
-Une carte plus grande contient une plus grande part du modèle et demande moins de RAM : environ 17 Go à côté d'une carte de 12 Go, 13 Go à côté d'une carte de 16 Go, et 10 Go dès que la carte contient tout. Ce sont les estimations
+Une carte plus grande contient une plus grande part du modèle et demande moins de RAM : avec APEX-I-COMPACT, environ 17 Go à côté d'une carte de 12 Go, 13 Go à côté d'une carte de 16 Go, et 10 Go dès que la carte contient tout. Ce sont les estimations
 de l'installeur. Elles n'ont pas été vérifiées sur un tel PC.
 
 ### Gemma 4 26B-A4B
 
-Une taille pour l'instant.
+Trois tailles pour l'instant. L'installeur prend UD-Q3_K_M, ou UD-Q2_K_XL sur un PC qui a moins de RAM. UD-Q4_K_M se choisit par son nom : `--model UD-Q4_K_M`.
 
 | Taille | Ce que c'est | Téléchargement | RAM à côté d'une carte de 8 Go |
 | --- | --- | ---: | ---: |
 | **UD-Q3_K_M** | le modèle entier avec des experts à 3 bits ([Unsloth](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)), et le modèle brouillon de Google pour lui | 13 Go | environ 18 Go |
+| **UD-Q2_K_XL** | le même avec des experts à 2 bits : celui qui demande le moins de RAM | 11 Go | environ 15 Go |
+| **UD-Q4_K_M** | le même avec des experts à 4 et 5 bits | 17 Go | environ 21 Go |
 
-Une carte plus grande contient une plus grande part du modèle et demande moins de RAM : environ 14 Go à côté d'une carte de 12 Go, et 10 Go dès que la carte contient tout. Ce sont les estimations
+Une carte plus grande contient une plus grande part du modèle et demande moins de RAM : avec UD-Q3_K_M, environ 14 Go à côté d'une carte de 12 Go, et 10 Go dès que la carte contient tout. Ce sont les estimations
 de l'installeur. Elles n'ont pas été vérifiées sur un tel PC.
 
 ## Utilisation

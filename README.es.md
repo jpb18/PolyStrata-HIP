@@ -22,10 +22,10 @@ Los otros cuatro usan un motor escrito para PolyStrata, en Linux con una tarjeta
 han funcionado en un PC, con una tarjeta de 32 GB.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, el más grande: un archivo de 79 a 114 GB, que en su mayor parte se queda en la RAM.
-- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, un archivo de 17 GB. También entiende imágenes.
-- **[Ornith 1.5](docs/BACKENDS.md)**, con la arquitectura de Qwen3.6-35B-A3B y otros pesos: un archivo de 17 GB.
+- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, un archivo de 13 a 23 GB. También entiende imágenes.
+- **[Ornith 1.5](docs/BACKENDS.md)**, con la arquitectura de Qwen3.6-35B-A3B y otros pesos: un archivo de 14 a 24 GB.
   También entiende imágenes.
-- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, un archivo de 13 GB. También entiende imágenes.
+- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, un archivo de 11 a 17 GB. También entiende imágenes.
 
 El servidor puede cambiar entre los modelos instalados mientras está en marcha
 ([cómo](docs/BACKENDS.md#changing-the-model), en inglés).
@@ -105,12 +105,16 @@ el procesador.
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 302-313 tokens/s | 5,110-5,170 tokens/s |
+| **UD-Q2_K_XL** | 321-335 tokens/s | 5,290-5,380 tokens/s |
+| **UD-Q4_K_M** | 306-312 tokens/s | 5,370-5,450 tokens/s |
 
 </td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 149-155 tokens/s | 3,920-4,000 tokens/s |
+| **UD-Q2_K_XL** | 155-160 tokens/s | 3,880-3,890 tokens/s |
+| **UD-Q4_K_M** | 150-156 tokens/s | 3,710-3,820 tokens/s |
 
 </td></tr>
 </table>
@@ -131,12 +135,16 @@ Medido igual, con el mismo prompt de 30K tokens.
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
 | **APEX-I-COMPACT** | 229-230 tokens/s | 5,190-5,200 tokens/s |
+| **APEX-I-MINI** | 231 tokens/s | 5,190-5,200 tokens/s |
+| **APEX-I-QUALITY** | 219-223 tokens/s | 5,180-5,260 tokens/s |
 
 </td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
 | **APEX-I-COMPACT** | 150-155 tokens/s | 3,760-3,820 tokens/s |
+| **APEX-I-MINI** | 131-133 tokens/s | 3,720-3,790 tokens/s |
+| **APEX-I-QUALITY** | 127-131 tokens/s | 3,540-3,630 tokens/s |
 
 </td></tr>
 </table>
@@ -155,12 +163,16 @@ Medido igual, con un prompt de 31K tokens.
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 272-276 tokens/s | 5,530-5,710 tokens/s |
+| **UD-Q2_K_XL** | 246-261 tokens/s | 5,440-5,540 tokens/s |
+| **UD-Q4_K_M** | 269-270 tokens/s | 5,800-5,810 tokens/s |
 
 </td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 134-138 tokens/s | 4,640-4,730 tokens/s |
+| **UD-Q2_K_XL** | 149-156 tokens/s | 4,660-4,730 tokens/s |
+| **UD-Q4_K_M** | 132-139 tokens/s | 4,310-4,370 tokens/s |
 
 </td></tr>
 </table>
@@ -212,8 +224,8 @@ La lista completa: [docs/GLM.md](docs/GLM.md#what-you-need) (en inglés).
 | | |
 | --- | --- |
 | **Tarjeta gráfica** | Una tarjeta **NVIDIA** GeForce RTX serie 20 o más nueva con **8 GB de VRAM o más**. Unos 5 GB se ocupan antes del primer experto. Ha funcionado en una tarjeta de 32 GB, y en esa tarjeta limitada a 8 GB. |
-| **RAM** | Unos **21 GB** junto a una tarjeta de 8 GB, según la estimación del instalador. Una tarjeta de 24 GB guarda el modelo entero. |
-| **Disco** | 17 GB para el archivo del modelo, 1 GB más para leer imágenes. |
+| **RAM** | Unos **17, 21 o 27 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Una tarjeta de 24 GB guarda enteros los dos tamaños más pequeños. |
+| **Disco** | 13, 17 o 23 GB para el archivo del modelo, 1 GB más para leer imágenes. |
 | **Sistema** | Linux y un controlador de NVIDIA actual. |
 
 El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. Todavía no: Windows, tarjetas AMD, varias tarjetas.
@@ -223,8 +235,8 @@ El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. Todavía no:
 | | |
 | --- | --- |
 | **Tarjeta gráfica** | Una tarjeta **NVIDIA** GeForce RTX serie 20 o más nueva con **8 GB de VRAM o más**. Unos 4 GB se ocupan antes del primer experto. Ha funcionado en una tarjeta de 32 GB, y en esa tarjeta limitada a 8 GB. |
-| **RAM** | Unos **22 GB** junto a una tarjeta de 8 GB, según la estimación del instalador. Una tarjeta de 24 GB guarda el modelo entero. |
-| **Disco** | 17 GB para el archivo del modelo, 1 GB más para leer imágenes. |
+| **RAM** | Unos **18, 22 o 28 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Una tarjeta de 24 GB guarda enteros los dos tamaños más pequeños. |
+| **Disco** | 14, 17 o 24 GB para el archivo del modelo, 1 GB más para leer imágenes. |
 | **Sistema** | Linux y un controlador de NVIDIA actual. |
 
 El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. Todavía no: Windows, tarjetas AMD, varias tarjetas.
@@ -234,8 +246,8 @@ El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. Todavía no:
 | | |
 | --- | --- |
 | **Tarjeta gráfica** | Una tarjeta **NVIDIA** GeForce RTX serie 20 o más nueva con **8 GB de VRAM o más**. Unos 6 GB se ocupan antes del primer experto. Ha funcionado en una tarjeta de 32 GB, y en esa tarjeta limitada a 8 GB. |
-| **RAM** | Unos **18 GB** junto a una tarjeta de 8 GB, según la estimación del instalador. Según la misma estimación, una tarjeta de 16 GB guarda el modelo entero. |
-| **Disco** | 13 GB para el archivo del modelo y su modelo borrador, 1 GB más para leer imágenes. |
+| **RAM** | Unos **15, 18 o 21 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Según la misma estimación, una tarjeta de 16 GB guarda enteros los dos tamaños más pequeños. |
+| **Disco** | 11, 13 o 17 GB para el archivo del modelo y su modelo borrador, 1 GB más para leer imágenes. |
 | **Sistema** | Linux y un controlador de NVIDIA actual. |
 
 El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. Todavía no: Windows, tarjetas AMD, varias tarjetas.
@@ -269,7 +281,7 @@ Te hace unas pocas preguntas:
 - si debe entender imágenes (GLM 5.3 Flash no las entiende).
 
 Pulsa Enter cada vez para usar la respuesta recomendada. Después descarga el modelo (unos 70 GB para
-Qwen3.8-Flash-Next, de 79 a 114 GB para GLM 5.3 Flash, de 13 a 17 GB para los otros tres) y lo arranca. Si la
+Qwen3.8-Flash-Next, de 79 a 114 GB para GLM 5.3 Flash, de 11 a 24 GB para los otros tres) y lo arranca. Si la
 descarga se detiene, vuelve a ejecutarlo: sigue donde lo dejó. Tu navegador abre la aplicación de PolyStrata en
 `http://127.0.0.1:8080`.
 
@@ -342,35 +354,41 @@ Las demás cuantizaciones de GLM 5.3 Flash todavía no se admiten: [qué falta](
 
 ### Qwen3.6-35B-A3B
 
-Un tamaño por ahora.
+Tres tamaños por ahora. El instalador toma UD-Q3_K_M, o UD-Q2_K_XL en un PC con menos RAM. UD-Q4_K_M se elige por su nombre: `--model UD-Q4_K_M`.
 
 | Tamaño | Qué es | Descarga | RAM junto a una tarjeta de 8 GB |
 | --- | --- | ---: | ---: |
 | **UD-Q3_K_M** | el modelo entero con expertos de 3 bits ([Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)) | 17 GB | unos 21 GB |
+| **UD-Q2_K_XL** | el mismo con expertos de 2 y 3 bits: el que menos RAM pide | 13 GB | unos 17 GB |
+| **UD-Q4_K_M** | el mismo con expertos de 4 bits | 23 GB | unos 27 GB |
 
-Una tarjeta más grande guarda más parte del modelo y necesita menos RAM: unos 17 GB junto a una tarjeta de 12 GB, 13 GB junto a una de 16 GB y 10 GB cuando la tarjeta lo guarda todo. Son estimaciones del instalador. No se
+Una tarjeta más grande guarda más parte del modelo y necesita menos RAM: con UD-Q3_K_M, unos 17 GB junto a una tarjeta de 12 GB, 13 GB junto a una de 16 GB y 10 GB cuando la tarjeta lo guarda todo. Son estimaciones del instalador. No se
 han comprobado en un PC así.
 
 ### Ornith 1.5
 
-Un tamaño por ahora.
+Tres tamaños por ahora. El instalador toma APEX-I-COMPACT, o APEX-I-MINI en un PC con menos RAM. APEX-I-QUALITY se elige por su nombre: `--model APEX-I-QUALITY`.
 
 | Tamaño | Qué es | Descarga | RAM junto a una tarjeta de 8 GB |
 | --- | --- | ---: | ---: |
 | **APEX-I-COMPACT** | el modelo entero con expertos de 3 y 4 bits ([APEX](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF) de mudler) | 17 GB | unos 22 GB |
+| **APEX-I-MINI** | el mismo con expertos de 2 y 3 bits: el que menos RAM pide | 14 GB | unos 18 GB |
+| **APEX-I-QUALITY** | el mismo con expertos de 4 a 6 bits | 24 GB | unos 28 GB |
 
-Una tarjeta más grande guarda más parte del modelo y necesita menos RAM: unos 17 GB junto a una tarjeta de 12 GB, 13 GB junto a una de 16 GB y 10 GB cuando la tarjeta lo guarda todo. Son estimaciones del instalador. No se
+Una tarjeta más grande guarda más parte del modelo y necesita menos RAM: con APEX-I-COMPACT, unos 17 GB junto a una tarjeta de 12 GB, 13 GB junto a una de 16 GB y 10 GB cuando la tarjeta lo guarda todo. Son estimaciones del instalador. No se
 han comprobado en un PC así.
 
 ### Gemma 4 26B-A4B
 
-Un tamaño por ahora.
+Tres tamaños por ahora. El instalador toma UD-Q3_K_M, o UD-Q2_K_XL en un PC con menos RAM. UD-Q4_K_M se elige por su nombre: `--model UD-Q4_K_M`.
 
 | Tamaño | Qué es | Descarga | RAM junto a una tarjeta de 8 GB |
 | --- | --- | ---: | ---: |
 | **UD-Q3_K_M** | el modelo entero con expertos de 3 bits ([Unsloth](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)), y el modelo borrador de Google para él | 13 GB | unos 18 GB |
+| **UD-Q2_K_XL** | el mismo con expertos de 2 bits: el que menos RAM pide | 11 GB | unos 15 GB |
+| **UD-Q4_K_M** | el mismo con expertos de 4 y 5 bits | 17 GB | unos 21 GB |
 
-Una tarjeta más grande guarda más parte del modelo y necesita menos RAM: unos 14 GB junto a una tarjeta de 12 GB y 10 GB cuando la tarjeta lo guarda todo. Son estimaciones del instalador. No se
+Una tarjeta más grande guarda más parte del modelo y necesita menos RAM: con UD-Q3_K_M, unos 14 GB junto a una tarjeta de 12 GB y 10 GB cuando la tarjeta lo guarda todo. Son estimaciones del instalador. No se
 han comprobado en un PC así.
 
 ## Cómo usarlo

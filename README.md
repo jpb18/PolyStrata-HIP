@@ -21,10 +21,10 @@ The other four run on an engine written for PolyStrata, on Linux with one NVIDIA
 have run on one PC, with a 32 GB card.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, the largest: a file of 79 to 114 GB, most of which stays in RAM.
-- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, a 17 GB file. It also reads pictures.
-- **[Ornith 1.5](docs/BACKENDS.md)**, which has Qwen3.6-35B-A3B's architecture and other weights: a 17 GB file. It
+- **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, a file of 13 to 23 GB. It also reads pictures.
+- **[Ornith 1.5](docs/BACKENDS.md)**, which has Qwen3.6-35B-A3B's architecture and other weights: a file of 14 to 24 GB. It
   also reads pictures.
-- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, a 13 GB file. It also reads pictures.
+- **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, a file of 11 to 17 GB. It also reads pictures.
 
 The server can change between installed models while it runs ([how](docs/BACKENDS.md#changing-the-model)).
 
@@ -102,12 +102,16 @@ model. On the right the same card is held to 8 GB, and most of the experts run o
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 302-313 tokens/s | 5,110-5,170 tokens/s |
+| **UD-Q2_K_XL** | 321-335 tokens/s | 5,290-5,380 tokens/s |
+| **UD-Q4_K_M** | 306-312 tokens/s | 5,370-5,450 tokens/s |
 
 </td><td>
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 149-155 tokens/s | 3,920-4,000 tokens/s |
+| **UD-Q2_K_XL** | 155-160 tokens/s | 3,880-3,890 tokens/s |
+| **UD-Q4_K_M** | 150-156 tokens/s | 3,710-3,820 tokens/s |
 
 </td></tr>
 </table>
@@ -128,12 +132,16 @@ Measured the same way, with the same 30K-token prompt.
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **APEX-I-COMPACT** | 229-230 tokens/s | 5,190-5,200 tokens/s |
+| **APEX-I-MINI** | 231 tokens/s | 5,190-5,200 tokens/s |
+| **APEX-I-QUALITY** | 219-223 tokens/s | 5,180-5,260 tokens/s |
 
 </td><td>
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **APEX-I-COMPACT** | 150-155 tokens/s | 3,760-3,820 tokens/s |
+| **APEX-I-MINI** | 131-133 tokens/s | 3,720-3,790 tokens/s |
+| **APEX-I-QUALITY** | 127-131 tokens/s | 3,540-3,630 tokens/s |
 
 </td></tr>
 </table>
@@ -152,12 +160,16 @@ Measured the same way, with a 31K-token prompt.
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 272-276 tokens/s | 5,530-5,710 tokens/s |
+| **UD-Q2_K_XL** | 246-261 tokens/s | 5,440-5,540 tokens/s |
+| **UD-Q4_K_M** | 269-270 tokens/s | 5,800-5,810 tokens/s |
 
 </td><td>
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
 | **UD-Q3_K_M** | 134-138 tokens/s | 4,640-4,730 tokens/s |
+| **UD-Q2_K_XL** | 149-156 tokens/s | 4,660-4,730 tokens/s |
+| **UD-Q4_K_M** | 132-139 tokens/s | 4,310-4,370 tokens/s |
 
 </td></tr>
 </table>
@@ -209,8 +221,8 @@ The full list: [docs/GLM.md](docs/GLM.md#what-you-need).
 | | |
 | --- | --- |
 | **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 5 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
-| **RAM** | About **21 GB** beside an 8 GB card, the installer's estimate. A card with 24 GB holds the whole model. |
-| **Disk** | 17 GB for the model file, 1 GB more to read pictures. |
+| **RAM** | About **17, 21 or 27 GB** beside an 8 GB card for the three sizes, the installer's estimate. A card with 24 GB holds the two smaller sizes whole. |
+| **Disk** | 13, 17 or 23 GB for the model file, 1 GB more to read pictures. |
 | **System** | Linux, and a current NVIDIA driver. |
 
 The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
@@ -220,8 +232,8 @@ The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Wi
 | | |
 | --- | --- |
 | **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 4 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
-| **RAM** | About **22 GB** beside an 8 GB card, the installer's estimate. A card with 24 GB holds the whole model. |
-| **Disk** | 17 GB for the model file, 1 GB more to read pictures. |
+| **RAM** | About **18, 22 or 28 GB** beside an 8 GB card for the three sizes, the installer's estimate. A card with 24 GB holds the two smaller sizes whole. |
+| **Disk** | 14, 17 or 24 GB for the model file, 1 GB more to read pictures. |
 | **System** | Linux, and a current NVIDIA driver. |
 
 The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
@@ -231,8 +243,8 @@ The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Wi
 | | |
 | --- | --- |
 | **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 6 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
-| **RAM** | About **18 GB** beside an 8 GB card, the installer's estimate. By the same estimate a card with 16 GB holds the whole model. |
-| **Disk** | 13 GB for the model file and its draft model, 1 GB more to read pictures. |
+| **RAM** | About **15, 18 or 21 GB** beside an 8 GB card for the three sizes, the installer's estimate. By the same estimate a card with 16 GB holds the two smaller sizes whole. |
+| **Disk** | 11, 13 or 17 GB for the model file and its draft model, 1 GB more to read pictures. |
 | **System** | Linux, and a current NVIDIA driver. |
 
 The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
@@ -265,7 +277,7 @@ The installer finds your card and sets up the right engine for it. It asks you a
 - whether it should read pictures (GLM 5.3 Flash reads none).
 
 Press Enter each time for the recommended answer. Then it downloads the model (about 70 GB for Qwen3.8-Flash-Next,
-79 to 114 GB for GLM 5.3 Flash, 13 to 17 GB for the other three) and starts it. If the download stops, run it again:
+79 to 114 GB for GLM 5.3 Flash, 11 to 24 GB for the other three) and starts it. If the download stops, run it again:
 it continues where it left off. Your browser opens the PolyStrata app at `http://127.0.0.1:8080`.
 
 All five are in the installer's list of models. `./setup.sh --family glm`, `qwen36`, `ornith` or `gemma4` goes
@@ -335,37 +347,43 @@ Other quantizations of GLM 5.3 Flash are not supported yet: [what is missing](do
 
 ### Qwen3.6-35B-A3B
 
-One size so far.
+Three sizes so far. The installer takes UD-Q3_K_M, or UD-Q2_K_XL when the PC has too little RAM for it. UD-Q4_K_M is chosen by name: `--model UD-Q4_K_M`.
 
 | Size | What it is | Download | RAM beside an 8 GB card |
 | --- | --- | ---: | ---: |
 | **UD-Q3_K_M** | the whole model with 3-bit experts ([Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF)) | 17 GB | about 21 GB |
+| **UD-Q2_K_XL** | the same with 2- and 3-bit experts: the least RAM | 13 GB | about 17 GB |
+| **UD-Q4_K_M** | the same with 4-bit experts | 23 GB | about 27 GB |
 
-A larger card holds more of the model and needs less RAM: about 17 GB beside a 12 GB card, 13 GB beside a 16 GB
+A larger card holds more of the model and needs less RAM: with UD-Q3_K_M about 17 GB beside a 12 GB card, 13 GB beside a 16 GB
 card, and 10 GB once the card holds all of it. These are the installer's estimates. They have not been checked on
 such a PC.
 
 ### Ornith 1.5
 
-One size so far.
+Three sizes so far. The installer takes APEX-I-COMPACT, or APEX-I-MINI when the PC has too little RAM for it. APEX-I-QUALITY is chosen by name: `--model APEX-I-QUALITY`.
 
 | Size | What it is | Download | RAM beside an 8 GB card |
 | --- | --- | ---: | ---: |
 | **APEX-I-COMPACT** | the whole model with 3- and 4-bit experts ([APEX](https://huggingface.co/mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF) by mudler) | 17 GB | about 22 GB |
+| **APEX-I-MINI** | the same with 2- and 3-bit experts: the least RAM | 14 GB | about 18 GB |
+| **APEX-I-QUALITY** | the same with 4- to 6-bit experts | 24 GB | about 28 GB |
 
-A larger card holds more of the model and needs less RAM: about 17 GB beside a 12 GB card, 13 GB beside a 16 GB
+A larger card holds more of the model and needs less RAM: with APEX-I-COMPACT about 17 GB beside a 12 GB card, 13 GB beside a 16 GB
 card, and 10 GB once the card holds all of it. These are the installer's estimates. They have not been checked on
 such a PC.
 
 ### Gemma 4 26B-A4B
 
-One size so far.
+Three sizes so far. The installer takes UD-Q3_K_M, or UD-Q2_K_XL when the PC has too little RAM for it. UD-Q4_K_M is chosen by name: `--model UD-Q4_K_M`.
 
 | Size | What it is | Download | RAM beside an 8 GB card |
 | --- | --- | ---: | ---: |
 | **UD-Q3_K_M** | the whole model with 3-bit experts ([Unsloth](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)), and Google's draft model for it | 13 GB | about 18 GB |
+| **UD-Q2_K_XL** | the same with 2-bit experts: the least RAM | 11 GB | about 15 GB |
+| **UD-Q4_K_M** | the same with 4- and 5-bit experts | 17 GB | about 21 GB |
 
-A larger card holds more of the model and needs less RAM: about 14 GB beside a 12 GB card, and 10 GB once the card
+A larger card holds more of the model and needs less RAM: with UD-Q3_K_M about 14 GB beside a 12 GB card, and 10 GB once the card
 holds all of it. These are the installer's estimates. They have not been checked on such a PC.
 
 ## Using it

@@ -13,9 +13,9 @@ card with 8 GB was not there: [one table](#with-8-gb-of-vram) holds the 5090 to 
 | --- | --- | --- | --- | --- |
 | Qwen3.8-Flash-Next and fine-tunes | `qwen4exp` | `strata` | the packs setup builds | separate MTP model |
 | GLM 5.3 Flash | `glm5-next` | `strata-poly` | GSQ-RCO 3.0bit, REAP50-Q3_K_M, UD-IQ2_XXS | draft block |
-| Qwen3.6-35B-A3B | `qwen35moe` | `strata-poly` | Unsloth UD-Q3_K_M, 17.1 GB | draft block in the file |
-| Ornith 1.5 35B-A3B | `qwen35moe` | `strata-poly` | APEX-MTP-I-Compact, 17.4 GB | draft block in the file |
-| Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, 12.7 GB | its draft model, a file of 0.46 GB |
+| Qwen3.6-35B-A3B | `qwen35moe` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 12.6 to 22.7 GB | draft block in the file |
+| Ornith 1.5 35B-A3B | `qwen35moe` | `strata-poly` | APEX-MTP-I-Compact, I-Mini and I-Quality, 14.4 to 23.7 GB | draft block in the file |
+| Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 10.5 to 16.9 GB | its draft model, a file of 0.46 GB |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
 GGUF in place, and it now has three architectures. It was called `strata-glm`, after its first model; an install
@@ -41,8 +41,22 @@ straight to it:
 | Family | Model | File | Download | RAM beside an 8 GB card (estimate) |
 | --- | --- | --- | --- | --- |
 | `qwen36` | Qwen3.6-35B-A3B | Unsloth UD-Q3_K_M | 17.1 GB | about 21 GB |
+| | | Unsloth UD-Q2_K_XL | 12.6 GB | about 17 GB |
+| | | Unsloth UD-Q4_K_M | 22.7 GB | about 27 GB |
 | `ornith` | Ornith 1.5 35B-A3B | APEX-MTP-I-Compact | 17.4 GB | about 22 GB |
+| | | APEX-MTP-I-Mini | 14.4 GB | about 18 GB |
+| | | APEX-MTP-I-Quality | 23.7 GB | about 28 GB |
 | `gemma4` | Gemma 4 26B-A4B | Unsloth UD-Q3_K_M and its draft model | 13.2 GB | about 18 GB |
+| | | Unsloth UD-Q2_K_XL and the draft model | 11.0 GB | about 15 GB |
+| | | Unsloth UD-Q4_K_M and the draft model | 17.4 GB | about 21 GB |
+
+A family's first size is the one setup takes. On a PC with less RAM than that wants it takes the second, the
+smallest, and the third is by name: `--model UD-Q4_K_M`, `--model APEX-I-QUALITY`. The sizes differ in their
+routed experts. UD-Q2_K_XL has them as IQ2_XS and IQ3_XXS, for Gemma 4 as IQ2_XS and IQ4_NL; UD-Q4_K_M as Q4_K
+with Q5_K and Q6_K where they write, for Gemma 4 Q4_K and Q5_1; I-Mini as Q3_K in half its layers and IQ2_S in
+the other half; I-Quality as IQ4_XS, Q5_K and Q6_K. The i-quants are slower on the CPU than the K-quants, which
+shows when the card is small: held to 8 GB, Ornith's I-Mini writes more slowly than its I-Compact with more of
+its experts on the card.
 
 The steps are GLM's ([GLM.md](GLM.md#install)). Setup asks the context and whether to keep several conversations in
 RAM, compiles `strata-poly`, downloads the model's file from a pinned revision (for Gemma 4 also its draft model,
@@ -274,6 +288,18 @@ table, as the others do, and guesses with its draft model. GLM's second run read
 60, 55 and 55. GLM's longest prompt starts like the one before it, so its first 2,048 tokens are not read
 again: the 9.7 s are for 7,398.
 
+The table has each new model's first size. The other sizes by the same benchmark, one run each, every expert
+in VRAM:
+
+| Model and size | Reads its two long prompts, tokens/s | Writes after the three prompts, tokens/s |
+| --- | ---: | ---: |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | 4,218 and 5,632 | 324, 258, 178 |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 4,281 and 5,603 | 300, 239, 171 |
+| Ornith 1.5 APEX-I-Mini | 4,251 and 5,521 | 228, 195, 136 |
+| Ornith 1.5 APEX-I-Quality | 4,256 and 5,364 | 218, 180, 133 |
+| Gemma 4 26B-A4B UD-Q2_K_XL | 4,402 and 5,546 | 268, 217, 165 |
+| Gemma 4 26B-A4B UD-Q4_K_M | 4,703 and 5,740 | 270, 208, 158 |
+
 The last four changes in [What was tuned](#what-was-tuned) are to reading a prompt: one to the attention of a
 prompt batch in the three new models, which now runs on the card's tensor cores, and three to GLM's layers,
 whose attention is its own. The build before the four, that morning, read the three's long prompts at 4,127
@@ -396,28 +422,46 @@ the draft block, which the other two files carry.
 
 | Model | Card | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B | whole model on it | 30,126 | 6.0 | 5,114 to 5,173 | 302 to 313 | 95 to 96 | 100% |
+| Qwen3.6-35B-A3B UD-Q3_K_M | whole model on it | 30,126 | 6.0 | 5,114 to 5,173 | 302 to 313 | 95 to 96 | 100% |
 | | held to 8 GB | | 7.7 to 7.8 | 3,918 to 3,999 | 149 to 155 | 50 to 51 | 41% to 42% |
-| Ornith 1.5 | whole model on it | 30,126 | 5.9 | 5,192 to 5,197 | 229 to 230 | 69 to 72 | 100% |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | whole model on it | 30,126 | 5.7 to 5.8 | 5,289 to 5,375 | 321 to 335 | 95 to 98 | 100% |
+| | held to 8 GB | | 7.9 | 3,880 to 3,888 | 155 to 160 | 52 to 54 | 53% to 62% |
+| Qwen3.6-35B-A3B UD-Q4_K_M | whole model on it | 30,126 | 5.7 | 5,374 to 5,451 | 306 to 312 | 91 | 100% |
+| | held to 8 GB | | 8.0 to 8.3 | 3,712 to 3,819 | 150 to 156 | 50 | 34% to 36% |
+| Ornith 1.5 APEX-I-Compact | whole model on it | 30,126 | 5.9 | 5,192 to 5,197 | 229 to 230 | 69 to 72 | 100% |
 | | held to 8 GB | | 8.0 to 8.1 | 3,762 to 3,822 | 150 to 155 | 46 to 48 | 50% to 52% |
-| Gemma 4 26B-A4B | whole model on it | 31,211 | 5.7 to 5.8 | 5,529 to 5,710 | 272 to 276 | 96 | 100% |
+| Ornith 1.5 APEX-I-Mini | whole model on it | 30,126 | 5.9 | 5,188 to 5,202 | 231 | 69 to 71 | 100% |
+| | held to 8 GB | | 8.1 to 8.2 | 3,723 to 3,788 | 131 to 133 | 48 | 54% to 58% |
+| Ornith 1.5 APEX-I-Quality | whole model on it | 30,126 | 5.9 | 5,181 to 5,265 | 219 to 223 | 75 to 78 | 100% |
+| | held to 8 GB | | 8.4 to 8.6 | 3,541 to 3,632 | 127 to 131 | 46 to 48 | 34% to 43% |
+| Gemma 4 26B-A4B UD-Q3_K_M | whole model on it | 31,211 | 5.7 to 5.8 | 5,529 to 5,710 | 272 to 276 | 96 | 100% |
 | | held to 8 GB | | 6.8 to 7.0 | 4,640 to 4,726 | 134 to 138 | 48 | 27% to 41% |
+| Gemma 4 26B-A4B UD-Q2_K_XL | whole model on it | 31,211 | 5.8 to 5.9 | 5,438 to 5,539 | 246 to 261 | 103 | 100% |
+| | held to 8 GB | | 6.8 to 6.9 | 4,664 to 4,730 | 149 to 156 | 51 | 48% to 62% |
+| Gemma 4 26B-A4B UD-Q4_K_M | whole model on it | 31,211 | 5.6 | 5,799 to 5,812 | 269 to 270 | 94 to 96 | 100% |
+| | held to 8 GB | | 7.3 to 7.5 | 4,308 to 4,371 | 132 to 139 | 50 to 52 | 16% to 28% |
 | GLM 5.3 Flash 3.0bit | 32 GB | 28,354 | 36.2 to 36.3 | 784 to 785 | 57 to 59 | 49 to 51 | 49% to 52% |
 | GLM 5.3 Flash UD-IQ2_XXS | 32 GB | 28,354 | 27.8 | 1,023 | 40 to 44 | 37 to 39 | 49% to 52% |
 | GLM 5.3 Flash REAP50-Q3_K_M | 32 GB | 28,354 | 22.7 | 1,252 | 56 to 62 | 50 to 51 | 57% to 64% |
 
-That morning, before the last four changes to reading a prompt ([What was tuned](#what-was-tuned)), the three
-new models read this prompt at 3,835 to 3,860 tokens/s with the whole model on the card and at 3,063 to 3,417
-held to 8 GB, with the first token after 7.9 to 8.3 and 9.3 to 10.0 s, and GLM read it at 529 to 531, with the
-first token after 53.5 to 53.6 s. Before the two changes before those the three read it at 2,214 to 2,408 and
-at 1,941 to 2,251, with the first token after 13.1 to 13.8 and 14.1 to 15.7 s: more slowly than a 10,000-token
-one, and held to 8 GB nearly as fast as whole, because what took the time was the attention and not the
-experts' copies. They wrote as they do now.
+The six other sizes of the three new models were measured later the same day, with the same engine, a family
+at a time with its two files in the file cache. Qwen3.6's UD-Q2_K_XL wrote its short chat at 231 tokens/s in
+the first of five runs with the whole model on the card and at 321 to 335 in the other four, which are the
+table's. The first 8 GB runs of the six, which started their profiles, wrote the short chat at 132 to 158
+tokens/s and read the prompt at 3,613 to 4,582, like the runs after them.
 
-The first 8 GB run of each, which started the profile, wrote the short chat at 151, 160 and 131 tokens/s and
-read the prompt at 3,874, 3,820 and 4,682. A run with the picture encoder left on the card is not in the table:
-the encoder holds 1.6 GB there, no expert fit beside it, and Qwen3.6 wrote 127 tokens/s and read the prompt at
-2,023, with the build before a prompt batch's attention took its rows a block at a time.
+That morning, before the last four changes to reading a prompt ([What was tuned](#what-was-tuned)), the three
+new models' first sizes read this prompt at 3,835 to 3,860 tokens/s with the whole model on the card and at
+3,063 to 3,417 held to 8 GB, with the first token after 7.9 to 8.3 and 9.3 to 10.0 s, and GLM read it at 529
+to 531, with the first token after 53.5 to 53.6 s. Before the two changes before those the three read it at
+2,214 to 2,408 and at 1,941 to 2,251, with the first token after 13.1 to 13.8 and 14.1 to 15.7 s: more slowly
+than a 10,000-token one, and held to 8 GB nearly as fast as whole, because what took the time was the
+attention and not the experts' copies. They wrote as they do now.
+
+The first 8 GB run of each first size, which started the profile, wrote the short chat at 151, 160 and 131
+tokens/s and read the prompt at 3,874, 3,820 and 4,682. A run with the picture encoder left on the card is not
+in the table: the encoder holds 1.6 GB there, no expert fit beside it, and Qwen3.6 wrote 127 tokens/s and read
+the prompt at 2,023, with the build before a prompt batch's attention took its rows a block at a time.
 
 ## How each backend was checked
 
@@ -429,6 +473,19 @@ token ids compared and the probabilities of the reference's five likeliest token
 | Qwen3.6-35B-A3B | 64, 64, 40, 64, 64 | 0.10 |
 | Ornith 1.5 | 8 of 60, 7, 64, 2, 64 | 0.37 |
 | Gemma 4 26B-A4B | 64, 64, 64, 64, 43 | 0.12 |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | 64, 46, 64, 64, 64 | 0.15 |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 64, 64, 33, 64, 19 | 0.08 |
+| Ornith 1.5 APEX-I-Mini | 40 of 40, 64, 64, 13, 28 | 0.25 |
+| Ornith 1.5 APEX-I-Quality | 61 of 61, 7, 21, 22, 34 | 0.16 |
+| Gemma 4 26B-A4B UD-Q2_K_XL | 64, 53, 22, 50, 33 | 0.09 |
+| Gemma 4 26B-A4B UD-Q4_K_M | 64, 26, 52, 25, 64 | 0.15 |
+
+The first three rows are the sizes setup takes first, UD-Q3_K_M and APEX-I-Compact. The six below them were
+compared once, with the current build, each against llama.cpp on its own file. Wherever one leaves llama.cpp's
+tokens, the two likeliest tokens at that step are within 0.1 of each other in the engine or in llama.cpp. Their
+states after a read and after the same calls one by one are equal byte for byte, held to 8 GB after 7,700
+tokens and with the whole model on the card after 30,000. Pictures were not compared for the six: the picture
+encoder and the rows it gives are the first size's.
 
 Two correct implementations do not write the same tokens for long. Activations are quantized to 8 bits at every
 quantized matrix, in a layout that depends on the kernel, so the two differ in the last bits and a near tie
@@ -639,9 +696,9 @@ picture in its place, and a prompt without pictures after them.
 
 All but Gemma 4's draft model and GLM's recurrent step, indexer and selection are in the shared runtime or its
 kernels, so every architecture with that kind of layer has them. Gemma 4's row for the routing has the two
-changes before it in it as well. The rows for writing are with guessed tokens, as setup installs the models, unless they say one token
-at a time, and Gemma 4's from its draft model on are with that. The 8 GB row and GLM's reading have the changes
-around them in them too: they were measured before the four and after.
+changes before it in it as well. The rows for writing are with guessed tokens, as setup installs the models,
+unless they say one token at a time, and Gemma 4's from its draft model on are with that. The 8 GB row and
+GLM's reading have the changes around them in them too: they were measured before the four and after.
 
 Each of the three steps of reading a prompt came from timing the one before it. Timed on the 7709-token prompt,
 the delta net's step was 4.8 of 6.9 seconds, where this page had said the experts' launches were most of it; they
