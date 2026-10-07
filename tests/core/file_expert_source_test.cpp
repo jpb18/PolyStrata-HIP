@@ -514,6 +514,67 @@ void test_host_memory() {
 #endif
 }
 
+// STRATA_IO_PREFETCH: the experts.bin file tier hands out the same bytes with the Linux I/O path on (whole-blob
+// preads, the read-ahead workers, the mapping for cached blobs), however the reads and the predictions interleave.
+void test_io_prefetch() {
+    using namespace strata::core;
+    using namespace strata::kernels::cpu;
+    constexpr int64_t layers = 3;
+    constexpr int64_t experts = 8;
+    const uint64_t layer_bytes = (uint64_t) experts * BLOB;
+    const uint64_t total = (uint64_t) layers * layer_bytes;
+    TempDirectory dir(fs::current_path());
+    std::string err;
+    require(expert_layout_load(dir.path.string(), layers, experts, err), "could not load canonical layout: " + err);
+    std::vector<uint8_t> bytes((size_t) total);
+    uint64_t x = 0xD1B54A32D192ED03ull;
+    for (uint8_t& b : bytes) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        b = (uint8_t) (x >> 56);
+    }
+    {
+        std::ofstream out(dir.path / "experts.bin", std::ios::binary | std::ios::trunc);
+        out.write((const char*) bytes.data(), (std::streamsize) bytes.size());
+        require((bool) out, "could not write the synthetic experts.bin");
+    }
+    FileExpertSource source;
+    require(source.open(dir.path.string(), layers, experts, err), "could not map the synthetic pack: " + err);
+    source.set_io_prefetch(true, 3);
+#if defined(__linux__)
+    require(source.io_prefetch() && source.warms(), "io prefetch did not turn on");
+    // predictions for the next layers, some of them wrong or repeated, while the layers are read
+    for (int round = 0; round < 20; ++round)
+        for (int64_t l = 0; l < layers; ++l) {
+            const int64_t pred[5] = {(round + l) % experts, (round * 3 + 1) % experts, (round + 2 * l + 5) % experts,
+                                     (round + l) % experts, 7};
+            source.warm((l + 1) % layers, pred, 5);
+            source.begin_layer(l, nullptr, 0);
+            std::vector<int64_t> want = {(round + l) % experts, (round * 5 + 2) % experts, (l * 3 + round) % experts};
+            source.prefetch(l, want.data(), (int64_t) want.size());
+            for (int64_t e : want) {
+                const uint8_t* b = source.blob(l, e);
+                require(b != nullptr, "an io-prefetch blob lookup failed");
+                require(std::memcmp(b, bytes.data() + (size_t) (l * (int64_t) layer_bytes + e * (int64_t) BLOB), (size_t) BLOB) == 0,
+                        "an io-prefetch blob differs from the file");
+                const uint8_t* s2 = source.blob_stable(l, e);
+                require(s2 != nullptr && std::memcmp(s2, bytes.data() + (size_t) (l * (int64_t) layer_bytes + e * (int64_t) BLOB), (size_t) BLOB) == 0,
+                        "a blob_stable pointer differs from the file");
+            }
+        }
+    std::vector<uint8_t> copy((size_t) BLOB);
+    require(source.copy_blob(1, 6, copy.data()) &&
+                std::memcmp(copy.data(), bytes.data() + (size_t) (layer_bytes + 6 * BLOB), (size_t) BLOB) == 0,
+            "an io-prefetch copy_blob differs from the file");
+    const FileExpertSource::IoCounters c = source.io_counters();
+    require(c.cached_bytes + c.uncached_bytes > 0, "no residency counted");
+    std::cout << "io prefetch: " << c.pf_read_blobs << " read ahead, " << c.pf_used << " used, " << c.pf_resident_skips
+              << " skipped, pread " << c.pread_bytes << " B: bytes PASS\n";
+#else
+    require(!source.io_prefetch(), "io prefetch on a platform without it");
+#endif
+    source.close();
+}
+
 void test_rotating_source(bool rotate, bool pin) {
     using namespace strata::core;
     using namespace strata::kernels::cpu;
@@ -613,6 +674,7 @@ int main(int argc, char** argv) {
         test_host_memory();
         test_canonical_layout();
         test_unbuffered_reads();
+        test_io_prefetch();
 #if defined(STRATA_NATIVE_EXPERTS)
         test_native_variable_layout();
 #endif
