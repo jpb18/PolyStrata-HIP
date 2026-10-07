@@ -270,15 +270,15 @@ after it at 68, 54 and 55; [What was tuned](#what-was-tuned) has the steps betwe
 
 | Model | Prompt, tokens | First token, s | Reads, tokens/s | Writes, tokens/s | Experts from VRAM | Guesses right |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B | 21 | 0.09 | 240 | 312 | 100% | 91% |
-| | 2,568 | 0.62 | 4,224 | 249 | 100% | 81% |
-| | 10,039 | 1.5 | 5,529 | 177 | 100% | 87% |
-| Ornith 1.5 | 21 | 0.09 | 242 | 230 | 100% | 40% |
-| | 2,568 | 0.59 | 4,467 | 192 | 100% | 53% |
-| | 10,039 | 1.5 | 5,569 | 158 | 100% | 78% |
-| Gemma 4 26B-A4B | 26 | 0.17 | 177 | 273 | 100% | 73% |
-| | 2,656 | 0.66 | 4,264 | 225 | 100% | 81% |
-| | 10,393 | 1.6 | 5,533 | 160 | 100% | 73% |
+| Qwen3.6-35B-A3B | 21 | 0.10 | 231 | 323 | 100% | 84% |
+| | 2,568 | 0.63 | 4,239 | 268 | 100% | 86% |
+| | 10,039 | 1.4 | 5,789 | 179 | 100% | 84% |
+| Ornith 1.5 | 21 | 0.09 | 241 | 264 | 100% | 78% |
+| | 2,568 | 0.60 | 4,407 | 223 | 100% | 77% |
+| | 10,039 | 1.5 | 5,699 | 158 | 100% | 78% |
+| Gemma 4 26B-A4B | 26 | 0.16 | 185 | 276 | 100% | 72% |
+| | 2,656 | 0.63 | 4,498 | 233 | 100% | 84% |
+| | 10,393 | 1.6 | 5,645 | 166 | 100% | 77% |
 | GLM 5.3 Flash 3.0bit | 23 | 0.79 | 29 | 57 | 50% | 80% |
 | | 2,424 | 4.5 | 546 | 55 | 49% | 78% |
 | | 9,446 | 9.7 | 767 | 58 | 59% | 90% |
@@ -293,19 +293,24 @@ in VRAM:
 
 | Model and size | Reads its two long prompts, tokens/s | Writes after the three prompts, tokens/s |
 | --- | ---: | ---: |
-| Qwen3.6-35B-A3B UD-Q2_K_XL | 4,218 and 5,632 | 324, 258, 178 |
-| Qwen3.6-35B-A3B UD-Q4_K_M | 4,281 and 5,603 | 300, 239, 171 |
-| Ornith 1.5 APEX-I-Mini | 4,251 and 5,521 | 228, 195, 136 |
-| Ornith 1.5 APEX-I-Quality | 4,256 and 5,364 | 218, 180, 133 |
-| Gemma 4 26B-A4B UD-Q2_K_XL | 4,402 and 5,546 | 268, 217, 165 |
-| Gemma 4 26B-A4B UD-Q4_K_M | 4,703 and 5,740 | 270, 208, 158 |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | 4,088 and 5,670 | 345, 284, 190 |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 4,205 and 5,572 | 324, 263, 180 |
+| Ornith 1.5 APEX-I-Mini | 4,296 and 5,380 | 270, 228, 154 |
+| Ornith 1.5 APEX-I-Quality | 4,224 and 5,389 | 264, 224, 152 |
+| Gemma 4 26B-A4B UD-Q2_K_XL | 4,302 and 5,476 | 276, 224, 166 |
+| Gemma 4 26B-A4B UD-Q4_K_M | 4,511 and 5,600 | 272, 212, 164 |
 
-The last four changes in [What was tuned](#what-was-tuned) are to reading a prompt: one to the attention of a
+The last change in [What was tuned](#what-was-tuned) is to what a guess costs. The build before it wrote 312,
+230 and 273 tokens/s after the three new models' short prompt, 249, 192 and 225 after the middle one and 177,
+158 and 160 after the longest, and read as the rows above do. GLM's rows are that build's: a 400-token answer
+of GLM's came at 60 to 66 tokens/s from it and at 60 to 67 from the one after, three runs each in turn.
+
+The four changes before that one are to reading a prompt: one to the attention of a
 prompt batch in the three new models, which now runs on the card's tensor cores, and three to GLM's layers,
 whose attention is its own. The build before the four, that morning, read the three's long prompts at 4,127
 to 4,272 and 4,583 to 4,841 tokens/s, with the first token after 0.62 to 0.67 and 1.7 to 1.9 s, and GLM's at
-475 and 579, with the first token after 5.1 and 12.8 s. It wrote within 7 tokens/s of the rows above. The two
-changes before those are to the same attention of the three new models: the build before them read their long
+475 and 579, with the first token after 5.1 and 12.8 s. It wrote within 7 tokens/s of the build after it. The
+two changes before those are to the same attention of the three new models: the build before them read their long
 prompts at 3,500 to 3,972 and 3,406 to 3,848 tokens/s, with the first token after 0.67 to 0.80 and 2.1 to
 2.5 s. The four changes before those are to reading a prompt with experts outside the cache, which only GLM
 does in this table. The last of them lets a small call in a read copy ahead with the others, and GLM's longest
@@ -370,21 +375,27 @@ above. 300-token answers, tokens per second; the two numbers are without and wit
 
 | Model | Experts from VRAM | Writes after a short prompt | after about 2,100 tokens | after about 7,700 | Reads about 2,100 tokens | about 7,700 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B | 45% to 60% | 132 to 134, 163 to 173 | 104, 152 | 94, 105 | 2,260 to 2,280 | 4,140 to 4,170 |
-| Ornith 1.5 | 45% to 61% | 135 to 152, 137 to 172 | 134, 135 | 102, 90 | 2,270 | 4,010 to 4,060 |
-| Gemma 4 26B-A4B | 47% to 61% | 120 to 121, 146 to 155 | 102, 125 | 87, 98 | 2,370 to 2,490 | 4,750 |
+| Qwen3.6-35B-A3B | 45% to 60% | 134, 164 to 166 | 122, 149 | 92, 104 | 2,250 to 2,300 | 4,020 to 4,160 |
+| Ornith 1.5 | 44% to 61% | 135 to 154, 137 to 166 | 137, 131 | 101, 110 | 2,270 to 2,310 | 4,050 to 4,120 |
+| Gemma 4 26B-A4B | 48% to 61% | 118 to 119, 150 to 152 | 97, 126 | 87, 93 | 2,450 to 2,540 | 4,190 to 4,660 |
 
 The short prompts are the two of three whose answers run to 300 tokens for Qwen3.6 and Gemma 4; one of
-Ornith's two stops after 115 to 123, and its answer after the longest prompt after 232 with guesses. With
-guesses a smaller share of the experts comes from VRAM (47% to 50% against 60% to 61% for Gemma 4). After its
-longest prompt Ornith writes no faster with guesses than without: each of these runs is a process of its own,
-and the engine asks the block in its first rounds, before it has measured that asking does not pay.
+Ornith's two stops after 122 to 123, and its answer after the longest prompt after 231 with guesses. With
+guesses a smaller share of the experts comes from VRAM (48% to 50% against 58% to 61% for Gemma 4). After
+about 2,100 tokens Ornith writes no faster with guesses than without: each of these runs is a process of its
+own, and the engine asks the block in its first rounds, before it has measured whether asking pays.
+
+The table is from after the last change in [What was tuned](#what-was-tuned), which is to what a guess costs.
+The build before it wrote with guesses at 163 to 173, 137 to 172 and 146 to 155 tokens/s after a short prompt,
+152, 135 and 125 after about 2,100 tokens and 105, 90 and 98 after about 7,700. Ornith's answer after its
+longest prompt went from slower with guesses than without to faster. The rest are within what one of these
+runs differs from the next.
 
 One read takes the longer prompt whole, and a layer's uncached experts are copied to the card once for it. At
 these lengths those copies are most of a read: the build before a prompt batch's attention ran on the tensor
 cores read the two prompts at 2,170 to 2,360 and 3,770 to 4,100 tokens/s that morning, and wrote within 22
-tokens/s of this one, faster in some runs and slower in others. The build before that attention took its rows
-a block at a time read them at 2,230 to 2,340 and 3,670 to 4,000. The shorter prompt ends in a call of
+tokens/s of the build after it, faster in some runs and slower in others. The build before that attention took
+its rows a block at a time read them at 2,230 to 2,340 and 3,670 to 4,000. The shorter prompt ends in a call of
 63 tokens, 163 for Gemma 4, after the checkpoint at 2,048. The build before such a call copied ahead with the
 others, when it was measured, read the shorter prompt at 2,060 to 2,080 tokens/s for Qwen3.6, 2,020 to 2,050
 for Ornith and 2,050 to 2,130 for Gemma 4. The build before reads went
@@ -422,33 +433,38 @@ the draft block, which the other two files carry.
 
 | Model | Card | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B UD-Q3_K_M | whole model on it | 30,126 | 6.0 | 5,114 to 5,173 | 302 to 313 | 95 to 96 | 100% |
-| | held to 8 GB | | 7.7 to 7.8 | 3,918 to 3,999 | 149 to 155 | 50 to 51 | 41% to 42% |
-| Qwen3.6-35B-A3B UD-Q2_K_XL | whole model on it | 30,126 | 5.7 to 5.8 | 5,289 to 5,375 | 321 to 335 | 95 to 98 | 100% |
-| | held to 8 GB | | 7.9 | 3,880 to 3,888 | 155 to 160 | 52 to 54 | 53% to 62% |
-| Qwen3.6-35B-A3B UD-Q4_K_M | whole model on it | 30,126 | 5.7 | 5,374 to 5,451 | 306 to 312 | 91 | 100% |
-| | held to 8 GB | | 8.0 to 8.3 | 3,712 to 3,819 | 150 to 156 | 50 | 34% to 36% |
-| Ornith 1.5 APEX-I-Compact | whole model on it | 30,126 | 5.9 | 5,192 to 5,197 | 229 to 230 | 69 to 72 | 100% |
-| | held to 8 GB | | 8.0 to 8.1 | 3,762 to 3,822 | 150 to 155 | 46 to 48 | 50% to 52% |
-| Ornith 1.5 APEX-I-Mini | whole model on it | 30,126 | 5.9 | 5,188 to 5,202 | 231 | 69 to 71 | 100% |
-| | held to 8 GB | | 8.1 to 8.2 | 3,723 to 3,788 | 131 to 133 | 48 | 54% to 58% |
-| Ornith 1.5 APEX-I-Quality | whole model on it | 30,126 | 5.9 | 5,181 to 5,265 | 219 to 223 | 75 to 78 | 100% |
-| | held to 8 GB | | 8.4 to 8.6 | 3,541 to 3,632 | 127 to 131 | 46 to 48 | 34% to 43% |
-| Gemma 4 26B-A4B UD-Q3_K_M | whole model on it | 31,211 | 5.7 to 5.8 | 5,529 to 5,710 | 272 to 276 | 96 | 100% |
-| | held to 8 GB | | 6.8 to 7.0 | 4,640 to 4,726 | 134 to 138 | 48 | 27% to 41% |
-| Gemma 4 26B-A4B UD-Q2_K_XL | whole model on it | 31,211 | 5.8 to 5.9 | 5,438 to 5,539 | 246 to 261 | 103 | 100% |
-| | held to 8 GB | | 6.8 to 6.9 | 4,664 to 4,730 | 149 to 156 | 51 | 48% to 62% |
-| Gemma 4 26B-A4B UD-Q4_K_M | whole model on it | 31,211 | 5.6 | 5,799 to 5,812 | 269 to 270 | 94 to 96 | 100% |
-| | held to 8 GB | | 7.3 to 7.5 | 4,308 to 4,371 | 132 to 139 | 50 to 52 | 16% to 28% |
+| Qwen3.6-35B-A3B UD-Q3_K_M | whole model on it | 30,126 | 5.8 to 5.9 | 5,218 to 5,357 | 325 to 326 | 98 to 99 | 100% |
+| | held to 8 GB | | 7.8 to 7.9 | 3,878 to 3,905 | 156 to 164 | 48 to 50 | 42% |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | whole model on it | 30,126 | 6.0 | 5,121 to 5,139 | 345 to 359 | 99 to 100 | 100% |
+| | held to 8 GB | | 7.9 | 3,876 to 3,901 | 157 | 56 to 57 | 61% |
+| Qwen3.6-35B-A3B UD-Q4_K_M | whole model on it | 30,126 | 5.9 | 5,216 to 5,248 | 328 to 332 | 93 to 94 | 100% |
+| | held to 8 GB | | 8.0 to 8.1 | 3,755 to 3,795 | 163 to 164 | 52 | 34% |
+| Ornith 1.5 APEX-I-Compact | whole model on it | 30,126 | 5.9 to 6.0 | 5,197 to 5,201 | 265 | 77 | 100% |
+| | held to 8 GB | | 8.0 to 8.1 | 3,778 to 3,814 | 153 to 165 | 52 | 48% to 49% |
+| Ornith 1.5 APEX-I-Mini | whole model on it | 30,126 | 6.0 to 6.1 | 5,087 to 5,114 | 265 to 279 | 78 to 79 | 100% |
+| | held to 8 GB | | 8.2 | 3,720 to 3,726 | 136 to 159 | 48 to 49 | 57% to 59% |
+| Ornith 1.5 APEX-I-Quality | whole model on it | 30,126 | 6.0 to 6.1 | 5,052 to 5,151 | 263 to 265 | 82 to 84 | 100% |
+| | held to 8 GB | | 8.5 to 8.6 | 3,573 to 3,579 | 147 to 150 | 46 to 50 | 34% to 35% |
+| Gemma 4 26B-A4B UD-Q3_K_M | whole model on it | 31,211 | 5.7 to 5.8 | 5,582 to 5,625 | 273 to 274 | 99 to 100 | 100% |
+| | held to 8 GB | | 6.8 to 6.9 | 4,626 to 4,689 | 131 to 145 | 45 to 49 | 26% to 28% |
+| Gemma 4 26B-A4B UD-Q2_K_XL | whole model on it | 31,211 | 5.8 | 5,516 to 5,530 | 273 to 274 | 103 to 104 | 100% |
+| | held to 8 GB | | 7.0 | 4,594 to 4,642 | 154 to 156 | 51 to 53 | 48% to 49% |
+| Gemma 4 26B-A4B UD-Q4_K_M | whole model on it | 31,211 | 5.7 | 5,652 to 5,683 | 270 to 272 | 93 to 95 | 100% |
+| | held to 8 GB | | 7.3 | 4,376 to 4,396 | 137 | 53 to 54 | 16% |
 | GLM 5.3 Flash 3.0bit | 32 GB | 28,354 | 36.2 to 36.3 | 784 to 785 | 57 to 59 | 49 to 51 | 49% to 52% |
 | GLM 5.3 Flash UD-IQ2_XXS | 32 GB | 28,354 | 27.8 | 1,023 | 40 to 44 | 37 to 39 | 49% to 52% |
 | GLM 5.3 Flash REAP50-Q3_K_M | 32 GB | 28,354 | 22.7 | 1,252 | 56 to 62 | 50 to 51 | 57% to 64% |
 
-The six other sizes of the three new models were measured later the same day, with the same engine, a family
-at a time with its two files in the file cache. Qwen3.6's UD-Q2_K_XL wrote its short chat at 231 tokens/s in
-the first of five runs with the whole model on the card and at 321 to 335 in the other four, which are the
-table's. The first 8 GB runs of the six, which started their profiles, wrote the short chat at 132 to 158
-tokens/s and read the prompt at 3,613 to 4,582, like the runs after them.
+The nine sizes of the three new models were measured together, a family at a time with its three files in the
+file cache, after the last change in [What was tuned](#what-was-tuned), which is to what a guess costs. Their
+first 8 GB runs, which started the profiles, wrote the short chat at 130 to 170 tokens/s and read the prompt
+at 3,572 to 4,636, like the runs after them. GLM's rows are from the build before that change, which left
+GLM's speeds where they were.
+
+The build before that change wrote the short chat at 302 to 335 tokens/s with Qwen3.6's three sizes, 219 to
+231 with Ornith's and 246 to 276 with Gemma 4's, and held to 8 GB at 149 to 160, 127 to 155 and 132 to 156.
+In the first of five runs with the whole model on the card, UD-Q2_K_XL of Qwen3.6 wrote it at 231: after a
+slow start its guessing had stopped for the rest of the answer, which is what the change is about.
 
 That morning, before the last four changes to reading a prompt ([What was tuned](#what-was-tuned)), the three
 new models' first sizes read this prompt at 3,835 to 3,860 tokens/s with the whole model on the card and at
@@ -456,10 +472,10 @@ new models' first sizes read this prompt at 3,835 to 3,860 tokens/s with the who
 to 531, with the first token after 53.5 to 53.6 s. Before the two changes before those the three read it at
 2,214 to 2,408 and at 1,941 to 2,251, with the first token after 13.1 to 13.8 and 14.1 to 15.7 s: more slowly
 than a 10,000-token one, and held to 8 GB nearly as fast as whole, because what took the time was the
-attention and not the experts' copies. They wrote as they do now.
+attention and not the experts' copies. They wrote as the builds after them did, up to the change to what a
+guess costs.
 
-The first 8 GB run of each first size, which started the profile, wrote the short chat at 151, 160 and 131
-tokens/s and read the prompt at 3,874, 3,820 and 4,682. A run with the picture encoder left on the card is not
+A run with the picture encoder left on the card is not
 in the table: the encoder holds 1.6 GB there, no expert fit beside it, and Qwen3.6 wrote 127 tokens/s and read
 the prompt at 2,023, with the build before a prompt batch's attention took its rows a block at a time.
 
@@ -713,6 +729,12 @@ picture in its place, and a prompt without pictures after them.
 | | GLM 5.3 Flash, reading 7,788 tokens | 755 | 806 |
 | The three together | GLM 5.3 Flash through the server, 28,354 tokens: seconds to the first token | 53.5 to 53.6 | 36.2 to 36.3 |
 | | GLM 5.3 Flash through the server, 7,398 tokens read: seconds to the first token | 12.7 to 12.8 | 9.7 to 9.9 |
+| A guess's token and its probability found on the card | Qwen3.6 with every expert in VRAM, after its three prompts | 312, 249, 177 | 323, 268, 179 |
+| | Ornith with every expert in VRAM, after its three prompts | 230, 192, 158 | 264, 223, 158 |
+| | Gemma 4 with every expert in VRAM, after its three prompts | 273, 225, 160 | 276, 233, 166 |
+| | Ornith, a 256-token answer about code | 238 | 291 |
+| | Ornith held to 8 GB, the same answer | 152 | 166 |
+| | Qwen3.6 UD-Q2_K_XL, an answer whose first 16 rounds take 3 ms longer each | 243 to 310 | 332 to 342 |
 
 All but Gemma 4's draft model and GLM's recurrent step, indexer and selection are in the shared runtime or its
 kernels, so every architecture with that kind of layer has them. Gemma 4's row for the routing has the two
@@ -962,6 +984,25 @@ server. What a call of 1,024 tokens still takes there: 0.4 s up to the routers, 
 in its attention, whose products are floats, and 0.86 s of experts. Of those, 0.32 s are the six layers of
 larger experts. Their experts outside the cache are 2.6 to 3.8 GiB a layer and the staging buffer is 2 GiB, so
 every call copies one of a layer's two rounds.
+
+A guess was asked for more seldom than it paid. After the block's kernels, which take 0.46 ms, the engine
+copied the guess's logits to the host and summed the softmax there on one thread. That took 0.1 ms where the
+block is sure, because few tokens are within 20 of the best, and 1.2 to 2.3 ms where it is not. The guessing
+weighs what a guess costs against what it brings. Before a round's first guess it asks whether a guess the
+block were sure of would pay for the asking, by the time of the last guesses and of the last windows of two
+tokens, and while the answer is no neither is measured again. With Ornith the second window of two of a
+process was enough, 8.8 ms where 6.7 is usual: a 256-token answer about code then had 68 guesses offered and
+40 of them right, and came at 238 tokens/s. A short chat of Qwen3.6 UD-Q2_K_XL that came at 231 tokens/s, where
+four other runs had 321 to 335, was the same thing after a slow start.
+
+A kernel now finds the first of the largest logits and its probability, one block of 1,024 threads, and eight
+bytes come back. A guess of Ornith's takes 0.56 to 0.60 ms and one of Qwen3.6's 0.48. Ornith's answer about
+code has 153 guesses offered and 127 right, and comes at 291 tokens/s. The question before a round's first
+guess is still asked, and a window size that looks slow is still not measured again. With guesses at this
+price neither stopped the guessing in these runs, also not when an answer's first 16 rounds were made 3 ms
+longer each: UD-Q2_K_XL then wrote at 332 to 342 tokens/s in four runs, where the build before wrote at 243 to
+251 in three of four and at 310 in the fourth. GLM writes as it did: a 400-token answer came at 60 to 66
+tokens/s before and at 60 to 67 after.
 
 ## Adding a model of an architecture that is there
 

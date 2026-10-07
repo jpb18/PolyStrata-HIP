@@ -105,17 +105,17 @@ Modell. Rechts ist dieselbe Karte auf 8 GB begrenzt, und die meisten Experten re
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 302-313 Tokens/s | 5,110-5,170 Tokens/s |
-| **UD-Q2_K_XL** | 321-335 Tokens/s | 5,290-5,380 Tokens/s |
-| **UD-Q4_K_M** | 306-312 Tokens/s | 5,370-5,450 Tokens/s |
+| **UD-Q3_K_M** | 325-326 Tokens/s | 5,220-5,360 Tokens/s |
+| **UD-Q2_K_XL** | 345-359 Tokens/s | 5,120-5,140 Tokens/s |
+| **UD-Q4_K_M** | 328-332 Tokens/s | 5,220-5,250 Tokens/s |
 
 </td><td>
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 149-155 Tokens/s | 3,920-4,000 Tokens/s |
-| **UD-Q2_K_XL** | 155-160 Tokens/s | 3,880-3,890 Tokens/s |
-| **UD-Q4_K_M** | 150-156 Tokens/s | 3,710-3,820 Tokens/s |
+| **UD-Q3_K_M** | 156-164 Tokens/s | 3,880-3,900 Tokens/s |
+| **UD-Q2_K_XL** | 157 Tokens/s | 3,880-3,900 Tokens/s |
+| **UD-Q4_K_M** | 163-164 Tokens/s | 3,760-3,800 Tokens/s |
 
 </td></tr>
 </table>
@@ -135,17 +135,17 @@ Genauso gemessen, mit demselben Prompt von 30K Tokens.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 229-230 Tokens/s | 5,190-5,200 Tokens/s |
-| **APEX-I-MINI** | 231 Tokens/s | 5,190-5,200 Tokens/s |
-| **APEX-I-QUALITY** | 219-223 Tokens/s | 5,180-5,260 Tokens/s |
+| **APEX-I-COMPACT** | 265 Tokens/s | 5,200 Tokens/s |
+| **APEX-I-MINI** | 265-279 Tokens/s | 5,090-5,110 Tokens/s |
+| **APEX-I-QUALITY** | 263-265 Tokens/s | 5,050-5,150 Tokens/s |
 
 </td><td>
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 150-155 Tokens/s | 3,760-3,820 Tokens/s |
-| **APEX-I-MINI** | 131-133 Tokens/s | 3,720-3,790 Tokens/s |
-| **APEX-I-QUALITY** | 127-131 Tokens/s | 3,540-3,630 Tokens/s |
+| **APEX-I-COMPACT** | 153-165 Tokens/s | 3,780-3,810 Tokens/s |
+| **APEX-I-MINI** | 136-159 Tokens/s | 3,720-3,730 Tokens/s |
+| **APEX-I-QUALITY** | 147-150 Tokens/s | 3,570-3,580 Tokens/s |
 
 </td></tr>
 </table>
@@ -163,17 +163,17 @@ Genauso gemessen, mit einem Prompt von 31K Tokens.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 272-276 Tokens/s | 5,530-5,710 Tokens/s |
-| **UD-Q2_K_XL** | 246-261 Tokens/s | 5,440-5,540 Tokens/s |
-| **UD-Q4_K_M** | 269-270 Tokens/s | 5,800-5,810 Tokens/s |
+| **UD-Q3_K_M** | 273-274 Tokens/s | 5,580-5,620 Tokens/s |
+| **UD-Q2_K_XL** | 273-274 Tokens/s | 5,520-5,530 Tokens/s |
+| **UD-Q4_K_M** | 270-272 Tokens/s | 5,650-5,680 Tokens/s |
 
 </td><td>
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 134-138 Tokens/s | 4,640-4,730 Tokens/s |
-| **UD-Q2_K_XL** | 149-156 Tokens/s | 4,660-4,730 Tokens/s |
-| **UD-Q4_K_M** | 132-139 Tokens/s | 4,310-4,370 Tokens/s |
+| **UD-Q3_K_M** | 131-145 Tokens/s | 4,630-4,690 Tokens/s |
+| **UD-Q2_K_XL** | 154-156 Tokens/s | 4,590-4,640 Tokens/s |
+| **UD-Q4_K_M** | 137 Tokens/s | 4,380-4,400 Tokens/s |
 
 </td></tr>
 </table>
