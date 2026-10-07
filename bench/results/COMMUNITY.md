@@ -75,3 +75,4 @@ Notes:
 - #995 also changed the canonical `2026-09-29-speed-0126` report (matrix.json rewritten, README extended with another host's rows); that part was not ported, only the two new folders.
 - #777 and #811 are the same machine on two quants, kept as two folders.
 - The earlier community folders (`2026-09-30-community-rtx-5090`, `2026-10-03-community-2x-mi50`, `2026-10-04-community-2x-arc-pro-b60`) are listed in `docs/COMMUNITY_BENCHMARKS.md`.
+| [2026-10-06-community-rtxpro-v0140](2026-10-06-community-rtxpro-v0140/) | RTX PRO 6000 | Q4 / Q8 (MTP and ngram runs) | see the README | see the README | 0.1.40 | #1137 |
