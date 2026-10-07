@@ -47,8 +47,7 @@ double now_ms() {
 
 int main(int argc, char** argv) {
     if (const c::CpuFeatures feat = c::cpu_features(); !feat.usable()) {   // the AVX-512 kernel: nothing to test here
-        std::printf("expert_multi_test: CPU lacks %s: SKIPPED
-", feat.reason());
+        std::printf("expert_multi_test: CPU lacks %s: SKIPPED\n", feat.reason());
         return 77;
     }
     std::mt19937 rng(9);
