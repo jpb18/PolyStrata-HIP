@@ -83,3 +83,4 @@ Notes:
 | [2026-10-06-q8-prefill8192-rtxpro](2026-10-06-q8-prefill8192-rtxpro/) | RTX PRO 6000 | Q8, --prefill 8192 | see the README | see the README | 0.1.40 | #1171 |
 | [2026-10-06-community-rx-7900-xtx](2026-10-06-community-rx-7900-xtx/) | RX 7900 XTX, Windows 11 | IQ3_S | see the README | see the README | 0.1.40 | #1173 |
 | [2026-10-06-community-4x-tesla-p100](2026-10-06-community-4x-tesla-p100/) | 4x Tesla P100 16 GB (CUDA 12 engine) | IQ3_XXS | see the README | see the README | 0.1.40 | #1192 |
+| [2026-10-06-community-rtx3090-egpu-64gb](2026-10-06-community-rtx3090-egpu-64gb/) | RTX 3090 eGPU, 64 GB RAM | IQ2_XS vs IQ3_XXS | see the README | see the README | 0.1.40 | #1199 |
