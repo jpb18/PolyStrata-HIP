@@ -653,6 +653,8 @@ class StrataEngine:
         gs = self.batch // groups if self.batch else 0
         # slots in the order that spreads requests over the pipeline's groups first: 0, gs, 2gs, .., 1, gs+1, ..
         self.slot_order = [g * gs + t for t in range(gs) for g in range(groups)]
+        self.slot_group = [b // gs if gs else 0 for b in range(self.batch)]   # each slot's pipeline group
+        self.slot_groups = groups
         self.slot_q = [queue.Queue() for _ in range(self.batch)]
         self.slot_busy = [False] * self.batch
         # what each slot's sessions hold (prompt + every token a window fed), so a conversation's next turn goes to
@@ -908,15 +910,21 @@ class StrataEngine:
         for each `T`; returns ("done", None) at DONE, or ("badm", continues) at BADM (after DONE).  `stop_when()`
         true sends STOP once (the request is then read to its DONE)."""
         stopped = False
+        beat = time.monotonic()
         while True:
             try:
-                line = self.lines.get(timeout=10.0)
+                # A client can leave before the first PP/token.  Poll its Event as often as _take_control does;
+                # the ten-second HTTP heartbeat is independent of how promptly STOP reaches the engine.
+                line = self.lines.get(timeout=0.5)
             except queue.Empty:
                 if cancel.is_set() and not stopped:
                     self._send("STOP")
                     stopped = True
-                yield None
+                if time.monotonic() - beat >= 10.0:
+                    beat = time.monotonic()
+                    yield None
                 continue
+            beat = time.monotonic()
             if line is None:
                 raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
             if not line.startswith(("PP ", "INFO")):
@@ -1307,6 +1315,9 @@ class StrataEngine:
                         self.slot_busy[slot] = False
                         self.slot_cv.notify_all()
 
+    slot_groups = 1         # --batch-groups (set when the engine starts)
+    SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
+
     def pick_slot(self, prompt: list[int]) -> int | None:
         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
@@ -1318,9 +1329,17 @@ class StrataEngine:
             h = self.slot_held[b]
             return len(h) if h and len(h) < len(prompt) and prompt[:len(h)] == h else 0
         best = max(free, key=held_prefix)
-        if held_prefix(best) > 0:
+        # without --batch-groups a held prefix of any length is taken, as before
+        if held_prefix(best) >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
             return best
-        return min(free, key=lambda b: (bool(self.slot_held[b]), self.slot_used[b]))
+        # with --batch-groups: the group with the fewest busy slots first, so the requests spread over the
+        # pipeline's stages (two requests in one group leave the other stage idle); then empty, then least recent
+        busy_in = {}
+        for b in range(self.batch):
+            if self.slot_busy[b]:
+                busy_in[self.slot_group[b]] = busy_in.get(self.slot_group[b], 0) + 1
+        return min(free, key=lambda b: (busy_in.get(self.slot_group[b], 0) if self.slot_groups > 1 else 0,
+                                        bool(self.slot_held[b]), self.slot_used[b]))
 
     def slots_view(self) -> list[dict]:
         """/metrics: each batch slot - idle (with the tokens it holds for a next turn), reading or decoding."""
@@ -1361,6 +1380,7 @@ class StrataEngine:
         silence = float(self.silence_s or 0)
         allow = silence + min(len(ids), PP_CHUNK_MAX) / PP_FLOOR_TOK_S if silence > 0 else 0.0
         heard, read_to = time.monotonic(), 0
+        beat = heard
         try:
             while True:
                 wait = 10.0
@@ -1371,17 +1391,21 @@ class StrataEngine:
                         raise self._silent(f"the engine said nothing for {time.monotonic() - heard:.0f} s during "
                                            "the request")
                 try:
-                    line = self.lines.get(timeout=wait)
+                    line = self.lines.get(timeout=min(wait, 0.5))
                 except queue.Empty:
                     if cancel.is_set():
                         return
-                    if wait >= 10.0:
-                        yield None                        # the 10 s heartbeat (the deadline's short waits are not)
+                    if allow > 0 and time.monotonic() - heard >= allow:
+                        continue                          # enforce the expired deadline before another heartbeat
+                    if time.monotonic() - beat >= 10.0:
+                        beat = time.monotonic()
+                        yield None                        # polling cancellation does not add HTTP heartbeats
                     continue
                 if line is None:
                     done = True
                     raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
                 heard = time.monotonic()                  # any line is output: T, PP, RESUME, INFO ...
+                beat = heard
                 if line.startswith("T "):
                     allow = silence
                     if cancel.is_set():
@@ -1730,9 +1754,23 @@ class Vision:
         return data
 
     @staticmethod
+    def _exif_rotated(data: bytes) -> bool:
+        """A JPEG whose EXIF Orientation says it is stored turned (phones do this for portrait photos): the decoder
+        (stb_image) ignores the tag.  False without Pillow, or when the tag is missing, 1 or unreadable (#1229)."""
+        try:
+            import io
+            from PIL import Image
+            with Image.open(io.BytesIO(data)) as im:
+                return im.getexif().get(0x0112, 1) not in (None, 0, 1)
+        except Exception:  # noqa: BLE001 - any failure leaves the image as it was sent
+            return False
+
+    @staticmethod
     def normalize(data: bytes) -> bytes:
-        """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG."""
-        if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
+        """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG.
+        A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow)."""
+        jpeg = data[:3] == b"\xff\xd8\xff"
+        if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
                 data[:6] in (b"GIF87a", b"GIF89a"):
             return data
         try:
@@ -1744,6 +1782,8 @@ class Vision:
         try:
             im = Image.open(io.BytesIO(data))
             im.load()
+            from PIL import ImageOps
+            im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied (#1229)
         except Exception as e:
             raise ValueError(f"the image could not be read ({e})") from None
         if im.mode in ("RGBA", "LA", "P") and "transparency" in im.info or im.mode in ("RGBA", "LA"):
@@ -2309,6 +2349,7 @@ class Service:
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
+        self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
 
@@ -2986,7 +3027,7 @@ class Service:
             sampling = {**defaults, **req_values}
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
         budget = self.reasoning_budget(sampling) if thinking else None
-        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
+        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -4636,12 +4677,9 @@ def make_handler(svc: Service):
             except ValueError as e:
                 raise ResponsesError(str(e), "input") from None
             try:
-                messages, validator = prepare_format(responses_api.text_format(req), messages)
+                messages, validator = prepare_format(responses_api.text_format(req), messages, with_tools=bool(tools))
             except ValueError as e:
                 raise ResponsesError(str(e).replace("response_format", "text.format"), "text.format") from None
-            if validator is not None and tools:
-                raise ResponsesError("a JSON text.format with tools is not supported", "text.format",
-                                     "unsupported_parameter")
             noted = svc.__dict__.setdefault("hosted_tools_noted", set())   # said once per tool, not per request
             if set(skipped) - noted:
                 print(f"[strata] /v1/responses: left out the hosted tools {', '.join(sorted(set(skipped) - noted))} "
@@ -5286,6 +5324,10 @@ def main() -> int:
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[strata] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
     svc.anthropic_think_unasked = mode == "model"
+    recovery = cfg.get("tool_call_recovery", False)     # opt-in: see OutputParser's recover
+    if not isinstance(recovery, bool):
+        raise SystemExit(f"[strata] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
+    svc.tool_call_recovery = recovery
     rs = cfg.get("repeat_stop_tokens", REPEAT_STOP_TOKENS)   # #606: opt-out with 0
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
