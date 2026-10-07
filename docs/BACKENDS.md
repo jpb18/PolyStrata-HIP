@@ -484,8 +484,8 @@ The first three rows are the sizes setup takes first, UD-Q3_K_M and APEX-I-Compa
 compared once, with the current build, each against llama.cpp on its own file. Wherever one leaves llama.cpp's
 tokens, the two likeliest tokens at that step are within 0.1 of each other in the engine or in llama.cpp. Their
 states after a read and after the same calls one by one are equal byte for byte, held to 8 GB after 7,700
-tokens and with the whole model on the card after 30,000. Pictures were not compared for the six: the picture
-encoder and the rows it gives are the first size's.
+tokens and with the whole model on the card after 30,000. Their answers to pictures are in the table further
+down.
 
 Two correct implementations do not write the same tokens for long. Activations are quantized to 8 bits at every
 quantized matrix, in a layout that depends on the kernel, so the two differ in the last bits and a near tie
@@ -578,11 +578,24 @@ prompt tokens.
 | Qwen3.6-35B-A3B | 280, 440, 160 | 0 of 11, 33 of 64, 64 of 64 | 0.14 |
 | Ornith 1.5 | 280, 440, 160 | 17 of 17, 4 of 35, 59 of 59 | 0.17 |
 | Gemma 4 26B-A4B | 117, 194, 77 | 14 of 14, 19 of 19, 55 of 55 | 0.12 |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | 280, 440, 160 | 12 of 12, 64 of 64, 64 of 64 | 0.11 |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 280, 440, 160 | 11 of 11, 11 of 64, 64 of 64 | 0.07 |
+| Ornith 1.5 APEX-I-Mini | 280, 440, 160 | 6 of 18, 54 of 54, 16 of 64 | 0.29 |
+| Ornith 1.5 APEX-I-Quality | 280, 440, 160 | 18 of 18, 40 of 40, 50 of 50 | 0.22 |
+| Gemma 4 26B-A4B UD-Q2_K_XL | 117, 194, 77 | 14 of 14, 7 of 25, 55 of 55 | 0.11 |
+| Gemma 4 26B-A4B UD-Q4_K_M | 117, 194, 77 | 14 of 14, 19 of 19, 55 of 55 | 0.07 |
 
 Ornith's second answer leaves llama.cpp's where that has a near tie: 0.504 against 0.495 there and 0.444
 against 0.555 here. Qwen3.6's first answer starts with another token than llama.cpp's, which has five tokens
 between 0.10 and 0.14 there. The engine's first step is 0.14 from that, and not all of its five likeliest are
 the same five. The differences are what the same models show on text.
+
+The six rows below the first three are the other sizes, compared once with the current build, each against
+llama.cpp on its own file with its model's encoder file. Where one leaves llama.cpp's answer the two likeliest
+tokens are close on both sides: UD-Q4_K_M of Qwen3.6 in its second answer at 0.51 against 0.49 here and 0.46
+against 0.54 there, APEX-I-Mini in its first at 0.58 against 0.42 and 0.47 against 0.53 and in its third at
+0.55 against 0.43 and 0.48 against 0.50, UD-Q2_K_XL of Gemma 4 in its second at 0.53 against 0.39 and 0.41
+against 0.47. APEX-I-Mini's 0.29 is a step inside its second answer, whose 54 tokens are llama.cpp's.
 
 The counts and the differences have moved with the sums. Before the products of a prompt batch's attention
 took halves, Ornith's three were 17, 4 and 9 within 0.22, its third leaving at a near tie too, Qwen3.6's first
@@ -605,6 +618,13 @@ Qwen3.6 left after four tokens, at a near tie, and Ornith after eleven. Before a
 were cuBLAS products Qwen3.6 wrote llama.cpp's 64 and Gemma 4 started with another token at a near tie, and
 before the sums had more threads a block Ornith left at its fourth. A fifth has 43 lines ahead of the picture,
 so that its rows start in one prompt batch of Qwen3.6's and end in the next: 64 of 64 tokens.
+
+The other sizes on the fourth prompt: UD-Q4_K_M of Qwen3.6 and both of Gemma 4's write llama.cpp's tokens, 64,
+28 and 25 of them. UD-Q2_K_XL of Qwen3.6 leaves after 40 of 64 (0.39 against 0.33 here, 0.32 against 0.42
+there) and APEX-I-Mini after 48 of 64 (0.52 against 0.48 here, 0.35 against 0.65 there). APEX-I-Quality starts
+with another token (0.43 against 0.28 here, 0.35 against 0.37 there). These three answers name the shapes and
+give the code of the right line too. On the fifth prompt both other sizes of Qwen3.6 write llama.cpp's 64
+tokens.
 
 For Gemma 4 the other ways a picture's rows could see each other were run against the same reference. With no
 row seeing a later one, the second prompt's answer leaves llama.cpp's at its 14th token with probabilities 0.63
