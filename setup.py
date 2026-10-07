@@ -191,7 +191,7 @@ CUDA12_WHEELS = ["nvidia-cublas-cu12==12.9.1.4", "nvidia-cuda-runtime-cu12==12.9
 # toolkit the CUDA 12 zip is built with (cuBLAS 12.9.1.4, runtime 12.9.79).  Not tested on such an old driver here.
 CUDA12_MIN_DRIVER = 528 if WIN else 525
 ENGINE12_DIR = "engine-cuda12"
-MIN_ENGINE = (0, 1, 40)                # v0.1.40: --resident-experts on a layer split with the split+resident variant (#848), --kv k8v4 with KV streaming (#711); v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
+MIN_ENGINE = (0, 1, 40, 2)             # versions compare all four numbers; v0.1.40.2: F4 verify windows, the Linux file tier (#1194), the stager wait (#1057), #1264/#1201/#1139 fixes, opt-in CPU share (#1282), Intel Arc; v0.1.40: --resident-experts on a layer split with the split+resident variant (#848), --kv k8v4 with KV streaming (#711); v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
 # KV bytes per context token and attention layer: 8-bit 1056, rotated 4-bit 576, hybrid K8V4 (8-bit K, 4-bit V) 816
 KV_CELL_BYTES = {"q4_0": 576, "k8v4": 816}
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
@@ -2199,7 +2199,7 @@ def get_prebuilt_hip(url_base, gpu, updating=False) -> Path | None:
             meta = json.loads(info.read_text(encoding="utf-8"))
         except ValueError:
             meta = {}
-        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
         if meta.get("backend") == "hip" and meta.get("source") == "prebuilt" and ver >= WIN_HIP_MIN_ENGINE and \
                 gpu["arch"] in meta.get("archs", []) and not updating:
             ok("ready-made AMD engine already installed")
@@ -2237,7 +2237,7 @@ def get_prebuilt_hip(url_base, gpu, updating=False) -> Path | None:
         meta = json.loads((tmp / "BUILD.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         meta = {}
-    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
     why = None
     if meta.get("backend") != "hip" or not (tmp / EXE).exists():
         why = "it is not a HIP engine"
@@ -2701,7 +2701,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
     info = eng / "BUILD.json"
     if info.exists() and (eng / EXE).exists() and json.loads(info.read_text(encoding="utf-8")).get("backend") != "hip":
         meta = json.loads(info.read_text(encoding="utf-8"))
-        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
         if meta.get("source") == "local":              # compiled here: build_engine checks its source and cards
             return None
         have = [int(a) for a in meta.get("archs", [])]
@@ -2750,7 +2750,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
         drop_archive(z)                                # every later run fail on it instead of downloading it again
         raise
     meta = json.loads((tmp / "BUILD.json").read_text(encoding="utf-8"))
-    if tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit()) < MIN_ENGINE:
+    if tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit()) < MIN_ENGINE:
         need = ".".join(map(str, MIN_ENGINE))
         if updating:                                   # these files are newer than the published release (#58)
             warn(f"engine {need} is not published yet (the release may still be uploading): run this again "
@@ -2801,7 +2801,7 @@ def update_installed_engine(url_base, toolkit=None) -> None:
     meta_text = info.read_text(encoding="utf-8")
     meta = json.loads(meta_text)
     if meta.get("backend") == "hip" and WIN:           # AMD on Windows: the ready-made HIP engine, when older
-        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
         if meta.get("source") == "prebuilt" and ver < WIN_HIP_MIN_ENGINE:
             try:
                 g = next((x for x in amd_gpus() if amd_problem(x) is None), None)
@@ -2829,7 +2829,7 @@ def update_installed_engine(url_base, toolkit=None) -> None:
                 warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: "
                      "starting the installed one")
         return
-    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
     local = meta.get("source") == "local"
     vision = meta.get("vision") or "none"
     if local:                                          # compiled here: is it older than the source (a git pull)?
@@ -3742,11 +3742,11 @@ def engine_version(exe: Path) -> tuple:
     v = str(meta.get("version") or "")
     if not v:                                          # the version compiled into the binary: 0.1.13 and newer
         try:                                           # carry it, so a binary without it is older
-            m = re.search(rb"engine=(\d+\.\d+\.\d+)(?:\.\d+)?\n", Path(exe).read_bytes())
+            m = re.search(rb"engine=(\d+\.\d+\.\d+(?:\.\d+)?)\n", Path(exe).read_bytes())
             v = m.group(1).decode() if m else "0.1.12"
         except OSError:
             v = "0"
-    return tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
+    return tuple(int(x) for x in v.split(".")[:4] if x.isdigit())
 
 
 def is_wsl() -> bool:
@@ -5113,7 +5113,7 @@ def main() -> int:
         lib_dirs = [str(d) for d in hip_lib_dirs(eng)]
     else:
         lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(cuda_tk)
-    engine_ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+    engine_ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
     need_engine = MODELS[model].get("engine", UNSLOTH_ENGINE)
     if budget is not None and engine_ver < need_engine:      # checked before the 94-111 GB download
         fail(f"{model} needs engine {'.'.join(map(str, need_engine))} or newer; this one is {meta.get('version')}",

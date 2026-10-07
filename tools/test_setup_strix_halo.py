@@ -371,7 +371,7 @@ class WindowsZip(unittest.TestCase):
     def fake_download(self, url, dest, label=""):
         with zipfile.ZipFile(dest, "w") as z:
             z.writestr("BUILD.json", json.dumps({"source": "prebuilt", "backend": "hip", "platform": "windows-x64",
-                                                  "version": "0.1.40", "archs": self.archs, "lib_dirs": []}))
+                                                  "version": ".".join(map(str, setup.MIN_ENGINE)), "archs": self.archs, "lib_dirs": []}))
             z.writestr(setup.EXE, "x")
 
 
