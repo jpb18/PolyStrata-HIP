@@ -2480,6 +2480,7 @@ int main(int argc, char **argv) try {
     // link (the copy kernel, since 0.1.14), so on a slower link it must shrink or the window waits for it.  The
     // real H2D bandwidth is probed once; from 20 GB/s up (x16 PCIe 4/5) the measured default stays.  The canonical
     // pack's 0.2 was never measured against the link, so it is left alone.  `--calibrate` measures it outright.
+    const bool pcie_explicit = o.pcie_frac >= 0.0;
     if (o.pcie_frac < 0.0) {
         const double base = native_pack ? 0.55 : 0.2;
         std::string bursts;
@@ -2493,6 +2494,24 @@ int main(int argc, char **argv) try {
         } else {
             o.pcie_frac = base;
             std::fprintf(stderr, "strata generate: PCIe probe failed -> pcie_frac default %.2f\n", base);
+        }
+    }
+    // SYCL port, Arc on the xe driver (Arc Pro B60/B65/B70, B580): the GPU page-faults when a kernel reads ordinary
+    // (pageable) host memory, and the card times the job out (seen on a B70: Timedout job, Fault response -EINVAL,
+    // faulted address in the CPU's mmap range). Without --stream-experts the experts outside the VRAM cache stay in a
+    // pageable arena that the PCIe share (--pcie-frac) hands to the GPU. Recommend, never force: the default share
+    // becomes 0 (the CPU computes those misses) and an explicit --pcie-frac is kept with a warning.
+    if (strata::intel_gpu_driver() == "xe" && !o.stream_experts) {
+        if (!pcie_explicit) {
+            o.pcie_frac = 0.0;
+            std::fprintf(stderr, "strata generate: xe driver without --stream-experts: the GPU faults on pageable host "
+                                 "memory, so --pcie-frac defaults to 0 here (the CPU computes the experts outside VRAM). "
+                                 "Use --stream-experts, as setup configures it, to let the GPU read a pinned mirror\n");
+        } else if (o.pcie_frac > 0.0) {
+            std::fprintf(stderr, "strata generate: WARNING: --pcie-frac %.2f on the xe driver without --stream-experts "
+                                 "makes the GPU read pageable host memory; that page-faulted and hung an Arc Pro B70 "
+                                 "(Timedout job, device lost). Use --stream-experts, as setup configures it, or "
+                                 "--pcie-frac 0\n", o.pcie_frac);
         }
     }
     // the canonical Q2_0 pack's CPU kernels are AVX-512 only; a native pack runs on AVX2 CPUs as well
