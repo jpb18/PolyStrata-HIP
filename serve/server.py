@@ -690,7 +690,9 @@ class StrataEngine:
         if asked and self.batch != asked:
             print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
                   "(its log says why)", flush=True)
-        groups = int(args[args.index("--batch-groups") + 1]) if "--batch-groups" in args else 1
+        _bg = args[args.index("--batch-groups") + 1] if "--batch-groups" in args else "1"
+        # `--batch-groups auto`: the engine picks the groups and says so (INFO batch_groups=G)
+        groups = int(self.info.get("batch_groups") or 1) if _bg == "auto" else int(_bg)
         groups = groups if self.batch and groups > 0 and self.batch % groups == 0 else 1
         gs = self.batch // groups if self.batch else 0
         # slots in the order that spreads requests over the pipeline's groups first: 0, gs, 2gs, .., 1, gs+1, ..
