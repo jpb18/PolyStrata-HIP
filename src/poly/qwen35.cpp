@@ -158,12 +158,7 @@ void Qwen35::assign_scratch() {
     att_ = fbuf(heads);
     score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
     sg_ = fbuf(n);
-    if (rows_ >= kStageRows) {   // a prompt batch reads the cache's rows as floats, a block of them at a time
-        const size_t block = (size_t) std::min(opt_.max_context, kAttendRows) * n_kv_ * head_dim_;
-        akeys_ = fbuf(block);
-        avals_ = fbuf(block);
-        awork_ = fbuf(2 * heads + 3 * n * n_head_);
-    }
+    if (rows_ >= kStageRows) awork_ = fbuf(heads + heads / 2 + 1 + 3 * n * n_head_);   // a prompt batch's attention
 }
 
 // A recurrent layer's convolution and delta-rule state lie one behind the other in state_ (alloc_caches()).
@@ -303,8 +298,8 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
     const float scale = 1.f / std::sqrt((float) head_dim_);
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
     if (n >= kStageRows)
-        attend_batch(blas_, q_, B.keys, B.vals, pos, n, akeys_, avals_, score_,
-                     (size_t) chunk_ * n_head_ * opt_.max_context, awork_, att_, head_dim_, n_head_, n_kv_, scale, st_);
+        attend_batch(blas_, q_, B.keys, B.vals, pos, n, score_, (size_t) chunk_ * n_head_ * opt_.max_context, awork_,
+                     att_, head_dim_, n_head_, n_kv_, scale, st_);
     else
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
                at, at ? room(n) : 0);

@@ -592,51 +592,54 @@ __global__ void attn_value_kernel(const float* __restrict__ score, const half* _
     out[(size_t(tok) * n_head + h) * dim + d] = acc;
 }
 
-// Row lo + blockIdx.y of the sequence as floats, `width` values a row.
-__global__ void attn_rows_kernel(const half* __restrict__ cache, float* __restrict__ out, int width, long long lo,
-                                 int ring) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= width) return;
-    const long long row = ring > 0 ? (lo + blockIdx.y) % ring : lo + blockIdx.y;
-    out[size_t(blockIdx.y) * width + i] = __half2float(cache[size_t(row) * width + i]);
+// A chunk's queries and its results lie in two orders: the engine's (token, head) and the one a product per
+// group of heads takes (group, token, head of the group).  This is where the engine's `row` lies in the second.
+__device__ __forceinline__ size_t attn_by_group(int row, int n_head, int kv_heads, int tokens) {
+    const int per = n_head / kv_heads, t = row / n_head, h = row % n_head;
+    return (size_t(h / per) * tokens + t) * per + h % per;
 }
 
-// A chunk's queries, or its results, between the order the engine keeps them in (token, head) and the one a
-// product per group of heads takes (group, token, head of the group).  blockIdx.y is the token and the head.
-__global__ void attn_regroup_kernel(const float* __restrict__ src, float* __restrict__ dst, int dim, int n_head,
-                                    int kv_heads, int tokens, bool to_groups) {
+// The queries to the order of the groups, as the halves the products take.  blockIdx.y is the token and the head.
+__global__ void attn_group_kernel(const float* __restrict__ src, half* __restrict__ dst, int dim, int n_head,
+                                  int kv_heads, int tokens) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim) return;
-    const int per = n_head / kv_heads, t = blockIdx.y / n_head, h = blockIdx.y % n_head;
-    const size_t by_token = size_t(blockIdx.y) * dim + i;
-    const size_t by_group = ((size_t(h / per) * tokens + t) * per + h % per) * dim + i;
-    if (to_groups) dst[by_group] = src[by_token];
-    else dst[by_token] = src[by_group];
+    const float x = src[size_t(blockIdx.y) * dim + i];
+    dst[attn_by_group(blockIdx.y, n_head, kv_heads, tokens) * dim + i] = __float2half(x);
+}
+
+// The results back to the engine's order.
+__global__ void attn_ungroup_kernel(const float* __restrict__ src, float* __restrict__ dst, int dim, int n_head,
+                                    int kv_heads, int tokens) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dim) return;
+    dst[size_t(blockIdx.y) * dim + i] = src[attn_by_group(blockIdx.y, n_head, kv_heads, tokens) * dim + i];
 }
 
 // A softmax over a chunk's rows a block of rows at a time, for scores in the order of the groups: blockIdx.x
-// counts (group, token, head of the group), and the block's rows start at row0 of the sequence.  A score becomes
-// its exp against the largest its token and head have had (top), zero for a row the token does not attend.  sum
-// is the sum of the exps against that top, and shrink what the exps of the blocks before are worth against it.
-// With `fresh` there was no block before.
-__global__ void attn_softmax_block_kernel(float* score, int n_keys, long long row0, long long pos, int first,
-                                          int window, int tokens, int per, long long last, float* top, float* sum,
-                                          float* shrink, bool fresh) {
+// counts (group, token, head of the group), and the block's rows start at row0 of the sequence.  A score's weight
+// is its exp against the largest its token and head have had (top), zero for a row the token does not attend, as
+// the half the values' product takes.  sum is the sum of the weights against that top, and shrink what the
+// weights of the blocks before are worth against it.  With `fresh` there was no block before.
+__global__ void attn_softmax_block_kernel(const float* __restrict__ score, half* __restrict__ weight, int n_keys,
+                                          long long row0, long long pos, int first, int window, int tokens, int per,
+                                          long long last, float* top, float* sum, float* shrink, bool fresh) {
     __shared__ float part[8];
     const int tok = first + (blockIdx.x % (tokens * per)) / per;
     long long lo;
     const int n = attn_rows(pos + tok, window, last, &lo);
     const long long end = lo + n;   // the token attends the sequence's rows from lo to before end
     const int j0 = lo > row0 ? int(lo - row0) : 0, j1 = end - row0 < n_keys ? int(end - row0) : n_keys;
-    float* row = score + size_t(blockIdx.x) * n_keys;
+    const float* row = score + size_t(blockIdx.x) * n_keys;
+    half* w = weight + size_t(blockIdx.x) * n_keys;
     float mx = -INFINITY;
     for (int j = j0 + threadIdx.x; j < j1; j += blockDim.x) mx = fmaxf(mx, row[j]);
     mx = block_max(mx, part);
     const float before = fresh ? -INFINITY : top[blockIdx.x], now = fmaxf(before, mx);
     float s = 0.0f;
     for (int j = threadIdx.x; j < n_keys; j += blockDim.x) {
-        row[j] = j >= j0 && j < j1 ? expf(row[j] - now) : 0.0f;
-        s += row[j];
+        w[j] = __float2half(j >= j0 && j < j1 ? expf(row[j] - now) : 0.0f);
+        s += __half2float(w[j]);   // the sum is of the weights as the values get them
     }
     s = block_sum(s, part);
     if (threadIdx.x != 0) return;
@@ -793,6 +796,19 @@ void* blas_create(void* stream) {
         cublasDestroy(h);
         blas_ck(s, "cublasSetStream");
     }
+    // cuBLAS takes 75 ms over a process's first product of halves, whatever its size: a prompt batch's attention
+    // would wait for it.  A product that fails here fails again where its status is read.
+    const int n = 16;
+    void* p = nullptr;
+    if (cudaMalloc(&p, n * n * (2 * sizeof(half) + sizeof(float))) != cudaSuccess) return h;
+    cudaMemsetAsync(p, 0, n * n * (2 * sizeof(half) + sizeof(float)), cs(stream));
+    const float one = 1.0f, zero = 0.0f;
+    const half* a = (const half*) p;
+    cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, a, CUDA_R_16F, n, n * n, a + n * n,
+                               CUDA_R_16F, n, n * n, &zero, (float*) (a + 2 * n * n), CUDA_R_32F, n, n * n, 1,
+                               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    cudaStreamSynchronize(cs(stream));
+    cudaFree(p);
     return h;
 }
 
@@ -992,56 +1008,64 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
 }
 
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
-                  float* keys, float* vals, float* score, size_t score_floats, float* work, float* out, int dim,
-                  int n_head, int kv_heads, float scale, void* stream, int window, int ring, bool whole) {
+                  float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
+                  float scale, void* stream, int window, int ring, bool whole) {
     const cublasHandle_t h = (cublasHandle_t) blas;
     const float one = 1.0f, zero = 0.0f;
     const int per = n_head / kv_heads, width = kv_heads * dim;
     const long long last = whole ? pos + rows - 1 : -1;
+    // The products take halves and sum floats, on the tensor cores: the cache's rows as they lie there, the
+    // queries and the softmax's weights rounded.  Two thirds of the scratch are for a block's scores, the rest
+    // for their weights.
+    const size_t cells = score_floats / 3 * 2;
+    half* weight = (half*) (score + cells);
     for (int first = 0, c = 0; first < rows; first += c) {
         // every token left, unless a grid's 65535 rows or the scratch for one row's scores is less
-        c = (int) std::min({size_t(rows - first), size_t(65535 / n_head), score_floats / n_head});
+        c = (int) std::min({size_t(rows - first), size_t(65535 / n_head), cells / n_head});
         const long long p0 = pos + first;   // the chunk's first position, and the first row its tokens read
         const long long lo0 = window > 0 && p0 >= window ? p0 - window + 1 : 0;
         const int n_keys = int((whole ? last : p0 + c - 1) - lo0) + 1;
         const size_t heads = size_t(c) * n_head;
-        float* qg = work;                    // the queries by group, then the results
-        float* og = qg + heads * dim;
-        float* top = og + heads * dim;       // a token and head's largest score so far, the sum of its exps against
-        float* sum = top + heads;            // it, and what a block of rows makes the sums before it worth
+        half* qg = (half*) work;                      // the queries by group
+        float* og = work + (heads * dim + 1) / 2;     // the results by group
+        float* top = og + heads * dim;       // a token and head's largest score so far, the sum of its weights
+        float* sum = top + heads;            // against it, and what a block of rows makes the sums before it worth
         float* shrink = sum + heads;
-        attn_regroup_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(
-            q + size_t(first) * n_head * dim, qg, dim, n_head, kv_heads, c, true);
+        attn_group_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(q + size_t(first) * n_head * dim,
+                                                                                   qg, dim, n_head, kv_heads, c);
         // The rows go a block at a time, as many as have their scores in the scratch, so that a product has the
         // chunk's every token for its columns however long the context is: cuBLAS is several times slower on a
         // few columns.  A token's softmax is kept from block to block (top, sum), and its values so far shrink
         // to the new top.
         const long long cols = (long long) c * per;
-        const int block = (int) std::min<size_t>(kAttendRows, score_floats / heads);
-        for (int k0 = 0; k0 < n_keys; k0 += block) {
-            const int m = std::min(block, n_keys - k0);
-            attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>((const half*) kcache, keys, width,
-                                                                               lo0 + k0, ring);
-            attn_rows_kernel<<<dim3(grid(width, 256), m), 256, 0, cs(stream)>>>((const half*) vcache, vals, width,
-                                                                               lo0 + k0, ring);
+        const int fit = (int) (cells / heads);
+        const int block = fit > 16 ? fit & ~15 : fit;   // the tensor cores are half as fast on a ragged block
+        for (int k0 = 0, m = 0; k0 < n_keys; k0 += m) {
+            // the block's rows where the cache has them: a block ends where a ring starts over
+            const long long row = ring > 0 ? (lo0 + k0) % ring : lo0 + k0;
+            m = (int) std::min<long long>(std::min(block, n_keys - k0), ring > 0 ? ring - row : n_keys);
             // A product a group: its heads' queries of every token of the chunk against the group's keys.  cuBLAS
-            // reads a buffer of rows as the transpose, and the groups' keys lie `dim` apart in a row.
-            blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, m, (int) cols, dim, &scale, keys, width,
-                                              dim, qg, dim, cols * dim, &zero, score, m, cols * m, kv_heads),
+            // reads the cache's rows as the transpose, and the groups' keys lie `dim` apart in a row.
+            blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, m, (int) cols, dim, &scale,
+                                               (const half*) kcache + size_t(row) * width, CUDA_R_16F, width, dim, qg,
+                                               CUDA_R_16F, dim, cols * dim, &zero, score, CUDA_R_32F, m, cols * m,
+                                               kv_heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP),
                     "attention scores");
-            attn_softmax_block_kernel<<<c * n_head, 256, 0, cs(stream)>>>(score, m, lo0 + k0, (long long) pos, first,
-                                                                         window, c, per, last, top, sum, shrink,
-                                                                         k0 == 0);
+            attn_softmax_block_kernel<<<c * n_head, 128, 0, cs(stream)>>>(score, weight, m, lo0 + k0, (long long) pos,
+                                                                         first, window, c, per, last, top, sum,
+                                                                         shrink, k0 == 0);
             if (k0 > 0)
                 attn_scale_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(og, shrink, dim, false);
-            blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, m, &one, vals, width, dim,
-                                              score, m, cols * m, k0 > 0 ? &one : &zero, og, dim, cols * dim,
-                                              kv_heads),
+            blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, m, &one,
+                                               (const half*) vcache + size_t(row) * width, CUDA_R_16F, width, dim,
+                                               weight, CUDA_R_16F, m, cols * m, k0 > 0 ? &one : &zero, og, CUDA_R_32F,
+                                               dim, cols * dim, kv_heads, CUBLAS_COMPUTE_32F,
+                                               CUBLAS_GEMM_DEFAULT_TENSOR_OP),
                     "attention values");
         }
         attn_scale_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(og, sum, dim, true);
-        attn_regroup_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(
-            og, out + size_t(first) * n_head * dim, dim, n_head, kv_heads, c, false);
+        attn_ungroup_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(
+            og, out + size_t(first) * n_head * dim, dim, n_head, kv_heads, c);
     }
 }
 

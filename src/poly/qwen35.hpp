@@ -78,7 +78,7 @@ private:
     float *proj_ = nullptr, *qkv_ = nullptr, *z_ = nullptr, *alpha_ = nullptr, *beta_ = nullptr, *gated_ = nullptr;
     float *qg_ = nullptr, *q_ = nullptr, *kraw_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr,
           *score_ = nullptr, *sg_ = nullptr;
-    float *akeys_ = nullptr, *avals_ = nullptr, *awork_ = nullptr;   ///< a prompt batch's attention (attend_batch)
+    float* awork_ = nullptr;   ///< a prompt batch's attention (attend_batch)
 
 };
 
