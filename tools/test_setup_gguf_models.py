@@ -17,33 +17,47 @@ sys.path.insert(0, str(ROOT))
 import setup  # noqa: E402
 from tools import test_setup_glm as glm_tests  # noqa: E402   (the module: its test classes are not this file's)
 
-# family: (size, file, repository, bytes)
+# family: (size, file, repository, bytes) of the size setup takes when the PC has the RAM for it
 NEW = {
     "qwen36": ("UD-Q3_K_M", "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF", 17104402720),
     "ornith": ("APEX-I-COMPACT", "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf",
                "mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF", 17437861408),
     "gemma4": ("UD-Q3_K_M", "gemma-4-26B-A4B-it-UD-Q3_K_M.gguf", "unsloth/gemma-4-26B-A4B-it-GGUF", 12728497888),
 }
+# family: its other sizes in setup's order, the smaller and then the larger: (size, file, bytes)
+MORE = {
+    "qwen36": [("UD-Q2_K_XL", "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf", 12574128416),
+               ("UD-Q4_K_M", "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", 22663387424)],
+    "ornith": [("APEX-I-MINI", "Ornith-1.5-35B-A3B-APEX-MTP-I-Mini.gguf", 14366220832),
+               ("APEX-I-QUALITY", "Ornith-1.5-35B-A3B-APEX-MTP-I-Quality.gguf", 23718411808)],
+    "gemma4": [("UD-Q2_K_XL", "gemma-4-26B-A4B-it-UD-Q2_K_XL.gguf", 10546934240),
+               ("UD-Q4_K_M", "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf", 16947541728)],
+}
 
 
 class Pins(unittest.TestCase):
     def test_the_files(self):
-        for family, (size, file, repo, n) in NEW.items():
+        for family, (size0, file0, repo, n0) in NEW.items():
+            sizes = [(size0, file0, n0), *MORE[family]]
             fam = setup.FAMILIES[family]
             self.assertEqual(fam["engine"], "poly", family)
             self.assertRegex(fam["hf"], rf"^https://huggingface.co/{repo}/resolve/[0-9a-f]{{40}}/$")
-            self.assertEqual(list(setup.family_models(family)), [size])
-            self.assertEqual((setup.model_file(fam, size, 1), setup.model_shards(fam, size)), (file, 1))
-            d = fam["models"][size]
-            more = [Path(d["draft_model"]).name] if d.get("draft_model") else []
+            self.assertEqual(list(setup.family_models(family)), [size for size, _, _ in sizes])
+            more = []                                                    # a draft model the sizes share
+            for size, file, n in sizes:
+                self.assertEqual((setup.model_file(fam, size, 1), setup.model_shards(fam, size)), (file, 1))
+                d = fam["models"][size]
+                more = [Path(d["draft_model"]).name] if d.get("draft_model") else []
+                self.assertEqual(fam["sha256"][file][0], n)
+                self.assertAlmostEqual(sum(fam["sha256"][f][0] for f in [file, *more]) / 1e9, d["download_gb"],
+                                       delta=0.05)
+                self.assertLess(d["arena_gb"], d["download_gb"])        # the experts are part of the file
+                self.assertEqual(d["ram_gb"], round(setup.poly_ram_need(d, 8.0)), size)
             # the image encoder is pinned too; it is downloaded when images are wanted, so it has its own size
-            self.assertEqual(list(fam["sha256"]), [file, *more, fam["mmproj"]])
-            self.assertEqual(fam["sha256"][file][0], n)
+            self.assertEqual(list(fam["sha256"]), [*(file for _, file, _ in sizes), *more, fam["mmproj"]])
             for pinned in fam["sha256"].values():
                 self.assertRegex(pinned[1], r"^[0-9a-f]{64}$")
-            self.assertAlmostEqual(sum(fam["sha256"][f][0] for f in [file, *more]) / 1e9, d["download_gb"], delta=0.05)
             self.assertAlmostEqual(fam["sha256"][fam["mmproj"]][0] / 1e9, fam["vision_gb"], delta=0.05)
-            self.assertLess(d["arena_gb"], d["download_gb"])            # the experts are part of the file
 
     def test_two_families_have_a_size_of_one_name(self):
         q, g = setup.FAMILIES["qwen36"]["models"]["UD-Q3_K_M"], setup.FAMILIES["gemma4"]["models"]["UD-Q3_K_M"]
@@ -209,13 +223,23 @@ class Main(unittest.TestCase):
         self.assertIsNotNone(cfg)
 
     def test_too_little_ram_for_the_model_stops(self):
-        code, out, cfg = self.main(family="qwen36", ram=12.0, vram=8.0)
+        code, out, cfg = self.main(family="qwen36", ram=12.0, vram=8.0)   # too little for its smallest size too
         self.assertNotEqual(code, 0)
-        self.assertIn("wants about 21 GB", out)
+        self.assertIn("wants about 17 GB", out)
         self.assertIsNone(cfg)
         code, out, cfg = self.main(family="qwen36", ram=12.0, vram=8.0, model="UD-Q3_K_M")   # named: a risk taken
         self.assertEqual(code, 0, out)
         self.assertIn("as you chose", out)
+
+    def test_the_size_taken_without_a_name(self):
+        """The first size where the PC has the RAM for it, the smaller one where not; the larger one only by name."""
+        for ram, size in ((64.0, "UD-Q3_K_M"), (20.0, "UD-Q3_K_M"), (16.0, "UD-Q2_K_XL")):
+            code, out, cfg = self.main(family="qwen36", ram=ram, vram=8.0)
+            self.assertEqual(code, 0, out)
+            self.assertIn(f"size: {size}", out, ram)
+        code, out, cfg = self.main(family="qwen36", ram=64.0, vram=8.0, model="UD-Q4_K_M")
+        self.assertEqual(code, 0, out)
+        self.assertIn("size: UD-Q4_K_M", out)
 
     def test_a_size_of_another_family_is_refused_by_name(self):
         code, out, cfg = self.main(family="gemma4", model="APEX-I-COMPACT")

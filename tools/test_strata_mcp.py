@@ -383,7 +383,8 @@ class Install(FakeRoot):
         self.assertIn("images are not available", res["error"])
 
     def test_a_family_with_sizes_of_its_own(self):
-        """Qwen3.6, Ornith 1.5 and Gemma 4: one size each, two of them of one name; a 32 GB PC with an 8 GB card."""
+        """Qwen3.6, Ornith 1.5 and Gemma 4: three sizes each, two families' of the same names; a 32 GB PC with an
+        8 GB card."""
         card = {**FAKE_HW["gpus"][0], "vram_gb": 8.0}
         self.strata._hardware = lambda: {**FAKE_HW, "ram_gb": 32.0, "gpus": [card]}
         res, err = self.call("strata_install", {"family": "gemma4"})
@@ -405,7 +406,9 @@ class Install(FakeRoot):
         self.assertFalse(err, res)
         by = {f["family"]: f["sizes"] for f in res["families"]}
         self.assertEqual([(x["model"], x["download_gb"], x["on_this_pc"], x["id"]) for x in by["qwen36"]],
-                         [("UD-Q3_K_M", 17.1, "fits", "qwen36-ud-q3_k_m")])
+                         [("UD-Q3_K_M", 17.1, "fits", "qwen36-ud-q3_k_m"),
+                          ("UD-Q2_K_XL", 12.6, "fits", "qwen36-ud-q2_k_xl"),
+                          ("UD-Q4_K_M", 22.7, "fits", "qwen36-ud-q4_k_m")])
         self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (13.2, True))
         self.assertFalse(next(f for f in res["families"] if f["family"] == "glm")["images"])   # GLM reads none
 

@@ -88,20 +88,33 @@ FALLBACK_FAMILIES = {
             "vision": False, "experimental": True},
     # a family with sizes of its own ("models"): two of these have a size of one name
     "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB "
-                                                     "of RAM beside an 8 GB card", "tag": "qwen36-", "engine": "poly",
-               "vision": True, "experimental": True,
+                                                     "of RAM beside an 8 GB card; a smaller and a larger size too",
+               "tag": "qwen36-", "engine": "poly", "vision": True, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
-                                        "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6}}},
+                                        "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6},
+                          "UD-Q2_K_XL": {"about": "2- and 3-bit i-quant experts (Unsloth Dynamic): the least RAM",
+                                         "download_gb": 12.6, "ram_gb": 17, "arena_gb": 10.8},
+                          "UD-Q4_K_M": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
+                                        "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.1}}},
     "ornith": {"title": "Ornith 1.5 35B-A3B", "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, "
-                                                        "~22 GB of RAM beside an 8 GB card", "tag": "ornith-",
+                                                        "~22 GB of RAM beside an 8 GB card; a smaller and a larger "
+                                                        "size too", "tag": "ornith-",
                "engine": "poly", "vision": True, "experimental": True,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the "
-                                                      "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8}}},
+                                                      "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8},
+                          "APEX-I-MINI": {"about": "2- and 3-bit experts (APEX): the least RAM",
+                                          "download_gb": 14.4, "ram_gb": 18, "arena_gb": 12.9},
+                          "APEX-I-QUALITY": {"about": "4- to 6-bit experts (APEX)",
+                                             "download_gb": 23.7, "ram_gb": 28, "arena_gb": 21.6}}},
     "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB "
-                                                     "card", "tag": "gemma4-", "engine": "poly",
-               "vision": True, "experimental": True,
+                                                     "card; a smaller and a larger size too", "tag": "gemma4-",
+               "engine": "poly", "vision": True, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
-                                        "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3}}},
+                                        "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3},
+                          "UD-Q2_K_XL": {"about": "2-bit i-quant experts (Unsloth Dynamic): the least RAM; the same "
+                                                  "draft model", "download_gb": 11.0, "ram_gb": 15, "arena_gb": 8.7},
+                          "UD-Q4_K_M": {"about": "4- and 5-bit experts (Unsloth Dynamic); the same draft model",
+                                        "download_gb": 17.4, "ram_gb": 21, "arena_gb": 14.3}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "

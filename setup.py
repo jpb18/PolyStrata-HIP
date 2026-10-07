@@ -281,21 +281,35 @@ FAMILIES = {
     # for it, a model of its own; it is downloaded beside the model's and its VRAM is in "vram_beside_gb".
     # "mmproj": the repository's image encoder, downloaded beside the model's file when images are wanted;
     # "vision_vram_gb" is what it holds on the GPU once it has warmed up at 1,024 image tokens (measured there too).
+    # A family's first size is the one setup takes on a PC with the RAM for it, the second the one it takes with
+    # less, and the third is by name (poly_default()).
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
-               "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card",
+               "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card; "
+                        "a smaller and a larger size too",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
                "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": True, "experimental": True,
                "row_bytes": 26624, "mmproj_hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "mmproj": "mmproj-F16.gguf",
                "vision_gb": 0.9, "vision_vram_gb": 1.6,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6,
-                                        "vram_beside_gb": 4.8, "draft": "own"}},
+                                        "vram_beside_gb": 4.8, "draft": "own"},
+                          "UD-Q2_K_XL": {"about": "2- and 3-bit i-quant experts (Unsloth Dynamic): the least RAM",
+                                         "download_gb": 12.6, "ram_gb": 17, "arena_gb": 10.8,
+                                         "vram_beside_gb": 4.2, "draft": "own"},
+                          "UD-Q4_K_M": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
+                                        "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.1,
+                                        "vram_beside_gb": 4.7, "draft": "own"}},
                "sha256": {"Qwen3.6-35B-A3B-UD-Q3_K_M.gguf":
                           (17104402720, "8966dd0cd8c543c4228490a2a8b0e0814fc4f1e6a8e199ceed4de6754ae7b8e1"),
+                          "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf":
+                          (12574128416, "ed7cda7e38985b4fcff76475865135039641d2bfbac3c169df15ca770f37fb0c"),
+                          "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf":
+                          (22663387424, "0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b"),
                           "mmproj-F16.gguf":
                           (899283584, "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160")}},
     "ornith": {"title": "Ornith 1.5 35B-A3B", "by": "ornith-ai; APEX quantization by mudler",
-               "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, ~22 GB of RAM beside an 8 GB card",
+               "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, ~22 GB of RAM beside an 8 GB card; "
+                        "a smaller and a larger size too",
                "hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf",
                "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "poly", "vision": True,
                "experimental": True, "row_bytes": 26624,
@@ -304,13 +318,26 @@ FAMILIES = {
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the file",
                                              "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8,
                                              "vram_beside_gb": 4.2,
-                                             "file": "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf", "draft": "own"}},
+                                             "file": "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf", "draft": "own"},
+                          "APEX-I-MINI": {"about": "2- and 3-bit experts (APEX): the least RAM",
+                                          "download_gb": 14.4, "ram_gb": 18, "arena_gb": 12.9,
+                                          "vram_beside_gb": 3.9,
+                                          "file": "Ornith-1.5-35B-A3B-APEX-MTP-I-Mini.gguf", "draft": "own"},
+                          "APEX-I-QUALITY": {"about": "4- to 6-bit experts (APEX)",
+                                             "download_gb": 23.7, "ram_gb": 28, "arena_gb": 21.6,
+                                             "vram_beside_gb": 4.4,
+                                             "file": "Ornith-1.5-35B-A3B-APEX-MTP-I-Quality.gguf", "draft": "own"}},
                "sha256": {"Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf":
                           (17437861408, "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165"),
+                          "Ornith-1.5-35B-A3B-APEX-MTP-I-Mini.gguf":
+                          (14366220832, "09c342594abf0cb0cda9e899977956b61e37da79b5e5ffbe77874512dbe78148"),
+                          "Ornith-1.5-35B-A3B-APEX-MTP-I-Quality.gguf":
+                          (23718411808, "2cedb760ebafb9f4943b4eac92628306110fc04eeea45dae2e1396aad626e691"),
                           "mmproj.gguf":
                           (899283200, "e277123529451fbcff6d880ad5bd7ada999f9d5e6339ba3639d06c5cef4763b1")}},
     "gemma4": {"title": "Gemma 4 26B-A4B", "by": "Google; quantized by Unsloth",
-               "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card",
+               "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB card; a smaller and a "
+                        "larger size too",
                "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
                "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "poly", "vision": True, "experimental": True,
                "row_bytes": 28672, "mmproj_hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "mmproj": "mmproj-F16.gguf",
@@ -318,9 +345,22 @@ FAMILIES = {
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
                                         "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3,
                                         "vram_beside_gb": 5.8,
+                                        "draft_model": "MTP/mtp-gemma-4-26B-A4B-it-Q8_0.gguf"},
+                          "UD-Q2_K_XL": {"about": "2-bit i-quant experts (Unsloth Dynamic): the least RAM; the same "
+                                                  "draft model",
+                                         "download_gb": 11.0, "ram_gb": 15, "arena_gb": 8.7,
+                                         "vram_beside_gb": 4.6,
+                                         "draft_model": "MTP/mtp-gemma-4-26B-A4B-it-Q8_0.gguf"},
+                          "UD-Q4_K_M": {"about": "4- and 5-bit experts (Unsloth Dynamic); the same draft model",
+                                        "download_gb": 17.4, "ram_gb": 21, "arena_gb": 14.3,
+                                        "vram_beside_gb": 5.3,
                                         "draft_model": "MTP/mtp-gemma-4-26B-A4B-it-Q8_0.gguf"}},
                "sha256": {"gemma-4-26B-A4B-it-UD-Q3_K_M.gguf":
                           (12728497888, "811882f6df81c8ea204a5d382f196d6bd601245091786912d4c70df41cdfa052"),
+                          "gemma-4-26B-A4B-it-UD-Q2_K_XL.gguf":
+                          (10546934240, "2a1d26dfe6ea00a467940a5728316af6edb366bbdba950d65b85d232392fb658"),
+                          "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf":
+                          (16947541728, "f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f"),
                           "mtp-gemma-4-26B-A4B-it-Q8_0.gguf":
                           (461766816, "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b"),
                           "mmproj-F16.gguf":
