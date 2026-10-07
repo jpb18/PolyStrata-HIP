@@ -5024,6 +5024,14 @@ class Server(ThreadingHTTPServer):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
             super().handle_error(request, client_address)
 
+    def server_close(self):
+        # the hardware sampler serve() started for this server stops with it (test isolation: every Service a test
+        # started used to leave its sampler running, 21 of them after test_responses, which slowed test_parallel's timing)
+        tel = getattr(getattr(self, "svc", None), "telemetry", None)
+        if tel is not None and hasattr(tel, "close"):
+            tel.close()
+        super().server_close()
+
 
 def warn_tight_ram(arena_mib) -> None:
     """The model's experts live in RAM (INFO arena_mib, engine 0.1.10+).  With less than ~6 GB left beside them for the
@@ -5251,6 +5259,7 @@ def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     svc.host_names = host_names_for(host, svc.allowed_hosts, svc.trusted_origins)
     svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
+    httpd.svc = svc
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
 
