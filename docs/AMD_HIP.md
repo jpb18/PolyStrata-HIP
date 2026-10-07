@@ -216,6 +216,23 @@ of decode (one card 47.5 / 46.9 / 48.3 -> 50.5 / 48.5 / 51.3 tok/s with it on). 
 `bench/results/2026-10-04-community-rx-6800-windows`): on was 12-22% slower. 4x R9700: fork off was 13-45% faster.
 Linux RX 6000 users can try `STRATA_SH_STREAM=1`; the output is identical either way.
 
+**Long prompts on a big card: check the lend-coverage line (#1389, measured by the reporter on an RX 7900 XTX, gfx1100,
+v0.1.40.2, 50 GB RAM).** With `--resident-experts` the prompt path borrows cache slots, and the experts of those slots
+must also sit in RAM. After the first request of a start the engine prints
+`FileExpertSource: N of M of the prompt path's lendable slots keep their experts in RAM too`. When N is not M, the
+experts not covered are read from the pack during the prompt (now also a `WARNING` line). A 74K prompt routes through
+nearly all experts, so the misses repeat: the reporter saw `wait copy` at 0.2% and 2,583 tok/s with 6201 of 6201, and
+36.8% and 1,810 tok/s with 5093 of 6202 (same binary, only the start differed). Short prompts (25K) read the same either
+way. The resident set is sized from `MemAvailable` at start, minus `STRATA_RESIDENT_HEADROOM_GIB` (default 4, in GiB; the
+`--resident-experts` switch and `--resident-budget-gib` read it). If the line is short, lower the headroom a little and
+restart; if the machine then swaps or stalls, raise it again. Re-check the line after a ROCm update: the reporter's newer
+runtime kept about 1 GiB more host RAM, which moved the best value from 8 to 7. Other levers from the same report (his
+numbers, not re-measured here): `STRATA_PF_FUSED=1 STRATA_PF_GEMM=1 STRATA_PF_SWITCH_MIN_T=4096` 925 -> 1,092 tok/s,
+`--resident-experts` 1,092 -> 2,503 tok/s, `--prefill auto:32768` +23% at 74K. The engine uses a hipBLASLt tuning table
+only when its version matches the installed library; otherwise it prefills on plain hipBLAS (about 45% slower for a 131K
+prompt), so keep the table and the library paired. Not worth trying (measured flat): `--kv-resident` changes, a prefill
+chunk above 32768, `--spec` above 4.
+
 ## Linux: verify timeouts while the kernel reclaims host memory (experimental workarounds)
 
 A `verify: timed out at layer N` or "no progress for 60 s" message does not by itself mean a kernel or handshake bug. Two
