@@ -1050,7 +1050,9 @@ void softcap(float* x, size_t n, float cap, void* stream) {
 }
 
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream) {
-    mul_sigmoid_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(acc, g, n, g_stride, one_gate);
+    for (int r = 0; r < rows; r += 65535)   // a grid has at most 65535 rows, and 4,096 tokens have 16 heads each
+        mul_sigmoid_kernel<<<dim3(grid(n, 256), std::min(65535, rows - r)), 256, 0, cs(stream)>>>(
+            acc + size_t(r) * n, g + size_t(r) * g_stride, n, g_stride, one_gate);
 }
 
 void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
