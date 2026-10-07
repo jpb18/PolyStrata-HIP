@@ -78,14 +78,12 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 | 规格 | 写回答 | 读提示 |
 | --- | ---: | ---: |
 | **3.0BIT** | 57-59 tokens/s | 784-785 tokens/s |
-| **UD-IQ2_XXS**（旧版引擎） | 33 tokens/s | 347 tokens/s |
-| **REAP50-Q3_K_M**（旧版引擎） | 27 tokens/s | 384 tokens/s |
+| **UD-IQ2_XXS** | 40-44 tokens/s | 1,020 tokens/s |
+| **REAP50-Q3_K_M** | 56-62 tokens/s | 1,250 tokens/s |
 
 </td></tr>
 </table>
 
-UD-IQ2_XXS 和 REAP50-Q3_K_M 这两行是用旧版引擎测的，没有重测：它们的文件已经不在测试机上了。用那两版引擎时，3.0BIT
-写回答每秒 37 和 27 个 token，读提示每秒 286 和 312 个。
 同一台电脑上用 llama.cpp 跑 3.0BIT 的文件，写回答每秒 26 个 token，读提示每秒约 265 个。GLM 5.3 Flash 比
 其他几个模型大得多，这张卡的 32 GB 显存只放得下它约五分之一的专家，所以写得慢一些。
 测了什么、怎么测的：[docs/GLM.md](docs/GLM.md#what-it-was-measured-on)。

@@ -390,7 +390,9 @@ cause was not found.
 The README's numbers are this benchmark with one long prompt, `--prompt-tokens 24000`, which comes to 28,000 to
 31,000 tokens by the models' tokenizers, twice each. The three new models ran as setup installed them, and held to
 8 GB as above but through the server, with the picture encoder on the CPU, where setup puts it for a card under
-16 GB, and a profile of the run's own that a first run had started. GLM ran from its hand-written config.
+16 GB, and a profile of the run's own that a first run had started. GLM's three sizes ran from hand-written
+configs: 24 threads, the profile the repository ships for the size after a first run's counts, and for 3.0bit
+the draft block, which the other two files carry.
 
 | Model | Card | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -401,6 +403,8 @@ The README's numbers are this benchmark with one long prompt, `--prompt-tokens 2
 | Gemma 4 26B-A4B | whole model on it | 31,211 | 5.7 to 5.8 | 5,529 to 5,710 | 272 to 276 | 96 | 100% |
 | | held to 8 GB | | 6.8 to 7.0 | 4,640 to 4,726 | 134 to 138 | 48 | 27% to 41% |
 | GLM 5.3 Flash 3.0bit | 32 GB | 28,354 | 36.2 to 36.3 | 784 to 785 | 57 to 59 | 49 to 51 | 49% to 52% |
+| GLM 5.3 Flash UD-IQ2_XXS | 32 GB | 28,354 | 27.8 | 1,023 | 40 to 44 | 37 to 39 | 49% to 52% |
+| GLM 5.3 Flash REAP50-Q3_K_M | 32 GB | 28,354 | 22.7 | 1,252 | 56 to 62 | 50 to 51 | 57% to 64% |
 
 That morning, before the last four changes to reading a prompt ([What was tuned](#what-was-tuned)), the three
 new models read this prompt at 3,835 to 3,860 tokens/s with the whole model on the card and at 3,063 to 3,417

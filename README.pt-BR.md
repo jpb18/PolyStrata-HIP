@@ -82,14 +82,12 @@ Medido para o PolyStrata numa estação de trabalho, com um prompt de 28K tokens
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
 | **3.0BIT** | 57-59 tokens/s | 784-785 tokens/s |
-| **UD-IQ2_XXS** (build anterior) | 33 tokens/s | 347 tokens/s |
-| **REAP50-Q3_K_M** (build anterior) | 27 tokens/s | 384 tokens/s |
+| **UD-IQ2_XXS** | 40-44 tokens/s | 1,020 tokens/s |
+| **REAP50-Q3_K_M** | 56-62 tokens/s | 1,250 tokens/s |
 
 </td></tr>
 </table>
 
-As linhas UD-IQ2_XXS e REAP50-Q3_K_M são de builds anteriores do motor e não foram medidas de novo: os arquivos
-delas não estão mais no PC de teste. Com essas duas builds, o 3.0BIT escrevia 37 e 27 tokens/s e lia 286 e 312.
 No mesmo PC, o llama.cpp escreveu 26 tokens/s com o arquivo 3.0BIT e leu cerca de 265. O GLM 5.3 Flash é um modelo
 muito maior que os outros, e só cerca de um quinto dos experts dele cabe nos 32 GB desta placa, por isso
 ele escreve mais devagar. O que foi medido e como: [docs/GLM.md](docs/GLM.md#what-it-was-measured-on) (em inglês).

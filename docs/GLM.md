@@ -63,12 +63,23 @@ such a tie.
 The RAM is setup's estimate: the experts the card does not hold, and 10 GB beside them. Without `--model` setup
 takes the first size whose estimate the PC meets.
 
-REAP50-Q3_K_M on the machine above, with that earlier build: 27.4 tokens/s, and prompts of 3,059, 11,673 and
-29,069 tokens read at 493, 448 and 384 tokens/s. The card held 20.8 GiB of its experts, 1,869 of 6,048. It was
-not run again: its file is no longer on the test machine. Neither is UD-IQ2_XXS's, which another earlier build
-read the 29,069-token prompt with at 347 tokens/s and wrote 33 after it; in that session 3.0BIT read it at 286
-and wrote 37. Against llama-server of the llama.cpp
-fork the file was made for, on a prompt of 1,678 tokens, the first 63 tokens were the same.
+The other two sizes on the machine above, measured like the table at the top, twice each. Both files carry
+their own draft block.
+
+REAP50-Q3_K_M writes a 400-token answer at 61 tokens/s and 42 to 49 after the long prompts, and reads prompts
+of 3,059, 11,673 and 29,069 tokens at 1,001 to 1,004, 1,254 to 1,259 and 1,207 to 1,209 tokens/s. The card
+holds 20.0 GiB of its experts, 1,802 of 6,192. By the README's test it reads 28,354 tokens at 1,252 tokens/s,
+with the first token after 22.7 s, and writes a short chat at 56 to 62. Against llama-server of the llama.cpp
+fork the file was made for, on a prompt of 1,678 tokens, the first 63 tokens were the same; that was an
+earlier build, and it was not compared again.
+
+UD-IQ2_XXS writes the 400-token answer at 44 to 45 tokens/s and 34 to 47 after the long prompts, and reads the
+three prompts at 776 to 783, 1,004 to 1,024 and 973 to 983. The card holds 18.5 GiB of its experts, about
+2,610 of 12,384. By the README's test it reads the 28,354 tokens at 1,023 tokens/s, with the first token after
+27.8 s, and writes a short chat at 40 to 44.
+
+An earlier build read the 29,069-token prompt at 384 tokens/s with REAP50-Q3_K_M and at 347 with UD-IQ2_XXS,
+and wrote 27 and 33.
 
 ## Install
 
