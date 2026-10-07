@@ -1,5 +1,7 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
 #include "strata/core/expert_source.hpp"
+#include "strata/core/foresight_swap.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -3029,7 +3031,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     kd = 2;                        // multi-GPU: the second GPU computes it
                 } else if (helper_holds(e)) {
                     // left to the helper: kind -1 until RemoteExperts::begin() claims the row (see above)
+                } else if (d.fs != nullptr && d.fs->take(d.layers, e, ptr)) {
+                    kd = 0;                        // Foresight: a landed swap-space slot holds it - a GPU group like a hit
                 } else {
+                    if (d.fs != nullptr) d.fs->note_miss(d.src, d.layers, e);
                     if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64) {
                         const uint8_t* src = d.src->pinned(d.layers, e) ? d.src->blob(d.layers, e) : nullptr;
                         if (src != nullptr) {
@@ -4011,6 +4016,214 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
     // Pointer arithmetic into resident memory.  No fault, no copy, no mapping - which is the entire point of
     // this class over `FileExpertSource`.
     return base_ + strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
+}
+
+}  // namespace strata::core
+
+// ---- Foresight swap space (see include/strata/core/foresight_swap.hpp) ------------------------------------------
+namespace strata::core {
+
+bool ForesightSwap::init(int slots_per_layer, int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
+                         const std::vector<int>& devices, std::string& err) {
+    slots = slots_per_layer;
+    n_layers = layers;
+    n_expert = experts;
+    const size_t ns = (size_t) (layers * slots);
+    slot.reset(new Slot[ns]);
+    where.assign((size_t) (layers * experts), -1);
+    miss_cnt.assign((size_t) (layers * experts), 0);
+    miss_at.assign((size_t) (layers * experts), 0);
+    layer_card = card_of_layer;
+    layer_dev.resize((size_t) layers);
+    card_dev = devices;
+    card_stream.assign(devices.size(), nullptr);
+    card_mem.assign(devices.size(), nullptr);
+    card_round.assign(devices.size(), ~0ull);
+    card_used.assign(devices.size(), 0);
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    for (size_t c = 0; c < devices.size(); ++c) {
+        uint64_t bytes = 0;
+        for (int64_t l = 0; l < layers; ++l)
+            if (card_of_layer[(size_t) l] == (int) c) bytes += (uint64_t) slots * (uint64_t) lay.blob_bytes(l);
+        if (bytes == 0) continue;
+        const OnDevice on(devices[c]);
+        cudaStream_t s = nullptr;
+        if (cudaMalloc(&card_mem[c], bytes) != cudaSuccess ||
+            cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess) {
+            cudaGetLastError();
+            err = "cannot allocate " + std::to_string(bytes >> 20) + " MiB on CUDA" + std::to_string(devices[c]) +
+                  " (raise --vram-reserve-mib by about that much)";
+            return false;
+        }
+        card_stream[c] = s;
+        uint64_t off = 0;
+        for (int64_t l = 0; l < layers; ++l) {
+            if (card_of_layer[(size_t) l] != (int) c) continue;
+            layer_dev[(size_t) l] = devices[c];
+            const uint64_t bb = (uint64_t) lay.blob_bytes(l);
+            for (int s2 = 0; s2 < slots; ++s2) {
+                Slot& sl = slot[(size_t) (l * slots + s2)];
+                sl.dptr = (unsigned long long) ((uint8_t*) card_mem[c] + off);
+                sl.bytes = bb;
+                cudaEvent_t ev = nullptr;
+                if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
+                    cudaGetLastError();
+                    err = "cannot create the copy events";
+                    return false;
+                }
+                sl.ev = ev;
+                off += bb;
+            }
+        }
+    }
+    filler_ = std::thread([this] { fill_loop(); });
+    return true;
+}
+
+ForesightSwap::~ForesightSwap() {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        stop_ = true;
+    }
+    cv_.notify_all();
+    if (filler_.joinable()) filler_.join();
+    for (size_t c = 0; c < card_dev.size(); ++c) {
+        const OnDevice on(card_dev[c]);
+        if (card_stream[c]) cudaStreamSynchronize((cudaStream_t) card_stream[c]);
+        if (card_mem[c]) cudaFree(card_mem[c]);
+        if (card_stream[c]) cudaStreamDestroy((cudaStream_t) card_stream[c]);
+    }
+    if (slot)
+        for (int64_t i = 0; i < n_layers * slots; ++i)
+            if (slot[(size_t) i].ev) cudaEventDestroy((cudaEvent_t) slot[(size_t) i].ev);
+}
+
+void ForesightSwap::fill_loop() {
+    int cur_dev = -1;
+    for (;;) {
+        int64_t idx;
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_.wait(lk, [&] { return stop_ || !queue_.empty(); });
+            if (stop_) return;
+            idx = queue_.front();
+            queue_.pop_front();
+        }
+        Slot& sl = slot[(size_t) idx];
+        const int64_t l = idx / slots;
+        const int dev = layer_dev[(size_t) l];
+        if (dev != cur_dev) { cudaSetDevice(dev); cur_dev = dev; }
+        cudaStream_t s = (cudaStream_t) card_stream[(size_t) layer_card[(size_t) l]];
+        if (cudaMemcpyAsync((void*) sl.dptr, sl.src, sl.bytes, cudaMemcpyHostToDevice, s) != cudaSuccess ||
+            cudaEventRecord((cudaEvent_t) sl.ev, s) != cudaSuccess) {
+            cudaGetLastError();
+            if (!failed.exchange(true)) std::fprintf(stderr, "strata serve: foresight swap: a copy failed - swap space off\n");
+            continue;   // never marked issued: the slot is never used
+        }
+        sl.issued.store(true, std::memory_order_release);
+    }
+}
+
+bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr) {
+    const int s = where[(size_t) (layer * n_expert + expert)];
+    if (s < 0) return false;
+    Slot& sl = slot[(size_t) (layer * slots + s)];
+    if (!sl.ready) {
+        if (!sl.loading || !sl.issued.load(std::memory_order_acquire)) { ++pending; return false; }
+        const cudaError_t q = cudaEventQuery((cudaEvent_t) sl.ev);
+        if (q != cudaSuccess) {
+            if (q != cudaErrorNotReady) cudaGetLastError();
+            ++pending;
+            return false;
+        }
+        sl.ready = true;
+        sl.loading = false;
+    }
+    sl.last_ref = completed.load(std::memory_order_acquire);
+    ptr = sl.dptr;
+    ++hits;
+    return true;
+}
+
+void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) {
+    if (failed.load(std::memory_order_relaxed)) return;
+    const size_t key = (size_t) (layer * n_expert + expert);
+    if (where[key] >= 0) return;                        // already on its way
+    const uint64_t now = completed.load(std::memory_order_acquire);
+    if (admit > 1) {
+        if (now > miss_at[key] + 4) miss_cnt[key] = 0;
+        miss_at[key] = now;
+        if (miss_cnt[key] < 255) ++miss_cnt[key];
+        if (miss_cnt[key] < admit) return;
+    }
+    const int c = layer_card[(size_t) layer];
+    if (card_round[(size_t) c] != now) { card_round[(size_t) c] = now; card_used[(size_t) c] = 0; }
+    if (card_used[(size_t) c] >= budget) { ++over_budget; return; }
+    if (src == nullptr || !src->pinned(layer, expert)) return;   // async copies need the pinned arena
+    const uint8_t* b = src->blob(layer, expert);
+    if (b == nullptr) return;
+    int best = -1;
+    uint64_t best_ref = ~0ull;
+    for (int s = 0; s < slots; ++s) {   // an empty slot, else the one used longest ago that no window can still read
+        Slot& sl = slot[(size_t) (layer * slots + s)];
+        if (sl.loading) continue;
+        if (sl.expert < 0) { best = s; break; }
+        if (sl.last_ref + (uint64_t) depth > now) continue;
+        if (sl.last_ref < best_ref) { best_ref = sl.last_ref; best = s; }
+    }
+    if (best < 0) { ++busy; return; }
+    Slot& sl = slot[(size_t) (layer * slots + best)];
+    if (sl.expert >= 0) where[(size_t) (layer * n_expert + sl.expert)] = -1;
+    sl.expert = expert;
+    sl.ready = false;
+    sl.loading = true;
+    sl.issued.store(false, std::memory_order_relaxed);
+    sl.src = b;
+    sl.last_ref = now;
+    where[key] = (int16_t) best;
+    ++card_used[(size_t) c];
+    ++copies;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        queue_.push_back(layer * slots + best);
+    }
+    cv_.notify_one();
+}
+
+std::string ForesightSwap::report() const {
+    char buf[256];
+    std::snprintf(buf, sizeof buf, "foresight swap: %llu experts served from the swap space, %llu copies, %llu not landed "
+                                   "yet, %llu no free slot, %llu over budget",
+                  (unsigned long long) hits, (unsigned long long) copies, (unsigned long long) pending,
+                  (unsigned long long) busy, (unsigned long long) over_budget);
+    return buf;
+}
+
+ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
+                                       const std::vector<int>& devices) {
+    const char* v = std::getenv("STRATA_FS_SLOTS");
+    const int slots = v ? std::atoi(v) : 0;
+    if (slots <= 0) return nullptr;
+    if (const char* dp = std::getenv("STRATA_VERIFY_DEVICE_PLAN"); dp && std::atoi(dp) != 0) {
+        std::fprintf(stderr, "strata serve: foresight swap: off beside STRATA_VERIFY_DEVICE_PLAN (the device would plan "
+                             "resident layers without the host)\n");
+        return nullptr;
+    }
+    auto* f = new ForesightSwap();
+    auto env_int = [](const char* name, int def, int lo) { const char* e = std::getenv(name); const int x = e ? std::atoi(e) : def; return x < lo ? lo : x; };
+    f->budget = env_int("STRATA_FS_BUDGET", 32, 1);
+    f->admit = env_int("STRATA_FS_ADMIT", 1, 1);
+    f->depth = env_int("STRATA_FS_DEPTH", 4, 2);
+    std::string err;
+    if (!f->init(std::min(slots, 64), layers, experts, card_of_layer, devices, err)) {
+        std::fprintf(stderr, "strata serve: foresight swap: %s - swap space off\n", err.c_str());
+        delete f;
+        return nullptr;
+    }
+    std::fprintf(stderr, "strata serve: foresight swap: %d slots per layer on %zu card(s), up to %d copies per card and "
+                         "window, admit after %d miss(es), reuse after %d windows\n",
+                 f->slots, devices.size(), f->budget, f->admit, f->depth);
+    return f;
 }
 
 }  // namespace strata::core
