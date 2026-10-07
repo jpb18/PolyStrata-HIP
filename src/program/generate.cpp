@@ -8388,7 +8388,10 @@ int main(int argc, char** argv) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld %s %.1f\n", gi * GS + t, (long long) sl.produced, fin, ms);
                         sl.active = false;
-                        sl.cached = false;   // the pipeline's pad rows: a pipelined slot is not reused as a cache
+                        // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
+                        // drafts): its state is final once its last window has left the last stage.  A later group window whose pad
+                        // row writes this slot clears the flag (below, where the group starts), so a stale state is never reused
+                        sl.cached = o.prompt_cache > 0 && !sl.img;
                     } else {
                         sl.x = y;
                         sl.p += 1;
