@@ -107,7 +107,7 @@ int main() {
         cache.put(image({9, 8, 7}));
         check(cache.size() == 2 && cache.slots() == 4, "slots() reports the configured limit");
         const size_t both = cache.bytes();
-        check(cache.evict_oldest());
+        check(cache.evict_oldest(), "evict_oldest reports an eviction");
         check(cache.size() == 1 && cache.evictions() == 1, "evict_oldest drops exactly one, oldest first");
         check(cache.best(a, {}, true).tokens == 0 && cache.best(b, {}, true).tokens == 3,
               "the oldest conversation went, the newest stayed");
