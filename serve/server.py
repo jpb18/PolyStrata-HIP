@@ -214,6 +214,25 @@ SESSION_WAIT_MAX_S = 3600
 PP_CHUNK_MAX = 32768
 PP_FLOOR_TOK_S = 50.0
 PP_SLACK = 3.0
+# Reads that had no timeout (#1317).  A blocking read of the image encoder's pipe or of the engine's READY line that
+# never returned held the request turn for good: the engine then sat idle in its command loop, so no watchdog could
+# fire and every later request queued behind it (the "lost step" class of #481).  Generous on purpose: a cold model
+# load, a slow disk or a slow CPU encode is not a hang.  Only a process that says nothing at all for this long is
+# ended; the next request starts it again.
+# STRATA_ENGINE_READY_S / STRATA_VISION_READY_S / STRATA_VISION_ENCODE_S override them (0 = wait for ever, as before).
+
+
+def _timeout_env(name: str, default: float) -> float | None:
+    try:
+        v = float(os.environ.get(name, default))
+    except ValueError:
+        v = default
+    return None if v <= 0 else v
+
+
+VISION_READY_S = _timeout_env("STRATA_VISION_READY_S", 300.0)
+VISION_ENCODE_S = _timeout_env("STRATA_VISION_ENCODE_S", 300.0)
+ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -611,7 +630,23 @@ class StrataEngine:
         self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         contain(self.proc)                               # ends with the server, however it ends (Windows)
-        for line in self.proc.stdout:
+        # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
+        # stays for _pump (one reader at a time)
+        ready_q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._ready_pump, args=(self.proc, ready_q), daemon=True).start()
+        ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
+        timed_out = False
+        while True:
+            left = None if ready_deadline is None else ready_deadline - time.monotonic()
+            if left is not None and left <= 0:
+                timed_out = True
+                break
+            try:
+                line = ready_q.get(timeout=left)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
             if line.startswith("INFO "):
                 for kv in line.split()[1:]:
                     k, _, v = kv.partition("=")
@@ -623,6 +658,11 @@ class StrataEngine:
                 break
         loading.set()
         if self.max_context <= 0:
+            if timed_out:                               # still loading, or hung: end it, so the turn is not held for good
+                try:
+                    self.proc.kill()
+                except OSError:
+                    pass
             try:                                        # its pipes and our handle on its log (the log stays)
                 self.proc.wait(timeout=5)
                 self.proc.stdin.close()
@@ -631,7 +671,9 @@ class StrataEngine:
                     self.log.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else "") +
+            why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s" if timed_out else
+                   "the engine exited before it was ready")
+            raise RuntimeError(why + (f" (see {log})" if log else "") +
                                start_failure_hint(log, log_start) + start_log_tail(log, log_start))
         self.known_ctx = self.max_context   # survives a failed restart: requests keep their limit and restart it
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
@@ -758,6 +800,22 @@ class StrataEngine:
         self.unloaded = True
 
     RESTART_RETRY_S = 15.0   # between the tries of restart(): a dying engine's VRAM may take a while to come back
+
+    @staticmethod
+    def _ready_pump(proc, out: queue.Queue) -> None:
+        """The engine's first lines up to READY, for a read that can time out; None when its output closed first."""
+        done = False
+        try:
+            for line in proc.stdout:
+                out.put(line)
+                if line.startswith("READY"):
+                    done = True
+                    return
+        except (OSError, ValueError):                   # the pipe closed under us (the engine was killed)
+            pass
+        finally:
+            if not done:
+                out.put(None)
 
     def restart(self, tries: int = 3):
         """Start the engine again (the same command) after it died; the new process has its own line queue.
@@ -1689,7 +1747,11 @@ class Vision:
                           stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1, env=env,
                           cwd=self.dir)
         contain(self.proc)
-        line = self.proc.stdout.readline()
+        try:
+            line = self._readline(VISION_READY_S, "the vision encoder did not start")
+        except RuntimeError as e:                       # silent for VISION_READY_S: it was ended, and it is not left half-started
+            self.proc, self.stopped = None, True
+            raise RuntimeError(str(e)) from None
         if not line.startswith("READY"):
             proc, self.proc = self.proc, None
             self.stopped = True
@@ -1700,6 +1762,28 @@ class Vision:
                 pass
             raise RuntimeError("the vision encoder did not start: " + line.strip())
         self.stopped = False
+
+    def _readline(self, timeout: float, what: str) -> str:
+        """One line from the encoder, waiting at most `timeout` s (#1317).  On a timeout the encoder is killed, so the
+        next request starts a fresh one, and the read raises RuntimeError instead of holding the request turn."""
+        proc = self.proc
+        got: queue.Queue = queue.Queue()
+
+        def read():
+            try:
+                got.put(proc.stdout.readline())
+            except (OSError, ValueError):               # killed under the read
+                got.put("")
+
+        threading.Thread(target=read, daemon=True).start()
+        try:
+            return got.get(timeout=timeout)
+        except queue.Empty:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise RuntimeError(f"{what}: it said nothing for {timeout:.0f} s") from None
 
     def alive(self) -> bool:
         return self.proc is not None and not self.stopped and self.proc.poll() is None
@@ -1827,7 +1911,11 @@ class Vision:
             try:
                 self.proc.stdin.write(f"ENC {img.name} {out.name}\n")      # relative to the encoder's cwd (#480)
                 self.proc.stdin.flush()
-                line = self.proc.stdout.readline().strip()
+                try:
+                    line = self._readline(VISION_ENCODE_S, "the image could not be read").strip()
+                except RuntimeError as e:                 # silent for VISION_ENCODE_S: the encoder was ended (#1317)
+                    self.stopped = True                   # alive() is False, so the next request starts it again
+                    raise ValueError(str(e)) from None
             finally:                                                   # #352: also when the encoder's pipe is gone
                 img.unlink(missing_ok=True)
             if not line.startswith("OK"):

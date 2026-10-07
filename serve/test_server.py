@@ -4709,5 +4709,89 @@ class ClaudeCodeBillingStamp(unittest.TestCase):
         self.assertEqual(ids[1][:len(first) - 8], first[:len(first) - 8])   # all but the generation header
 
 
+class UntimedReads(unittest.TestCase):
+    """#1317: a read of the engine's READY line or of the image encoder's pipe that never returns held the request
+    turn for good.  Each now has a timeout; a process that stays silent is ended and the read raises."""
+
+    def test_engine_that_never_says_ready_is_ended(self):
+        import serve.server as server
+        fake = "import time\nprint('INFO engine=0.0.0', flush=True)\ntime.sleep(600)\n"
+        with tempfile.TemporaryDirectory() as d:
+            script = Path(d) / "fake_strata.py"
+            script.write_text(fake, encoding="utf-8")
+            real = server.subprocess.Popen
+            procs = []
+
+            def popen(cmd, **kw):
+                procs.append(real([sys.executable, str(script), *cmd[1:]], **kw))
+                return procs[-1]
+            with mock.patch.object(server.subprocess, "Popen", popen), \
+                    mock.patch.object(server, "ENGINE_READY_S", 1.0), \
+                    mock.patch.object(server, "narrate_start", lambda *a, **k: None):
+                t0 = time.monotonic()
+                with self.assertRaises(RuntimeError) as cm:
+                    StrataEngine("strata", [])
+            self.assertLess(time.monotonic() - t0, 30)
+            self.assertIn("did not report READY within 1 s", str(cm.exception))
+            procs[0].wait(10)                                   # killed, not left running
+            self.assertIsNotNone(procs[0].poll())
+
+    class Silent:
+        """A pipe whose readline blocks until the test lets go (or the encoder is killed)."""
+        def __init__(self):
+            self.release = threading.Event()
+            self.killed = False
+
+        def readline(self):
+            self.release.wait(30)
+            return ""
+
+        def kill(self):
+            self.killed = True
+            self.release.set()
+
+    def test_vision_encode_read_times_out(self):
+        import serve.server as server
+        silent = self.Silent()
+        v = server.Vision.__new__(server.Vision)
+        v.dir, v.lock, v.cache = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}
+        v.stopped = False
+        v.proc = SimpleNamespace(stdin=io.StringIO(), stdout=silent, kill=silent.kill, poll=lambda: 1 if silent.killed else None)
+        try:
+            with mock.patch.object(server, "VISION_ENCODE_S", 0.3), \
+                    mock.patch.object(server.Vision, "load", return_value=b""),                     mock.patch.object(server.Vision, "normalize", return_value=b"png"):
+                with self.assertRaises(ValueError) as cm:
+                    v.encode("x")
+            self.assertIn("said nothing for", str(cm.exception))
+            self.assertTrue(silent.killed)                      # ended: the next request starts a fresh one
+            self.assertFalse(v.alive())
+            self.assertEqual(list(v.dir.glob("*.img")), [])     # the temporary image is removed
+        finally:
+            shutil_rmtree(v.dir)
+
+    def test_vision_ready_read_times_out(self):
+        import serve.server as server
+        silent = self.Silent()
+        proc = SimpleNamespace(stdin=io.StringIO(), stdout=silent, kill=silent.kill, poll=lambda: None)
+        v = server.Vision.__new__(server.Vision)
+        v.spawn = (["strata-vision"], None, None)
+        v.dir = Path(tempfile.mkdtemp(prefix="strata-vision-test-"))
+        try:
+            with mock.patch.object(server, "popen", lambda *a, **k: proc), mock.patch.object(server, "contain"),                     mock.patch.object(server, "VISION_READY_S", 0.3):
+                with self.assertRaises(RuntimeError) as cm:
+                    v._start()
+            self.assertIn("did not start", str(cm.exception))
+            self.assertTrue(silent.killed)
+            self.assertFalse(v.alive())
+        finally:
+            shutil_rmtree(v.dir)
+
+    def test_a_vision_answer_in_time_is_unchanged(self):
+        import serve.server as server
+        v = server.Vision.__new__(server.Vision)
+        v.proc = SimpleNamespace(stdout=SimpleNamespace(readline=lambda: "OK 7 1 1 1\n"))
+        self.assertEqual(v._readline(5.0, "x"), "OK 7 1 1 1\n")
+
+
 if __name__ == "__main__":
     unittest.main()
