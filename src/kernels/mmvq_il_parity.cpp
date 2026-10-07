@@ -224,6 +224,12 @@ int check_tables() {
                 if (a != 0 && a != 1 && a != 2 && a != 4) { ++bad; std::printf("FAIL table: rows %d
 ", a); }
             }
+    // Volta has its own table (PR 1401): Q6_K at 2 columns, 2560 rows -> 1 row a warp; the Ampere table says 0 there
+    if (native_mmvq_il_rows_for(70, 14, 2, 2560) != 1 || native_mmvq_il_rows_for(86, 14, 2, 2560) != 0) {
+        ++bad;
+        std::printf("FAIL table: the sm_70 table is not the V100's
+");
+    }
     if (native_mmvq_il_rows_for(89, 99, 2, 2560) != 0 || native_mmvq_il_rows_for(89, 12, 5, 2560) != 0) {
         ++bad;
         std::printf("FAIL table: an unknown type or ncols must be 0
