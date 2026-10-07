@@ -4138,6 +4138,21 @@ bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr)
         }
         sl.ready = true;
         sl.loading = false;
+        if (verify) {   // test mode: the bytes the GPU will read must be the expert's own
+            std::vector<uint8_t> back((size_t) sl.bytes);
+            const OnDevice on(layer_dev[(size_t) layer]);
+            const bool same = cudaMemcpy(back.data(), (const void*) sl.dptr, (size_t) sl.bytes, cudaMemcpyDeviceToHost) ==
+                                  cudaSuccess && std::memcmp(back.data(), sl.src, (size_t) sl.bytes) == 0;
+            if (same) ++verify_ok;
+            else {
+                cudaGetLastError();
+                ++verify_bad;
+                sl.ready = false;                           // never serve it
+                where[(size_t) (layer * n_expert + expert)] = -1;
+                sl.expert = -1;
+                return false;
+            }
+        }
     }
     sl.last_ref = completed.load(std::memory_order_acquire);
     ptr = sl.dptr;
@@ -4191,12 +4206,14 @@ void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) 
 }
 
 std::string ForesightSwap::report() const {
-    char buf[256];
+    char buf[320];
     std::snprintf(buf, sizeof buf, "foresight swap: %llu experts served from the swap space, %llu copies, %llu not landed "
-                                   "yet, %llu no free slot, %llu over budget",
+                                   "yet, %llu no free slot, %llu over budget%s",
                   (unsigned long long) hits, (unsigned long long) copies, (unsigned long long) pending,
-                  (unsigned long long) busy, (unsigned long long) over_budget);
-    return buf;
+                  (unsigned long long) busy, (unsigned long long) over_budget, verify ? "" : "");
+    std::string r = buf;
+    if (verify) r += ", verified " + std::to_string(verify_ok) + " ok / " + std::to_string(verify_bad) + " BAD";
+    return r;
 }
 
 ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
@@ -4214,6 +4231,7 @@ ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const st
     f->budget = env_int("STRATA_FS_BUDGET", 32, 1);
     f->admit = env_int("STRATA_FS_ADMIT", 1, 1);
     f->depth = env_int("STRATA_FS_DEPTH", 4, 2);
+    f->verify = env_int("STRATA_FS_VERIFY", 0, 0) != 0;
     std::string err;
     if (!f->init(std::min(slots, 64), layers, experts, card_of_layer, devices, err)) {
         std::fprintf(stderr, "strata serve: foresight swap: %s - swap space off\n", err.c_str());

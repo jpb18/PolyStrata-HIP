@@ -14,7 +14,8 @@
 // plan resident layers without the host).
 //
 // Switches: STRATA_FS_SLOTS (per layer and card), STRATA_FS_BUDGET (copies per card per finished window, default 32),
-// STRATA_FS_ADMIT (misses within the last 4 windows before an expert is copied, default 1), STRATA_FS_DEPTH.
+// STRATA_FS_ADMIT (misses within the last 4 windows before an expert is copied, default 1), STRATA_FS_DEPTH,
+// STRATA_FS_VERIFY=1 (test mode: every slot is read back and compared with its source the first time it is used).
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -58,6 +59,8 @@ struct ForesightSwap {
     std::atomic<bool> failed{false};
     // counters (dispatch thread)
     uint64_t hits = 0, copies = 0, busy = 0, over_budget = 0, pending = 0;
+    bool verify = false;                     ///< STRATA_FS_VERIFY=1: read every landed slot back and compare (slow, tests)
+    uint64_t verify_ok = 0, verify_bad = 0;
 
     /// Allocates the slots on each card and starts the filler.  `card_of_layer[l]` indexes `devices` (CUDA ids).
     bool init(int slots_per_layer, int64_t layers, int64_t experts, const std::vector<int>& card_of_layer,
