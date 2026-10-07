@@ -4869,7 +4869,12 @@ int main(int argc, char** argv) {
     // input predicts its experts and their pages are warmed meanwhile.  It only warms pages; STRATA_LOOKAHEAD=0 is
     // the A/B arm, STRATA_LOOKAHEAD_K the experts per token (default 10).
     strata::core::RouterLookahead lookahead;
-    if (srcp == &src && src.warms() && [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::atoi(v) != 0; }()) {
+    // #1348, one prefetch design: with the Foresight swap space on (STRATA_FS_SLOTS) the look-ahead also runs on the pinned-RAM
+    // tiers, where there are no pages to warm, and feeds its predictions to the swap space (STRATA_FS_AHEAD=0: not)
+    const bool fs_ahead = srcp != nullptr && [] { const char* v = std::getenv("STRATA_FS_SLOTS"); return v != nullptr && std::atoi(v) > 0; }() &&
+                          [] { const char* v = std::getenv("STRATA_FS_AHEAD"); return v == nullptr || std::atoi(v) != 0; }();
+    if (srcp != nullptr && ((srcp == &src && src.warms()) || fs_ahead) &&
+        [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::atoi(v) != 0; }()) {
         std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
         bool ok = true;
         for (int64_t l = 0; l < g.n_layers && ok; ++l) {
@@ -4881,11 +4886,11 @@ int main(int argc, char** argv) {
             ok = cudaMemcpy(routers[(size_t) l].data(), w->data, (size_t) w->bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
         }
         const char* kv = std::getenv("STRATA_LOOKAHEAD_K");
-        if (ok && lookahead.start(std::move(routers), g.n_embd, g.n_expert, kv ? std::atoi(kv) : 10, &src, err)) {
+        if (ok && lookahead.start(std::move(routers), g.n_embd, g.n_expert, kv ? std::atoi(kv) : 10, srcp, err, fs_ahead)) {
             drive.d.lookahead = &lookahead;
             if (const char* dv = std::getenv("STRATA_IO_PREFETCH_DEPTH"); dv != nullptr && std::atoi(dv) > 0)
                 lookahead.set_depth(std::atoi(dv));
-            else if (src.io_prefetch())
+            else if (srcp == &src && src.io_prefetch())
                 lookahead.set_depth(2);
             std::fprintf(stderr, "strata generate: routing-aware prefetch of the file tier on (the next layer's router)\n");
         } else {
@@ -7261,7 +7266,13 @@ int main(int argc, char** argv) {
             for (int64_t l = 0; l < g.n_layers; ++l) card[(size_t) l] = multi_gpu ? stage_of(l) : 0;
             fs_swap.reset(strata::core::foresight_swap_from_env(g.n_layers, g.n_expert, card, devs));
             drive.d.fs = fs_swap.get();
+            if (fs_swap && drive.d.lookahead != nullptr) lookahead.set_foresight(fs_swap.get());
         }
+        // the look-ahead thread must not touch the swap space once it is gone (declared after it: destroyed first)
+        struct FsDetach {
+            strata::core::RouterLookahead* la;
+            ~FsDetach() { la->set_foresight(nullptr); }
+        } fs_detach{&lookahead};
         drive.d.pcie_num = std::max(0, std::min(256, (int) (o.pcie_frac * 256.0 + 0.5)));
         const bool all_experts_resident = !host_res.empty() &&
             std::all_of(host_res.begin(), host_res.end(), [](int32_t r) { return r >= 0; });

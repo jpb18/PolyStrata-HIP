@@ -205,6 +205,7 @@ protected:
 /// next - takes each token's top `k` experts, drops the ones the GPU cache or the RAM copy holds, and asks the
 /// source to `warm` the rest, so their pages are on the way while layer l computes.  A prediction only warms pages:
 /// it never changes which experts are computed or how.
+struct ForesightSwap;
 class RouterLookahead {
 public:
     RouterLookahead() = default;
@@ -213,7 +214,11 @@ public:
     RouterLookahead& operator=(const RouterLookahead&) = delete;
     /// `routers[l]`: layer l's ffn_gate_inp as BF16 bits, n_expert rows of n_embd.
     bool start(std::vector<std::vector<uint16_t>> routers, int64_t n_embd, int64_t n_expert, int k, ExpertSource* src,
-               std::string& err);
+               std::string& err, bool allow_cold_source = false);
+    /// One prefetch design (#1348): the predicted experts that no cache holds also go to the Foresight swap space
+    /// (ForesightSwap::predict), which copies them to VRAM ahead of the layer.  nullptr detaches it (waits for a
+    /// prediction in progress), so the swap space can be destroyed first.
+    void set_foresight(ForesightSwap* fs);
     /// Layer `layer`'s MoE input for `n_tok` tokens (host floats): predict and warm layer + 1.  Never waits: a
     /// prediction still running for an earlier layer makes this one skip.
     void submit(int64_t layer, const float* x, int64_t n_tok, const int32_t* host_res);
@@ -238,6 +243,7 @@ private:
     bool quit_ = false, pending_ = false, busy_ = false;
     int64_t layer_ = -1, n_tok_ = 0;
     const int32_t* host_res_ = nullptr;
+    ForesightSwap* fs_ = nullptr;                   ///< (under mu_)
     std::vector<float> x_;
     std::atomic<int64_t> predicted_{0}, skipped_{0};
     std::atomic<uint64_t> busy_us_{0};

@@ -1848,9 +1848,20 @@ RouterLookahead::~RouterLookahead() {
     if (thread_.joinable()) thread_.join();
 }
 
+void RouterLookahead::set_foresight(ForesightSwap* fs) {
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (fs != nullptr || !busy_) { fs_ = fs; return; }
+        }
+        // detaching: a prediction in progress finishes first (the swap space is about to go away)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 bool RouterLookahead::start(std::vector<std::vector<uint16_t>> routers, int64_t n_embd, int64_t n_expert, int k,
-                            ExpertSource* src, std::string& err) {
-    if (src == nullptr || !src->warms()) { err = "RouterLookahead: the expert source does not warm"; return false; }
+                            ExpertSource* src, std::string& err, bool allow_cold_source) {
+    if (src == nullptr || (!allow_cold_source && !src->warms())) { err = "RouterLookahead: the expert source does not warm"; return false; }
     if (n_embd % 8 != 0) { err = "RouterLookahead: n_embd is not a multiple of 8"; return false; }
     for (const auto& r : routers)
         if (r.size() != (size_t) (n_embd * n_expert)) { err = "RouterLookahead: a router of another shape"; return false; }
@@ -1885,6 +1896,7 @@ void RouterLookahead::run() {
     for (;;) {
         int64_t layer, nt;
         const int32_t* host_res;
+        ForesightSwap* fs;
         {
             std::unique_lock<std::mutex> lk(mu_);
             cv_.wait(lk, [&] { return quit_ || pending_; });
@@ -1894,6 +1906,7 @@ void RouterLookahead::run() {
             layer = layer_;
             nt = n_tok_;
             host_res = host_res_;
+            fs = fs_;
         }
         const auto t0 = std::chrono::steady_clock::now();
         const int64_t layer0 = layer;
@@ -1941,6 +1954,8 @@ void RouterLookahead::run() {
             }
         }
         src_->warm(layer, want.data(), (int64_t) want.size());
+        if (fs != nullptr && dj == 0)   // the next layer only: a deeper guess is too often wrong to spend a copy on
+            for (const int64_t e : want) fs->predict(src_, layer, (int32_t) e);
         predicted_.fetch_add((int64_t) want.size(), std::memory_order_relaxed);
         }
         busy_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
@@ -4150,6 +4165,7 @@ void ForesightSwap::fill_loop() {
 }
 
 bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr) {
+    std::lock_guard<std::mutex> smu_lk(smu_);
     const int s = where[(size_t) (layer * n_expert + expert)];
     if (s < 0) return false;
     Slot& sl = slot[(size_t) (layer * slots + s)];
@@ -4186,11 +4202,22 @@ bool ForesightSwap::take(int64_t layer, int32_t expert, unsigned long long& ptr)
 }
 
 void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) {
+    std::lock_guard<std::mutex> smu_lk(smu_);
+    request_locked(src, layer, expert, false);
+}
+
+void ForesightSwap::predict(ExpertSource* src, int64_t layer, int32_t expert) {
+    if (layer < 0 || layer >= n_layers || expert < 0 || expert >= n_expert) return;
+    std::lock_guard<std::mutex> smu_lk(smu_);
+    request_locked(src, layer, expert, true);
+}
+
+void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t expert, bool predicted_copy) {
     if (failed.load(std::memory_order_relaxed)) return;
     const size_t key = (size_t) (layer * n_expert + expert);
     if (where[key] >= 0) return;                        // already on its way
     const uint64_t now = completed.load(std::memory_order_acquire);
-    if (admit > 1) {
+    if (admit > 1 && !predicted_copy) {
         if (now > miss_at[key] + 4) miss_cnt[key] = 0;
         miss_at[key] = now;
         if (miss_cnt[key] < 255) ++miss_cnt[key];
@@ -4229,6 +4256,7 @@ void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) 
     where[key] = (int16_t) best;
     ++card_used[(size_t) c];
     ++copies;
+    if (predicted_copy) ++predicted;
     {
         std::lock_guard<std::mutex> lk(mu_);
         queue_.push_back(layer * slots + best);
@@ -4237,11 +4265,12 @@ void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) 
 }
 
 std::string ForesightSwap::report() const {
+    std::lock_guard<std::mutex> smu_lk(const_cast<std::mutex&>(smu_));
     char buf[320];
-    std::snprintf(buf, sizeof buf, "foresight swap: %llu experts served from the swap space, %llu copies, %llu not landed "
-                                   "yet, %llu no free slot, %llu over budget%s",
-                  (unsigned long long) hits, (unsigned long long) copies, (unsigned long long) pending,
-                  (unsigned long long) busy, (unsigned long long) over_budget, verify ? "" : "");
+    std::snprintf(buf, sizeof buf, "foresight swap: %llu experts served from the swap space, %llu copies (%llu from the "
+                                   "router look-ahead), %llu not landed yet, %llu no free slot, %llu over budget%s",
+                  (unsigned long long) hits, (unsigned long long) copies, (unsigned long long) predicted,
+                  (unsigned long long) pending, (unsigned long long) busy, (unsigned long long) over_budget, verify ? "" : "");
     std::string r = buf;
     if (verify) r += ", verified " + std::to_string(verify_ok) + " ok / " + std::to_string(verify_bad) + " BAD";
     return r;
