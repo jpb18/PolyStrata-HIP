@@ -2141,6 +2141,61 @@ def hip_visible(cfg: dict) -> list[int]:
     return gpu_list(cfg)
 
 
+def gpu_speed_scores(indices: list[int]) -> dict[int, float] | None:
+    """Multiprocessors x max clock for each NVIDIA card, numbered as nvidia-smi numbers them (the CUDA driver API,
+    which every driver ships: no toolkit needed); None when it cannot say for every one of them."""
+    code = (
+        "import ctypes,sys,os\n"
+        "os.environ['CUDA_DEVICE_ORDER']='PCI_BUS_ID'\n"
+        "lib=ctypes.CDLL('nvcuda.dll' if os.name=='nt' else 'libcuda.so.1')\n"
+        "assert lib.cuInit(0)==0\n"
+        "n=ctypes.c_int()\n"
+        "assert lib.cuDeviceGetCount(ctypes.byref(n))==0\n"
+        "for i in range(n.value):\n"
+        "    d=ctypes.c_int()\n"
+        "    assert lib.cuDeviceGet(ctypes.byref(d),i)==0\n"
+        "    sm=ctypes.c_int(); mhz=ctypes.c_int()\n"
+        "    lib.cuDeviceGetAttribute(ctypes.byref(sm),16,d)\n"
+        "    lib.cuDeviceGetAttribute(ctypes.byref(mhz),13,d)\n"
+        "    print(i,sm.value,mhz.value)\n")
+    try:
+        env = dict(os.environ)
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30, env=env)
+        got = {}
+        for line in r.stdout.splitlines():
+            i, sm, khz = (int(x) for x in line.split())
+            got[i] = float(sm) * float(khz)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return got if all(i in got and got[i] > 0 for i in indices) else None
+
+
+def ordered_gpus(cfg: dict, scores=None) -> list[int]:
+    """#1352: the cards of a layer split in the order the engine stages them.  With "layer_split": "auto" (the
+    default) the faster card goes LAST - the last stage runs the head, the draft layer and the verify, and a prompt
+    chunk waits on it (the reporter's 4070 Ti SUPER + 5060 Ti: a 6K prompt took 50 s one way round and 15 s the
+    other); "faster" is multiprocessors x max clock.  Equal cards keep the config's order (the sort is stable), and
+    so does anything we cannot measure.  "gpu_order": "as_given" keeps the config's order whatever the cards.  A
+    manual "layer_split" ("24") also keeps it: the user placed the layers.  scores: {index: score} (tests); None asks
+    the driver."""
+    gl = gpu_list(cfg)
+    if len(gl) < 2 or cfg.get("gpu_order") == "as_given" or cfg.get("backend") == "hip":
+        return gl
+    args = cfg.get("args") or []
+    if "--peer-device" in args or "--layer-split" in args or layer_split_value(cfg) != "auto":
+        return gl
+    sc = scores if scores is not None else gpu_speed_scores(gl)
+    if not sc or any(i not in sc for i in gl):
+        return gl
+    out = sorted(gl, key=lambda i: sc[i])
+    if out != gl:
+        print(f"[strata] layer split: card order {','.join(map(str, out))} (the faster card last; "
+              f'"gpu_order": "as_given" keeps {",".join(map(str, gl))}, #1352)', flush=True)
+    return out
+
+
 def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
@@ -2149,7 +2204,7 @@ def child_env(cfg: dict) -> dict:
         env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in hip_visible(cfg))
     elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
