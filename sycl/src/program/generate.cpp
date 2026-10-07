@@ -2723,7 +2723,7 @@ int main(int argc, char **argv) try {
     rewritten.
     */
     if (const dpct::err0 ce =
-            DPCT_CHECK_ERROR(arena = (void *)sycl::malloc_device(
+            DPCT_CHECK_ERROR(arena = (void *)strata::malloc_device_guarded(
                                  pool_bytes, dpct::get_in_order_queue()));
         ce != 0) {
         // #486: the arena is the first large allocation and its size does not depend on the context, so what is
@@ -3154,7 +3154,7 @@ int main(int argc, char **argv) try {
             skip_s = skip;
         }
         void* arena_s = nullptr;
-        if (DPCT_CHECK_ERROR(arena_s = (void *)sycl::malloc_device(
+        if (DPCT_CHECK_ERROR(arena_s = (void *)strata::malloc_device_guarded(
                                  pool_s, dpct::get_in_order_queue())) != 0 ||
             !st.wt.load(o.pack, arena_s, pool_s, err,
                         skip_s.empty() ? nullptr : &skip_s)) {
@@ -4511,6 +4511,7 @@ int main(int argc, char **argv) try {
     // admission finds no room and every non-profiled expert stays a CPU miss.  That is what makes the profile
     // the policy rather than a hint.
     int64_t prefilled = 0;
+    std::function<void(const char*)> verify_all_slots;   // STRATA_VERIFY_ALL_SLOTS (debug), set by the pipelined fill
     if (!profile.empty() && srcp != nullptr) {
         // #369 (dag08): per layer, a full layer skips only its own pairs - each layer takes its hottest experts until
         // its range is full (one full layer used to end the whole fill, leaving most layers empty)
@@ -4580,6 +4581,51 @@ int main(int argc, char **argv) try {
                 return 1;
             }
             prefilled = (int64_t) fills.size();
+            if (std::getenv("STRATA_VERIFY_ALL_SLOTS") != nullptr) {   // debug: every filled slot read back and compared with the GGUF
+                auto fl = std::make_shared<std::vector<Fill>>(fills);
+                verify_all_slots = [&, fl, blob_cap](const char* when) {
+                    sycl::queue& vq = dpct::get_in_order_queue();
+                    vq.wait();
+                    std::vector<uint8_t> want_b(blob_cap), got_b(blob_cap);
+                    int64_t bad = 0, first_bad = -1;
+                    for (size_t i = 0; i < fl->size(); ++i) {
+                        const Fill& f = (*fl)[i];
+                        const size_t nb = (size_t) lay.blob_bytes(f.l);
+                        if (!gguf_src.read_into(f.l, f.e, want_b.data(), blob_cap)) { ++bad; continue; }
+                        vq.memcpy(got_b.data(), xcache.device_slot(f.slot), nb).wait();
+                        if (std::memcmp(want_b.data(), got_b.data(), nb) != 0) {
+                            if (first_bad < 0) first_bad = (int64_t) i;
+                            ++bad;
+                            size_t nd = 0, fd = nb, ld = 0;
+                            for (size_t x = 0; x < nb; ++x)
+                                if (want_b[x] != got_b[x]) { ++nd; if (fd == nb) fd = x; ld = x; }
+                            if (std::getenv("STRATA_VERIFY_FIND") != nullptr && bad <= 2 && fd + 4160 < nb) {   // whose blob is the wrong data?
+                                const uint8_t* probe = got_b.data() + fd + 4096;
+                                std::vector<uint8_t> other(blob_cap);
+                                for (size_t j = 0; j < fl->size(); ++j) {
+                                    const Fill& g2 = (*fl)[j];
+                                    if (!gguf_src.read_into(g2.l, g2.e, other.data(), blob_cap)) continue;
+                                    const size_t nb2 = (size_t) lay.blob_bytes(g2.l);
+                                    const void* hit = memmem(other.data(), nb2, probe, 64);
+                                    if (hit != nullptr)
+                                        std::fprintf(stderr, "    the wrong data at byte %zu is expert (layer %d, expert %d), slot %d (fill %zu), byte %zu of its blob\n",
+                                                     fd + 4096, (int) g2.l, (int) g2.e, (int) g2.slot, j, (size_t) ((const uint8_t*) hit - other.data()));
+                                }
+                            }
+                            if (const char* dd = std::getenv("STRATA_VERIFY_DUMP"); dd != nullptr && bad == 1) {
+                                const std::string base = std::string(dd) + "/slot" + std::to_string(f.slot);
+                                if (FILE* fo = std::fopen((base + ".got").c_str(), "wb")) { std::fwrite(got_b.data(), 1, nb, fo); std::fclose(fo); }
+                                if (FILE* fo = std::fopen((base + ".want").c_str(), "wb")) { std::fwrite(want_b.data(), 1, nb, fo); std::fclose(fo); }
+                            }
+                            std::fprintf(stderr, "strata generate: STRATA_VERIFY_ALL_SLOTS (%s): fill %zu (layer %d expert %d) slot %d at %p: %zu of %zu bytes differ, first at %zu, last at %zu\n",
+                                         when, i, (int) f.l, (int) f.e, (int) f.slot, (const void*) xcache.device_slot(f.slot), nd, nb, fd, ld);
+                        }
+                    }
+                    std::fprintf(stderr, "strata generate: STRATA_VERIFY_ALL_SLOTS (%s): %lld of %zu slots differ from the GGUF (first at fill %lld)\n",
+                                 when, (long long) bad, fl->size(), (long long) first_bad);
+                };
+                verify_all_slots("after the fill");
+            }
         }
         // #286: an unbuffered file tier reads the pairs in batches of 64, the next batch while this one is copied
         std::future<void> ahead;
@@ -5113,6 +5159,7 @@ int main(int argc, char **argv) try {
 
     mem_mark("the expert cache and the graphs");
     std::fprintf(stderr, "strata generate: session is up (engine %s)\n", STRATA_VERSION);
+    if (verify_all_slots) verify_all_slots("session up");
     auto run_head = [&](void* stream) -> bool {
         if (!native_head.loaded())
             return strata::core::lm_head(wt, g, ss.block, d_logits, stream, err);
