@@ -1645,7 +1645,7 @@ static bool gr_fast() {
 #if defined(__HIPCC__)
     return true;
 #else
-    return cur_dev_volta();   // CUDA: on Volta (V100-SXM2: 50.9 -> 46.7 us a read at T 1, bitwise); elsewhere opt-in
+    { const char* v = std::getenv("STRATA_SM70_TABLE"); return cur_dev_volta() && v != nullptr && std::atoi(v) != 0; }   // PR 1401: opt-in   // CUDA: on Volta (V100-SXM2: 50.9 -> 46.7 us a read at T 1, bitwise); elsewhere opt-in
 #endif
 }
 #else

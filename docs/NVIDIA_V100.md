@@ -81,3 +81,11 @@ sm_80.
   0.1.40 with the P100 as helper cache). One reporter's numbers each; this page's own kernel measurements are V100 only.
 - Volta's tensor cores take FP16 only: a model's BF16 weights are converted, and a weight outside FP16's range would saturate (none did in
   the check above).
+
+## The decode kernels measured on a V100 (opt-in: `STRATA_SM70_TABLE=1`)
+
+The interleaved 2-4 column matvec with a Volta rows table, expert mode 8 and the latency-hidden norm/up (bitwise the default
+kernels' output, GPU work per verify window 22.8 -> 21.2 ms on a V100-SXM2 in the contributor's measurement) are used on
+sm_70 only when `STRATA_SM70_TABLE=1` is set. They become the default once the contributor has confirmed them on a V100 with
+the 0.1.41 code. Without the variable sm_70 runs what 0.1.40.3 ran. The single switches (`STRATA_EXP_MODE`, `STRATA_MMVQ_IL`,
+`STRATA_GR_FAST`) still apply on top.
