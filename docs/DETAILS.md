@@ -548,7 +548,8 @@ the OS file cache, so loading again takes seconds while that RAM is not needed e
 16 GB with Q2_0 in the low-RAM mode: unloading takes ~0.3 s, and a request to an unloaded model answered after
 4.6 s (text) or 14.7 s (a picture, image encoder on the CPU).
 
-**Giving part of the VRAM back while it keeps serving (#533, opt-in, one NVIDIA GPU).** With `"vram_elastic": true`
+**Giving part of the VRAM back while it keeps serving (#533, opt-in, one NVIDIA GPU; every request and answer:
+[VRAM_ELASTIC.md](VRAM_ELASTIC.md)).** With `"vram_elastic": true`
 in the config (the engine flag `--vram-elastic`), the expert cache is allocated in 512 MiB segments
 (`"vram_segment_mib"`), and `POST /v1/vram` with `{"reserve_mib": 8000}` shrinks it between requests until that much
 VRAM is free for another program; `{"reserve_mib": null}` grows it back towards its full size, keeping the reserve
