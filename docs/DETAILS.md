@@ -122,7 +122,7 @@ Max+ 395 (Radeon 8060S, Linux, ROCm 7.14.1, the iGPU alone), UD-Q4_K_XL, `--spec
 layer), temperature 1.0 / top_p 0.95 / top_k 20, a 1.3K-token prompt and 512 output tokens, 12-13 requests per arm:
 drafts accepted 52.8% -> 59.9%, tokens per verify window 2.65 -> 2.88, output 41.1 -> 44.9 tokens/s (+9%); a window
 costs the same (draft 8.8 -> 9.1 ms of 64). `sampler_parity` checks the pick against a host reference on every sampled
-path, and that its frequencies match the softmax.
+path, and that its frequencies match the softmax. On an RTX 3060 (IQ3_XXS, `--spec 4 --mtp`, temperature 1.0 / top_p 0.95 / top_k 20, 12 interleaved pairs of 200-token story and code requests) `STRATA_SPEC_COUPLED=1` raised the accepted drafts from 62.1% to 66.9% and adding `STRATA_SPEC_GUMBEL=1` to 68.0%, but decode speed did not move beyond the run-to-run spread (median 43.3 tok/s with coupled alone, 42.8 with Gumbel as well): try it on your own card before relying on it.
 
 **The draft layer's tokens (0.1.27, `--draft-vocab`):** the MTP draft layer can only propose tokens from a subset
 of the vocabulary (`mtp/rt/draft_vocab.bin`). Since 0.1.27 the subset includes every Chinese, Japanese and Korean
