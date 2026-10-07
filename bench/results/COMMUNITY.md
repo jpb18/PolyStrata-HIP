@@ -78,3 +78,5 @@ Notes:
 | [2026-10-06-community-rtxpro-v0140](2026-10-06-community-rtxpro-v0140/) | RTX PRO 6000 | Q4 / Q8 (MTP and ngram runs) | see the README | see the README | 0.1.40 | #1137 |
 | [2026-10-06-community-2x-rx-7900-gre](2026-10-06-community-2x-rx-7900-gre/) | 2x RX 7900 GRE (gfx1100) | layer split, #848 / #854 | see the README | see the README | 0.1.40 | #1140 |
 | [2026-10-06-community-2x-p100](2026-10-06-community-2x-p100/) | 2x Tesla P100 16 GB | Flash-Next IQ3_S, 128K | see the README | see the README | 0.1.40 | #1157 |
+| [2026-10-06-community-rtx4090-opt-ins](2026-10-06-community-rtx4090-opt-ins/) | RTX 4090 | IQ3_S 140K / IQ3_XXS 200K opt-ins and tool-call hotfix | see the README | see the README | 0.1.38 to 0.1.40 | #1158 |
+| [2026-10-06-community-rtx4090-toolcall-hotfix](2026-10-06-community-rtx4090-toolcall-hotfix/) | RTX 4090 | IQ3_S 140K / IQ3_XXS 200K opt-ins and tool-call hotfix | see the README | see the README | 0.1.38 to 0.1.40 | #1158 |
