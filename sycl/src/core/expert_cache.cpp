@@ -77,8 +77,7 @@ size_t device_free_bytes() try {
     if (const unsigned long long own = own_drm_local_bytes(); own > 0 && total_b > own && total_b - own < free_b) {
         static std::atomic<bool> said{false};
         if (free_b + (16ull << 20) >= total_b && !said.exchange(true))
-            std::fprintf(stderr, "strata: the driver reports the whole card as free although this process holds %.2f GiB of it (Arc A750/i915 does this); sizing from the DRM fdinfo instead
-", (double) own / 1073741824.0);
+            std::fprintf(stderr, "strata: the driver reports the whole card as free although this process holds %.2f GiB of it (Arc A750/i915 does this); sizing from the DRM fdinfo instead\n", (double) own / 1073741824.0);
         free_b = (size_t) (total_b - own);
     }
 #if defined(__linux__) && !defined(STRATA_HIP_GFX906)   // (the gfx906 compat layer has no cudaDevAttrIntegrated; that GPU is discrete)
