@@ -86,3 +86,4 @@ Notes:
 | [2026-10-06-community-rtx3090-egpu-64gb](2026-10-06-community-rtx3090-egpu-64gb/) | RTX 3090 eGPU, 64 GB RAM | IQ2_XS vs IQ3_XXS | see the README | see the README | 0.1.40 | #1199 |
 | [2026-10-06-community-r9-2x-rtx-2080-ti](2026-10-06-community-r9-2x-rtx-2080-ti/) | 2x RTX 2080 Ti (R9) | see README | see the README | see the README | 0.1.40 | #1225 |
 | [2026-10-06-community-2x-rtx-pro-4500-engine-0.1.40.1](2026-10-06-community-2x-rtx-pro-4500-engine-0.1.40.1/) | 2x RTX PRO 4500 Blackwell | Swift IQ3_XXS | see the README | see the README | 0.1.40.1 | #1226 |
+| [2026-10-05-community-rtx5080-9900x3d](2026-10-05-community-rtx5080-9900x3d/) | RTX 5080, Ryzen 9 9900X3D | Coder IQ1_M and others | see the README | see the README | 0.1.40 | #1243 |
