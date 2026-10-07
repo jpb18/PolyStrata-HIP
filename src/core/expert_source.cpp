@@ -1142,6 +1142,8 @@ bool FileExpertSource::copy_from_files(int64_t layer, int64_t expert, uint8_t* d
     return true;
 }
 
+// Pinned stage buffers (PR 1237): whether they are the default is decided by the A/B in notes-141-cuda.md.
+#define STAGE_PIN_DEFAULT 0
 void FileExpertSource::StageBufFree::operator()(uint8_t* p) const noexcept {
     if (pinned) (void) cudaFreeHost(p);
     else delete[] p;
@@ -1178,8 +1180,10 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
         // Pinned, where the driver allows: a stage buffer is the source of the cache fill's cudaMemcpyAsync,
         // and a pageable source is staged through the driver's bounce buffer - an extra copy at a fraction of
         // the transfer rate, on the calling thread.  A failure falls back to pageable for this buffer.
+        // (STRATA_STAGE_PIN=0 keeps them pageable, as before.)
+        static const bool want_pin = [] { const char* v = std::getenv("STRATA_STAGE_PIN"); return STAGE_PIN_DEFAULT ? (v == nullptr || std::atoi(v) != 0) : (v != nullptr && std::atoi(v) != 0); }();
         void* p = nullptr;
-        const cudaError_t pin_err = cudaHostAlloc(&p, (size_t) stage_blob_, cudaHostAllocDefault);
+        const cudaError_t pin_err = want_pin ? cudaHostAlloc(&p, (size_t) stage_blob_, cudaHostAllocDefault) : cudaErrorNotSupported;
         const bool pinned = pin_err == cudaSuccess && p != nullptr;
         if (!pinned) (void) cudaGetLastError();   // the failed alloc's sticky error is ours, not the caller's
         uint8_t* raw = pinned ? (uint8_t*) p : new (std::nothrow) uint8_t[(size_t) stage_blob_];
@@ -1188,7 +1192,7 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
         if (pinned && !stage_pin_said_) {
             stage_pin_said_ = true;
             std::fprintf(stderr, "FileExpertSource: the stage buffers are pinned (cudaHostAlloc)\n");
-        } else if (!pinned && !stage_pin_failed_said_) {
+        } else if (!pinned && want_pin && !stage_pin_failed_said_) {
             stage_pin_failed_said_ = true;
             std::fprintf(stderr, "FileExpertSource: cudaHostAlloc failed for a stage buffer (%s) - pageable it is\n",
                          cudaGetErrorString(pin_err));
