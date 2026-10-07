@@ -607,10 +607,10 @@ class StrataEngine:
                 self.log.flush()
             except OSError:
                 pass
+        self.max_context = 0                             # before the new process is visible: never its predecessor's
         self.proc = popen("the Strata engine", [exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         contain(self.proc)                               # ends with the server, however it ends (Windows)
-        self.max_context = 0
         for line in self.proc.stdout:
             if line.startswith("INFO "):
                 for kv in line.split()[1:]:
@@ -1611,7 +1611,7 @@ class StrataEngine:
             pass
         finally:
             if self.proc.poll() is not None:
-                if self.pump is not None:
+                if self.pump is not None and self.pump.ident is not None:   # a restart can stop before starting it
                     self.pump.join(timeout=2)
                 try:
                     self.proc.stdin.close()             # buffered data may flush again after the engine has exited
