@@ -887,6 +887,13 @@ class StrataEngine:
         # extends: no conversation checkpoint for it (#830).  It still reuses a cached prefix.  Absent = as before.
         if sampling.get("strata_checkpoint") is False:
             keys += " ckpt=0"
+        # "strata_prefix" (resolved by Service.resolve_prefix to {"tokens": N}): the first N prompt tokens are a shared
+        # prefix - the engine pins the checkpoint there.  Absent or unresolved = as before.
+        prefix = sampling.get("strata_prefix")
+        if isinstance(prefix, dict):
+            pn = prefix.get("tokens")
+            if isinstance(pn, int) and not isinstance(pn, bool) and pn > 0:
+                keys += f" pin={pn}"
         return keys + StrataEngine.projection_key(sampling)
 
     @staticmethod
@@ -2899,7 +2906,7 @@ class Service:
                     content[n] = {"type": "text", "text": f"[image omitted: {why}]"}
         return fetched
 
-    def prepare(self, messages, tools, kwargs, max_new=None, force=None):
+    def prepare(self, messages, tools, kwargs, max_new=None, force=None, req=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the
         prompt; with thinking, Service.run writes it once the thinking is over."""
@@ -2974,7 +2981,83 @@ class Service:
             combined = combined_embeddings_path(self.vision.dir, sum(Path(p).stat().st_size for p, _ in encoded))
             self.embeddings.path = combined             # first, so a half-written one is found as well
             write_temporary(combined, [p for p, _ in encoded])
+        if req is not None and req.get("strata_prefix") is not None:
+            req["strata_prefix"] = self.resolve_prefix(req["strata_prefix"], messages, tools, kwargs, ids, bool(images))
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
+
+    PREFIX_END = "\u0001strata-prefix-end\u0001"          # marks where a message's shared part ends in the rendered prompt
+
+    def resolve_prefix(self, spec, messages, tools, kwargs, ids, has_images=False) -> dict:
+        """R1: `"strata_prefix"` marks the start of the prompt as a shared read-only prefix: a long document that many
+        short questions follow.  Three ways to say where it ends: `{"messages": K}` (the first K messages), `{"message":
+        I, "chars": N}` (the first N characters of message I's text: a document and its question in one message) or
+        `{"tokens": N}`.  The engine reads the prompt in two parts there, keeps the checkpoint at the boundary pinned
+        (never evicted) and does not park the branch it leaves, so N questions cost one prefix.  Returns
+        {"tokens": N} (what the engine's `pin=N` takes: always a prefix of the prompt's ids, the tokenizer's merge across
+        the boundary included), or {} when the prefix cannot be marked (said in the log: the request is never refused for
+        it).  A malformed field is a 400."""
+        keys = ("messages", "message", "chars", "tokens")
+        if (not isinstance(spec, dict) or not spec or any(k not in keys for k in spec) or
+                set(spec) not in ({"messages"}, {"tokens"}, {"message", "chars"})):
+            raise ValueError('strata_prefix: {"messages": K} (the first K messages), {"message": I, "chars": N} (the first '
+                             'N characters of message I) or {"tokens": N}')
+        for k, v in spec.items():
+            if not isinstance(v, int) or isinstance(v, bool) or v < (0 if k == "message" else 1):
+                raise ValueError(f"strata_prefix.{k}: a whole number ({'0' if k == 'message' else '1'} or more)")
+        if has_images:
+            print("[strata] strata_prefix ignored: the request has images", flush=True)
+            return {}
+        what = ",".join(f"{k}={v}" for k, v in spec.items())
+
+        def lcp(a, b):
+            n = 0
+            for x, y in zip(a, b):
+                if x != y:
+                    break
+                n += 1
+            return n
+
+        def head_ids(msgs):
+            """The ids the rendered `msgs` start with (a message's trailing marker cut at PREFIX_END when it is there)."""
+            marked, marked_tools, changed = mark_think_literals(msgs, tools, self.literals)
+            effort = kwargs.get("reasoning_effort")
+            off = kwargs.get("enable_thinking") is False        # render_prompt's rule for #458's effort_end
+            kw = ({k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
+                  if self.effort_end and (off or effort not in (None, "", "xhigh", "high")) else dict(kwargs))
+            kw["add_generation_prompt"] = False
+            text = self.template.render(marked, tools=marked_tools, **kw)
+            cut = text.find(self.PREFIX_END)
+            if cut >= 0:
+                text = text[:cut]
+            if changed:
+                text, plain = unmark_think_literals(text, self.literals)
+                return self.tok.encode(text, parse_special=True, plain=plain)
+            return self.tok.encode(text, parse_special=True)
+
+        if "tokens" in spec:
+            n = spec["tokens"]
+        elif "messages" in spec:
+            k = spec["messages"]
+            if k >= len(messages):
+                print(f"[strata] strata_prefix.messages={k} ignored: the request has {len(messages)} message(s) and the "
+                      "prefix must leave at least the last one", flush=True)
+                return {}
+            head = head_ids(messages[:k])
+            n = lcp(head, ids)
+        else:
+            i, chars = spec["message"], spec["chars"]
+            text = messages[i].get("content") if 0 <= i < len(messages) else None
+            if not isinstance(text, str) or chars > len(text):
+                print(f"[strata] strata_prefix ignored: message {i} has no text of {chars} characters", flush=True)
+                return {}
+            cut = messages[:i] + [{**messages[i], "content": text[:chars] + self.PREFIX_END}]
+            head = head_ids(cut)
+            n = lcp(head, ids)
+        if n < 1 or n >= len(ids) - 1:
+            print(f"[strata] strata_prefix {what} ignored: it leaves no usable prefix of the {len(ids)}-token prompt "
+                  f"(common start {n})", flush=True)
+            return {}
+        return {"tokens": n}
 
     def drop_embeddings(self) -> None:
         """Delete the combined image file prepare() wrote when no run() took it over (a run deletes its own as it
@@ -4541,7 +4624,7 @@ def make_handler(svc: Service):
                 raise ValueError("a forced tool_choice with MCP tools is not supported")
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -4716,12 +4799,12 @@ def make_handler(svc: Service):
             shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
             try:
                 try:
-                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0, req=req)
                 except ValueError:
                     if shown is tools:
                         raise
                     shown = tools                            # too long with the kept tools: the request as sent
-                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0, req=req)
             except ResponsesError:
                 raise
             except ValueError as e:                          # too long for the context, an image without vision
@@ -4755,7 +4838,7 @@ def make_handler(svc: Service):
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
