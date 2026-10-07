@@ -522,6 +522,83 @@ __global__ void idx_weigh_kernel(const float* __restrict__ dot, const float* __r
     score[tok * score_stride + p] = acc;
 }
 
+// A score as an integer: a higher score is a larger one, and -0 is +0, as the host compares them.
+__device__ __forceinline__ uint32_t idx_key(float s) {
+    const uint32_t b = __float_as_uint(s + 0.0f);
+    return b & 0x80000000u ? ~b : b | 0x80000000u;
+}
+
+// One value per thread summed over the block, as block_sum for counts.
+__device__ __forceinline__ int block_count(int x, int* part) {
+#pragma unroll
+    for (int o = WARP / 2; o > 0; o >>= 1) x += __shfl_xor_sync(0xffffffff, x, o, WARP);
+    if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = x;
+    __syncthreads();
+    int s = 0;
+    for (int k = 0; k < int(blockDim.x) / WARP; ++k) s += part[k];
+    __syncthreads();
+    return s;
+}
+
+// A token's n_top pools with the highest scores, the lower pool first among equals, as rows of its list in that
+// order, then the rows no pool has yet: what the host's partial sort makes of the scores.  One block of 256 a
+// token; a thread has a run of the token's pools.  The block's shared memory holds the chosen pools and then
+// their keys, n_top each.
+__global__ void idx_select_kernel(const float* __restrict__ score, int score_stride, int32_t* __restrict__ sel,
+                                  int sel_stride, int n_top, int kpool, long long pos) {
+    extern __shared__ uint32_t chosen[];
+    __shared__ int part[8], above[256], level[256];
+    const long long at = pos + blockIdx.x;
+    const int n_pool = int((at + 1) / kpool);
+    const float* s = score + size_t(blockIdx.x) * score_stride;
+    const int per = (n_pool + int(blockDim.x) - 1) / int(blockDim.x);
+    const int lo = threadIdx.x * per, hi = min(lo + per, n_pool);
+    // the cut: the largest key that n_top pools reach, a bit at a time
+    uint32_t cut = 0;
+    for (int b = 31; b >= 0; --b) {
+        const uint32_t c = cut | (1u << b);
+        int n = 0;
+        for (int i = lo; i < hi; ++i) n += idx_key(s[i]) >= c;
+        if (block_count(n, part) >= n_top) cut = c;
+    }
+    // the pools above the cut, and of those on it the lowest, in the order of the pools
+    int g = 0, e = 0;
+    for (int i = lo; i < hi; ++i) {
+        const uint32_t k = idx_key(s[i]);
+        g += k > cut;
+        e += k == cut;
+    }
+    above[threadIdx.x] = g;
+    level[threadIdx.x] = e;
+    __syncthreads();
+    int g0 = 0, e0 = 0, g_all = 0;   // in the threads before this one, and above the cut in all
+    for (int k = 0; k < int(blockDim.x); ++k) {
+        if (k < int(threadIdx.x)) g0 += above[k], e0 += level[k];
+        g_all += above[k];
+    }
+    const int need = n_top - g_all;
+    int out = g0 + min(e0, need);
+    for (int i = lo; i < hi; ++i) {
+        const uint32_t k = idx_key(s[i]);
+        if (k > cut || (k == cut && e0++ < need)) {
+            chosen[out] = i;
+            chosen[n_top + out++] = k;
+        }
+    }
+    __syncthreads();
+    // a chosen pool's place: behind those with a higher score and the lower pools with its own
+    for (int c = threadIdx.x; c < n_top; c += blockDim.x) {
+        const uint32_t mine = chosen[n_top + c];
+        int rank = 0;
+        for (int k = 0; k < n_top; ++k) rank += chosen[n_top + k] > mine || (chosen[n_top + k] == mine && k < c);
+        int32_t* row = sel + size_t(blockIdx.x) * sel_stride + size_t(rank) * kpool;
+        for (int j = 0; j < kpool; ++j) row[j] = int32_t(chosen[c]) * kpool + j;
+    }
+    if (threadIdx.x != 0) return;
+    int32_t* tail = sel + size_t(blockIdx.x) * sel_stride + size_t(n_top) * kpool;
+    for (long long p = (long long) n_pool * kpool; p <= at; ++p) *tail++ = int32_t(p);
+}
+
 __global__ void swiglu_clamp_kernel(const float* __restrict__ gate, const float* __restrict__ up,
                                     float* __restrict__ out, int n, float limit) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1053,6 +1130,12 @@ void idx_score(const float* q, const float* w, const float* cache, float* score,
     idx_score_kernel<<<dim3(n_pool, rows), WARP, 0, cs(stream)>>>(q, w, cache, score, score_stride, dim, n_head,
                                                                  kpool, (long long) pos,
                                                                  1.0f / std::sqrt(float(dim) * float(n_head)));
+}
+
+void idx_select(const float* score, int score_stride, int32_t* sel, int sel_stride, int n_top, int kpool,
+                int64_t pos, int rows, void* stream) {
+    idx_select_kernel<<<rows, 256, 2 * size_t(n_top) * sizeof(uint32_t), cs(stream)>>>(
+        score, score_stride, sel, sel_stride, n_top, kpool, (long long) pos);
 }
 
 void idx_score_batch(void* blas, const float* q, const float* w, const float* cache, float* score, int score_stride,

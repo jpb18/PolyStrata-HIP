@@ -377,21 +377,24 @@ void Glm5Next::kda(Block& B, int n) {
 }
 
 // For the n tokens from row `first` of a call whose first token is at `at`: the n_top pools with the highest
-// indexer score, expanded to their rows, then the tail that is in no pool yet.  The scores come to the host for
-// the selection, which costs a wait per layer; it only runs past top_k tokens.
+// indexer score, expanded to their rows, then the tail that is in no pool yet.  A few tokens' scores come to the
+// host for the selection, which costs a wait per layer; it only runs past top_k tokens.
 void Glm5Next::dsa_select(Block& B, int64_t at, int first, int n) {
     const int64_t pos = at + first;
     const int n_top = idx_top_k_ / kpool_;
     lin(B.idx_q_b, qr_ + (size_t) first * q_rank_, iq_, n);
     lin(B.idx_proj, xn_ + (size_t) first * n_embd_, iw_, n,
         (const uint8_t*) xq_ + (size_t) first * kernels::native_q8_1_bytes(n_embd_));
-    // a prompt batch through cuBLAS, with the attention's scratch for the products; a few tokens with the kernel
-    // that gives a token the same bits in any company
-    if (n >= kStageRows)
+    // A prompt batch stays on the card: its products through cuBLAS, with the attention's scratch for them, and
+    // its selection in a kernel.  A few tokens take the kernel that gives a token the same bits in any company,
+    // and the host selects.
+    if (n >= kStageRows) {
         idx_score_batch(blas_, iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, akeys_,
                         akeys_n_, st_);
-    else
-        idx_score(iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
+        idx_select(score_, score_stride_, sel_, sel_stride_, n_top, kpool_, pos, n, st_);
+        return;
+    }
+    idx_score(iq_, iw_, B.idx, score_, score_stride_, idx_dim_, idx_heads_, kpool_, pos, n, st_);
     ck(cudaMemcpyAsync(h_score_, score_, (size_t) n * score_stride_ * sizeof(float), cudaMemcpyDeviceToHost,
                        cs(st_)),
        "indexer scores");

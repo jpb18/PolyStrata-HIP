@@ -95,6 +95,12 @@ void idx_score(const float* q, const float* w, const float* cache, float* score,
 void idx_score_batch(void* blas, const float* q, const float* w, const float* cache, float* score, int score_stride,
                      int dim, int n_head, int kpool, int64_t pos, int rows, float* work, size_t work_floats,
                      void* stream);
+/// For each of the tokens from position `pos`, from its scores: the n_top pools with the highest, the lower pool
+/// first among equals, as their kpool rows each in that order, then the rows that are in no whole pool yet.  A
+/// token's list starts sel_stride apart and takes n_top * kpool + kpool - 1 at most.  Every token has n_top
+/// whole pools or more.
+void idx_select(const float* score, int score_stride, int32_t* sel, int sel_stride, int n_top, int kpool,
+                int64_t pos, int rows, void* stream);
 
 /// out = silu(min(gate, limit)) * clamp(up, -limit, limit).
 void swiglu_clamp(const float* gate, const float* up, float* out, int n, float limit, void* stream);
