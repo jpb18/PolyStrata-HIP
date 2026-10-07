@@ -408,6 +408,7 @@ struct Options {
     bool graph_only = false;
     bool gpu_only_full = false;   ///< R0.3: pre + post + head, the true per-token GPU floor
     int pool_workers = 0;         ///< R2.2: 0 = "all physical cores minus the host's"; >0 overrides
+    int pool_tasks = 0;           ///< Batched CPU expert tasks per phase; 0 keeps the existing policy
     /// #272: the pool's core layout; `all` (the default) is the layout it always had, auto / p-cores are opt-in
     strata::kernels::cpu::PoolAffinity pool_affinity = strata::kernels::cpu::PoolAffinity::All;
     /// --host-core first|last (STRATA_HOST_CORE): the host thread's core (see HostCore in pool.hpp)
@@ -831,7 +832,8 @@ void usage() {
                  "                       position take all of them.  The default policy fills in arrival order\n"
                  "                       from one shared counter, so 256 slots went to ~26 layers of position 0\n"
                  "                       and measured **2.97%%**.  Per-layer, the same routing gives 21.4%% at 8\n"
-                 "                       slots/layer and 70.4%% at 64.\n"
+                 "                       slots/layer and 70.4%% at 64.  On a native pack, N is still the budget of N\n"
+                 "                       largest blobs; each layer's slots are that layer's own blob.\n"
                  "  --no-host-worker     R2.2: the A/B arm.  By default the HOST THREAD joins the drain, so the\n"
                  "                       pool is six threads on six cores instead of five plus an idle core;\n"
                  "                       this flag restores the five-worker form for comparison on `pool phases`.\n"
@@ -839,6 +841,8 @@ void usage() {
                  "                       except the one the host loop spins on (with --pool-affinity auto or\n"
                  "                       p-cores on a hybrid CPU: P-cores minus 1).  A sweep is how the pool's\n"
                  "                       deviation from `cpu_s2` is attributed.\n"
+                 "  --pool-tasks N       Batched CPU expert tasks per GU/Down phase (0..4096). Default 0 =\n"
+                 "                       3 per participating thread; positive counts are capped by row count.\n"
                  "  --host-core WHERE    The host thread's core: first (the default: the first physical core, as always) or\n"
                  "                       last (the last physical core, the workers on the others).  Windows sends a GPU's\n"
                  "                       interrupts to one logical processor, usually the first, and every copy that lands\n"
@@ -1654,6 +1658,16 @@ int main(int argc, char** argv) {
         else if (a == "--graph-only") o.graph_only = true;
         else if (a == "--gpu-only-full") o.gpu_only_full = true;
         else if (a == "--pool-workers") o.pool_workers = std::atoi(next("--pool-workers"));
+        else if (a == "--pool-tasks") {
+            const char* v = next("--pool-tasks");
+            char* end = nullptr;
+            const long tasks = std::strtol(v, &end, 10);
+            if (end == v || *end != '\0' || tasks < 0 || tasks > strata::kernels::cpu::ExpertPool::kMaxTasks) {
+                std::fprintf(stderr, "strata generate: --pool-tasks expects an integer in 0..4096 (0 = automatic)\n");
+                return 2;
+            }
+            o.pool_tasks = (int) tasks;
+        }
         else if (a == "--host-core") {
             o.host_core = next("--host-core");
             if (o.host_core != "first" && o.host_core != "last") {
@@ -4095,7 +4109,12 @@ int main(int argc, char** argv) {
 #endif
         srcp = &arena_src;
     }
-    strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker, o.pool_affinity);
+    strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker,
+                                        o.pool_affinity, o.pool_tasks);
+    std::fprintf(stderr, "strata generate: CPU pool tasks/phase: %d%s, participating threads: %d\n",
+                 o.pool_tasks ? o.pool_tasks : 3 * (pool.workers() + (pool.host_works() ? 1 : 0)),
+                 o.pool_tasks ? " (capped by rows)" : " (automatic)",
+                 pool.workers() + (pool.host_works() ? 1 : 0));
     if (pool.is_hybrid() && pool.affinity() != strata::kernels::cpu::PoolAffinity::All) {
         const char* aff_str = pool.affinity() == strata::kernels::cpu::PoolAffinity::PCores ? "p-cores" :
                               pool.affinity() == strata::kernels::cpu::PoolAffinity::All ? "all" : "auto";
@@ -4251,12 +4270,40 @@ int main(int argc, char** argv) {
             o.expert_cache = (int) fit;
         }
     }
-    // plan v0.3 P6: a native pack's blobs differ per layer, so with a profile its slots are sized per pair: the
-    // same VRAM holds ~30% more IQ3_XXS experts than slots of the largest blob would
-    // #369: not with --expert-cache-per-layer - its per-layer slot ranges ignore the profile rank a sized slot was cut
-    // for, so a layer's larger blob could land in a smaller slot: that mode keeps slots of the largest blob
+    // plan v0.3 P6: a native pack's blobs differ per layer, so the same VRAM holds more experts than slots of
+    // the largest blob would. The shared cache below sizes slots in profile order.
+    // #369: that list does not match --expert-cache-per-layer. A range is layer * quota + n, so a size cut for
+    // one layer can land in another layer's slot. Every expert in a layer is one size, so the per-layer list is
+    // `quota` copies of that layer's own blob, in layer order. `--expert-cache N` stays the budget of N largest
+    // blobs, and the quota is however many copies of every layer fit in it.
     std::vector<int64_t> sized_slots;
-    if (native_pack && o.expert_cache > 0 && !profile.empty() && !o.expert_cache_per_layer) {
+    uint64_t per_layer_bytes = 0;
+    if (native_pack && o.expert_cache > 0 && o.expert_cache_per_layer) {
+        const size_t free_b = strata::core::device_free_bytes();   // the same reading the shared-cache sizing uses
+        const auto& lay = strata::kernels::cpu::expert_layout();
+        const int asked = o.expert_cache;
+        const uint64_t budget = (uint64_t) asked * lay.max_blob;
+        size_t free_room = free_b > ((size_t) o.vram_reserve_mib << 20) ? free_b - ((size_t) o.vram_reserve_mib << 20) : 0;
+        const uint64_t cap = std::min<uint64_t>(budget, (uint64_t) free_room);
+        uint64_t sum = 0;
+        for (int64_t l = 0; l < g.n_layers; ++l)
+            sum += (lay.blob_bytes(l) + 255) / 256 * 256;
+        int64_t q = sum > 0 ? (int64_t) (cap / sum) : 0;
+        if (q > g.n_expert) q = g.n_expert;
+        if (q > 0) {
+            per_layer_bytes = sum;
+            sized_slots.reserve((size_t) q * (size_t) g.n_layers);
+            for (int64_t l = 0; l < g.n_layers; ++l) {
+                const int64_t b = (int64_t) lay.blob_bytes(l);
+                for (int64_t s = 0; s < q; ++s) sized_slots.push_back(b);
+            }
+            o.expert_cache = (int) sized_slots.size();
+            std::fprintf(stderr, "strata generate: per-layer slots use each layer's blob: %d uniform slots "
+                                 "(%.2f GiB) -> %d slots, %lld per layer (%.2f GiB)\n",
+                         asked, (double) budget / 1073741824.0, o.expert_cache, (long long) q,
+                         (double) ((uint64_t) q * per_layer_bytes) / 1073741824.0);
+        }
+    } else if (native_pack && o.expert_cache > 0 && !profile.empty()) {
         size_t free_b = 0, total_b = 0;
         free_b = strata::core::device_free_bytes(); (void) total_b;
         const auto& lay = strata::kernels::cpu::expert_layout();
@@ -4302,6 +4349,20 @@ int main(int argc, char** argv) {
         // keep the first `keep_bytes` of the cache (the profile's hottest experts first); false when nothing is left
         auto shrink_to = [&](int64_t keep_bytes) -> bool {
             if (keep_bytes <= 0) { o.expert_cache = 0; sized_slots.clear(); return false; }
+            if (per_layer_bytes > 0) {
+                // Cutting the list short would put one layer's blob in the next layer's range.
+                const auto& lay = strata::kernels::cpu::expert_layout();
+                int64_t q = keep_bytes / (int64_t) per_layer_bytes;
+                if (q > g.n_expert) q = g.n_expert;
+                sized_slots.clear();
+                if (q <= 0) { o.expert_cache = 0; return false; }
+                for (int64_t l = 0; l < g.n_layers; ++l) {
+                    const int64_t b = (int64_t) lay.blob_bytes(l);
+                    for (int64_t s = 0; s < q; ++s) sized_slots.push_back(b);
+                }
+                o.expert_cache = (int) sized_slots.size();
+                return true;
+            }
             if (!sized_slots.empty()) {
                 int64_t used = 0;
                 size_t keep = 0;

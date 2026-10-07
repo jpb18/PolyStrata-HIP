@@ -113,6 +113,22 @@ inline bool force_pageable() {
     static const bool v = [] { const char* e = std::getenv("STRATA_TEST_PAGEABLE"); return e != nullptr && e[0] == '1'; }();
     return v;
 }
+// #1057: the Stager threads wait by sleeping (atomic wait, blocking-sync events) instead of a yield spin.  On Linux the
+// spinners starved a pinned host thread (DGX Spark IQ3_S 8K prompt 91 -> 1,222 tok/s with sleeping waits); on Windows
+// the 5070 read an 8K Q2_0 prompt 1.2% slower with them (1,469.5 -> 1,452 tok/s, 10 pairs), so they stay spinning
+// there.  Same output either way.  STRATA_STAGER_SLEEP=1/0 forces either.
+inline bool stager_sleep() {
+    static const bool v = [] {
+        const char* e = std::getenv("STRATA_STAGER_SLEEP");
+        if (e != nullptr && e[0] != '\0') return e[0] != '0';
+#if defined(_WIN32)
+        return false;
+#else
+        return true;
+#endif
+    }();
+    return v;
+}
 constexpr int RING_MAX = 1024;          // the arrays; the ring itself is ring_slots(), at most ring_cap()
 // The chunk size from which every expert streams: 1024 since 0.1.30 (was 2048).  Measured on the 5070, Q2_0 / IQ2_XS,
 // fixed cache: 1,500-token prompts 621 -> 785 / 612 -> 735 tok/s, 2,000 727 -> 934 / 712 -> 892, 4,000 (its last
@@ -360,7 +376,8 @@ struct Stager {
                 pageable[(size_t) i].resize(blob_bytes);
                 buf[i] = pageable[(size_t) i].data();
             }
-            if (cudaEventCreateWithFlags(&dma_done[i], cudaEventDisableTiming) != cudaSuccess) return false;
+            if (cudaEventCreateWithFlags(&dma_done[i], stager_sleep() ? (cudaEventDisableTiming | cudaEventBlockingSync)
+                                                                      : cudaEventDisableTiming) != cudaSuccess) return false;
         }
         cudaGetDevice(&device);
         for (int t = 0; t < nthreads; ++t) threads.emplace_back([this] { work(); });
@@ -391,8 +408,15 @@ struct Stager {
                 const int j = claim(seen);
                 if (j < 0) { active.fetch_sub(1, std::memory_order_acq_rel); break; }
                 const int b = j % kRing;
-                if (j >= kRing)   // job j - kRing's DMA from this buffer is queued
-                    while (issued.load(std::memory_order_acquire) <= j - kRing) std::this_thread::yield();
+                // The copies run ahead of the DMAs, so most of these threads spend most of a prompt waiting here: sleep
+                // (atomic wait, and a blocking-sync event below), not a yield spin - 32 spinners took every core
+                // (Linux; see stager_sleep for Windows).
+                if (j >= kRing) {   // job j - kRing's DMA from this buffer is queued
+                    if (stager_sleep())
+                        for (int i; (i = issued.load(std::memory_order_acquire)) <= j - kRing;) issued.wait(i);
+                    else
+                        while (issued.load(std::memory_order_acquire) <= j - kRing) std::this_thread::yield();
+                }
                 // and done - for a generation's first kRing jobs that is the previous generation's last DMA from
                 // the buffer, which nothing else waits for when a chunk ends without a sync (no MTP) or the DMA
                 // was a ring entry the routing skipped (an event never recorded returns at once)
@@ -441,11 +465,13 @@ struct Stager {
     void issued_one(int j, cudaStream_t copy) {
         cudaEventRecord(dma_done[j % kRing], copy);
         issued.store(j + 1, std::memory_order_release);
+        issued.notify_all();
     }
     /// No job is running after this (the end of a layer, or an early return in the middle of one).
     void finish() {
         head.store((uint64_t) gen << 32, std::memory_order_release);   // n = 0: nothing more to claim
         issued.store(1 << 30, std::memory_order_release);
+        issued.notify_all();
         while (active.load(std::memory_order_acquire) != 0) std::this_thread::yield();
     }
 };
