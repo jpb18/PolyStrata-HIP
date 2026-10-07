@@ -2626,8 +2626,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: no GPU is visible (%s) and this user cannot open /dev/kfd "
                                      "(permission denied): it is not another program holding the GPU. Add your user to "
                                      "the render and video groups - sudo usermod -aG render,video $USER - then log out "
-                                     "and in again
-", cudaGetErrorString(ce));
+                                     "and in again\n", cudaGetErrorString(ce));
                 return 1;
             }
         }
