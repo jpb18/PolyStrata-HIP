@@ -4,6 +4,8 @@
 //   gemm_launch [calls=2000]
 #include <sycl/sycl.hpp>
 #include <oneapi/mkl.hpp>
+#include <dpct/dpct.hpp>
+#include <dpct/blas_utils.hpp>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -36,8 +38,22 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             run(calls);
             const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / calls;
-            const double gflop = 2.0 * (double) s.n * (double) T * (double) s.k * 1e-9;
-            std::printf("%-20s T=%5lld: %7.1f us/call  (%6.1f TFLOP/s)\n", s.name, (long long) T, us, gflop / us * 1e-3 * 1e3 / 1e3);
+            auto* h = new dpct::blas::descriptor();
+            h->set_queue(&q);
+            const float alpha = 1.0f, beta = 0.0f;
+            auto run2 = [&](int cnt) {
+                for (int i = 0; i < cnt; ++i)
+                    dpct::blas::gemm(h, oneapi::mkl::transpose::trans, oneapi::mkl::transpose::nontrans, (int) s.n, (int) T, (int) s.k, &alpha, W,
+                                     dpct::library_data_t::real_half, (int) s.k, X, dpct::library_data_t::real_half, (int) s.k, &beta, Y,
+                                     dpct::library_data_t::real_float, (int) s.n, dpct::compute_type::f32);
+                q.wait();
+            };
+            run2(50);
+            const auto t1 = std::chrono::steady_clock::now();
+            run2(calls);
+            const double us2 = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t1).count() / calls;
+            delete h;
+            std::printf("%-20s T=%5lld: mkl %7.1f us/call   dpct::blas::gemm %7.1f us/call\n", s.name, (long long) T, us, us2);
         }
     }
     return 0;
