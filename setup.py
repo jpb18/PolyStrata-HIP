@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import glob
 import hashlib
 import json
 import math
@@ -1788,7 +1789,47 @@ STRIX_HALO_MIN_GB = 80         # UD-IQ4_XS keeps all of its experts in memory fr
 def strix_halo_recommends(gpu, ram) -> bool:
     """Is UD-IQ4_XS the recommended model here: a Strix Halo whose unified memory (the OS's RAM plus the BIOS carve-out)
     holds it - the model docs/STRIX_HALO.md measures.  A recommendation only: the menus still list every size."""
-    return bool(gpu.get("uma")) and ram + gpu.get("dedicated_gb", 0.0) >= STRIX_HALO_MIN_GB
+    return is_strix_halo(gpu) and bool(gpu.get("uma")) and ram + gpu.get("dedicated_gb", 0.0) >= STRIX_HALO_MIN_GB
+
+
+def amd_device_access_problem(dev="/dev", access=os.access, listing=glob.glob) -> str | None:
+    """Linux AMD: /dev/kfd and the render nodes must be readable and writable by this user (the render / video groups).
+    None when they are, else a sentence for the user.  A missing /dev/kfd is not this problem (no driver / no ROCm)."""
+    kfd = os.path.join(dev, "kfd")
+    if not os.path.exists(kfd):
+        return None
+    bad = [kfd] if not access(kfd, os.R_OK | os.W_OK) else []
+    bad += [n for n in sorted(listing(os.path.join(dev, "dri", "renderD*"))) if not access(n, os.R_OK | os.W_OK)]
+    if not bad:
+        return None
+    return (f"this user cannot open {', '.join(bad)}: ROCm will find no GPU and the engine will fail with 'no ROCm-capable "
+            "device' although nothing else holds the GPU. Add your user to the render and video groups: "
+            "sudo usermod -aG render,video $USER, then log out and in again")
+
+
+def gfx1103_notes(gpu, ram) -> list[str]:
+    """What setup tells the owner of a Radeon 780M / 760M / 740M (Phoenix / Hawk Point, gfx1103, unified memory): never
+    the Strix Halo text, which is about another chip (gfx1151).  Opt-in only (STRATA_EXPERIMENTAL_GFX1103=1)."""
+    notes = [f"  Radeon 780M / 760M class (gfx1103, Ryzen 7040 / 8040): the CPU and the GPU share one memory pool ({ram:.0f} GB "
+             f"seen by the OS + a {gpu.get('dedicated_gb', 0.0):.1f} GB BIOS carve-out), so the model's experts live in "
+             "that pool and the expert cache is sized from the memory the OS can give back."]
+    notes.append("  " + ("The engine is compiled here for gfx1103" if not WIN else "This GPU has no ready-made Windows engine")
+                 + " (experimental opt-in, STRATA_EXPERIMENTAL_GFX1103=1; measured on one machine, not validated on a real "
+                 "card): see docs/AMD_HIP.md. This is not a Strix Halo.")
+    if not WIN and gpu.get("shared_gb", 0) < 0.75 * ram - 1:
+        notes.append(f"!the GPU can reach {gpu.get('shared_gb', 0):.0f} GB of shared memory (the GTT pool; the kernel's "
+                     "default is about half of the RAM). The kernel option ttm.pages_limit raises it; setup changes no "
+                     "host setting - a bigger model needs the room, a smaller one runs as it is")
+    return notes
+
+
+def igpu_notes(gpu, ram) -> list[str]:
+    """The unified-memory notes for exactly this chip: Strix Halo (gfx1151) or the gfx1103 opt-in, nothing else."""
+    if is_strix_halo(gpu):
+        return strix_halo_notes(gpu, ram)
+    if gfx_arch_is(gpu.get("arch"), "gfx1103"):
+        return gfx1103_notes(gpu, ram)
+    return []
 
 
 def strix_halo_notes(gpu, ram) -> list[str]:
@@ -4683,6 +4724,10 @@ def main() -> int:
         for g in amd:
             say(f"    GPU {g['index']}: {g['name']}, {amd_mem_text(g)} - " + (amd_problem(g) or "can be used"))
         usable = [g for g in amd if amd_problem(g) is None]
+        if not WIN and (amd or amd_pci_devices()):     # a warning only: recommend, never force
+            acc = amd_device_access_problem()
+            if acc:
+                warn(acc)
         if not amd and not WIN:                        # the KFD topology is empty: name a Strix Halo the kernel sees
             for d in amd_pci_devices():
                 if d["pci_id"] in STRIX_HALO_PCI_IDS:
@@ -4716,9 +4761,12 @@ def main() -> int:
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
         ok(f"GPU: {gpu['name']}, {amd_mem_text(gpu) if gpu.get('uma') else format(gpu['vram_gb'], '.1f') + ' GB VRAM'}, "
-           f"{gpu['arch']} (AMD: docs/{'STRIX_HALO' if gpu.get('uma') else 'AMD_HIP'}.md)")
+           f"{gpu['arch']} (AMD: docs/{'STRIX_HALO' if is_strix_halo(gpu) else 'AMD_HIP'}.md)")
+        if WIN and str(gpu.get("arch") or "").startswith("gfx12"):   # only a pointer; no default changes
+            say("  If Windows resets the AMD driver (VIDEO_ENGINE_TIMEOUT_DETECTED, flicker, the engine dies mid-answer): "
+                "docs/TROUBLESHOOTING.md, \"Windows AMD: the driver resets\"")
         if gpu.get("uma"):
-            for line in strix_halo_notes(gpu, ram_gb()):
+            for line in igpu_notes(gpu, ram_gb()):
                 (warn if line.startswith("!") else say)(line.lstrip("!"))
     else:
         if not found:

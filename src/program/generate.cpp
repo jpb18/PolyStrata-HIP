@@ -2615,6 +2615,23 @@ int main(int argc, char** argv) {
         // #486: the arena is the first large allocation and its size does not depend on the context, so what is
         // missing is held by something else: say how much was free
         cudaGetLastError();
+#if (defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)) && !defined(_WIN32)
+        // HIP sees no device at all and /dev/kfd exists but this user cannot open it: the missing render / video group,
+        // not another program holding the memory (0 MiB of 0 MiB would blame the wrong thing)
+        {
+            int n_hip = 0;
+            if ((cudaGetDeviceCount(&n_hip) != cudaSuccess || n_hip < 1) && ::access("/dev/kfd", F_OK) == 0 &&
+                ::access("/dev/kfd", R_OK | W_OK) != 0) {
+                cudaGetLastError();
+                std::fprintf(stderr, "strata generate: no GPU is visible (%s) and this user cannot open /dev/kfd "
+                                     "(permission denied): it is not another program holding the GPU. Add your user to "
+                                     "the render and video groups - sudo usermod -aG render,video $USER - then log out "
+                                     "and in again
+", cudaGetErrorString(ce));
+                return 1;
+            }
+        }
+#endif
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
         std::fprintf(stderr, "strata generate: cudaMalloc(%llu) for the weight arena failed (%s): %llu MiB of %llu "
