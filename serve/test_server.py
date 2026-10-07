@@ -3971,6 +3971,17 @@ class SilentEngine(unittest.TestCase):
             self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [7])
         engine.proc.kill.assert_not_called()
 
+    def test_a_busy_gpu_is_not_a_frozen_engine(self):
+        # #1317: no CPU and no disk, but the GPU is at work (a long prompt chunk on a slow card): not ended
+        from serve import server
+        engine = self.bare(300.0)
+        engine._activity = lambda: (12.0, 4096)
+        engine.gpu_busy = lambda: True
+        self.later(engine, 2.5, "T 7", "DONE 1 1 1 1 length")
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [7])
+        engine.proc.kill.assert_not_called()
+
     def test_no_reading_means_no_kill_and_zero_is_off(self):
         from serve import server
         for stall, act in ((1.0, lambda: None), (0, lambda: (1.0, 1))):
