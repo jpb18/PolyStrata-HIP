@@ -107,15 +107,27 @@ int main() {
         cache.put(image({9, 8, 7}));
         check(cache.size() == 2 && cache.slots() == 4, "slots() reports the configured limit");
         const size_t both = cache.bytes();
-        cache.evict_oldest();
+        check(cache.evict_oldest());
         check(cache.size() == 1 && cache.evictions() == 1, "evict_oldest drops exactly one, oldest first");
         check(cache.best(a, {}, true).tokens == 0 && cache.best(b, {}, true).tokens == 3,
               "the oldest conversation went, the newest stayed");
         check(cache.bytes() == both - image({1, 2, 3}).bytes(), "evict_oldest releases the entry's bytes");
         cache.evict_oldest();
         check(cache.size() == 0 && cache.bytes() == 0, "evicting the last parked conversation empties the cache");
-        cache.evict_oldest();   // the gate's loop can reach this once the cache is empty
+        check(!cache.evict_oldest(), "the gate's loop can reach an empty cache: false");
         check(cache.size() == 0 && cache.evictions() == 2, "evict_oldest on an empty cache is a no-op");
+    }
+    {   // the RAM gate's eviction skips a conversation that holds a pinned shared prefix, and says so (false)
+        ConversationCache cache(1 << 20, 4);
+        auto pinned = image({1, 2, 3});
+        pinned.checkpoints.push_back(ConversationCheckpoint{});
+        pinned.checkpoints.back().ids = {1, 2};
+        pinned.checkpoints.back().pinned = true;
+        pinned.checkpoints.back().gdn.resize(64, 1);
+        cache.put(std::move(pinned));
+        cache.put(image({9, 8, 7}));
+        check(cache.evict_oldest() && cache.size() == 1, "the oldest unpinned conversation went (the pinned one is older)");
+        check(!cache.evict_oldest() && cache.size() == 1, "only a pinned one is left: nothing more can go");
     }
     {
         auto s = image({1, 2, 3});
