@@ -34,6 +34,18 @@ settings; it cannot be turned back on without a reset of Windows), or, if only t
 An update keeps the engine it replaced in `engine\.previous` (one generation, about 210 MiB).
 `python setup.py --rollback-engine` puts it back (and keeps the newer one there: run it again to go forward) (#670).
 
+**UPDATE.bat / update.sh say "git pull did not succeed", or "has no commit in common" (#1276).**
+The repository's history was cleaned up on 2026-10-06, so a clone made before that cannot be updated with `git pull`.
+The 0.1.40.2 scripts handle it: when no tracked file is edited they keep your old commits in the branch
+`pre-cleanup-backup` and move the clone to the new history; otherwise they print the two commands for you. Your models,
+settings and engine are untracked files and are never touched. An older UPDATE.bat / update.sh (before 0.1.40.2) cannot
+do this itself: run these once in the Strata folder, then use UPDATE.bat as usual (add `git stash` first if `git status`
+lists edited files):
+
+    git fetch origin
+    git branch pre-cleanup-backup
+    git checkout -B main origin/main
+
 **Python or the build tools could not be installed.**
 Install what it names (links are printed), then run it again. Everything already done is kept.
 
@@ -85,6 +97,23 @@ from 100 to 14 tok/s with only a few hundred slots too many. Use `--expert-cache
 **A low-RAM PC (about 32 GB) stalls with `--resident-budget-gib N` (#649).**
 The budget is pinned (locked) in RAM, which leaves the OS and the CPU workers little room. `STRATA_RESIDENT_PIN=0` keeps
 it pageable; a smaller budget works too.
+
+**Decode got slower in 0.1.40 on a 32 GB PC with `--resident-budget-gib N`, and the drive is read hard (#1194, #1116, #1085).**
+The start line "the file tier reads unbuffered" means the experts outside the RAM copy are read straight from the drive.
+0.1.40 chose that whenever the free RAM could not hold all of them; but the same few come back token after token, and
+a cache a twentieth of their size serves most of the repeats. 0.1.40.2 asks for that much (at least 1.5 GiB beside the
+4 GiB headroom) and reads through the cache otherwise, which measured 7% to 118% faster decode with a third to a sixth of
+the drive traffic on a 20 to 32 GB box. On 0.1.40 / 0.1.40.1: `STRATA_UNBUFFERED_LOAD=0` does the same, `=1` forces the
+unbuffered reads.
+
+**Linux: the start is OOM-killed while the engine allocates the page-locked expert copy (#1250).**
+Page-locked pages come from the driver in one go and cannot wait for the kernel to give back file cache, so with the
+model files' cache in the way (little really free RAM, much "available") the host could run out. 0.1.40.2 gives back the
+cached pages of the model files it mapped before it page-locks the copy; when the really free RAM still does not cover it,
+it takes the pages in 1 GiB steps while the RAM available (cgroup limits included) stays above the headroom, page-locks
+what it has, and keeps the rest resident but pageable with a warning ("only N of M GiB could be page-locked"): the answers
+are the same, only the copies of the pageable part to the GPU go through the CPU. `STRATA_PIN_GUARD=0` turns this off,
+`STRATA_PIN_RESERVE_GIB=N` sets the RAM that must stay free (default: `STRATA_RESIDENT_HEADROOM_GIB`, 4 GiB).
 
 **The Windows display driver resets, then the PC blue-screens (0x141, then 0x116 in `nvlddmkm`) during an answer (#961).**
 This is the NVIDIA driver, not Strata: the report shows the same wedge with other CUDA programs on that driver (610.88,
