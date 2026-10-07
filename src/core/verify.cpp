@@ -69,8 +69,9 @@ inline bool g_lfuse_pair() { static const bool on = [] { const char* v = std::ge
 inline bool g_qdedup() { static const bool on = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 // S26 STRATA_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
 // fork F4 (Eddoursul): 2-4 token dense projections read an interleaved copy of the q8_1 activations (bitwise the same
-// outputs); STRATA_MMVQ_IL=0 keeps native_mmvq's multi-column kernels
-inline bool g_mmvq_il() { static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_IL"); return v == nullptr || v[0] != '0'; }(); return on; }
+// outputs). OPT-IN (STRATA_MMVQ_IL=1; 0.1.40.3): it measured +4.2% on one sm_86 and +1.3-2.2% on one sm_120, but a
+// two-GPU layer split (sm_89 + sm_120) was reported slower (#1373), so it is off until it is measured there.
+inline bool g_mmvq_il() { static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_IL"); return v != nullptr && v[0] == '1'; }(); return on; }
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
