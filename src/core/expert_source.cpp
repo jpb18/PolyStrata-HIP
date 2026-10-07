@@ -4181,7 +4181,13 @@ void ForesightSwap::note_miss(ExpertSource* src, int64_t layer, int32_t expert) 
     uint64_t best_ref = ~0ull;
     for (int s = 0; s < slots; ++s) {   // an empty slot, else the one used longest ago that no window can still read
         Slot& sl = slot[(size_t) (layer * slots + s)];
-        if (sl.loading) continue;
+        if (sl.loading) {   // copied in but never asked for since: landed long ago -> an ordinary candidate
+            if (sl.last_ref + (uint64_t) depth > now || !sl.issued.load(std::memory_order_acquire)) continue;
+            const cudaError_t q = cudaEventQuery((cudaEvent_t) sl.ev);
+            if (q != cudaSuccess) { if (q != cudaErrorNotReady) cudaGetLastError(); continue; }
+            sl.loading = false;
+            sl.ready = true;
+        }
         if (sl.expert < 0) { best = s; break; }
         if (sl.last_ref + (uint64_t) depth > now) continue;
         if (sl.last_ref < best_ref) { best_ref = sl.last_ref; best = s; }
