@@ -171,6 +171,10 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 # With the default, the release of this checkout's own version (PREBUILT_TAG_URL, CMakeLists.txt's version) is
 # tried first and the latest release is the fallback (#214): an older checkout keeps the engine it shipped with.
 PREBUILT_URL = "https://github.com/Niko1221/Strata/releases/latest/download/"
+# The repository the release assets and their SHA-256 come from; `engine_digest` reads the API here even
+# when --prebuilt points the download somewhere else, because the hash is only worth having if it comes
+# from somewhere the download does not.
+REPO = "Niko1221/Strata"
 PREBUILT_TAG_URL = "https://github.com/Niko1221/Strata/releases/download/v{version}/"
 PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
@@ -2220,6 +2224,11 @@ def get_prebuilt_hip(url_base, gpu, updating=False) -> Path | None:
             return None
     say("  Downloading the ready-made Strata engine for AMD GPUs (with the ROCm libraries it uses) ...")
     download(base + WIN_HIP_ASSET, z, "Strata AMD engine")
+    try:
+        verify_engine_archive(z, WIN_HIP_ASSET, base)
+    except UnverifiedEngine as e:
+        engine_refused(WIN_HIP_ASSET, e, updating)
+        return None
     tmp = eng / "_unpack"
     shutil.rmtree(tmp, ignore_errors=True)
     with zipfile.ZipFile(z) as f:
@@ -2451,6 +2460,165 @@ def driver_major(gpu):
         return 0
 
 
+class UnverifiedEngine(Exception):
+    """The engine archive could not be verified, with the reason.
+
+    Raised rather than `fail()`-ed on purpose.  The engine-UPDATE paths wrap their download in
+    `except Exception` and fall back to the engine already installed, so a refusal has to be an Exception:
+    `fail()` ends in `sys.exit(1)`, and SystemExit is a BaseException, so it flies past that guard and
+    kills the start instead.  Measured on this change before the fix - a wrong hash, a wrong size and a
+    missing digest each escaped get_prebuilt(updating=True) as SystemExit(1).
+    """
+
+
+def release_of(base: str) -> tuple[str, str | None] | None:
+    """("github", tag) for a GitHub release URL, or None when the URL is not one.
+
+    `base` is one of the bases from `prebuilt_bases`: a `releases/download/v0.1.40/` URL (which names its
+    tag), the `releases/latest/download/` URL, or something else entirely - a local folder, a plain mirror.
+    That last case matters: it has no published digest, so treating it as "latest" would check the file
+    against a release the user did not ask for, over the network, which is wrong twice over.
+
+    The repository comes out of the URL when it names one, so a fork's own releases are checked against
+    the fork rather than against Niko1221/Strata (which never has the fork's tags, so the check would
+    always fail).
+    """
+    m = re.search(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/releases/(?:download/v([^/]+)|latest)/",
+                  base)
+    if not m:
+        return None
+    return f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}/releases", m.group(3)
+
+
+def is_local(base: str) -> bool:
+    """True for a path on this machine - `C:/mirror`, `/mnt/mirror`, `//share/engine`, `file://...`.
+
+    A local folder is the user's own file on their own disk, the same trust decision as `--gguf-dir`, and
+    there is no published digest for it to be checked against.  It is treated differently from a remote
+    mirror on purpose: nothing is between the file and setup, whereas a remote mirror has a network in the
+    middle and still no release to check it against.
+    """
+    b = base.strip()
+    if b.lower().startswith("file://"):
+        return True
+    return not re.match(r"^[a-z][a-z0-9+.\-]*://", b, re.I)
+
+
+def engine_digest(asset: str, base: str) -> tuple[int, str] | None:
+    """(size, "sha256:<hex>") for `asset` in the release `base` points at, or None if GitHub will not say.
+
+    The size and hash come from the releases API - a different origin from the download, which is the
+    whole point: a mirrored, substituted or TLS-intercepted download does not come with a matching digest,
+    while a compromised release does (see `verify_engine_archive` for what that leaves uncovered).
+
+    GitHub populates `digest` for every asset, including ones uploaded before the field existed
+    (measured on v0.1.34 through v0.1.40.1).  None means no answer - no network, a rate limit, or a
+    release that does not publish one - and the caller warns and installs anyway (never refuses).
+    """
+    where = release_of(base)
+    if where is None:                  # a local folder or a plain mirror: nothing published to check against
+        return None
+    releases, tag = where
+    url = f"{releases}/tags/v{tag}" if tag else f"{releases}/latest"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "strata-setup",
+                                                   "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            rel = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None                     # offline, rate-limited, or the release is not there
+    for a in rel.get("assets") or []:
+        if a.get("name") == asset and a.get("digest") and str(a.get("digest")).startswith("sha256:"):
+            return int(a.get("size") or 0), str(a["digest"]).split(":", 1)[1]
+    return None
+
+
+def drop_download(z: Path) -> None:
+    """The archive and its finish mark. A refused engine is not left where a later run would reuse it."""
+    z.unlink(missing_ok=True)
+    z.with_name(z.name + ".done").unlink(missing_ok=True)
+
+
+def verify_engine_archive(z: Path, asset: str, base: str) -> None:
+    """The downloaded engine archive against the published size and SHA-256, before it is unpacked.
+
+    Without this, a ready-made engine is installed on nothing more than the byte count matching the
+    server's Content-Length - and a substituted file of the same length passes that.  It runs before the
+    archive is opened, so a wrong engine never reaches `_unpack`, let alone the engine directory.
+
+    Raises UnverifiedEngine on a refusal; the caller decides whether that stops setup (a first install,
+    with nothing to fall back to) or keeps the engine that is already there (an update).
+
+    Where the hash comes from, and where it cannot:
+
+    - a GitHub release URL: the tag is read out of the URL, so the exact release the bytes claim to come
+      from is the one checked rather than "latest" (setup tries the checkout's own release first, #214),
+      and the repository comes out of the URL too, so a fork's releases are checked against the fork;
+    - a local folder (`--prebuilt D:/mirror`): nothing published to check against.  This warns and goes
+      ahead - it is the user's own file, the same trust decision as `--gguf-dir`, and there is nothing an
+      API could say about it;
+    - any other remote mirror: nothing published to check against either, but a network is in the middle,
+      so it warns and installs anyway (no digest is never a reason to refuse).
+
+    What a digest from the API does NOT cover, stated plainly: it proves the bytes are the ones GitHub
+    published for that asset, so it catches a corrupted transfer, a mirror or proxy that substituted the
+    file, and a hostile network.  It does not make a malicious RELEASE safe - if whoever can publish a
+    release publishes a hostile engine, the digest matches it.  Only a hash pinned in this file closes
+    that, at the cost of a commit per release; a dict of tag -> sha next to `engine_digest` is where one
+    would go.
+
+    The size and the hashing below are spelled out rather than delegated to `verify_sha256`, for two
+    reasons, both measured here.  That function ends in `fail()`, and a refusal has to be an Exception so
+    the update paths can fall back.  And it keeps a `.done` mark so 111 GB of Unsloth shards is hashed
+    once; the engine archive is 190 MB, which hashes in 0.79 s at 242 MB/s on this machine, against 3.0 s
+    to download the same file.  A mark that saves 0.8 s is not worth a class of hole - anything that
+    changes the file after it was verified, at any length - so there is no mark here.
+    """
+    if os.environ.get("STRATA_SKIP_SHA256") == "1":
+        warn(f"STRATA_SKIP_SHA256=1: NOT checking {asset} against its SHA-256. If the file is corrupt or "
+             f"tampered with, it will be installed anyway. Unset it to get the check back.")
+        return
+    want = engine_digest(asset, base)          # one API call: this is a rate-limited API
+    if not want:
+        # no published digest (offline, rate limit, a mirror or folder): install anyway, never refuse
+        warn(f"could not get a SHA-256 for {asset} from GitHub (offline, rate limited, or not a release "
+             f"URL), so it was NOT verified. Installing it as it is.")
+        return
+    size, sha = want
+    have = z.stat().st_size if z.exists() else -1
+    if have != size:
+        drop_download(z)
+        raise UnverifiedEngine(f"{z.name} is {have:,} bytes, not the published {size:,}")
+    h = hashlib.sha256()
+    with open(z, "rb") as f:
+        while True:
+            b = f.read(16 << 20)
+            if not b:
+                break
+            h.update(b)
+    if h.hexdigest() != sha:
+        got = h.hexdigest()
+        drop_download(z)
+        raise UnverifiedEngine(f"{z.name} has the wrong SHA-256 ({got}, expected {sha})")
+
+
+def engine_refused(asset: str, e: Exception, updating: bool) -> None:
+    """Report a refusal and either stop setup or keep the engine that is installed.
+
+    A first install has nothing to fall back to, so it stops.  An update does: the engine already in
+    place is untouched by a refusal (nothing has been unpacked), it works, and stopping the model from
+    starting over a hash is worse than keeping what is there - which is the whole reason that call site
+    catches what the download can throw.
+    """
+    if not updating:
+        fail(f"the downloaded Strata engine does not match GitHub's checksum: {e}",
+             "the bad download has been deleted (corrupt or tampered), so the next run fetches the "
+             "published file again. Set STRATA_SKIP_SHA256=1 only if you insist on installing it anyway")
+        return
+    warn(f"keeping the engine that is installed: {e}")
+    say("       Nothing was replaced. The bad download was deleted; run setup again to fetch it afresh.")
+
+
 def prebuilt_bases(url_base) -> list[str]:
     """Where to look for the ready-made engine, in order (each ending in a slash).  The default: the release of this
     checkout's version first, then the latest (#214); an explicit --prebuilt / STRATA_PREBUILT_URL: only that."""
@@ -2568,6 +2736,11 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
             return None
     say("  Downloading the ready-made Strata engine" + (" (CUDA 12, experimental)" if int(toolkit) == 12 else "") + " ...")
     download(base + asset, z, "Strata engine")
+    try:
+        verify_engine_archive(z, asset, base)
+    except UnverifiedEngine as e:
+        engine_refused(asset, e, updating)
+        return None
     tmp = eng / "_unpack"
     shutil.rmtree(tmp, ignore_errors=True)
     try:

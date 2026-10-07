@@ -65,6 +65,9 @@ PC); `STRATA_READ_AHEAD=0` turns that off. On Linux with transparent huge pages 
 for `MADV_HUGEPAGE` on top (a fragmented machine spent minutes compacting memory, #771); `STRATA_NO_ARENA_THP=1` skips
 that request on any setting.
 
+**Setup says the engine does not match GitHub's checksum.**
+Setup checks the downloaded ready-made engine against the SHA-256 GitHub publishes. On a mismatch the file is corrupt or was changed on the way, so setup deletes it and stops; run setup again to download it afresh. If GitHub gives no checksum (offline, rate limited, your own mirror), setup warns and installs anyway. `STRATA_SKIP_SHA256=1` skips the check, only if you insist.
+
 ## While it answers
 
 **It's very slow and the disk light keeps blinking.**
