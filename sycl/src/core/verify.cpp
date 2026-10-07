@@ -541,7 +541,7 @@ bool Verifier::init(const WeightTable &wt, const ModelGeometry &g,
     };
     Bump count;
     carve(count);
-    if (DPCT_CHECK_ERROR(arena_ = (void *)sycl::malloc_device(
+    if (DPCT_CHECK_ERROR(arena_ = (void *)strata::malloc_device_guarded(
                              count.used, dpct::get_in_order_queue())) != 0) {
         err = "verify: the device arena (" + std::to_string(count.used >> 20) + " MiB) does not fit";
         return false;

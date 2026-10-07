@@ -316,7 +316,7 @@ struct Alloc {
             return p;
         }
         void* p = nullptr;
-        if (DPCT_CHECK_ERROR(p = (void *)sycl::malloc_device(
+        if (DPCT_CHECK_ERROR(p = (void *)strata::malloc_device_guarded(
                                  bytes, dpct::get_in_order_queue())) != 0) {
             ok = false; failed_bytes = bytes; return nullptr;
         }
@@ -1706,7 +1706,7 @@ bool Prefill::set_peer(core::PeerExperts *peer, int64_t cap_rows,
         try {
     void *p = nullptr;
         if (!ok ||
-            DPCT_CHECK_ERROR(p = (void *)sycl::malloc_device(
+            DPCT_CHECK_ERROR(p = (void *)strata::malloc_device_guarded(
                                  bytes, dpct::get_in_order_queue())) != 0) {
             ok = false; return nullptr;
         }

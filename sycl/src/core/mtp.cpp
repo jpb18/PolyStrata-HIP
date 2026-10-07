@@ -222,7 +222,7 @@ bool MtpDrafter::make_q4_dense(const std::vector<uint8_t>& blob, std::string& er
         }
         q4_off_.push_back({t->name, off});
     }
-    dense4_ = (uint8_t*) sycl::malloc_device((size_t) total, dpct::get_in_order_queue());   // SYCL port: cudaMalloc/cudaMemcpy
+    dense4_ = (uint8_t*) strata::malloc_device_guarded((size_t) total, dpct::get_in_order_queue());   // SYCL port: cudaMalloc/cudaMemcpy
     if (dense4_ == nullptr) { err = "mtp: the Q4_0 projections do not fit"; return false; }
     dpct::get_in_order_queue().memcpy(dense4_, host.data(), (size_t) total).wait();
     vram_ += total;
@@ -306,7 +306,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         std::vector<uint8_t> blob;
         if (!read_file(rt_dir + "/dense.bin", blob)) { err = "mtp: cannot read dense.bin"; return false; }
         const dpct::err0 alloc =
-            DPCT_CHECK_ERROR(dense_ = (uint8_t *)sycl::malloc_device(
+            DPCT_CHECK_ERROR(dense_ = (uint8_t *)strata::malloc_device_guarded(
                                  blob.size(), dpct::get_in_order_queue()));
         /*
         DPCT1000: Error handling if-stmt was detected but could not be
@@ -353,7 +353,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
             FILE* f;
             ~Closer() { if (f != nullptr) std::fclose(f); }
         } closer{f};
-        if (DPCT_CHECK_ERROR(experts_ = (uint8_t *)sycl::malloc_device(
+        if (DPCT_CHECK_ERROR(experts_ = (uint8_t *)strata::malloc_device_guarded(
                                  bytes, dpct::get_in_order_queue())) != 0) {
             err = "mtp: the 512 experts do not fit in VRAM"; return false;
         }
@@ -390,7 +390,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
     uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
-    if (DPCT_CHECK_ERROR(state_arena_ = (void *)sycl::malloc_device(
+    if (DPCT_CHECK_ERROR(state_arena_ = (void *)strata::malloc_device_guarded(
                              sb, dpct::get_in_order_queue())) != 0) {
         err = "mtp: the K/V state does not fit"; return false;
     }
@@ -405,7 +405,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
         st_ = QsaState{};
         ring = -1;   // fully resident
         sb = qsa_state_bytes(g, max_cells, false, ring);
-        if (DPCT_CHECK_ERROR(state_arena_ = (void *)sycl::malloc_device(
+        if (DPCT_CHECK_ERROR(state_arena_ = (void *)strata::malloc_device_guarded(
                                  sb, dpct::get_in_order_queue())) != 0) {
             err = "mtp: the K/V state does not fit"; return false;
         }
@@ -465,7 +465,7 @@ bool MtpDrafter::load(const std::string &rt_dir, const ModelGeometry &g,
     };
     Bump count;
     carve(count);
-    if (DPCT_CHECK_ERROR(arena_ = (void *)sycl::malloc_device(
+    if (DPCT_CHECK_ERROR(arena_ = (void *)strata::malloc_device_guarded(
                              count.used, dpct::get_in_order_queue())) != 0) {
         err = "mtp: buffers do not fit"; return false;
     }
