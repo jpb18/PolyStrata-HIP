@@ -1143,7 +1143,8 @@ bool FileExpertSource::copy_from_files(int64_t layer, int64_t expert, uint8_t* d
 }
 
 // Pinned stage buffers (PR 1237): whether they are the default is decided by the A/B in notes-141-cuda.md.
-#define STAGE_PIN_DEFAULT 0
+#define STAGE_PIN_DEFAULT 1
+constexpr uint64_t kStagePinFloor = 3ull << 30;   // RAM left available after a pinned stage buffer
 void FileExpertSource::StageBufFree::operator()(uint8_t* p) const noexcept {
     if (pinned) (void) cudaFreeHost(p);
     else delete[] p;
@@ -1180,8 +1181,15 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
         // Pinned, where the driver allows: a stage buffer is the source of the cache fill's cudaMemcpyAsync,
         // and a pageable source is staged through the driver's bounce buffer - an extra copy at a fraction of
         // the transfer rate, on the calling thread.  A failure falls back to pageable for this buffer.
-        // (STRATA_STAGE_PIN=0 keeps them pageable, as before.)
-        static const bool want_pin = [] { const char* v = std::getenv("STRATA_STAGE_PIN"); return STAGE_PIN_DEFAULT ? (v == nullptr || std::atoi(v) != 0) : (v != nullptr && std::atoi(v) != 0); }();
+        // STRATA_STAGE_PIN: 0 keeps them pageable (as before 0.1.41), 1 always tries to pin, unset (the default) pins while
+        // the host has kStagePinFloor of RAM to spare beside this buffer (the pool grows to ~257 buffers, 0.4-0.6 GiB):
+        // a low-RAM box keeps pageable ones instead of paying for the pinning (recommend, never force).
+        static const int pin_mode = [] { const char* v = std::getenv("STRATA_STAGE_PIN"); return v == nullptr ? -1 : (std::atoi(v) != 0 ? 1 : 0); }();
+        bool want_pin = pin_mode != 0;
+        if (pin_mode < 0) {
+            uint64_t avail = 0;
+            want_pin = STAGE_PIN_DEFAULT && available_memory_bytes(avail) && avail >= (uint64_t) stage_blob_ + kStagePinFloor;
+        }
         void* p = nullptr;
         const cudaError_t pin_err = want_pin ? cudaHostAlloc(&p, (size_t) stage_blob_, cudaHostAllocDefault) : cudaErrorNotSupported;
         const bool pinned = pin_err == cudaSuccess && p != nullptr;
