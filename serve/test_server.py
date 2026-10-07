@@ -1624,10 +1624,7 @@ class GpuChoice(unittest.TestCase):
             for n, simd, clk in ((0, 0, 0), (1, 128, 2350), (2, 64, 2000), (3, 128, 2350)):
                 os.makedirs(os.path.join(d, str(n)))
                 with open(os.path.join(d, str(n), "properties"), "w") as f:
-                    f.write(f"simd_count {simd}
-max_engine_clk_fcompute {clk}
-gfx_target_version 120001
-")
+                    f.write(f"simd_count {simd}\nmax_engine_clk_fcompute {clk}\ngfx_target_version 120001\n")
             sc = hip_speed_scores([0, 1, 2], root=d)
             self.assertEqual(sc, {0: 128 * 2350.0, 1: 64 * 2000.0, 2: 128 * 2350.0})
             self.assertIsNone(hip_speed_scores([0, 1, 2, 3], root=d))      # a card the topology does not have
