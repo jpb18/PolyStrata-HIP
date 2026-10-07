@@ -563,7 +563,9 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
             cudaGetLastError();
             return cudaErrorNotSupported;
         }
-        if (major < 8 || sms < HK * (S / GDV) || (size_t) smem < kChunkScanSmem)
+        // as in kernels.cu: STRATA_GDN_CHUNKED=2 skips the SM-count test (to measure a card under 128 SMs)
+        static const bool any_sms = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
+        if (major < 8 || (!any_sms && sms < HK * (S / GDV)) || (size_t) smem < kChunkScanSmem)
             return cudaErrorNotSupported;
     }
     float* scratch = gdn_chunk_scratch();
