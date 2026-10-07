@@ -322,6 +322,24 @@ void test_resident_exchange() {
     require(offsets == before, "exchanging back did not restore the plan");
 }
 
+// #1250: when the page-locked complement is registered in steps, and what a meminfo reading says
+void test_pin_pacing() {
+    using namespace strata::core::detail;
+    constexpr uint64_t GiB = 1ull << 30;
+    // the reporter's reading: 54 GiB available but 16 GiB really free for a 26 GiB complement
+    require(pin_depends_on_reclaim(16 * GiB, 26 * GiB, 4 * GiB), "a complement bigger than the free pages was not flagged");
+    require(!pin_depends_on_reclaim(40 * GiB, 26 * GiB, 4 * GiB), "a complement the free pages cover was flagged");
+    require(pin_depends_on_reclaim(30 * GiB, 26 * GiB, 4 * GiB) == false, "exactly free = bytes + reserve is enough");
+    require(!pin_depends_on_reclaim(0, 0, 4 * GiB), "no complement, nothing to pin");
+    require(pin_step_fits(6 * GiB, 1 * GiB, 4 * GiB) && !pin_step_fits(4 * GiB, 1 * GiB, 4 * GiB),
+            "a step must leave the reserve");
+    const std::string info =
+        "MemTotal:       65011484 kB\nMemFree:         1284096 kB\nMemAvailable:   33463296 kB\nCached:         54507520 kB\n";
+    require(meminfo_bytes(info, "MemFree") == 1284096ull * 1024, "MemFree was misread");
+    require(meminfo_bytes(info, "MemAvailable") == 33463296ull * 1024, "MemAvailable was misread");
+    require(meminfo_bytes(info, "Mem") == 0 && meminfo_bytes(info, "Shmem") == 0, "an absent key was not 0");
+}
+
 void test_resident_memory_budget() {
     using strata::core::detail::clamp_resident_budget;
     constexpr uint64_t GiB = 1ull << 30, margin = 256ull << 20, headroom = 4 * GiB;
@@ -670,6 +688,7 @@ int main(int argc, char** argv) {
         test_resident_lend_region();
         test_resident_exchange();
         test_resident_memory_budget();
+        test_pin_pacing();
         test_cgroup_memory_budget();
         test_host_memory();
         test_canonical_layout();

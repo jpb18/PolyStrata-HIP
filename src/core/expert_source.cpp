@@ -88,6 +88,30 @@ uint64_t clamp_resident_budget(uint64_t requested, uint64_t physical, uint64_t c
     return room > margin ? room - margin : 0;
 }
 
+bool pin_depends_on_reclaim(uint64_t free_now, uint64_t bytes, uint64_t reserve) {
+    return bytes > 0 && free_now < bytes + reserve;
+}
+
+bool pin_step_fits(uint64_t available, uint64_t step, uint64_t reserve) {
+    return available >= step + reserve;
+}
+
+uint64_t meminfo_bytes(const std::string& meminfo_text, const std::string& key) {
+    std::istringstream in(meminfo_text);
+    std::string line;
+    const std::string want = key + ":";
+    while (std::getline(in, line)) {
+        std::istringstream fields(line);
+        std::string k, unit;
+        uint64_t value = 0;
+        if (fields >> k >> value && k == want) {
+            fields >> unit;
+            return unit == "kB" ? value * 1024 : value;
+        }
+    }
+    return 0;
+}
+
 bool make_cache_complement_plan(
     int64_t n_layers, int64_t n_expert, const std::vector<uint64_t>& layer_blob_bytes,
     const std::vector<std::pair<int32_t, int32_t>>& primary_gpu_pairs,
@@ -346,6 +370,21 @@ bool available_memory_bytes(uint64_t& bytes, uint64_t* commit = nullptr) {
     bytes = m.available;
     if (commit != nullptr) *commit = m.commit;
     return bytes > 0;
+}
+
+/// #1250: the pages that are really free (MemFree), not the reclaimable cache MemAvailable counts; false when unknown.
+bool free_memory_bytes(uint64_t& bytes) {
+#if defined(__linux__)
+    std::ifstream info("/proc/meminfo");
+    if (!info) return false;
+    std::stringstream text;
+    text << info.rdbuf();
+    bytes = detail::meminfo_bytes(text.str(), "MemFree");
+    return bytes > 0;
+#else
+    bytes = 0;
+    return false;
+#endif
 }
 
 void log_complement_memory(const char* stage, uint64_t requested) {
@@ -861,9 +900,9 @@ void FileExpertSource::close() {
     io_stop();
     inputs_.clear();
     if (complement_arena_ != nullptr) {
-        if (complement_pinned_ && !complement_partial_) (void) cudaFreeHost(complement_arena_);
+        if (complement_pinned_ && !complement_registered_) (void) cudaFreeHost(complement_arena_);
         else {
-            if (complement_partial_) (void) cudaHostUnregister(complement_arena_);
+            if (complement_registered_) (void) cudaHostUnregister(complement_arena_);
             if (complement_locked_ > 0)
                 strata::platform::unlock_resident((uint8_t*) complement_arena_ + complement_lock_off_, complement_locked_);
             std::free(complement_arena_);
@@ -889,6 +928,7 @@ void FileExpertSource::close() {
     complement_offsets_.clear();
     complement_pinned_ = false;
     complement_partial_ = false;
+    complement_registered_ = false;
     complement_pin_limit_ = 0;
     complement_lock_off_ = 0;
     complement_ready_ = false;
@@ -2152,6 +2192,7 @@ bool FileExpertSource::pin_cache_complement(
     const uint8_t* host = nullptr;
     const uint8_t* device = nullptr;
     bool pinned_ok = false;
+    bool paced = false;         ///< #1250: the pages are taken in steps and page-locked afterwards
     uint64_t locked = 0;
     uint64_t partial_pin = 0;   ///< CS-T: a registered prefix of a locked arena
     uint64_t lock_off = 0;      ///< where the working-set lock starts (after the registered prefix)
@@ -2166,12 +2207,60 @@ bool FileExpertSource::pin_cache_complement(
         }
         arena = nullptr;
     };
+#if defined(__linux__)
+    // #1250: the cached pages of the model files this source maps (the engine read them itself), given back
+    auto drop_file_cache = [&]() {
+        auto drop = [](const uint8_t* at, uint64_t len, int fd) {
+            if (at != nullptr && len > 0) (void) madvise((void*) at, (size_t) len, MADV_DONTNEED);
+            if (fd >= 0) (void) posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        };
+        if (maps_.empty()) drop(base_, mapped_bytes_, fd_);
+        else for (const Map& m : maps_) drop(m.base, m.bytes, m.fd);
+    };
+#endif
     if (bytes > 0) {
         std::fprintf(stderr, "FileExpertSource: allocating %.2f GiB %s cache complement\n",
                      (double) bytes / 1073741824.0, pin ? "page-locked" : "pageable resident");
         log_complement_memory("before complement allocation", bytes);
         std::fflush(stderr);
+        // #1250: the driver takes page-locked pages in one go and cannot wait for the kernel to reclaim file cache: with
+        // the cache of the model files the engine read itself in the way (MemFree low, MemAvailable high) a host was
+        // OOM-killed here.  First give those pages back (the engine's own mappings); when what is really free still
+        // does not cover the complement, register it in steps, each only while the RAM left stays above the reserve.
+        // STRATA_PIN_GUARD=0 pages-locks in one go as before, =2 always registers in steps (a test); STRATA_PIN_RESERVE_GIB
+        // is the RAM that must stay above every step (default: the resident headroom, at least 2 GiB)
+        const uint64_t pace_reserve = [&] {
+            const char* v = std::getenv("STRATA_PIN_RESERVE_GIB");
+            return v != nullptr && std::atof(v) > 0 ? (uint64_t) (std::atof(v) * 1073741824.0)
+                                                     : std::max<uint64_t>(headroom_bytes, 2ull << 30);
+        }();
+#if defined(__linux__)
         if (pin) {
+            static const int guard = [] {
+                const char* v = std::getenv("STRATA_PIN_GUARD");
+                return v == nullptr ? 1 : std::atoi(v);
+            }();
+            uint64_t free_now = 0;
+            if (guard == 2) {
+                paced = true;
+                std::fprintf(stderr, "FileExpertSource: STRATA_PIN_GUARD=2: page-locking the complement in steps\n");
+            } else if (guard != 0 && free_memory_bytes(free_now) &&
+                       detail::pin_depends_on_reclaim(free_now, bytes, pace_reserve)) {
+                drop_file_cache();
+                const uint64_t before = free_now;
+                if (free_memory_bytes(free_now))
+                    std::fprintf(stderr, "FileExpertSource: %.2f GiB really free for a %.2f GiB page-locked complement; "
+                                         "the model files' cached pages were released: %.2f GiB free\n",
+                                 (double) before / 1073741824.0, (double) bytes / 1073741824.0,
+                                 (double) free_now / 1073741824.0);
+                paced = detail::pin_depends_on_reclaim(free_now, bytes, pace_reserve);
+                if (paced)
+                    std::fprintf(stderr, "FileExpertSource: the rest comes from reclaimed cache of other files: "
+                                         "page-locking it in steps, as far as the RAM allows (#1250)\n");
+            }
+        }
+#endif
+        if (pin && !paced) {
             const cudaError_t allocated = cudaHostAlloc(&arena, (size_t) bytes,
                                                          cudaHostAllocMapped | cudaHostAllocPortable);
             if (allocated == cudaSuccess) {
@@ -2202,7 +2291,15 @@ bool FileExpertSource::pin_cache_complement(
                 std::fflush(stderr);
             }
             errno = 0;
-            arena = std::malloc((size_t) bytes);
+            if (paced) {   // page-aligned: the steps are registered on page boundaries
+#if !defined(_WIN32)
+                void* aligned = nullptr;
+                const uint64_t page = 4096;
+                if (posix_memalign(&aligned, (size_t) page, (size_t) ((bytes + page - 1) / page * page)) == 0) arena = aligned;
+#endif
+            } else {
+                arena = std::malloc((size_t) bytes);
+            }
             if (arena == nullptr) {
                 const int allocation_errno = errno;
                 err = "FileExpertSource: pageable resident complement allocation failed (malloc errno " +
@@ -2230,7 +2327,63 @@ bool FileExpertSource::pin_cache_complement(
                     const char* v = std::getenv("STRATA_PARTIAL_PIN_GIB");
                     return (uint64_t) ((v != nullptr && std::atof(v) > 0 ? std::atof(v) : 24.0) * 1073741824.0);
                 }();
-                if (budget_bytes > 0 && partial_on) {
+                if (paced) {
+                    // #1250: the pages are taken in 1 GiB steps by ordinary page faults (which reclaim file cache as
+                    // they need to), each only while the RAM available (the cgroup's room included) stays above the
+                    // reserve; then the pages that are there are page-locked in ONE registration (nothing is
+                    // allocated then, the driver only pins them), so a blob never straddles two registrations.  The
+                    // hottest experts come first in the arena: they are the pinned ones; the rest is locked pageable
+                    // memory, as when the driver refuses the page-locking.
+                    constexpr uint64_t kStep = 1ull << 30, kPage = 4096;
+                    uint64_t got = 0;
+                    const char* stop = nullptr;
+                    while (got < bytes) {
+                        const uint64_t step = std::min<uint64_t>(kStep, bytes - got);
+                        uint64_t avail_now = 0;
+                        if (!available_memory_bytes(avail_now) || !detail::pin_step_fits(avail_now, step, pace_reserve)) {
+                            stop = "the RAM left would fall under the reserve";
+                            break;
+                        }
+                        for (uint64_t at = got; at < got + step; at += kPage) ((volatile uint8_t*) arena)[at] = 0;
+                        got += step;
+                    }
+                    // cut at an expert boundary: a blob that runs past the registered range would be refused by a
+                    // cudaMemcpyAsync as not page-locked
+                    uint64_t w = got;
+                    for (size_t i = 0; i < offsets.size() && w < bytes; ++i) {
+                        if (offsets[i] == kNoComplement) continue;
+                        const uint64_t b = layer_blob_bytes_[i / (size_t) n_expert_];
+                        if (offsets[i] < got && offsets[i] + b > got) { w = offsets[i]; break; }
+                    }
+                    if (w > 0) {
+                        if (cudaHostRegister(arena, (size_t) w, cudaHostRegisterMapped | cudaHostRegisterPortable) ==
+                            cudaSuccess) {
+                            void* alias = nullptr;
+                            if (cudaHostGetDevicePointer(&alias, arena, 0) == cudaSuccess && alias != nullptr) {
+                                device = (const uint8_t*) alias;
+                                partial_pin = w;
+                            } else {
+                                (void) cudaGetLastError();
+                                (void) cudaHostUnregister(arena);
+                                if (stop == nullptr) stop = "no device alias";
+                            }
+                        } else {
+                            (void) cudaGetLastError();
+                            if (stop == nullptr) stop = "the driver refused to page-lock it";
+                        }
+                    }
+                    lock_off = partial_pin;
+                    char msg[240];
+                    if (stop != nullptr)
+                        std::snprintf(msg, sizeof msg, "WARNING: only %.2f of %.2f GiB could be page-locked (%s); the rest is "
+                                      "resident but pageable, so its copies to the GPU go through the CPU (#1250)",
+                                      (double) partial_pin / 1073741824.0, (double) bytes / 1073741824.0, stop);
+                    else
+                        std::snprintf(msg, sizeof msg, "%.2f GiB page-locked after taking the pages in steps",
+                                      (double) partial_pin / 1073741824.0);
+                    note += std::string(note.empty() ? "" : "; ") + msg;
+                    if (stop != nullptr) std::fprintf(stderr, "FileExpertSource: %s\n", msg);
+                } else if (budget_bytes > 0 && partial_on) {
                     const uint64_t step = 2ull << 30;
                     for (uint64_t want = std::min(bytes, pin_cap); want >= step; want = want > step ? want - step : 0) {
                         // cut at an expert boundary: a blob that started inside the registered range and ran past it
@@ -2262,9 +2415,11 @@ bool FileExpertSource::pin_cache_complement(
                                   (double) partial_pin / 1073741824.0);
                     note += std::string("; ") + msg;
                 }
-                lock_off = partial_pin;
+                if (!paced) lock_off = partial_pin;
+                // (paced: lock_off was set above)
                 const strata::platform::LockResult lr =
-                    strata::platform::lock_resident((uint8_t*) arena + lock_off, bytes - lock_off);
+                    lock_off < bytes ? strata::platform::lock_resident((uint8_t*) arena + lock_off, bytes - lock_off)
+                                     : strata::platform::LockResult{true, 0, ""};
                 locked = lr.locked_bytes;
                 note += (note.empty() ? "" : "; ") + lr.note;
             }
@@ -2396,7 +2551,9 @@ bool FileExpertSource::pin_cache_complement(
     complement_offsets_ = std::move(offsets);
     complement_pinned_ = (pinned_ok || partial_pin > 0) && bytes > 0;
     complement_pin_limit_ = pinned_ok ? bytes : partial_pin;
-    complement_partial_ = !pinned_ok && partial_pin > 0;
+    complement_registered_ = !pinned_ok && partial_pin > 0;
+    // a paced registration that covers the whole arena is as good as a cudaHostAlloc'd one
+    complement_partial_ = complement_registered_ && !(paced && partial_pin >= bytes);
     complement_locked_ = locked;
     complement_lock_off_ = lock_off;
     complement_lent_slots_ = lend ? n_slots - keep_from : 0;
