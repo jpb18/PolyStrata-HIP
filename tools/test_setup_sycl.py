@@ -127,5 +127,54 @@ class IntelIds(unittest.TestCase):
         self.assertEqual(t["e221"][0], "Arc Pro B60")
 
 
+class ToSycl(unittest.TestCase):
+    """The config sycl/setup_intel.py writes: an explicit --vram-reserve-mib is kept, the B-series streams its experts,
+    the A-series (i915) cannot (a single pinned host allocation above a few GB fails there) and loads them into RAM."""
+
+    @staticmethod
+    def mod():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("setup_intel", ROOT / "sycl" / "setup_intel.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def cfg(self, m, extra=()):
+        base = m.MOUNT
+        return {"exe": "x", "cwd": "y", "args": ["--pack", str(base / "d" / "pack"), "--native", str(base / "d" / "a.gguf"),
+                                                 "--expert-cache", "auto", "--prefill", "auto", "--max-context", "32768",
+                                                 "--kv", "int8", *extra]}
+
+    def test_b_series_streams_and_defaults_the_reserve(self):
+        m = self.mod()
+        c = m.to_sycl(self.cfg(m), m.ROOT / "build-sycl-aot" / "strata", 64.0, {}, 32.0, "xe")
+        self.assertIn("--stream-experts", c["args"])
+        self.assertEqual(c["args"][c["args"].index("--vram-reserve-mib") + 1], "1024")
+        self.assertNotIn("STRATA_VERIFY_NO_HOST", c.get("env", {}))
+
+    def test_an_explicit_reserve_is_kept_on_both_drivers(self):
+        m = self.mod()
+        for vram, drv in ((32.0, "xe"), (8.0, "i915")):
+            c = m.to_sycl(self.cfg(m, ["--vram-reserve-mib", "500"]), m.ROOT / "build-sycl-aot" / "strata", 64.0, {}, vram, drv)
+            self.assertEqual(c["args"].count("--vram-reserve-mib"), 1)
+            self.assertEqual(c["args"][c["args"].index("--vram-reserve-mib") + 1], "500")
+
+    def test_a_series_loads_experts_into_ram_and_leaves_no_host_off(self):
+        m = self.mod()
+        c = m.to_sycl(self.cfg(m), m.ROOT / "build-sycl" / "strata", 64.0, {}, 8.0, "i915")
+        self.assertNotIn("--stream-experts", c["args"])
+        self.assertEqual(c["args"][c["args"].index("--ple-io") + 1], "ram")
+        self.assertEqual(c["args"][c["args"].index("--vram-reserve-mib") + 1], "300")
+        self.assertEqual(c["env"]["STRATA_VERIFY_NO_HOST"], "0")
+        self.assertEqual(c["env"]["STRATA_SYCL_BIN"], "build-sycl/strata")
+
+    def test_small_card_rule(self):
+        m = self.mod()
+        self.assertTrue(m.small_card(8.0, "i915"))
+        self.assertTrue(m.small_card(24.0, "i915"))
+        self.assertTrue(m.small_card(10.0, "xe"))
+        self.assertFalse(m.small_card(32.0, "xe"))
+
+
 if __name__ == "__main__":
     unittest.main()
