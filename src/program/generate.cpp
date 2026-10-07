@@ -1066,6 +1066,37 @@ MemSample mem_sample() {
 }
 
 // the stage the watchdog names: "<where> <detail>", and the prompt chunk a batched read is in (#251)
+// #1407: the file tier's activity as the OS counts it (Linux: major page faults and bytes read from storage). The #29
+// watchdog treats a growing count as "the step is slow, not stuck": a prompt layer whose experts are re-read from the
+// pack (low RAM, mmap experts) can take minutes while the heartbeat stands still. Zero where unavailable.
+static uint64_t file_tier_activity() {
+#if defined(__linux__)
+    uint64_t total = 0;
+    if (FILE* f = std::fopen("/proc/self/stat", "r")) {
+        char buf[1024] = {};
+        const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        const char* p = std::strrchr(buf, ')');
+        if (p != nullptr && n > 0) {
+            // after "(comm)": state ppid pgrp session tty tpgid flags minflt cminflt majflt
+            unsigned long long majflt = 0;
+            if (std::sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %llu", &majflt) == 1) total += majflt;
+        }
+    }
+    if (FILE* f = std::fopen("/proc/self/io", "r")) {
+        char line[256];
+        while (std::fgets(line, sizeof(line), f) != nullptr) {
+            unsigned long long v = 0;
+            if (std::sscanf(line, "read_bytes: %llu", &v) == 1) total += v >> 20;   // MiB
+        }
+        std::fclose(f);
+    }
+    return total;
+#else
+    return 0;
+#endif
+}
+
 std::string stage_text() {
     const strata::core::Progress& p = strata::core::progress();
     std::string s = std::string(p.where.load()) + " " + std::to_string((long long) p.detail.load());
@@ -7903,17 +7934,39 @@ int main(int argc, char** argv) {
         {
             const char* ws = std::getenv("STRATA_WATCHDOG_S");
             const int limit = ws ? std::atoi(ws) : 60;   // one step (a prompt layer, a verify window) takes seconds
+            // #1407: while the OS is still reading the file tier (major faults / bytes read advance), a silent step is
+            // slow, not stuck; it gets up to STRATA_WATCHDOG_IO_S (default 10 x the limit) of such time. 0 = no allowance.
+            const char* wio = std::getenv("STRATA_WATCHDOG_IO_S");
+            const int io_limit = wio ? std::atoi(wio) : limit * 10;
             if (limit > 0)
-                std::thread([limit] {
+                std::thread([limit, io_limit] {
                     strata::core::Progress& p = strata::core::progress();
                     uint64_t last = p.beats.load(), ticks_at = p.ticks.load();
                     auto since = std::chrono::steady_clock::now();
+                    auto io_since = since;
+                    uint64_t io_last = file_tier_activity();
+                    bool io_noted = false;
                     for (;;) {
                         std::this_thread::sleep_for(std::chrono::seconds(1));
                         const auto now = std::chrono::steady_clock::now();
                         const uint64_t b = p.beats.load();
-                        if (!p.busy.load() || b != last) { last = b; ticks_at = p.ticks.load(); since = now; continue; }
+                        if (!p.busy.load() || b != last) { last = b; ticks_at = p.ticks.load(); since = now; io_since = now; io_noted = false; io_last = file_tier_activity(); continue; }
                         if (now - since < std::chrono::seconds(limit)) continue;
+                        if (io_limit > limit && now - io_since < std::chrono::seconds(io_limit)) {
+                            const uint64_t a = file_tier_activity();
+                            if (a >= io_last + 16) {   // 16 = faults + MiB read in the last second: the file tier is busy
+                                io_last = a;
+                                if (!io_noted) {
+                                    io_noted = true;
+                                    std::fprintf(stderr, "strata serve: no step finished for %d s, but the file tier is still being read "
+                                                         "(slow storage or low RAM): waiting up to %d s in all (STRATA_WATCHDOG_IO_S) (#1407)
+",
+                                                 limit, io_limit);
+                                }
+                                continue;
+                            }
+                            io_last = a;
+                        }
                         // a blocking step's explicit allowance (session files): still within it, not yet stuck
                         if (strata::core::progress_now_ms() < p.allow_until_ms.load()) continue;
                         std::fprintf(stderr, "strata serve: no progress for %d s during a request (%s) - stopping "
