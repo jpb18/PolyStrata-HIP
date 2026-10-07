@@ -88,6 +88,17 @@ bool host_available_memory(HostMemory& m, const std::string& meminfo = "/proc/me
 /// Pass UINT64_MAX for commit when the platform does not report it.
 uint64_t clamp_resident_budget(uint64_t requested, uint64_t physical, uint64_t commit, uint64_t headroom);
 
+/// #1250: one cudaHostAlloc of the whole page-locked complement has no way back when the kernel does not give the
+/// pages as fast as the driver takes them (the process is OOM-killed, even with MemAvailable high: clean file cache
+/// that cannot be reclaimed at that moment).  `free_now` is MemFree (pages that are really free), `bytes` the
+/// complement, `reserve` what must stay.  True when the pages would have to come from reclaimed cache.
+bool pin_depends_on_reclaim(uint64_t free_now, uint64_t bytes, uint64_t reserve);
+/// The paced registration takes the next `step` bytes only while the RAM available after it (cgroup limits included)
+/// is still above `reserve`.
+bool pin_step_fits(uint64_t available, uint64_t step, uint64_t reserve);
+/// Parses `key` ("MemFree") of a /proc/meminfo text; 0 when absent.
+uint64_t meminfo_bytes(const std::string& meminfo_text, const std::string& key);
+
 /// Build compact offsets for experts absent from both the primary GPU cache and an optional second GPU tier.
 /// Kept CPU-only so selection and byte accounting can be tested without initializing a GPU.
 bool make_cache_complement_plan(
@@ -724,6 +735,7 @@ private:
     detail::ExchangeStorage exchange_storage_; // authoritative when active; original arenas still own memory
     bool complement_pinned_ = false;
     bool complement_partial_ = false;         ///< CS-T: only the first complement_pin_limit_ bytes are registered
+    bool complement_registered_ = false;      ///< the arena is ordinary memory registered with cudaHostRegister (not cudaHostAlloc)
     uint64_t complement_pin_limit_ = 0;
     uint64_t complement_lock_off_ = 0;        ///< the working-set lock covers [lock_off, lock_off + locked)
     bool complement_ready_ = false;
