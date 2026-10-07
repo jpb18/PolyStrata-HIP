@@ -1946,6 +1946,37 @@ bool FileExpertSource::transient(int64_t layer, int64_t expert) const {
     return override_.empty() || override_[index] == nullptr;
 }
 
+double FileExpertSource::cached_share(int64_t samples) const {
+#if defined(__linux__)
+    if (role_ptr_.empty() || samples <= 0 || n_layers_ <= 0 || n_expert_ <= 0) return -1.0;
+    // an even spread over the (layer, expert) grid, every page of each of the expert's three slices through mincore
+    const int64_t total = (int64_t) n_layers_ * (int64_t) n_expert_;
+    const int64_t n = std::min<int64_t>(samples, total);
+    uint64_t pages = 0, resident = 0;
+    std::vector<unsigned char> vec;
+    for (int64_t s = 0; s < n; ++s) {
+        const int64_t idx = std::min<int64_t>(total - 1, (s * total) / n + (s * 7919) % std::max<int64_t>(1, total / n));
+        const int64_t layer = idx / n_expert_, expert = idx % n_expert_;
+        if (!transient(layer, expert)) continue;
+        for (int r = 0; r < 3; ++r) {
+            const size_t i = (size_t) (3 * layer + r);
+            if (role_ptr_[i] == nullptr || role_bytes_[i] == 0) continue;
+            const uint8_t* p = role_ptr_[i] + (size_t) ((uint64_t) expert * role_bytes_[i]);
+            const uintptr_t pg = 4096, a = (uintptr_t) p & ~(pg - 1);
+            const size_t len = (size_t) ((uintptr_t) p + role_bytes_[i] - a), np = (len + pg - 1) / pg;
+            vec.assign(np, 0);
+            if (mincore((void*) a, len, vec.data()) != 0) return -1.0;
+            pages += np;
+            for (unsigned char v : vec) resident += v & 1;
+        }
+    }
+    return pages ? (double) resident / (double) pages : -1.0;
+#else
+    (void) samples;
+    return -1.0;   // no cheap residency query for a file mapping here: the caller keeps its SSD assumption
+#endif
+}
+
 bool FileExpertSource::copy_blob(int64_t layer, int64_t expert, uint8_t* dst) {
     if (base_ == nullptr || dst == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_)
         return false;

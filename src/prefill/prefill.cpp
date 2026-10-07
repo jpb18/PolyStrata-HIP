@@ -933,6 +933,18 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         bool files = false;
         for (int64_t l = 0; src != nullptr && !files && l < g.n_layers; ++l)
             for (int64_t e = 0; !files && e < g.n_expert; ++e) files = src->transient(l, e);
+        // #1353: ... but a source answers transient() for every blob it copies out of the GGUF, including the ones whose
+        // pages are already in the page cache (a Q8 pack on a big-RAM box with a warm cache).  Those copies are memcpy
+        // from RAM, where 32 threads and a 128-deep ring ran 4-7x slower than the defaults.  So ask the OS: the SSD
+        // profile only when fewer than 90% of a sample of the blobs' pages are resident (-1: it cannot tell, keep it).
+        if (files && !stv) {
+            const char* ev = std::getenv("STRATA_STAGER_SSD");   // 1 / 0: force the profile (A/B, support)
+            if (ev != nullptr && ev[0] != '\0') files = ev[0] != '0';
+            else if (const double warm = src->cached_share(256); warm >= 0.9) {
+                files = false;
+                std::fprintf(stderr, "prefill: the GGUF experts are %.0f%% in the page cache; the stager takes the RAM profile\n", warm * 100.0);
+            }
+        }
         const int threads = stv ? std::clamp(std::atoi(stv), 1, 32) : files ? 32 : std::max(2, std::min(4, hw / 4));
         if (files && std::getenv("STRATA_STAGER_RING") == nullptr) m.stager->kRing = 4 * threads;
         if (!m.stager->init((size_t) MAXBLOB(), threads)) ok = false;
