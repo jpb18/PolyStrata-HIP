@@ -2151,7 +2151,7 @@ def hip_visible(cfg: dict) -> list[int]:
             return [int(str(ordinal).strip())]
         except ValueError:
             pass
-    return gpu_list(cfg)
+    return ordered_gpus(cfg)
 
 
 def gpu_speed_scores(indices: list[int]) -> dict[int, float] | None:
@@ -2185,6 +2185,26 @@ def gpu_speed_scores(indices: list[int]) -> dict[int, float] | None:
     return got if all(i in got and got[i] > 0 for i in indices) else None
 
 
+def hip_speed_scores(indices: list[int], root: str = "/sys/class/kfd/kfd/topology/nodes") -> dict[int, float] | None:
+    """AMD on Linux: SIMDs x max engine clock of each card, from the KFD topology (the order setup and the engine use
+    for "gpu" there: the GPU nodes in node order).  None when the files are not there (Windows, no ROCm driver)."""
+    try:
+        nodes = sorted((int(n) for n in os.listdir(root) if n.isdigit()))
+    except OSError:
+        return None
+    cards = []
+    for n in nodes:
+        try:
+            props = dict(line.split() for line in open(os.path.join(root, str(n), "properties")) if len(line.split()) == 2)
+            simd, clk = int(props.get("simd_count", 0)), int(props.get("max_engine_clk_fcompute", 0))
+        except (OSError, ValueError):
+            continue
+        if simd > 0:
+            cards.append(float(simd) * float(clk or 1))
+    got = dict(enumerate(cards))
+    return got if all(i in got for i in indices) else None
+
+
 def ordered_gpus(cfg: dict, scores=None) -> list[int]:
     """#1352: the cards of a layer split in the order the engine stages them.  With "layer_split": "auto" (the
     default) the faster card goes LAST - the last stage runs the head, the draft layer and the verify, and a prompt
@@ -2194,12 +2214,13 @@ def ordered_gpus(cfg: dict, scores=None) -> list[int]:
     manual "layer_split" ("24") also keeps it: the user placed the layers.  scores: {index: score} (tests); None asks
     the driver."""
     gl = gpu_list(cfg)
-    if len(gl) < 2 or cfg.get("gpu_order") == "as_given" or cfg.get("backend") == "hip":
+    if len(gl) < 2 or cfg.get("gpu_order") == "as_given":
         return gl
     args = cfg.get("args") or []
     if "--peer-device" in args or "--layer-split" in args or layer_split_value(cfg) != "auto":
         return gl
-    sc = scores if scores is not None else gpu_speed_scores(gl)
+    hip = cfg.get("backend") == "hip"
+    sc = scores if scores is not None else (hip_speed_scores(gl) if hip else gpu_speed_scores(gl))
     if not sc or any(i not in sc for i in gl):
         return gl
     out = sorted(gl, key=lambda i: sc[i])
