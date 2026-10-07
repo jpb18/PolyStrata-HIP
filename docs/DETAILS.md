@@ -1409,7 +1409,7 @@ the pairs in which the switched arm won). They are here so you can try them on y
   every prompt tried). The kernel needs 128 SMs in one wave, so by itself it runs only on a card with 128 or more
   (RTX 5090: 1.8x on the recurrence). On smaller cards `STRATA_GDN_CHUNKED=2` forces it for a measurement, and it is
   slower there: 0.73x on an RTX 3060 (28 SMs) and 0.87x on an RTX 5070 (48 SMs) at 2K-32K tokens (`gdn_rec_parity --bench`),
-  and the prompt time did not move on the 5070 (2K 1.01x, 8K 1.00x).
+  and the prompt time did not improve: RTX 5070 2K 1.01x, 8K 1.00x of the default's time; RTX 3060 2K, 8K, 16K 1.01x, no pair faster.
 - **`STRATA_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
   with the experts that just missed and with the ones the next layer's router predicts (`STRATA_FS_AHEAD=0` for the
   misses only), so that an expert the cache lacks can be computed on the GPU instead of by the CPU. The model's own router
@@ -1419,10 +1419,15 @@ the pairs in which the switched arm won). They are here so you can try them on y
   returned: decode 4 slots, median tok/s B/A (pairs faster): RTX 3060 0.95 (0/6) with misses only, 0.91 (0/6) with the
   look-ahead; Tesla P100 0.97 (2/6) and 1.00 (4/6); 16 slots on the P100 0.96 (0/6); RTX 5070 0.98 (1/6). The reporter
   measured the same on 2x RTX 3090 (the misses per layer are below one there, so the CPU round trip stays). Left off.
-- **`STRATA_STAGE_PIN=1`: pinned stage buffers** (Zhong Uncle, #1237): where the experts are served from the GGUF in place
-  (`--mmap-experts`, or too little RAM for the arena) the buffers the cache fill copies from are page-locked, so the
-  copy no longer goes through the driver's bounce buffer (about 0.4-0.6 GiB of pinned RAM, falls back per buffer when the
-  driver refuses).
+- **`STRATA_STAGE_PIN`: pinned stage buffers** (Zhong Uncle, #1237; **on by default** while the host has 3 GiB of RAM to
+  spare, `STRATA_STAGE_PIN=0` turns it off, `=1` pins without the RAM check). Where the experts are served from the GGUF in
+  place (`--mmap-experts`, or too little RAM for the arena) the buffers the cache fill copies from are page-locked, so the
+  copy no longer goes through the driver's bounce buffer (about 0.4-0.6 GiB of pinned RAM, one buffer falls back to
+  pageable when the driver refuses). Decode, median tok/s on, off, 6 pairs of whole runs: Tesla P100 with the RAM capped at
+  24 GB (cgroup) 13.9 -> 15.0 (+8%, 6/6 pairs faster); RTX 5070 `--mmap-experts` +1.2% (5/6); RTX 3060 `--mmap-experts`
+  -0.1% (5/6). Boxes that hold all experts in RAM never use the stage buffers.
+- **`STRATA_ADAPT_LAG=2`: the adaptive tier's copies are waited for one window later** (#764). Decode, 6 pairs: Tesla P100
+  (PCIe 3.0 x16) +3.5% (6/6 pairs faster), RTX 5070 +0.2% (4/6), RTX 3060 -1.3% (0/6), so it stays opt-in.
 
 ---
 
