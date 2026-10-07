@@ -843,6 +843,29 @@ __global__ void softcap_kernel(float* x, size_t n, float cap) {
     if (i < n) x[i] = tanhf(x[i] * (1.0f / cap)) * cap;
 }
 
+// One block of 1024; a thread has every 1024th value.
+__global__ void likeliest_kernel(const float* __restrict__ x, int n, Likeliest* __restrict__ out) {
+    __shared__ float part[32];
+    __shared__ int first[32];
+    float m = -INFINITY;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) m = fmaxf(m, x[i]);
+    m = block_max(m, part);
+    int at = n;
+    float sum = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        if (x[i] == m) at = min(at, i);
+        if (x[i] > m - 20.0f) sum += expf(x[i] - m);
+    }
+#pragma unroll
+    for (int o = WARP / 2; o > 0; o >>= 1) at = min(at, __shfl_xor_sync(0xffffffff, at, o, WARP));
+    if ((threadIdx.x & 31) == 0) first[threadIdx.x >> 5] = at;
+    sum = block_sum(sum, part);   // and first is written
+    if (threadIdx.x != 0) return;
+    for (int k = 1; k < int(blockDim.x) / WARP; ++k) at = min(at, first[k]);
+    out->token = at < n ? at : 0;
+    out->prob = 1.0f / sum;
+}
+
 __global__ void mul_sigmoid_kernel(float* __restrict__ acc, const float* __restrict__ g, int n, int g_stride,
                                    bool one_gate) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1289,6 +1312,10 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
 
 void softcap(float* x, size_t n, float cap, void* stream) {
     softcap_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(x, n, cap);
+}
+
+void likeliest(const float* logits, int n, Likeliest* out, void* stream) {
+    likeliest_kernel<<<1, 1024, 0, cs(stream)>>>(logits, n, out);
 }
 
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream) {

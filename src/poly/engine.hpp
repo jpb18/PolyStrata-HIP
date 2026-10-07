@@ -26,6 +26,7 @@ struct MetaValue;
 namespace strata::poly {
 
 class Shards;
+struct Likeliest;
 
 struct Options {
     std::string model;
@@ -384,7 +385,7 @@ protected:
     // The draft block reads the model's output for the token before each of its tokens.  Row 0 is the output of
     // the last token of the sequence, and the outputs of the tokens of the call under way follow it.
     float* hn_ = nullptr;
-    float* h_dlogits_ = nullptr;        ///< a guess's logits, pinned
+    Likeliest *guess_ = nullptr, *h_guess_ = nullptr;   ///< a guess and its probability: VRAM and pinned
     int32_t win_tok_[8] = {};           ///< the window's tokens, for keep()
     int64_t ahead_pos_ = -1;            ///< draft() has left the block's row of this position as its token leaves it,
     int32_t ahead_tok_ = 0;             ///< which is this one

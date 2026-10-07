@@ -166,6 +166,13 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                   float scale, void* stream, int window = 0, int ring = 0, bool whole = false);
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
+/// The first of the largest of n logits and the softmax's probability of it, summed without the logits more than
+/// 20 below it.
+struct Likeliest {
+    int32_t token;
+    float prob;
+};
+void likeliest(const float* logits, int n, Likeliest* out, void* stream);
 /// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.
 /// With one_gate a group has one gate for all its values.
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream);

@@ -829,7 +829,8 @@ void Engine::alloc() {
                               "the recurrent state");
     if (draft_) {
         hn_ = state_ + rec_n_;
-        h_dlogits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
+        guess_ = (Likeliest*) dmalloc(sizeof(Likeliest), "scratch");
+        h_guess_ = (Likeliest*) hmalloc(sizeof(Likeliest), "pinned memory");
     }
     // window(): the state after each of its tokens but the last, for keep(), and every token's logits
     if (opt_.window > 1)
@@ -1857,27 +1858,17 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
     if (i < 0 || pos_ + i >= opt_.max_context) throw std::logic_error("draft: the position is outside the context");
     ck(cudaStreamSynchronize(cs(st_)), "draft");
     draft_step(token, i);
-    ck(cudaMemcpyAsync(h_dlogits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
-       "draft");
+    // The guess and its probability are found on the card.  On the host a vocabulary's softmax takes up to 2 ms
+    // where the block is unsure, four times what the block takes.
+    likeliest(logits_, n_vocab_, guess_, st_);
+    ck(cudaMemcpyAsync(h_guess_, guess_, sizeof(Likeliest), cudaMemcpyDeviceToHost, cs(st_)), "draft");
     ck(cudaStreamSynchronize(cs(st_)), "draft");
     if (i == 0) {
         ahead_pos_ = pos_;
         ahead_tok_ = token;
     }
-
-    const float* l = h_dlogits_;
-    const int best = most_likely(l, n_vocab_);
-    // the softmax's sum without the tokens too unlikely to change it: a stretch with none of them is passed over
-    const float least = l[best] - 20.f;
-    double sum = 0.0;
-    for (int v0 = 0; v0 < n_vocab_; v0 += kLanes * 8) {
-        const int v1 = std::min(n_vocab_, v0 + kLanes * 8);
-        if (!(largest(l + v0, v1 - v0) > least)) continue;
-        for (int v = v0; v < v1; ++v)
-            if (l[v] > least) sum += std::exp((double) (l[v] - l[best]));
-    }
-    *prob = (float) (1.0 / sum);
-    return best;
+    *prob = h_guess_->prob;
+    return h_guess_->token;
 }
 
 int most_likely(const float* logits, int n) {
