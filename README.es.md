@@ -81,7 +81,7 @@ Medido para PolyStrata en una estación de trabajo, con un prompt de 28K tokens.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **3.0BIT** | 58-59 tokens/s | 529-531 tokens/s |
+| **3.0BIT** | 57-59 tokens/s | 784-785 tokens/s |
 | **UD-IQ2_XXS** (compilación anterior) | 33 tokens/s | 347 tokens/s |
 | **REAP50-Q3_K_M** (compilación anterior) | 27 tokens/s | 384 tokens/s |
 
@@ -107,19 +107,19 @@ el procesador.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 310-311 tokens/s | 3,830-3,860 tokens/s |
+| **UD-Q3_K_M** | 302-313 tokens/s | 5,110-5,170 tokens/s |
 
 </td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 156-165 tokens/s | 3,160-3,190 tokens/s |
+| **UD-Q3_K_M** | 149-155 tokens/s | 3,920-4,000 tokens/s |
 
 </td></tr>
 </table>
 
 La tabla de la derecha no es un PC con una tarjeta de 8 GB: el procesador, la RAM y la velocidad de la tarjeta son
-los de esta estación de trabajo. Un prompt más corto se lee más rápido: uno de 10,000 tokens a 4,800 tokens/s con el
+los de esta estación de trabajo. Un prompt más corto se lee más rápido: uno de 10,000 tokens a 5,500 tokens/s con el
 modelo entero en la tarjeta. llama.cpp, con el modelo entero en la misma tarjeta, escribió unos 180 tokens/s y leyó
 prompts a entre 6,000 y 9,000. Necesita una tarjeta en la que quepa el modelo.
 
@@ -133,18 +133,18 @@ Medido igual, con el mismo prompt de 30K tokens.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 229 tokens/s | 3,860 tokens/s |
+| **APEX-I-COMPACT** | 229-230 tokens/s | 5,190-5,200 tokens/s |
 
 </td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 140-148 tokens/s | 3,060-3,070 tokens/s |
+| **APEX-I-COMPACT** | 150-155 tokens/s | 3,760-3,820 tokens/s |
 
 </td></tr>
 </table>
 
-Un prompt de 10,000 tokens se lee a 4,800 tokens/s con el modelo entero en la tarjeta. llama.cpp, con el modelo
+Un prompt de 10,000 tokens se lee a 5,500 tokens/s con el modelo entero en la tarjeta. llama.cpp, con el modelo
 entero en la misma tarjeta, escribió unos 180 tokens/s y leyó prompts a entre 6,000 y 9,000.
 
 ### Gemma 4 26B-A4B
@@ -157,18 +157,18 @@ Medido igual, con un prompt de 31K tokens.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 274-276 tokens/s | 3,850 tokens/s |
+| **UD-Q3_K_M** | 272-276 tokens/s | 5,530-5,710 tokens/s |
 
 </td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 135-142 tokens/s | 3,390-3,420 tokens/s |
+| **UD-Q3_K_M** | 134-138 tokens/s | 4,640-4,730 tokens/s |
 
 </td></tr>
 </table>
 
-Un prompt de 10,000 tokens se lee a 4,600 tokens/s con el modelo entero en la tarjeta. llama.cpp, con
+Un prompt de 10,000 tokens se lee a 5,500 tokens/s con el modelo entero en la tarjeta. llama.cpp, con
 el modelo entero en la misma tarjeta, escribió unos 165 tokens/s y leyó prompts a entre 6,000 y 9,000.
 
 Los cuatro modelos del motor propio de PolyStrata se midieron con su benchmark, que puedes ejecutar en tu PC:
@@ -402,7 +402,7 @@ En qué se diferencian:
 | **Imágenes** | Responde que sí a "Images?" en la instalación. Luego haz clic en **Picture** en el chat, o adjunta imágenes en tu aplicación. Las tarjetas AMD leen imágenes en Linux a través del procesador; en Windows todavía no. | Todavía no. | Responde que sí a "Images?" en la instalación, y luego como con Qwen3.8-Flash-Next. En una tarjeta de menos de 16 GB el codificador de imágenes funciona en el procesador, y una imagen tarda unos segundos. |
 | **Una petición cada vez** | Por defecto PolyStrata responde una petición y las demás esperan. Para responder varias a la vez, pon `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). En una tarjeta de 12 GB, cada respuesta va más lenta. | Una cada vez, las demás esperan. | Una cada vez, las demás esperan. |
 | **Varias conversaciones** | La última se conserva, así que los mensajes siguientes empiezan en segundos. Dos argumentos del motor guardan varias en RAM ([detalles](docs/DETAILS.md#using-it)). | La última se conserva. La instalación pregunta si guardar varias en RAM, para que un agente y sus subagentes se turnen sin que se vuelvan a leer sus prompts ([cómo](docs/GLM.md#several-conversations-at-once)). | Como GLM 5.3 Flash. |
-| **Prompts largos** | PolyStrata lee entero el primer mensaje de un chat, más o menos 1 minuto por cada 30,000 tokens. Los mensajes siguientes empiezan en segundos. | El primer mensaje se lee entero, más o menos 1 minuto por cada 30,000 tokens. | El primer mensaje se lee entero, más o menos 10 segundos por cada 30,000 tokens. |
+| **Prompts largos** | PolyStrata lee entero el primer mensaje de un chat, más o menos 1 minuto por cada 30,000 tokens. Los mensajes siguientes empiezan en segundos. | El primer mensaje se lee entero, más o menos 40 segundos por cada 30,000 tokens. | El primer mensaje se lee entero, entre 6 y 8 segundos por cada 30,000 tokens. |
 
 Más: [dónde se guardan tus chats](docs/INSTALL.md#where-things-are-stored), [la API](docs/DETAILS.md#using-it).
 

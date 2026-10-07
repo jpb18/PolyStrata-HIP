@@ -19,10 +19,10 @@ It is early. It has been built and run on one machine, with Linux and one NVIDIA
 
 | | `strata-poly` | llama.cpp ([neurall's fork](https://github.com/neurall/llama.cpp)), stock settings |
 | --- | ---: | ---: |
-| Writes answers | 48 to 55 tokens/s after the two long prompts, 66 to 67 for a 400-token answer to a short one | 26 tokens/s |
-| Reads a prompt of 3,059 tokens | 539 to 545 tokens/s | about 265 tokens/s |
-| Reads a prompt of 11,673 tokens | 598 to 610 tokens/s | |
-| Reads a prompt of 29,069 tokens | 448 to 459 tokens/s | |
+| Writes answers | 47 to 51 tokens/s after the two long prompts, 62 to 65 for a 400-token answer to a short one | 26 tokens/s |
+| Reads a prompt of 3,059 tokens | 610 to 620 tokens/s | about 265 tokens/s |
+| Reads a prompt of 11,673 tokens | 788 to 802 tokens/s | |
+| Reads a prompt of 29,069 tokens | 733 to 742 tokens/s | |
 | Starts | about 6 s with the file in the page cache | |
 
 Both ran on the machine above. Nothing here has been run on a smaller card.
@@ -34,8 +34,8 @@ same way without the draft block, wrote 26.7 to 27.7 tokens/s and read the three
 [BACKENDS.md](BACKENDS.md#what-was-tuned) has what changed since. llama.cpp was not run again.
 
 The README's row for 3.0BIT is PolyStrata's own benchmark through the server, the test every model of this engine
-gets ([BACKENDS.md](BACKENDS.md#a-prompt-of-30000-tokens)): a short chat written at 58 to 59 tokens/s, and a prompt
-of 28,354 tokens read whole at 529 to 531, with the first token after 54 s and the answer after it written at 50
+gets ([BACKENDS.md](BACKENDS.md#a-prompt-of-30000-tokens)): a short chat written at 57 to 59 tokens/s, and a prompt
+of 28,354 tokens read whole at 784 to 785, with the first token after 36 s and the answer after it written at 49
 to 51. Of the 29,069-token prompt in the table above only the last 18,829 tokens are read, the ones furthest
 into the context, which is the likely reason it comes out slower.
 
