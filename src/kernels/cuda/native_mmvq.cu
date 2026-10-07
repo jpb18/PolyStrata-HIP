@@ -2543,11 +2543,9 @@ const std::vector<IlEnvRow>& il_env_rows() {
                 bool ok = true;
                 for (int i = 0; i < 5; ++i) { ok = ok && (r[i] == 0 || r[i] == 1 || r[i] == 2 || r[i] == 4); x.r[i] = (uint8_t) r[i]; }
                 if (ok) out.push_back(x);
-                else std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored
-");
+                else std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: rows must be 0/1/2/4 - entry ignored\n");
             } else {
-                std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored
-",
+                std::fprintf(stderr, "strata: STRATA_MMVQ_IL_ROWS: cannot read '%s' (type:ncols:r0,r1,r2,r3,r4) - ignored\n",
                              str.substr(pos, end - pos).c_str());
             }
             pos = end + 1;

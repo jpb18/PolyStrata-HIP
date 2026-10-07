@@ -178,8 +178,7 @@ int run_case(const Case& c, bool bench, cudaStream_t s) {
 void emit_table() {
     const int types[] = {23, 12, 13, 14};
     const char* names[] = {"IQ4_XS", "Q4_K", "Q5_K", "Q6_K"};
-    std::printf("// measured on this card by mmvq_il_parity --bench --emit-table
-");
+    std::printf("// measured on this card by mmvq_il_parity --bench --emit-table\n");
     for (int ti = 0; ti < 4; ++ti) {
         std::printf("    {%d, {", types[ti]);
         for (int nc = 2; nc <= 4; ++nc) {
@@ -203,8 +202,7 @@ void emit_table() {
             }
             std::printf("}%s", nc < 4 ? ", " : "");
         }
-        std::printf("}},   // %s
-", names[ti]);
+        std::printf("}},   // %s\n", names[ti]);
     }
 }
 
@@ -218,22 +216,18 @@ int check_tables() {
                 // sm_89 has no table of its own: it must answer exactly what the measured Ampere table says
                 if (native_mmvq_il_rows_for(89, type, nc, n_out) != a || native_mmvq_il_rows_for(120, type, nc, n_out) != a) {
                     ++bad;
-                    std::printf("FAIL table: sm_89/sm_120 differ from sm_86 at type %d ncols %d n_out %d
-", type, nc, n_out);
+                    std::printf("FAIL table: sm_89/sm_120 differ from sm_86 at type %d ncols %d n_out %d\n", type, nc, n_out);
                 }
-                if (a != 0 && a != 1 && a != 2 && a != 4) { ++bad; std::printf("FAIL table: rows %d
-", a); }
+                if (a != 0 && a != 1 && a != 2 && a != 4) { ++bad; std::printf("FAIL table: rows %d\n", a); }
             }
     // Volta has its own table (PR 1401): Q6_K at 2 columns, 2560 rows -> 1 row a warp; the Ampere table says 0 there
     if (native_mmvq_il_rows_for(70, 14, 2, 2560) != 1 || native_mmvq_il_rows_for(86, 14, 2, 2560) != 0) {
         ++bad;
-        std::printf("FAIL table: the sm_70 table is not the V100's
-");
+        std::printf("FAIL table: the sm_70 table is not the V100's\n");
     }
     if (native_mmvq_il_rows_for(89, 99, 2, 2560) != 0 || native_mmvq_il_rows_for(89, 12, 5, 2560) != 0) {
         ++bad;
-        std::printf("FAIL table: an unknown type or ncols must be 0
-");
+        std::printf("FAIL table: an unknown type or ncols must be 0\n");
     }
     return bad;
 }
