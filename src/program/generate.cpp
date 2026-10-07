@@ -3816,8 +3816,7 @@ int main(int argc, char** argv) {
             if (o.batch % d == 0) best = d;
         if (stages.empty()) best = 1;
         o.batch_groups = best;
-        std::fprintf(stderr, "strata generate: --batch-groups auto: %d group%s of %d slot%s
-", best, best == 1 ? "" : "s",
+        std::fprintf(stderr, "strata generate: --batch-groups auto: %d group%s of %d slot%s\n", best, best == 1 ? "" : "s",
                      o.batch / best, o.batch / best == 1 ? "" : "s");
     };
     if (o.batch > 0) resolve_groups_auto();
