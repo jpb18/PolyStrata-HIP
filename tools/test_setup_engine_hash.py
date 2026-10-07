@@ -191,7 +191,7 @@ class ArchiveVerification(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {}, clear=False)
         env = patch.start()
         self.addCleanup(patch.stop)
-        env.pop("STRATA_ALLOW_UNVERIFIED_ENGINE", None)
+        env.pop("STRATA_SKIP_SHA256", None)
 
     def digest(self, value):
         return mock.patch.object(setup, "engine_digest", return_value=value)
@@ -226,33 +226,30 @@ class ArchiveVerification(unittest.TestCase):
                 setup.verify_engine_archive(self.z, ASSET, TAG_BASE)
         self.assertFalse(self.z.exists())
 
-    def test_refuses_when_github_gives_no_hash(self):
-        with self.digest(None):
-            with self.assertRaises(setup.UnverifiedEngine) as caught:
-                setup.verify_engine_archive(self.z, ASSET, TAG_BASE)
-        self.assertIn("did not give a SHA-256", str(caught.exception))
-        self.assertTrue(self.z.exists(), "the file is left alone; only the install is refused")
+    def test_no_digest_warns_and_installs_anyway(self):
+        # "recommend, never force": no digest (offline, rate limit, mirror, folder) is a warning, not a refusal.
+        for base in (TAG_BASE, LOCAL_BASE, "https://mirror.invalid/dl/"):
+            said = io.StringIO()
+            with self.digest(None), mock.patch.object(setup, "warn", said.write):
+                setup.verify_engine_archive(self.z, ASSET, base)     # must not raise
+            self.assertIn("NOT verified", said.getvalue(), base)
+            self.assertTrue(self.z.exists())
 
-    def test_a_local_folder_warns_and_proceeds(self):
-        # `--prebuilt D:\mirror` used to be refused unless the override was set, which was a regression on
-        # a supported workflow: it is the user's own file on their own disk, the same trust decision as
-        # --gguf-dir, and no API could say anything about it. It now warns by name and goes ahead.
+    def test_skip_env_skips_the_check_loudly(self):
+        os.environ["STRATA_SKIP_SHA256"] = "1"
         said = io.StringIO()
-        with self.digest(None), mock.patch.object(setup, "warn", said.write):
-            setup.verify_engine_archive(self.z, ASSET, LOCAL_BASE)     # must not raise
-        out = said.getvalue()
-        self.assertIn(LOCAL_BASE, out)
-        self.assertIn("cannot be checked", out)
+        with mock.patch.object(setup, "engine_digest", return_value=(1, "0" * 64)) as m,                 mock.patch.object(setup, "warn", said.write):
+            setup.verify_engine_archive(self.z, ASSET, TAG_BASE)     # a wrong digest, but skipped
+        self.assertEqual(m.call_count, 0)
+        self.assertIn("STRATA_SKIP_SHA256", said.getvalue())
+        self.assertIn("NOT checking", said.getvalue())
+        self.assertTrue(self.z.exists())
 
-    def test_a_remote_mirror_still_needs_the_override(self):
-        # There IS a network in the middle of a mirror, and still no release to check it against.
-        with self.digest(None):
-            with self.assertRaises(setup.UnverifiedEngine) as caught:
-                setup.verify_engine_archive(self.z, ASSET, "https://mirror.invalid/dl/")
-        msg = str(caught.exception)
-        self.assertIn("not a GitHub release URL", msg)
-        # and it says why a local folder would have been different, which is the distinction
-        self.assertIn("is not a folder on this PC either", msg)
+    def test_skip_env_needs_exactly_1(self):
+        os.environ["STRATA_SKIP_SHA256"] = "0"
+        with self.digest((1, "0" * 64)):
+            with self.assertRaises(setup.UnverifiedEngine):
+                setup.verify_engine_archive(self.z, ASSET, TAG_BASE)
 
     def test_a_truncated_archive_is_refused(self):
         # There is no finish mark any more, so nothing can vouch for a file that changed after it was
@@ -285,22 +282,6 @@ class ArchiveVerification(unittest.TestCase):
             setup.verify_engine_archive(self.z, ASSET, TAG_BASE)
         self.assertEqual(m.call_count, 1, f"engine_digest was called {m.call_count} times")
 
-    def test_the_api_is_asked_once_when_the_escape_hatch_is_set_too(self):
-        os.environ["STRATA_ALLOW_UNVERIFIED_ENGINE"] = "1"
-        with mock.patch.object(setup, "engine_digest", return_value=None) as m:
-            said = io.StringIO()
-            with mock.patch.object(setup, "say", said.write), mock.patch.object(setup, "warn", said.write):
-                setup.verify_engine_archive(self.z, ASSET, TAG_BASE)   # must not raise
-        self.assertEqual(m.call_count, 1, f"engine_digest was called {m.call_count} times")
-        self.assertIn("UNVERIFIED", said.getvalue())
-        self.assertIn(ASSET, said.getvalue())
-
-    def test_the_escape_hatch_is_opt_in(self):
-        self.assertNotIn("STRATA_ALLOW_UNVERIFIED_ENGINE", os.environ)
-        with self.digest(None):
-            with self.assertRaises(setup.UnverifiedEngine):
-                setup.verify_engine_archive(self.z, ASSET, TAG_BASE)
-
 
 class WhatARefusalDoesToTheCaller(unittest.TestCase):
     """`engine_refused`, and the paths that call it.
@@ -327,7 +308,7 @@ class WhatARefusalDoesToTheCaller(unittest.TestCase):
 
     def test_updating_keeps_the_installed_engine_instead_of_stopping(self):
         # The call site's own words: "a failed download must not stop the model from starting".
-        for digest in ((999, "f" * 64), (1, "0" * 64), None):
+        for digest in ((999, "f" * 64), (1, "0" * 64)):
             eng, out = self.get_prebuilt(updating=True, digest=digest)
             self.assertIsNone(eng, f"digest={digest!r} did not return None")
         self.assertNotIn("Setup stopped", out.getvalue(),

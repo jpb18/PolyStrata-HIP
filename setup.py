@@ -2491,7 +2491,7 @@ def release_of(base: str) -> tuple[str, str | None] | None:
 
 
 def is_local(base: str) -> bool:
-    """True for a path on this machine - `C:\mirror`, `/mnt/mirror`, `\\share\engine`, `file://...`.
+    """True for a path on this machine - `C:/mirror`, `/mnt/mirror`, `//share/engine`, `file://...`.
 
     A local folder is the user's own file on their own disk, the same trust decision as `--gguf-dir`, and
     there is no published digest for it to be checked against.  It is treated differently from a remote
@@ -2513,7 +2513,7 @@ def engine_digest(asset: str, base: str) -> tuple[int, str] | None:
 
     GitHub populates `digest` for every asset, including ones uploaded before the field existed
     (measured on v0.1.34 through v0.1.40.1).  None means no answer - no network, a rate limit, or a
-    release that does not publish one - and the caller refuses rather than treating it as a pass.
+    release that does not publish one - and the caller warns and installs anyway (never refuses).
     """
     where = release_of(base)
     if where is None:                  # a local folder or a plain mirror: nothing published to check against
@@ -2554,11 +2554,11 @@ def verify_engine_archive(z: Path, asset: str, base: str) -> None:
     - a GitHub release URL: the tag is read out of the URL, so the exact release the bytes claim to come
       from is the one checked rather than "latest" (setup tries the checkout's own release first, #214),
       and the repository comes out of the URL too, so a fork's releases are checked against the fork;
-    - a local folder (`--prebuilt D:\mirror`): nothing published to check against.  This warns and goes
+    - a local folder (`--prebuilt D:/mirror`): nothing published to check against.  This warns and goes
       ahead - it is the user's own file, the same trust decision as `--gguf-dir`, and there is nothing an
       API could say about it;
     - any other remote mirror: nothing published to check against either, but a network is in the middle,
-      so it refuses unless `STRATA_ALLOW_UNVERIFIED_ENGINE=1`.
+      so it warns and installs anyway (no digest is never a reason to refuse).
 
     What a digest from the API does NOT cover, stated plainly: it proves the bytes are the ones GitHub
     published for that asset, so it catches a corrupted transfer, a mirror or proxy that substituted the
@@ -2574,20 +2574,16 @@ def verify_engine_archive(z: Path, asset: str, base: str) -> None:
     to download the same file.  A mark that saves 0.8 s is not worth a class of hole - anything that
     changes the file after it was verified, at any length - so there is no mark here.
     """
+    if os.environ.get("STRATA_SKIP_SHA256") == "1":
+        warn(f"STRATA_SKIP_SHA256=1: NOT checking {asset} against its SHA-256. If the file is corrupt or "
+             f"tampered with, it will be installed anyway. Unset it to get the check back.")
+        return
     want = engine_digest(asset, base)          # one API call: this is a rate-limited API
     if not want:
-        if is_local(base):
-            warn(f"{base} is a folder on this PC, not a published release, so {asset} cannot be checked "
-                 f"against a SHA-256. Installing it as it is.")
-            return
-        if os.environ.get("STRATA_ALLOW_UNVERIFIED_ENGINE"):
-            warn(f"no published SHA-256 for {asset}; installing it UNVERIFIED "
-                 f"(STRATA_ALLOW_UNVERIFIED_ENGINE)")
-            return
-        if release_of(base) is None:
-            raise UnverifiedEngine(f"{base} is not a GitHub release URL, so there is no published "
-                                   f"SHA-256 for {asset}, and it is not a folder on this PC either")
-        raise UnverifiedEngine(f"GitHub's API did not give a SHA-256 for {asset}")
+        # no published digest (offline, rate limit, a mirror or folder): install anyway, never refuse
+        warn(f"could not get a SHA-256 for {asset} from GitHub (offline, rate limited, or not a release "
+             f"URL), so it was NOT verified. Installing it as it is.")
+        return
     size, sha = want
     have = z.stat().st_size if z.exists() else -1
     if have != size:
@@ -2615,14 +2611,12 @@ def engine_refused(asset: str, e: Exception, updating: bool) -> None:
     catches what the download can throw.
     """
     if not updating:
-        fail(f"cannot verify the Strata engine: {e}",
-             "the downloaded archive has been deleted so the next run fetches the published one. "
-             "Re-run when GitHub answers - it publishes a size and SHA-256 for every asset - or set "
-             "STRATA_ALLOW_UNVERIFIED_ENGINE=1 to install an engine that cannot be checked")
+        fail(f"the downloaded Strata engine does not match GitHub's checksum: {e}",
+             "the bad download has been deleted (corrupt or tampered), so the next run fetches the "
+             "published file again. Set STRATA_SKIP_SHA256=1 only if you insist on installing it anyway")
         return
     warn(f"keeping the engine that is installed: {e}")
-    say(f"       Nothing was replaced. Run setup again when GitHub answers, or set "
-        f"STRATA_ALLOW_UNVERIFIED_ENGINE=1 to install an engine that cannot be checked.")
+    say("       Nothing was replaced. The bad download was deleted; run setup again to fetch it afresh.")
 
 
 def prebuilt_bases(url_base) -> list[str]:
