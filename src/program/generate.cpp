@@ -4188,6 +4188,25 @@ int main(int argc, char** argv) {
         // under WDDM an over-subscribed allocation does not fail, it pages to system memory and crawls.
         // (with borrowing - the default with a profile - the prompt path lends cache slots instead; `pf_borrow` is
         // the predicate a local `borrow` was here, hoisted above so both cache-size branches read the same one)
+        // #1376: under WDDM the free figure read here runs high, and what is allocated after the cache (the verify
+        // windows, the prompt path) comes out of the reserve.  0.1.40 ended a 20 GB RX 7900 XT with 2,170 MiB free
+        // (its write-back check cut the cache); 0.1.40.2 passed that check with the default 700 MiB and ended with
+        // 323 MiB, where Windows paged and decode fell from 52 to 21-25 tok/s.  --vram-reserve-mib 2600 fixed it.  So on
+        // Windows an auto cache on a card of 16 GiB or more keeps a floor of kWddmAutoReserveMib.  A reserve given on the
+        // command line is kept as it is; a smaller card keeps its own sizing (#496 lowers the reserve further when
+        // the cache would not fit); and this is said, never silent.  The cache size changes no output bit.
+        constexpr int kWddmAutoReserveMib = 2560;
+        if (!o.vram_reserve_given && o.vram_reserve_mib < kWddmAutoReserveMib) {
+#if defined(_WIN32)
+            size_t fb_now = 0, tb_now = 0;
+            if (cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess && tb_now >= (16ull << 30)) {
+                std::fprintf(stderr, "strata generate: expert cache auto: Windows keeps %d MiB free after the cache on a card "
+                                     "this size (the default %d MiB left 323 MiB on a 20 GB card and Windows paged, #1376); "
+                                     "--vram-reserve-mib N sets it\n", kWddmAutoReserveMib, o.vram_reserve_mib);
+                o.vram_reserve_mib = kWddmAutoReserveMib;
+            }
+#endif
+        }
         const int64_t prefill_mib = owned_prefill_mib();
         // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
         // ~110-180 MiB larger, and out of the reserve they left 16 GB cards below the stall line (#199)
