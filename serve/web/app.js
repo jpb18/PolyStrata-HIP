@@ -726,7 +726,7 @@ function apiMessages() {
       const text = userText(m);
       out.push({role: "user", content: imgs.length ? [{type: "text", text},
         ...imgs.map((i) => ({type: "image_url", image_url: {url: i.url}}))] : text});
-    } else if (!m.error) {
+    } else if (!(busy && busy.msg === m)) {            // the answer being asked for now is not history yet
       out.push(...assistantMessages(m));
     }
   }
@@ -736,7 +736,14 @@ function apiMessages() {
 // their results (as the model read them), then the rest - so the next question can build on what the tools found.
 function assistantMessages(m) {
   const ran = (m.tools || []).filter((t) => t.round != null && t.result != null && t.state !== "skipped");
-  if (!ran.length) return m.text ? [{role: "assistant", content: m.text}] : [];
+  // #1392: a turn with no answer text (only reasoning, a stop before the first content token, or an error) still goes
+  // back as an assistant turn, so the history keeps alternating and a reasoning model sees that it already answered.
+  // The server leaves such a turn out of the prompt itself (serve/frontend.py, #843); reasoning_content rides along.
+  if (!ran.length) {
+    const msg = {role: "assistant", content: m.text || ""};
+    if (!m.text && m.reasoning) msg.reasoning_content = m.reasoning;
+    return [msg];
+  }
   const out = [];
   let pos = 0;
   for (const r of [...new Set(ran.map((t) => t.round))]) {
