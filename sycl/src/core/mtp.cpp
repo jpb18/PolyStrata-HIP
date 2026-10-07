@@ -87,9 +87,9 @@ bool mapped(size_t bytes, void **h, void **d) try {
     migrated code and was removed or replaced with 0. You may need to check the
     migrated code.
     */
-    if (DPCT_CHECK_ERROR(*h = (void *)sycl::malloc_host(
+    if (DPCT_CHECK_ERROR(*h = strata::host_malloc_polled(
                              bytes, dpct::get_in_order_queue())) !=
-        0) return false;
+        0 || *h == nullptr) return false;   // the host polls what the draft steps write: uncached host memory (sycl_queue.hpp)
     std::memset(*h, 0, bytes);
     return DPCT_CHECK_ERROR(*d = (void *)*h) == 0;
 }
@@ -176,7 +176,7 @@ MtpDrafter::~MtpDrafter() {
     if (ev_chain_) dpct::destroy_event(ev_chain_);
     for (dpct::event_ptr e : ev_step_) if (e) dpct::destroy_event(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
-    for (void *h : hosts) if (h) sycl::free(h, dpct::get_in_order_queue());
+    for (void *h : hosts) if (h) strata::host_free_polled(h, dpct::get_in_order_queue());
 }
 
 const float* MtpDrafter::f32(const char* name) const {
@@ -1622,7 +1622,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
                 _mm_pause();
 #endif
                 if ((++spins & 1023u) == 0 &&
-                    DPCT_CHECK_ERROR(((cs_)->ext_oneapi_empty())) != 1) break;
+                    ((cs_)->ext_oneapi_empty() ? 0 : 1) != 1) break;   /* SYCL port: DPCT_CHECK_ERROR of ext_oneapi_empty() was always 0, so the wait gave up after 1024 spins and read a draft the GPU had not written */
             }
             drafts[j] = ((volatile int32_t*) h_out_)[j];
             if (probs) probs[j] = ((volatile float*) h_prob_)[j];
@@ -1673,7 +1673,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
                 _mm_pause();
 #endif
                 if ((++spins & 1023u) == 0 &&
-                    DPCT_CHECK_ERROR(((cs_)->ext_oneapi_empty())) != 1) break;
+                    ((cs_)->ext_oneapi_empty() ? 0 : 1) != 1) break;   /* SYCL port: DPCT_CHECK_ERROR of ext_oneapi_empty() was always 0, so the wait gave up after 1024 spins and read a draft the GPU had not written */
             }
         }
         catch (sycl::exception const &exc) {

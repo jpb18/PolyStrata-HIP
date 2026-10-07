@@ -3588,7 +3588,7 @@ bool Verifier::done(std::string &err) try {
       return false;
     }
     if (copy_used_) {   // no host function of this window may raise flag B in the next one
-        if (DPCT_CHECK_ERROR(((copy_)->ext_oneapi_empty())) == 1) return false;
+        if (((copy_)->ext_oneapi_empty() ? 0 : 1) == 1) return false;
         copy_used_ = false;
     }
     return true;
