@@ -1231,16 +1231,29 @@ class StrataEngine:
                 while True:
                     if slot is None:
                         # a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
-                        # the start of this prompt (its conversation's last turn), else the one used longest ago
-                        with self.slot_cv:
-                            while True:
+                        # the start of this prompt (its conversation's last turn), else the one used longest ago.
+                        # With none free the control lines are given back while waiting: a slot can be held by a read
+                        # that gave way (BYIELD) and needs them to go on, so waiting with them is a deadlock - long,
+                        # long, short at 0.25 s steps under parallel: 2 (ENGINE_REVIEW finding 1, reproduced in 0.1.41).
+                        while True:
+                            with self.slot_cv:
                                 slot = self.pick_slot(prompt)
                                 if slot is not None:
                                     self.slot_busy[slot] = True
                                     break
-                                self.slot_cv.wait(timeout=10.0)
-                                if cancel.is_set():
+                            if holding:
+                                self.ctl.release()
+                                holding = False
+                            with self.slot_cv:
+                                if self.pick_slot(prompt) is None:
+                                    self.slot_cv.wait(timeout=1.0)
+                            if cancel.is_set():
+                                return
+                            if not holding:
+                                ok = yield from self._take_control(cancel, len(prompt))
+                                if not ok:
                                     return
+                                holding, born = True, self.gen
                     if self._yielded is not None:           # it gave way: the others waiting then go first
                         self.slot_held[slot] = list(prompt[:self._yielded[1]])
                         self._yielded = None
