@@ -884,7 +884,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_, (int) HK,
                                     (int) HV, te, self_commit ? one_ : nullptr, cs, tb, g_qfuse() ? (void*) xq_ : nullptr);
                 stamp(l, 6, grp);
-                if (!g_qfuse()) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);   // STRATA_QFUSE: done above
+                // STRATA_QFUSE: done above by gdn_step_norm_multi - but a batch's per-slot recurrence passes it no q8_1
+                // destination (#1139: the out-projection read stale bytes), so that case quantizes here as without it
+                if (!g_qfuse() || batch_rec_) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);
                 native_mmvq(wout->native_type, wout->native_data, xq_, bo_ + tb * N, (int) ZV, (int) N, n, cs);
             } else {
                 // ======================= QSA =======================
@@ -947,10 +949,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     const float* kc_b = kcur_ + tb * NKV * HD;
                     const float* vc_b = vcur_ + tb * NKV * HD;
                     if (st.kv_hybrid) {   // K8V4: the unused half's lanes folded onto the used pool (layer.cpp)
+                        // #1188: a streamed state's host copy gets the window's cells too, as the per-token path below
+                        // writes them - without it a block that was not resident when its cells were appended came
+                        // back from the host copy without them, and free generation degenerated into repetition
+                        const KvHostPools hk = kv_hybrid_k_half(st.host), hv = kv_hybrid_v_half(st.host);
+                        const bool mirror = st.host.present();
                         kv_append_q8_steps(st.k_q, st.k_q, st.k_scale, st.k_scale, st.page_table, step_b, kStepCount,
-                                           kc_b, kc_b, (int) (NKV * HD), n, s, cs, nullptr);
+                                           kc_b, kc_b, (int) (NKV * HD), n, s, cs, mirror ? &hk : nullptr);
                         kv_append_q4_steps(st.v_q4, st.v_q4, st.page_table, step_b, kStepCount, n, vc_b, vc_b, s, cs,
-                                           nullptr);
+                                           mirror ? &hv : nullptr);
                     } else if (st.kv_q4)
                         kv_append_q4_steps(st.k_q4, st.v_q4, st.page_table, step_b, kStepCount, n, kc_b, vc_b, s, cs,
                                            &st.host);
@@ -2391,7 +2398,10 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     // ("verify batch: layer K never rang (graph finished)" - K is that stage's first layer), and with it the graph
     // sits on the PLE wait until the 20 s timeout.  As run() does: raise the PLE flag the graph's first wait reads,
     // let the graph run to the end, and skip the host's per-layer service (there is nothing to serve).
-    if (all_resident_) {
+    // #646 + #871: the skip is per-window (ar_on), not per-process (all_resident_): a stage that was 100%
+    // resident at init takes the doorbell graph while a prompt loan/shrink/swap is in flight (ar_off_), and that
+    // graph waits on host doorbells the skipped service never raises (GPU at 100%, host in the sync below).
+    if (ar_on()) {
         if (ss_->ple.ready() && ple_stage()) {
             std::atomic_thread_fence(std::memory_order_seq_cst);
             _mm_sfence();
@@ -2560,13 +2570,14 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
     const int S = last_t_;
     // #646: an all-resident stage's graph raises no host doorbells (see run_slot_rows): nothing to serve per layer,
     // so the poll is just "has the graph finished" - except the PLE flag, which the graph's first wait reads and
-    // only the host can raise (the same raise run_slot_rows makes).
-    if (all_resident_ && ss_->ple.ready() && ple_stage()) {
+    // only the host can raise (the same raise run_slot_rows makes).  Per-window (ar_on): with a loan in flight the
+    // doorbell graph needs the per-layer service below.
+    if (ar_on() && ss_->ple.ready() && ple_stage()) {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         _mm_sfence();
         *h_flag_ = 1;
     }
-    while (!all_resident_ && b_k_ < b_steps_) {
+    while (!ar_on() && b_k_ < b_steps_) {
         const uint32_t want = (uint32_t) (b_k_ + 1);
         if (*seq < want) {
             const auto now = Clock::now();
@@ -2765,7 +2776,8 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {
         ms_host += ms_since(tp);
         return true;
     };
-    if (all_resident_) {   // the zero-doorbell graph never rings: it waits only for flag 1 (stage 0's PLE rows)
+    if (ar_on()) {   // the zero-doorbell graph never rings: it waits only for flag 1 (stage 0's PLE rows).
+        // Per-window: with a loan in flight (ar_off_) the doorbell graph needs the per-layer service below.
         if (!gather_ple()) return -1;
         *(volatile uint32_t*) h_flag_ = 1;
         fl_k_ = fl_total_;
