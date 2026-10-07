@@ -105,19 +105,19 @@ modelo inteiro. À direita, a mesma placa está limitada a 8 GB, e a maioria dos
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 307-309 tokens/s | 2,210-2,220 tokens/s |
+| **UD-Q3_K_M** | 310-311 tokens/s | 3,830-3,860 tokens/s |
 
 </td><td>
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 149-164 tokens/s | 1,970-1,990 tokens/s |
+| **UD-Q3_K_M** | 156-165 tokens/s | 3,160-3,190 tokens/s |
 
 </td></tr>
 </table>
 
 A tabela da direita não é um PC com placa de 8 GB: o processador, a RAM e a velocidade da placa são os desta estação
-de trabalho. Um prompt mais curto é lido mais rápido: um de 10,000 tokens a 3,800 tokens/s com o modelo inteiro na
+de trabalho. Um prompt mais curto é lido mais rápido: um de 10,000 tokens a 4,800 tokens/s com o modelo inteiro na
 placa. O llama.cpp, com o modelo inteiro na mesma placa, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
 Ele precisa de uma placa em que o modelo caiba.
 
@@ -131,18 +131,18 @@ Medido do mesmo jeito, com o mesmo prompt de 30K tokens.
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 230 tokens/s | 2,210-2,230 tokens/s |
+| **APEX-I-COMPACT** | 229 tokens/s | 3,860 tokens/s |
 
 </td><td>
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 136-148 tokens/s | 1,940 tokens/s |
+| **APEX-I-COMPACT** | 140-148 tokens/s | 3,060-3,070 tokens/s |
 
 </td></tr>
 </table>
 
-Um prompt de 10,000 tokens é lido a 3,800 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo inteiro
+Um prompt de 10,000 tokens é lido a 4,800 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo inteiro
 na mesma placa, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
 
 ### Gemma 4 26B-A4B
@@ -155,18 +155,18 @@ Medido do mesmo jeito, com um prompt de 31K tokens.
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 259-275 tokens/s | 2,390-2,410 tokens/s |
+| **UD-Q3_K_M** | 274-276 tokens/s | 3,850 tokens/s |
 
 </td><td>
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 137 tokens/s | 2,240-2,250 tokens/s |
+| **UD-Q3_K_M** | 135-142 tokens/s | 3,390-3,420 tokens/s |
 
 </td></tr>
 </table>
 
-Um prompt de 10,000 tokens é lido a 3,300 a 3,500 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo
+Um prompt de 10,000 tokens é lido a 4,600 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo
 inteiro na mesma placa, escreveu cerca de 165 tokens/s e leu prompts a 6,000 a 9,000.
 
 Os quatro modelos do motor próprio do PolyStrata foram medidos com o benchmark dele, que você pode rodar no seu PC:
@@ -400,7 +400,7 @@ Onde eles diferem:
 | **Imagens** | Responda sim para "Images?" na instalação. Depois clique em **Picture** no chat, ou anexe imagens no seu app. Placas AMD entendem imagens no Linux usando o processador; no Windows, ainda não. | Ainda não. | Responda sim para "Images?" na instalação, e depois como no Qwen3.8-Flash-Next. Numa placa com menos de 16 GB, o codificador de imagens roda no processador, e uma imagem leva alguns segundos. |
 | **Uma requisição por vez** | Por padrão, o PolyStrata responde uma requisição e as outras esperam. Para responder várias ao mesmo tempo, defina `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). Numa placa de 12 GB, isso deixa cada resposta mais lenta. | Uma por vez, as outras esperam. | Uma por vez, as outras esperam. |
 | **Várias conversas** | A última é mantida, então as mensagens seguintes começam em segundos. Dois argumentos do motor mantêm várias na RAM ([detalhes](docs/DETAILS.md#using-it)). | A última é mantida. A instalação pergunta se deve manter várias na RAM, para que um agente e seus subagentes se revezem sem que os prompts sejam lidos de novo ([como](docs/GLM.md#several-conversations-at-once)). | Como o GLM 5.3 Flash. |
-| **Prompts longos** | O PolyStrata lê a primeira mensagem de uma conversa inteira, cerca de 1 minuto a cada 30,000 tokens. As mensagens seguintes começam em segundos. | A primeira mensagem é lida inteira, cerca de 1 minuto a cada 30,000 tokens. | A primeira mensagem é lida inteira, cerca de 15 segundos a cada 30,000 tokens. |
+| **Prompts longos** | O PolyStrata lê a primeira mensagem de uma conversa inteira, cerca de 1 minuto a cada 30,000 tokens. As mensagens seguintes começam em segundos. | A primeira mensagem é lida inteira, cerca de 1 minuto a cada 30,000 tokens. | A primeira mensagem é lida inteira, cerca de 10 segundos a cada 30,000 tokens. |
 
 Mais: [onde suas conversas ficam salvas](docs/INSTALL.md#where-things-are-stored), [a API](docs/DETAILS.md#using-it).
 
