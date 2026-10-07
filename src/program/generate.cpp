@@ -8326,6 +8326,11 @@ int main(int argc, char** argv) {
         // ---- --batch-groups: the slot groups pipelined through the stages (--batch-groups G > 1 with a layer split)
         const int n_pipe = (int) stages.size() + 1;
         const bool piped = o.batch > 0 && o.batch_groups > 1 && n_pipe > 1;
+        if (piped && batch_mtp)   // #1413: said, not silent
+            std::fprintf(stderr,
+                         "strata generate: WARNING: --batch-groups %d runs the pipelined path, which builds one row per slot: "
+                         "--batch-mtp's per-slot MTP drafts do not run there (their drafters still hold VRAM, about 0.9 GB per "
+                         "slot). Drop --batch-mtp, or use --batch-groups 1.\n", o.batch_groups);
         const int GS = piped ? o.batch / o.batch_groups : o.batch;
         struct PGroup {
             bool inflight = false;

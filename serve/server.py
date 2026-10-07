@@ -4022,6 +4022,17 @@ def anthropic_collect(events) -> dict:
 CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding: chunked body may hold (read into memory)
 
 
+def body_limit() -> int:
+    """The most a request body may hold, in bytes (read into memory): 256 MiB, which is a million-token conversation
+    with room to spare; STRATA_MAX_BODY_MIB changes it (0 or an unreadable value: the default).  A larger one is
+    answered 413 before it is read (a Content-Length of 10 TB used to be read until the client gave up)."""
+    try:
+        mib = int(os.environ.get("STRATA_MAX_BODY_MIB", "0"))
+    except ValueError:
+        mib = 0
+    return mib << 20 if mib > 0 else CHUNKED_BODY_MAX
+
+
 class BadBody(Exception):
     """A request body that cannot be read (a malformed or oversized chunked body): the status and the sentence."""
 
@@ -4043,8 +4054,13 @@ def make_handler(svc: Service):
             pass
 
         def handle_one_request(self):
+            self.answer_started = False
             super().handle_one_request()
             self._drain_body()
+
+        def send_response(self, code, message=None):
+            self.answer_started = True                 # a malformed-request answer can only replace one not yet begun
+            super().send_response(code, message)
 
         def _chunked(self) -> bool:
             """#893: a body sent as Transfer-Encoding: chunked (a relay or proxy that does not buffer it).  By RFC 9112
@@ -4094,9 +4110,20 @@ def make_handler(svc: Service):
 
         def _body(self) -> bytes:
             self.body_read = True
+            limit = body_limit()
             if self._chunked():
-                return self._read_chunked(CHUNKED_BODY_MAX)
-            return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                return self._read_chunked(limit)
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                raise BadBody(400, "invalid Content-Length") from None
+            if length < 0:
+                raise BadBody(400, "invalid Content-Length")
+            if length > limit:
+                self.close_connection = True               # the body is not read: the connection ends with the answer
+                raise BadBody(413, f"the request body is larger than {limit >> 20} MiB "
+                                   "(STRATA_MAX_BODY_MIB raises the limit)")
+            return self.rfile.read(length)
 
         def _drain_body(self):
             """An answer sent before the body was read (a 401, a 403, /load, a method with no handler) must not close
@@ -4110,7 +4137,7 @@ def make_handler(svc: Service):
                 return
             if self._chunked():
                 try:
-                    self._read_chunked(CHUNKED_BODY_MAX, keep=False, deadline=time.monotonic() + self.DRAIN_SECONDS)
+                    self._read_chunked(body_limit(), keep=False, deadline=time.monotonic() + self.DRAIN_SECONDS)
                 except (BadBody, OSError):
                     self.close_connection = True
                 return
@@ -4522,6 +4549,17 @@ def make_handler(svc: Service):
                                           "message": str(e)}})
             except (GpuBusy, EngineStarting) as e:
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+            except (TypeError, KeyError, AttributeError, IndexError, UnicodeError) as e:
+                # a body that is JSON but the wrong shape ("messages": 5, a content part that is a number): a 400 that
+                # says so, with the traceback in the log, instead of a dropped connection - unless the answer began
+                if getattr(self, "answer_started", False):
+                    raise
+                import traceback
+                print(f"[strata] 400 malformed request ({type(e).__name__}: {e}):\n" + traceback.format_exc(),
+                      flush=True)
+                body = {"error": {"type": "invalid_request_error",
+                                  "message": f"the request is malformed ({type(e).__name__}: {e})"}}
+                self._json(400, responses_error_body(body["error"]["message"]) if path == "/v1/responses" else body)
             except EngineDied as e:                          # before the answer started (not streamed)
                 self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
             except EngineStuck as e:                         # an unload or restart that could not end the engine
