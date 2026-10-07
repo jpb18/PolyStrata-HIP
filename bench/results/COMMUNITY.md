@@ -82,3 +82,4 @@ Notes:
 | [2026-10-06-community-rtx4090-toolcall-hotfix](2026-10-06-community-rtx4090-toolcall-hotfix/) | RTX 4090 | IQ3_S 140K / IQ3_XXS 200K opt-ins and tool-call hotfix | see the README | see the README | 0.1.38 to 0.1.40 | #1158 |
 | [2026-10-06-q8-prefill8192-rtxpro](2026-10-06-q8-prefill8192-rtxpro/) | RTX PRO 6000 | Q8, --prefill 8192 | see the README | see the README | 0.1.40 | #1171 |
 | [2026-10-06-community-rx-7900-xtx](2026-10-06-community-rx-7900-xtx/) | RX 7900 XTX, Windows 11 | IQ3_S | see the README | see the README | 0.1.40 | #1173 |
+| [2026-10-06-community-4x-tesla-p100](2026-10-06-community-4x-tesla-p100/) | 4x Tesla P100 16 GB (CUDA 12 engine) | IQ3_XXS | see the README | see the README | 0.1.40 | #1192 |
