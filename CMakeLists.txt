@@ -736,6 +736,8 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_include_directories(pdl_parity PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(pdl_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     add_test(NAME pdl_parity COMMAND pdl_parity)
+    # PDL is opt-in (STRATA_DF_PDL); the test checks the opted-in path, whose PDL capture forces programmatic launches
+    set_tests_properties(pdl_parity PROPERTIES ENVIRONMENT "STRATA_DF_PDL=1")
   endif()
   # the IQ kernels that decode a weight part once for every column/entry, bitwise vs the per-column ones
   # (GPU, synthetic, no model; --bench adds old/new timings)
