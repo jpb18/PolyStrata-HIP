@@ -2183,21 +2183,40 @@ def hip_lib_dirs(eng: Path) -> list[Path]:
 HIP_RUNTIME_DLLS = ("amdhip64_*.dll", "amd_comgr*.dll")
 
 
+def hip_runtime_closure(d: Path) -> list[str]:
+    """The DLLs of `d` (the engine's rocm/bin) that amdhip64_7.dll and amd_comgr.dll need, the two included, read from
+    their PE import tables and followed recursively (tools/hip/dll_closure.py).  #461: amdhip64_7.dll imports
+    rocm_kpack.dll, which imports the MSVC runtime; with only the two DLLs beside strata.exe the full-path load fails
+    (error 126), Windows falls back to System32's copy of the runtime, and the first big prompt dies with
+    hipErrorInvalidDeviceFunction.  Falls back to the names above when the helper cannot be read."""
+    roots = sorted({p.name for pat in HIP_RUNTIME_DLLS for p in d.glob(pat)})
+    try:
+        sys.path.insert(0, str(ROOT / "tools" / "hip"))
+        from dll_closure import dll_closure
+        return dll_closure(d, roots)
+    except Exception:                                  # noqa: BLE001 - a missing helper must not stop setup
+        return roots
+    finally:
+        if str(ROOT / "tools" / "hip") in sys.path:
+            sys.path.remove(str(ROOT / "tools" / "hip"))
+
+
 def hip_runtime_beside_exe(eng: Path) -> None:
-    """Copy the bundled HIP runtime DLLs from rocm/bin next to the engine's exes when missing or different (a 0.1.34
-    install, whose zip had them in rocm/bin only, is fixed on its next start)."""
+    """Copy the bundled HIP runtime DLLs and everything they import from rocm/bin next to the engine's exes when
+    missing or different (a 0.1.34 install, whose zip had them in rocm/bin only, is fixed on its next start; a
+    0.1.40.2 install, which got only the two runtime DLLs, gets rocm_kpack.dll and the C++ runtime now, #461)."""
     for d in hip_lib_dirs(eng):
-        for pat in HIP_RUNTIME_DLLS:
-            for src in d.glob(pat):
-                dst = eng / src.name
-                try:
-                    if dst.exists() and dst.stat().st_size == src.stat().st_size and \
-                            dst.stat().st_mtime >= src.stat().st_mtime:
-                        continue
-                    shutil.copy2(src, dst)
-                except OSError as e:                   # e.g. the engine is running and holds the old copy
-                    warn(f"could not put {src.name} next to the AMD engine ({e}); if the engine stops on its first "
-                         "request, close Strata and run START-HERE.bat again")
+        for name in hip_runtime_closure(d):
+            src = d / name
+            dst = eng / src.name
+            try:
+                if dst.exists() and dst.stat().st_size == src.stat().st_size and \
+                        dst.stat().st_mtime >= src.stat().st_mtime:
+                    continue
+                shutil.copy2(src, dst)
+            except OSError as e:                   # e.g. the engine is running and holds the old copy
+                warn(f"could not put {src.name} next to the AMD engine ({e}); if the engine stops on its first "
+                     "request, close Strata and run START-HERE.bat again")
 
 
 def hip_match(card: dict, listed: list[dict], hip: list[dict]) -> dict | None:
