@@ -2672,6 +2672,7 @@ def verify_engine_archive(z: Path, asset: str, base: str) -> None:
         got = h.hexdigest()
         drop_download(z)
         raise UnverifiedEngine(f"{z.name} has the wrong SHA-256 ({got}, expected {sha})")
+    ok(f"{z.name}: SHA-256 checksum verified against GitHub's ({sha[:12]}...)")
 
 
 def engine_refused(asset: str, e: Exception, updating: bool) -> None:
@@ -2735,6 +2736,17 @@ def install_unpacked(tmp: Path, eng: Path) -> None:
             shutil.move(str(prev / dst.name), str(dst))
         shutil.rmtree(prev, ignore_errors=True)
         raise
+    # #1403 debt: get_prebuilt moved the old BUILD.json aside (BUILD.json.prev) instead of deleting it; it goes with the
+    # engine it describes, so engine_version_of(.previous) says the version instead of "?"
+    kept = eng / "BUILD.json.prev"
+    if kept.exists():
+        try:
+            if moved and not (prev / "BUILD.json").exists():
+                shutil.move(str(kept), str(prev / "BUILD.json"))
+            else:
+                kept.unlink()
+        except OSError:
+            pass
     if moved:
         ok(f"the engine it replaced ({engine_version_of(prev)}) is kept in {prev}; "
            "setup.py --rollback-engine puts it back")
@@ -2787,7 +2799,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
             ok("ready-made engine already installed")
             return eng
         say(f"  Updating the ready-made engine ({meta.get('version')} -> {'.'.join(map(str, MIN_ENGINE))} or newer) ...")
-        info.unlink()
+        info.replace(eng / "BUILD.json.prev")   # kept for the .previous copy
     if not url_base:
         return None
     eng.mkdir(exist_ok=True)
