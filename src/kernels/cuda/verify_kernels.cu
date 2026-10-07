@@ -4,6 +4,7 @@
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/core/emulate.hpp"
+#include "strata/kernels/q8_1_finite.hpp"   // #606: q8_1_ds
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/pdl.hpp"
 
@@ -199,7 +200,7 @@ __device__ __forceinline__ void gdn_q8_1_store(GdnQ81* __restrict__ xq, size_t i
     const float d = amax / 127.0f;
     const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
     xq[idx / 32].qs[idx % 32] = q;
-    if (idx % 32 == 0) xq[idx / 32].ds = make_half2(d, sum);
+    if (idx % 32 == 0) xq[idx / 32].ds = q8_1_ds(d, sum);   // #606: clamped (the QFUSE path bypassed the finite helper)
 }
 
 template <bool ALL_OUT, bool Q>
