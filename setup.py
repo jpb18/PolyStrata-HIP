@@ -1107,10 +1107,11 @@ def split_budget(cfg: dict, yes: bool = False, explicit: bool = False) -> bool:
 
 
 REMOTE_EXPERT_OPT = "--remote-expert-opt"
+HELPER_CACHE_FLAGS = ("--expert-cache-device1", "--expert-cache-device2", "--expert-cache-device3")
 
 
 def recommend_remote_expert_opt(cfg: dict, off: bool = False) -> None:
-    """0.1.39b (#578): a config on two or more GPUs gets --remote-expert-opt - the helper expert caches
+    """0.1.39b (#578): a config on two or more GPUs with a helper cache gets --remote-expert-opt - the helper expert caches
     (--expert-cache-device1..3) then stay complementary to the main GPU's, return their rows already weighted and skip
     the CPU's activation quantization where no expert is left to it (dual RTX 4090: +63% mixed, +132% code over the
     plain helper path).  The engine uses it only with a helper cache; a layer split runs as before.  A recommendation:
@@ -1122,6 +1123,23 @@ def recommend_remote_expert_opt(cfg: dict, off: bool = False) -> None:
     if off or cfg.get("remote_expert_opt") is False:
         if REMOTE_EXPERT_OPT in args:
             args.remove(REMOTE_EXPERT_OPT)
+        return
+    # #1352: --pipeline-windows (the first card starts the next window) is switched off by --remote-expert-opt (the
+    # helper caches), so a config that asks for it keeps its pipeline: one of the two, not both (docs/MULTI_GPU.md)
+    pw = args.index("--pipeline-windows") if "--pipeline-windows" in args else -1
+    if pw >= 0 and pw + 1 < len(args) and args[pw + 1] != "0":
+        if REMOTE_EXPERT_OPT in args:
+            warn("--pipeline-windows and --remote-expert-opt are both in this config: the engine turns the pipeline off "
+                 "beside the helper caches. Keep one - remove --remote-expert-opt for the pipeline "
+                 "(docs/MULTI_GPU.md, #1352)")
+        else:
+            ok("multi-GPU: --pipeline-windows is set, so --remote-expert-opt is not added (the helper caches turn the "
+               "pipeline off; docs/MULTI_GPU.md)")
+        return
+    # #1447: the flag acts only on the helper caches (--expert-cache-device1..3); without one the engine builds nothing
+    # from it, and a plain layer split gained a flag that says "helpers" for no reason. Setup adds it only beside a
+    # helper cache; a flag already in the config stays (the user's, or an earlier setup's - harmless).
+    if not any(a.split("=", 1)[0] in HELPER_CACHE_FLAGS for a in args):
         return
     if REMOTE_EXPERT_OPT not in args:
         args.append(REMOTE_EXPERT_OPT)
