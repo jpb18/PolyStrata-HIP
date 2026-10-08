@@ -1772,6 +1772,31 @@ def network_path(path: str) -> bool:
     return p.startswith("\\\\") or p.startswith("\\??\\")
 
 
+def vision_start_error(line: str, log=None) -> str:
+    """The message when the image encoder answered something other than READY.  #1445: a card in the Exclusive_Process
+    compute mode (or one another process holds) refuses the encoder's CUDA context with "busy or unavailable"; that
+    cause is named instead of leaving the user the first line of a traceback.  `log` is the encoder's stderr file, whose
+    tail is searched too (the CUDA error is printed there)."""
+    text = line.strip()
+    tail = ""
+    try:
+        name = getattr(log, "name", None)
+        if name:
+            with open(name, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 16384))
+                tail = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        pass
+    if "busy or unavailable" in (text + tail).lower():
+        return ("the vision encoder did not start: the GPU refused a second CUDA context (\"CUDA-capable device(s) "
+                "is/are busy or unavailable\"). This is usually the compute mode Exclusive_Process: only one process "
+                "may use the card, and the engine already holds it. Check with: nvidia-smi --query-gpu=compute_mode "
+                "--format=csv; set it back with: sudo nvidia-smi -c DEFAULT (or run the encoder on another card). "
+                "First line from the encoder: " + (text or "(none)"))
+    return "the vision encoder did not start: " + text
+
+
 class Vision:
     """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
@@ -1837,7 +1862,7 @@ class Vision:
                 proc.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            raise RuntimeError("the vision encoder did not start: " + line.strip())
+            raise RuntimeError(vision_start_error(line, self.spawn[1]))
         self.stopped = False
 
     def _readline(self, timeout: float, what: str) -> str:

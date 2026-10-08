@@ -512,6 +512,8 @@ In the task's properties set both of these (the defaults are the opposite):
 (Both were changed at once, so the isolated effect of each is not measured.) If the model still starts
 slowly, the engine prints a hint under its `loaded ... GiB at ...` line naming this cause.
 
+**Large pages need a new logon (#1412).** Granting "Lock pages in memory" (`secpol.msc`, User Rights Assignment) to the account that runs the engine takes effect at the next logon: Windows puts the privilege in the access token when the session starts, so log off and on (or reboot) after granting it. Until then the startup log still says the large pages were refused.
+
 ### Chat in the terminal (optional)
 
 ```
