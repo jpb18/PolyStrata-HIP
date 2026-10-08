@@ -1198,8 +1198,9 @@ bool FileExpertSource::claim_stage(int64_t key, size_t& v, bool& fill, bool ahea
             want_pin = STAGE_PIN_DEFAULT && available_memory_bytes(avail) && avail >= (uint64_t) stage_blob_ + kStagePinFloor;
         }
         void* p = nullptr;
-        const cudaError_t pin_err = want_pin ? cudaHostAlloc(&p, (size_t) stage_blob_, cudaHostAllocDefault) : cudaErrorNotSupported;
-        const bool pinned = pin_err == cudaSuccess && p != nullptr;
+        cudaError_t pin_err = cudaSuccess;
+        if (want_pin) pin_err = cudaHostAlloc(&p, (size_t) stage_blob_, cudaHostAllocDefault);
+        const bool pinned = want_pin && pin_err == cudaSuccess && p != nullptr;
         if (!pinned) (void) cudaGetLastError();   // the failed alloc's sticky error is ours, not the caller's
         uint8_t* raw = pinned ? (uint8_t*) p : new (std::nothrow) uint8_t[(size_t) stage_blob_];
         if (raw == nullptr) return false;
