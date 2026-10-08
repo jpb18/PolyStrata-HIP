@@ -2,8 +2,7 @@
 
 Measured on 2026-10-07 by timnevits. **Official upstream release**, commit
 `e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a`, with **no local engine patches**.
-Codex, an OpenAI AI agent, ran the tests and drafted and submitted this report
-with my approval. The measurements come from my B65 hardware.
+The measurements come from my B65 hardware.
 
 Both memory profiles pass their bounded correctness checks. With the same 7K inputs, the 8K/prefill-512 profile delivers **43.49 decode tok/s**, versus **42.38** with the 262K/prefill-512 profile (-2.6%). The 8K/prefill-4096 profile reduces median 7K TTFT from **22.23 to 8.47 seconds**, with decode tradeoffs below.
 
