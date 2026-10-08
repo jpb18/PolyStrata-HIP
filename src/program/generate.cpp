@@ -535,6 +535,7 @@ struct Options {
     /// The --batch slots in this many groups pipelined through the stages of a layer split (stage k
     /// runs one group while stage k+1 runs another).  1 = every slot in one window, stage after stage.
     int batch_groups = 1;
+    bool batch_groups_set = false;    ///< --batch-groups was given (a number or auto): no default then
     bool batch_groups_auto = false;   ///< --batch-groups auto (#417 stage 1): one group per stage of a layer split, if it divides --batch
     bool batch_mtp = false;      ///< --batch-mtp / STRATA_BATCH_MTP=1 (opt-in): one MTP proposal per batch slot
     std::string spec_oracle;
@@ -1732,6 +1733,7 @@ int main(int argc, char** argv) {
         else if (a == "--trim-stage-weights") o.trim_stage_weights = true;
         else if (a == "--batch-groups") {
             const char* bgv = next("--batch-groups");
+            o.batch_groups_set = true;
             if (std::strcmp(bgv, "auto") == 0) o.batch_groups_auto = true;
             else o.batch_groups = std::atoi(bgv);
         }
@@ -3810,6 +3812,8 @@ int main(int argc, char** argv) {
     // --batch-groups auto: the pipeline needs one group per GPU stage to keep every card busy (4 x R9700, 8 clients:
     // 90 tok/s in one group, 136 in 2, 166 in 4).  The most groups, at most one per stage, that divide the slots.
     auto resolve_groups_auto = [&] {
+        // default (0.1.41): a layer split with --batch pipelines one group per stage; --batch-groups 1 opts out
+        if (!o.batch_groups_set && !stages.empty() && o.batch > 1) o.batch_groups_auto = true;
         if (!o.batch_groups_auto) return;
         int best = 1;
         for (int d = 2; d <= (int) stages.size() + 1 && d <= o.batch; ++d)

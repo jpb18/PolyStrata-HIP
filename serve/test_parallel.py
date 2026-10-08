@@ -313,6 +313,12 @@ class ParallelService(unittest.TestCase):
         self.tearDown(); self.httpd = self.engine = self.tmp = None
         self.start(8, more=["--batch-groups", "2"])
         self.assertEqual(self.engine.slot_groups, 2)
+        self.tearDown(); self.httpd = self.engine = self.tmp = None
+        self.start(8, says_groups=4)                           # 0.1.41: no flag on a layer split = the engine's choice
+        self.assertEqual(self.engine.slot_groups, 4)
+        self.tearDown(); self.httpd = self.engine = self.tmp = None
+        self.start(8, says_groups=4, more=["--batch-groups", "1"])   # the opt-out
+        self.assertEqual(self.engine.slot_groups, 1)
 
     def test_stop_strings_in_a_batch_slot(self):
         """#454: a stop string cuts the answer in --batch mode too, and the slot is freed for the next request."""
