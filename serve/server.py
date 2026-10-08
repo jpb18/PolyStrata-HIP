@@ -4969,7 +4969,8 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
     # socketserver listens with a backlog of 5: a burst of 30-40 clients at once got "connection reset by peer" on the
     # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
-    request_queue_size = 256
+    # (STRATA_HTTP_BACKLOG overrides it)
+    request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
