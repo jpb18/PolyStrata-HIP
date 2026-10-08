@@ -536,6 +536,8 @@ struct Options {
     /// The --batch slots in this many groups pipelined through the stages of a layer split (stage k
     /// runs one group while stage k+1 runs another).  1 = every slot in one window, stage after stage.
     int batch_groups = 1;
+    bool batch_groups_set = false;    ///< --batch-groups was given (a number or auto): no default then
+    bool batch_groups_auto = false;   ///< --batch-groups auto (#417 stage 1): one group per stage of a layer split, if it divides --batch
     bool batch_mtp = false;      ///< --batch-mtp / STRATA_BATCH_MTP=1 (opt-in): one MTP proposal per batch slot
     std::string spec_oracle;
     int spec_corrupt = 0;
@@ -1784,7 +1786,12 @@ int main(int argc, char** argv) {
         else if (a == "--batch") o.batch = std::atoi(next("--batch"));
         else if (a == "--slots") o.batch = std::atoi(next("--slots"));   // the same as --batch
         else if (a == "--trim-stage-weights") o.trim_stage_weights = true;
-        else if (a == "--batch-groups") o.batch_groups = std::atoi(next("--batch-groups"));
+        else if (a == "--batch-groups") {
+            const char* bgv = next("--batch-groups");
+            o.batch_groups_set = true;
+            if (std::strcmp(bgv, "auto") == 0) o.batch_groups_auto = true;
+            else o.batch_groups = std::atoi(bgv);
+        }
         else if (a == "--batch-mtp") o.batch_mtp = true;
         else if (a == "--spec-oracle") o.spec_oracle = next("--spec-oracle");
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
@@ -3884,6 +3891,21 @@ int main(int argc, char** argv) {
             o.batch = cap;
         }
     }
+    // --batch-groups auto: the pipeline needs one group per GPU stage to keep every card busy (4 x R9700, 8 clients:
+    // 90 tok/s in one group, 136 in 2, 166 in 4).  The most groups, at most one per stage, that divide the slots.
+    auto resolve_groups_auto = [&] {
+        // default (0.1.41): a layer split with --batch pipelines one group per stage; --batch-groups 1 opts out
+        if (!o.batch_groups_set && !stages.empty() && o.batch > 1) o.batch_groups_auto = true;
+        if (!o.batch_groups_auto) return;
+        int best = 1;
+        for (int d = 2; d <= (int) stages.size() + 1 && d <= o.batch; ++d)
+            if (o.batch % d == 0) best = d;
+        if (stages.empty()) best = 1;
+        o.batch_groups = best;
+        std::fprintf(stderr, "strata generate: --batch-groups auto: %d group%s of %d slot%s\n", best, best == 1 ? "" : "s",
+                     o.batch / best, o.batch / best == 1 ? "" : "s");
+    };
+    if (o.batch > 0) resolve_groups_auto();
     if (o.batch > 0 && o.batch_groups > 1 && (stages.empty() || o.batch % o.batch_groups != 0)) {
         std::fprintf(stderr, "strata generate: WARNING: --batch-groups %d needs a layer split and to divide --batch %d; "
                              "one group\n", o.batch_groups, o.batch);
@@ -3931,6 +3953,7 @@ int main(int argc, char** argv) {
             o.batch = 0;
         } else {
             o.batch = fit;
+            resolve_groups_auto();   // (the slots that fit may not be the ones asked for)
             if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
             // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
             std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
@@ -8536,7 +8559,10 @@ int main(int argc, char** argv) {
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
                         std::printf("BDONE %d %lld %s %.1f\n", gi * GS + t, (long long) sl.produced, fin, ms);
                         sl.active = false;
-                        sl.cached = false;   // the pipeline's pad rows: a pipelined slot is not reused as a cache
+                        // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
+                        // drafts): its state is final once its last window has left the last stage.  A later group window whose pad
+                        // row writes this slot clears the flag (below, where the group starts), so a stale state is never reused
+                        sl.cached = o.prompt_cache > 0 && !sl.img;
                     } else {
                         sl.x = y;
                         sl.p += 1;

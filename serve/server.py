@@ -707,7 +707,10 @@ class StrataEngine:
         if asked and self.batch != asked:
             print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
                   "(its log says why)", flush=True)
-        groups = int(args[args.index("--batch-groups") + 1]) if "--batch-groups" in args else 1
+        _bg = args[args.index("--batch-groups") + 1] if "--batch-groups" in args else "default"
+        # no `--batch-groups` (the default on a layer split) or `auto`: the engine picks the groups and says so
+        # (INFO batch_groups=G); a number is the group count asked for (1 = off)
+        groups = int(self.info.get("batch_groups") or 1) if _bg in ("auto", "default") else int(_bg)
         groups = groups if self.batch and groups > 0 and self.batch % groups == 0 else 1
         gs = self.batch // groups if self.batch else 0
         # slots in the order that spreads requests over the pipeline's groups first: 0, gs, 2gs, .., 1, gs+1, ..
@@ -5211,6 +5214,10 @@ class Server(ThreadingHTTPServer):
     # On Windows SO_REUSEADDR lets a second server bind a port that is already serving, and requests then land on
     # either one (a forgotten second start of run-<model>.bat).  Without it the second start fails loudly instead.
     allow_reuse_address = os.name != "nt"
+    # socketserver listens with a backlog of 5: a burst of 30-40 clients at once got "connection reset by peer" on the
+    # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
+    # (STRATA_HTTP_BACKLOG overrides it)
+    request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
