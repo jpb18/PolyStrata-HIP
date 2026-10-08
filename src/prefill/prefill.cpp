@@ -614,6 +614,26 @@ struct PeerPrefill {
     size_t host_x_cap = 0, host_rows_cap = 0, host_src_cap = 0;   // elements
     static constexpr size_t kHostBounds = 2 * (NE + NE / 16 + 2) + 64;
     int64_t back_at = 0, back_rows = 0;
+    // SUMS (the host route's default, STRATA_PF_PEER_SUMS=0: rows): the peer adds its rows into one weighted sum per
+    // token (`sum`, from the routing weights `wk` and each row's routed pair `pair`) and sends that back (`host_sum`,
+    // T x N) instead of its rows (rows_peer x N, up to K times more over the primary's link); the primary's combine
+    // adds it to its own experts' rows (eddoursul/Strata's second-GPU prompt path, f8de703).
+    bool sums = false;
+    cudaStream_t x_stream = nullptr;      // primary: the host route's copies beside its compute stream
+    cudaEvent_t ev_x = nullptr;
+    bool f16 = false;                     // the sums mode's transfers in FP16 (STRATA_PF_PEER_F16=0: FP32)
+    // the sums in one launch per group (STRATA_PF_PEER_GATHER=0: per expert): per group [tokens | starts | rows] at
+    // adds_at[g], built on the host from the rows' pairs, uploaded once per layer
+    bool gather = false;
+    int32_t *adds = nullptr, *host_adds = nullptr;
+    size_t adds_cap = 0;
+    std::vector<size_t> adds_at;
+    std::vector<int32_t> ntok, tcur, touched;
+    uint16_t *sum16 = nullptr, *host_x16 = nullptr, *host_sum16 = nullptr;
+    float *sum = nullptr, *wk = nullptr;
+    int32_t* pair = nullptr;
+    float *host_w = nullptr, *host_sum = nullptr;
+    int32_t* host_pair = nullptr;
     std::vector<int32_t> bounds_host;
     std::vector<void*> owned;
     int64_t layers = 0, experts = 0, rows = 0, over_cap = 0;   // stats
@@ -637,10 +657,18 @@ struct PeerPrefill {
         if (s) cudaStreamDestroy(s);
         cudaSetDevice(prev);
         if (ev_in) cudaEventDestroy(ev_in);
+        if (x_stream) { cudaStreamSynchronize(x_stream); cudaStreamDestroy(x_stream); }
+        if (ev_x) cudaEventDestroy(ev_x);
         if (host_x) cudaFreeHost(host_x);
         if (host_rows) cudaFreeHost(host_rows);
         if (host_src) cudaFreeHost(host_src);
         if (host_bounds) cudaFreeHost(host_bounds);
+        if (host_w) cudaFreeHost(host_w);
+        if (host_sum) cudaFreeHost(host_sum);
+        if (host_pair) cudaFreeHost(host_pair);
+        if (host_x16) cudaFreeHost(host_x16);
+        if (host_sum16) cudaFreeHost(host_sum16);
+        if (host_adds) cudaFreeHost(host_adds);
     }
 };
 
@@ -1540,15 +1568,28 @@ bool Prefill::bind_stage_helper(int64_t T) {
 bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& err) {
     Impl& m = *impl_;
     if (peer == nullptr || !peer->valid()) { m.pp.reset(); return true; }
-    if (!peer->p2p()) { err = "prefill peer: the two GPUs cannot access each other (no P2P)"; return false; }
+    // Without P2P the activations and the result rows take the mapped host route of the layer split's helper
+    // (STRATA_PF_PEER_HOST=0: refuse as before, the prompt path then stays on the primary)
+    const bool host_route_ok = [] { const char* v = std::getenv("STRATA_PF_PEER_HOST"); return v == nullptr || std::atoi(v) != 0; }();
+    if (!peer->p2p() && !host_route_ok) { err = "prefill peer: the two GPUs cannot access each other (no P2P)"; return false; }
     if (!mmq_plan().any) { err = "prefill peer: needs the MMQ prompt path"; return false; }
     auto pp = std::make_unique<PeerPrefill>();
     pp->peer = peer;
+    pp->p2p = peer->p2p();
     pp->T_max = m.T_max;
     pp->cap_rows = std::max<int64_t>(1, std::min<int64_t>(cap_rows, m.T_max * K));
     const int64_t R = pp->cap_rows;
     const MmqPlan& mp = mmq_plan();
     if (cudaEventCreateWithFlags(&pp->ev_in, cudaEventDisableTiming) != cudaSuccess) { err = "prefill peer: event"; return false; }
+    if (!pp->p2p) {   // the host route's copies on a stream of their own (STRATA_PF_PEER_XSTREAM=0: the compute stream)
+        const char* xv = std::getenv("STRATA_PF_PEER_XSTREAM");
+        if ((xv == nullptr || std::atoi(xv) != 0) &&
+            (cudaStreamCreateWithFlags(&pp->x_stream, cudaStreamNonBlocking) != cudaSuccess ||
+             cudaEventCreateWithFlags(&pp->ev_x, cudaEventDisableTiming) != cudaSuccess)) {
+            err = "prefill peer: copy stream";
+            return false;
+        }
+    }
     int prev = 0;
     cudaGetDevice(&prev);
     pp->dev = peer->device();
@@ -1573,7 +1614,7 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     pp->mixed = (float*) take((size_t) m.T_max * N * 4);
     {
         const char* v = std::getenv("STRATA_PF_PEER_COMPACT");
-        pp->compact = v == nullptr || std::atoi(v) != 0;
+        pp->compact = (v == nullptr || std::atoi(v) != 0) || !pp->p2p;   // the layer-sized path copies over P2P only
     }
     if (pp->compact) {
         pp->cap_rows = m.T_max * K;   // no row cap: only the row tables grow with it
@@ -1612,6 +1653,25 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
         pp->Dm = (float*) take((size_t) R * N * 4);
     }
     const int64_t Rt = pp->cap_rows;
+    if (!pp->p2p && pp->compact) {
+        const char* v = std::getenv("STRATA_PF_PEER_SUMS");
+        pp->sums = v == nullptr || std::atoi(v) != 0;
+    }
+    if (pp->sums) {
+        const char* v = std::getenv("STRATA_PF_PEER_F16");
+        pp->f16 = (v == nullptr || std::atoi(v) != 0) && N % 8 == 0;
+        if (pp->f16) pp->sum16 = (uint16_t*) take((size_t) m.T_max * N * 2);
+        const char* gv = std::getenv("STRATA_PF_PEER_GATHER");
+        pp->gather = gv == nullptr || std::atoi(gv) != 0;
+        if (pp->gather) {   // tokens and starts (<= 2 rows + 1 per group) and rows: <= 3 x the rows + 2 per expert
+            pp->adds_cap = 3 * (size_t) Rt + 2 * NE + 64;
+            pp->adds = (int32_t*) take(pp->adds_cap * 4);
+            pp->tcur.assign((size_t) m.T_max, 0);
+        }
+        pp->sum = (float*) take((size_t) m.T_max * N * 4);
+        pp->wk = (float*) take((size_t) m.T_max * K * 4);
+        pp->pair = (int32_t*) take((size_t) Rt * 4);
+    }
     pp->src = (int32_t*) take((size_t) Rt * 4);
     pp->ident = (int32_t*) take((size_t) Rt * 4);
     pp->bounds = (int32_t*) take((size_t) (2 * (NE + NE / MMQ_GROUP + 2)) * 4);
@@ -1623,12 +1683,48 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
         mmq::iota(pp->ident, pp->cap_rows, pp->s);
         ok = cudaStreamSynchronize(pp->s) == cudaSuccess;
     }
+    if (ok && !pp->p2p) {   // the host route's mapped buffers, sized for the largest chunk
+        auto host = [&](auto*& ptr, size_t& cap, size_t n) {
+            if (cudaHostAlloc((void**) &ptr, n * sizeof(*ptr), cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess) {
+                cudaGetLastError();
+                ptr = nullptr;
+                ok = false;
+                return;
+            }
+            cap = n;
+        };
+        size_t bounds_cap = 0, w_cap = 0, sum_cap = 0, pair_cap = 0;
+        size_t x16_cap = 0, sum16_cap = 0;
+        if (pp->f16) host(pp->host_x16, x16_cap, (size_t) m.T_max * N);
+        else host(pp->host_x, pp->host_x_cap, (size_t) m.T_max * N);
+        if (ok && pp->sums) {
+            host(pp->host_w, w_cap, (size_t) m.T_max * K);
+            if (ok && pp->f16) host(pp->host_sum16, sum16_cap, (size_t) m.T_max * N);
+            else if (ok) host(pp->host_sum, sum_cap, (size_t) m.T_max * N);
+            if (ok) host(pp->host_pair, pair_cap, (size_t) pp->cap_rows);
+            size_t adds_cap = 0;
+            if (ok && pp->gather) host(pp->host_adds, adds_cap, pp->adds_cap);
+        } else if (ok) {
+            host(pp->host_rows, pp->host_rows_cap, (size_t) pp->cap_rows * N);
+        }
+        if (ok) host(pp->host_src, pp->host_src_cap, (size_t) pp->cap_rows);
+        if (ok) host(pp->host_bounds, bounds_cap, PeerPrefill::kHostBounds);
+        if (!ok) {
+            cudaSetDevice(prev);
+            err = "prefill peer: the host route's pinned buffers (" +
+                  std::to_string(((size_t) pp->cap_rows * N * 4 + (size_t) m.T_max * N * 4) >> 20) + " MiB) do not fit in RAM";
+            return false;
+        }
+    }
     size_t fb = 0, tb = 0;
     cudaMemGetInfo(&fb, &tb);
     cudaSetDevice(prev);
     if (!ok) { err = "prefill peer: the peer's buffers do not fit (raise --peer-reserve-mib or lower --peer-prefill-rows)"; return false; }
     std::fprintf(stderr, "strata prefill: peer GPU %d computes its experts' rows of each prompt chunk (up to %lld rows per "
-                         "layer%s); %zu MiB left free on it\n", pp->dev, (long long) pp->cap_rows,
+                         "layer%s%s); %zu MiB left free on it\n", pp->dev, (long long) pp->cap_rows,
+                 pp->p2p ? "" : (pp->sums ? (pp->f16 ? ", no P2P: through mapped host memory in FP16, one weighted sum per token back"
+                                                     : ", no P2P: through mapped host memory, one weighted sum per token back")
+                                          : ", no P2P: through mapped host memory"),
                  pp->compact ? (pp->ps_frac > 0.0 ? (", compact group buffers, streams " + std::to_string((int) (pp->ps_frac * 100 + 0.5)) +
                                                     "% of the primary's streamed experts through a " + std::to_string(pp->RP) + "-slot ring").c_str()
                                                  : ", compact group buffers") : "", fb >> 20);
@@ -3101,8 +3197,22 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         peer_now = use_mmq && !order_peer.empty();
                         if (peer_now) {
                             PeerPrefill& P = *m.pp;
-                            if (!P.p2p) cudaMemcpyAsync(P.host_x, m.mixed, (size_t) T * N * 4, cudaMemcpyDeviceToHost, m.cs);
-                            cudaEventRecord(P.ev_in, m.cs);
+                            // the host route's copies beside the compute stream: the primary's own experts start at once
+                            // (mixed_h and w are rewritten only after this layer's combine, which waits for the peer)
+                            cudaStream_t xs = m.cs;
+                            if (P.x_stream != nullptr) {
+                                cudaEventRecord(P.ev_x, m.cs);
+                                cudaStreamWaitEvent(P.x_stream, P.ev_x, 0);
+                                xs = P.x_stream;
+                            }
+                            if (!P.p2p && P.f16) cudaMemcpyAsync(P.host_x16, m.mixed_h, (size_t) T * N * 2, cudaMemcpyDeviceToHost, xs);
+                            else if (!P.p2p) cudaMemcpyAsync(P.host_x, m.mixed, (size_t) T * N * 4, cudaMemcpyDeviceToHost, xs);
+                            if (P.sums) {   // the routing weights, and each peer row's routed pair (t * K + k)
+                                cudaMemcpyAsync(P.host_w, m.w, (size_t) T * K * 4, cudaMemcpyDeviceToHost, xs);
+                                for (int64_t i = 0; i < T * K; ++i)
+                                    if (const int32_t r = slot_h[(size_t) i]; r >= rows_local) P.host_pair[r - rows_local] = (int32_t) i;
+                            }
+                            cudaEventRecord(P.ev_in, xs);
                             int prevd = 0;
                             cudaGetDevice(&prevd);
                             cudaSetDevice(P.dev);
@@ -3111,6 +3221,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             if (P.out_pending) { cudaStreamWaitEvent(ps, P.ev_done, 0); P.out_pending = false; }
                             pe.mark(kPeMoeIn, ps);
                             if (P.p2p) cudaMemcpyPeerAsync(P.mixed, P.dev, m.mixed, prevd, (size_t) T * N * 4, ps);
+                            else if (P.f16) f16_to_f32_wide(P.mixed, P.host_x16, T * N, ps);
                             else copy_f32_wide(P.mixed, P.host_x, T * N, ps);
                             P.back_at = rows_local;
                             P.back_rows = rows_peer;
@@ -3122,6 +3233,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 copy_i32(P.src, P.host_src, rows_peer, ps);
                             }
                             const size_t n = order_peer.size();
+                            if (P.sums) {
+                                copy_f32_wide(P.wk, P.host_w, T * K, ps);
+                                copy_i32(P.pair, P.host_pair, rows_peer, ps);
+                                cudaMemsetAsync(P.sum, 0, (size_t) T * N * 4, ps);
+                            }
                             if (P.compact) {
                                 // groups of up to MMQ_GROUP experts and at most G rows, each computed from its own rows
                                 P.groups.clear();
@@ -3149,6 +3265,41 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 } else {
                                     std::memcpy(P.host_bounds, P.bounds_host.data(), P.bounds_host.size() * 4);
                                     copy_i32(P.bounds, P.host_bounds, (int64_t) P.bounds_host.size(), ps);
+                                }
+                                if (P.sums && P.gather) {   // each group's tokens, their row lists in the experts' order
+                                    P.adds_at.resize(ng);
+                                    P.ntok.resize(ng);
+                                    size_t at = 0;
+                                    for (size_t g2 = 0; g2 < ng; ++g2) {
+                                        const int32_t r0 = P.bounds_host[P.groups[g2].first], r1 = P.bounds_host[P.groups[g2].second];
+                                        P.touched.clear();
+                                        for (int32_t r = r0; r < r1; ++r) {
+                                            const int32_t t = P.host_pair[r] / (int32_t) K;
+                                            if (P.tcur[(size_t) t]++ == 0) P.touched.push_back(t);
+                                        }
+                                        const size_t nt = P.touched.size();
+                                        int32_t* a = P.host_adds + at;   // [tokens nt | starts nt + 1 | rows]
+                                        a[nt] = 0;
+                                        for (size_t i = 0; i < nt; ++i) {
+                                            const int32_t t = P.touched[i];
+                                            a[i] = t;
+                                            a[nt + 1 + i] = a[nt + i] + P.tcur[(size_t) t];
+                                            P.tcur[(size_t) t] = a[nt + i];   // the fill cursor
+                                        }
+                                        int32_t* list = a + 2 * nt + 1;
+                                        for (int32_t r = r0; r < r1; ++r)
+                                            list[P.tcur[(size_t) (P.host_pair[r] / (int32_t) K)]++] = r;
+                                        for (int32_t t : P.touched) P.tcur[(size_t) t] = 0;
+                                        P.adds_at[g2] = at;
+                                        P.ntok[g2] = (int32_t) nt;
+                                        at += 2 * nt + 1 + (size_t) (r1 - r0);
+                                    }
+                                    if (at > P.adds_cap) {
+                                        err = "prefill: the peer's group tables overflow";
+                                        cudaSetDevice(prevd);
+                                        return false;
+                                    }
+                                    copy_i32(P.adds, P.host_adds, (int64_t) at, ps);
                                 }
                                 pe.mark(kPeMoeGemm, ps);
                                 const auto& f = lay.fmt[(size_t) l];
@@ -3208,6 +3359,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     dn.ids = P.ident; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = P.Dm_b[b];
                                     dn.ld_dst = N;
                                     P.run_ctx->run(dn, ps);
+                                    if (P.sums && P.gather) {   // into the per-token sums, one launch for the group
+                                        const int32_t* a = P.adds + P.adds_at[g2];
+                                        const int64_t nt = P.ntok[g2];
+                                        peer_gather_add(P.sum, P.Dm_b[b], r0, P.wk, P.pair, a, a + nt, a + 2 * nt + 1, nt, ps);
+                                        continue;
+                                    }
+                                    if (P.sums) {   // into the per-token sums on this stream: Dm_b[b] is free after it
+                                        for (size_t j = j0; j < j1; ++j)
+                                            peer_scatter_add(P.sum, P.Dm_b[b] + (size_t) (P.bounds_host[j] - r0) * N, P.wk,
+                                                             P.pair + P.bounds_host[j], P.bounds_host[j + 1] - P.bounds_host[j], ps);
+                                        continue;
+                                    }
                                     cudaEventRecord(P.ev_grp[g2 % PeerPrefill::kGrpEv], ps);
                                     cudaStreamWaitEvent(P.s_out, P.ev_grp[g2 % PeerPrefill::kGrpEv], 0);
                                     if (P.p2p)
@@ -3276,7 +3439,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 }
                             }
                             pe.mark(kPeMoeOut, ps);
-                            if (P.out_pipe) {
+                            if (P.sums) {   // the sums go back: T x N
+                                if (P.f16) {
+                                    sums_to_f16(P.sum, P.sum16, T * N, ps);
+                                    cudaMemcpyAsync(P.host_sum16, P.sum16, (size_t) T * N * 2, cudaMemcpyDeviceToHost, ps);
+                                } else {
+                                    cudaMemcpyAsync(P.host_sum, P.sum, (size_t) T * N * 4, cudaMemcpyDeviceToHost, ps);
+                                }
+                                cudaEventRecord(P.ev_done, ps);
+                                P.out_pending = true;
+                            } else if (P.out_pipe) {
                                 cudaEventRecord(P.ev_done, P.s_out);
                                 P.out_pending = true;
                             } else {
@@ -3548,10 +3720,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     }
                     if (peer_now) {   // multi-GPU: the peer's rows are in Dm (or, without P2P, in host memory)
                         cudaStreamWaitEvent(m.cs, m.pp->ev_done, 0);
-                        if (!m.pp->p2p)
+                        if (!m.pp->p2p && !m.pp->sums)
                             copy_f32_wide(m.Dm + (size_t) m.pp->back_at * N, m.pp->host_rows, m.pp->back_rows * N, m.cs);
                     }
-                    moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs);
+                    if (peer_now && m.pp->sums && m.pp->f16)
+                        moe_combine_peer16(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.pp->host_sum16, m.pp->back_at, m.bo, T, m.cs);
+                    else if (peer_now && m.pp->sums)
+                        moe_combine_peer(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.pp->host_sum, m.pp->back_at, m.bo, T, m.cs);
+                    else
+                        moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs);
                     // debug: STRATA_DBG_NAN=1 reports the first layer of a chunk whose MoE produced non-finite values
                     if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {
                         cudaStreamSynchronize(m.cs);
