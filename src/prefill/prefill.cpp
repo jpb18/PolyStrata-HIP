@@ -40,6 +40,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <string>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -2570,6 +2572,66 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     pt.mark(kPfRouter, cs);
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
+                    // RESEARCH HOOK (141-research, opt-in, never on by default): STRATA_DBG_FEAT=<file> dumps, per MoE layer and chunk,
+                    // the routed ids + weights (and for the layers in STRATA_DBG_FEAT_LAYERS the router-input hidden state, bf16);
+                    // STRATA_DBG_ROUTE_OVERRIDE=<file> replaces the routing of the layers listed in that file with the file's ids + weights.
+                    {
+                        static const char* feat_path = std::getenv("STRATA_DBG_FEAT");
+                        static const char* ovr_path = std::getenv("STRATA_DBG_ROUTE_OVERRIDE");
+                        if (feat_path != nullptr || ovr_path != nullptr) {
+                            static std::FILE* ff = feat_path ? std::fopen(feat_path, "wb") : nullptr;
+                            static std::vector<bool> featl = [] {
+                                std::vector<bool> r(64, false);
+                                const char* e = std::getenv("STRATA_DBG_FEAT_LAYERS");
+                                std::string s = e ? e : "3,4,15,16,27,28,39,40";
+                                size_t i = 0;
+                                while (i < s.size()) { size_t j = s.find(',', i); if (j == std::string::npos) j = s.size(); int v = std::atoi(s.substr(i, j - i).c_str()); if (v >= 0 && v < 64) r[(size_t) v] = true; i = j + 1; }
+                                return r;
+                            }();
+                            static int64_t posl[64] = {};
+                            struct Ovr { std::vector<int32_t> ids; std::vector<float> w; };
+                            static std::map<std::pair<int32_t, int32_t>, Ovr> ovr = [] {
+                                std::map<std::pair<int32_t, int32_t>, Ovr> mp;
+                                const char* p = std::getenv("STRATA_DBG_ROUTE_OVERRIDE");
+                                std::FILE* f = p ? std::fopen(p, "rb") : nullptr;
+                                if (f == nullptr) return mp;
+                                int32_t h[3];
+                                while (std::fread(h, 4, 3, f) == 3) {
+                                    Ovr o; o.ids.resize((size_t) h[2] * 10); o.w.resize((size_t) h[2] * 10);
+                                    if (std::fread(o.ids.data(), 4, o.ids.size(), f) != o.ids.size()) break;
+                                    if (std::fread(o.w.data(), 4, o.w.size(), f) != o.w.size()) break;
+                                    mp[{h[0], h[1]}] = std::move(o);
+                                }
+                                std::fclose(f);
+                                std::fprintf(stderr, "route override: %zu records\n", mp.size());
+                                return mp;
+                            }();
+                            const int32_t pos = (int32_t) posl[l & 63];
+                            posl[l & 63] += T;
+                            cudaStreamSynchronize((cudaStream_t) m.cs);
+                            if (ff != nullptr) {
+                                std::vector<int32_t> hid((size_t) T * K); std::vector<float> hw((size_t) T * K);
+                                cudaMemcpy(hid.data(), m.ids, hid.size() * 4, cudaMemcpyDeviceToHost);
+                                cudaMemcpy(hw.data(), m.w, hw.size() * 4, cudaMemcpyDeviceToHost);
+                                std::vector<uint16_t> ids16(hid.size()), w16(hw.size());
+                                for (size_t i = 0; i < hid.size(); ++i) { ids16[i] = (uint16_t) hid[i]; w16[i] = (uint16_t) (((*(const uint32_t*) &hw[i]) + 0x8000u) >> 16); }
+                                const int32_t hd[4] = {(int32_t) l, pos, (int32_t) T, featl[(size_t) (l & 63)] ? 1 : 0};
+                                std::fwrite(hd, 4, 4, ff);
+                                std::fwrite(ids16.data(), 2, ids16.size(), ff);
+                                std::fwrite(w16.data(), 2, w16.size(), ff);   // bf16 weights
+                                if (hd[3]) {
+                                    std::vector<uint16_t> hx((size_t) T * N);
+                                    cudaMemcpy(hx.data(), m.mixed_bf, hx.size() * 2, cudaMemcpyDeviceToHost);
+                                    std::fwrite(hx.data(), 2, hx.size(), ff);
+                                }
+                            }
+                            auto it = ovr.find({(int32_t) l, pos});
+                            if (it != ovr.end() && (int64_t) it->second.ids.size() == T * K) {
+                                cudaMemcpy(m.ids, it->second.ids.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice);
+                                cudaMemcpy(m.w, it->second.w.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice);
+                            }
+                        }
+                    }
                     // the shared expert and its scalar gate
                     auto shared_expert = [&]() -> bool {
                         if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
