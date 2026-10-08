@@ -748,6 +748,24 @@ def gpu_drives_display(g) -> bool:
     return text.strip().lower() == "enabled"
 
 
+def gpu_compute_mode(index: int) -> str:
+    """#1445: nvidia-smi's compute mode for this card ("Default", "Exclusive_Process", "Prohibited", ...); "" when it
+    does not say."""
+    return out(["nvidia-smi", "-i", str(index), "--query-gpu=compute_mode", "--format=csv,noheader"]).strip()
+
+
+def compute_mode_warning(index: int, mode: str) -> str | None:
+    """#1445: the warning for a card that is not in the Default compute mode, or None.  In Exclusive_Process only one
+    process may hold a CUDA context, so the engine, the vision encoder and the tuning run cannot share the card
+    ("CUDA-capable device(s) is/are busy or unavailable"); Prohibited allows none.  A warning only: it is the
+    administrator's setting, Strata never changes it."""
+    if not mode or mode.lower() == "default" or mode.lower().startswith("n/a") or mode.lower().startswith("[n/a"):
+        return None
+    return (f"GPU {index} is in the compute mode {mode}, not Default: a second process cannot use the card while "
+            "the first holds it, so the vision encoder or the tuning run can fail with \"CUDA-capable device(s) is/are "
+            f"busy or unavailable\". If it does, set it back with: sudo nvidia-smi -i {index} -c DEFAULT")
+
+
 def pcie_link(index: int) -> dict | None:
     """The NVIDIA card's PCIe link: {"gen": the generation card and board both run (an idle card drops to a lower
     one, so the current generation is not asked), "gpu_gen", "host_gen", "width", "max_width"}; None when nvidia-smi
@@ -5399,6 +5417,12 @@ def main() -> int:
     if not hip and not multi and a.vram_reserve_mib is None and gpu_drives_display(gpu):
         say("  tip: this card drives a display. If the PC freezes or the screen goes black once the model is loaded "
             f"(#779), keep more VRAM free: run setup again with --vram-reserve-mib {DISPLAY_RESERVE_MIB}")   # a tip only
+    if not hip:
+        for gi in ([g for g in multi] if multi else [gpu.get("index", 0)]):
+            gi = gi["index"] if isinstance(gi, dict) else gi
+            w = compute_mode_warning(gi, gpu_compute_mode(gi))
+            if w:
+                warn(w)                                   # #1445: a warning only, never a refusal
     if esp is not None:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
