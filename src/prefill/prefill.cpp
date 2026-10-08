@@ -218,6 +218,14 @@ inline uint64_t ring_bytes() {
 // prompt path's loan on a native pack (fewer ring slots, the rest kept as cache slots, a larger auto chunk), so a long
 // prompt's experts are read through a different mix of resident and streamed groups and its bits differ from 0.1.39's
 // (RTX 5070, IQ3_XXS, 32K prompt: +14% to +26%; teacher-forced against the FP16 prompt path in the same band).
+// #1454: `bo` shares `emb`'s storage (carve), which frees T * N floats per chunk.  The planner keeps counting them by
+// default, so the auto chunk and the borrowed cache slots (and with them the prompt path's bits) are exactly 0.1.40.3's;
+// STRATA_EMB_REUSE_ACCOUNT=1 lets it use the saved bytes: a larger chunk or more borrowed slots where VRAM is the limit
+// (RTX 3060, IQ3_XXS: chunk 6400 -> 6656, prompt +3.9%), with other rounding in the prompt path.
+inline bool emb_reuse_account() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_EMB_REUSE_ACCOUNT"); return v != nullptr && v[0] == '1'; }();
+    return on;
+}
 inline bool ring_bytes_on() {
     static const bool on = [] { const char* v = std::getenv("STRATA_RING_BYTES"); return v == nullptr || v[0] != '0'; }();
     return on;
@@ -1586,6 +1594,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     }
     o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); f(T * LR); o.take<uint16_t>(T * LR, ok);
     f(T * D); f(T * HC); f(T * N); o.take<uint16_t>(T * N, ok); o.take<uint16_t>(T * N, ok);
+    if (!emb_reuse_account()) f(T * N);   // bo: aliases emb in carve; still counted unless STRATA_EMB_REUSE_ACCOUNT=1
     const bool f16_io = prompt_f16();   // the current device's mode (the stage's), as Prefill::init will decide it
     if (bf16x2_hc(f16_io)) { o.take<uint16_t>(T * D, ok); o.take<uint16_t>(T * LR, ok); }
     if (bf16x2(f16_io)) o.take<uint16_t>(T * N, ok);
