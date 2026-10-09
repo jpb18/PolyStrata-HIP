@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Strata doesn't work as documented
+description: Something in PolyStrata doesn't work as documented
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -7,7 +7,7 @@ body:
     value: |
       Thanks for the report.
 
-      Please search the [open issues](https://github.com/Niko1221/Strata/issues?q=is%3Aissue+state%3Aopen) first — this may already be tracked.
+      Please search the [open issues](https://github.com/VecSzn/PolyStrata/issues?q=is%3Aissue+state%3Aopen) first — this may already be tracked.
   - type: textarea
     id: what
     attributes:
@@ -18,7 +18,7 @@ body:
   - type: input
     id: hardware
     attributes:
-      label: Strata version, GPU, OS
+      label: PolyStrata version, GPU, OS
       description: The engine version is on the About tab, or in `GET /v1/status` under `engine`.
       placeholder: "0.1.31 · RTX 5070 12GB · Windows 11"
     validations:
@@ -27,11 +27,11 @@ body:
     id: log
     attributes:
       label: Engine log
-      description: Drag in `strata-<model>.log` from your Strata folder. Drag and drop works directly into this box.
+      description: Drag in `strata-<model>.log` from your PolyStrata folder. Drag and drop works directly into this box.
     validations:
       required: false
   - type: markdown
     value: |
       A couple of extras that help a lot:
 
-      - Check the [troubleshooting table](https://github.com/Niko1221/Strata/blob/main/docs/DETAILS.md#troubleshooting) first, many reports are already solved there.
+      - Check the [troubleshooting table](https://github.com/VecSzn/PolyStrata/blob/main/docs/DETAILS.md#troubleshooting) first, many reports are already solved there.

@@ -1,5 +1,5 @@
 name: Question
-description: Ask how to use Strata, or share a result
+description: Ask how to use PolyStrata, or share a result
 title: "Question: "
 labels: ["question"]
 body:
