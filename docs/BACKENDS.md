@@ -500,7 +500,8 @@ CUDA 13.0, the engine compiled with Visual Studio's 2022 compiler. Setup install
 models: a context of 32,768, the picture encoder on the CPU, and 13 threads for the experts that are not in
 VRAM. The numbers are the benchmark's through the server, as on the first machine, with a browser and the
 desktop on the same card and in the same RAM. They are one pass over the nine sizes with one build of the
-engine, the one with every change in [What was tuned](#what-was-tuned) and the merge of Strata 0.1.41.
+engine, the one with every change in [What was tuned](#what-was-tuned) and the merge of the Strata project's
+0.1.41.
 
 The README's test, `--prompt-tokens 24000`, three runs a size. A size's first run is the first after another
 model was in memory, and it starts without a profile of the experts' use. The table has the two runs after it.
@@ -1338,17 +1339,17 @@ then wrote the story at 76 to 86 where 72 to 79 in the same hour, and gives the 
 
 The laptop's processor has cores of two kinds, and Windows may hold the threads of a process it takes for
 background work to the slower kind. The experts that are not in VRAM are computed on those threads. Since the
-merge of Strata 0.1.41 the server takes the engines it starts out of that power throttling, and strata-poly does
-the same at its start, for an engine that anything else starts. In one hour, with the server from before the
-merge, Qwen3.6 wrote the answer after a 31,000-token prompt at 39 tokens/s in four runs of four, with the server
-of the merge at 57 to 62, and with the old server and its engine taken out from outside at 58. Started from a
-shell, the engine wrote 300 tokens after 7,709 at 48 to 50 tokens/s in four runs of six and at 66 in the other
-two, and with its own leaving at 66 to 72 in six of six. The laptop was on mains power, on the High performance
-plan, and its owner was at work on it. The pass of the night before, with nobody at it, wrote that answer at 59:
-it had not met the throttling. The threads that left the performance cores in the first measurements here
-([On a laptop with 8 GB of VRAM](#on-a-laptop-with-8-gb-of-vram)) may have been this, which was not tried
-again. Without the throttling, 16 and 20 threads wrote two short answers 2% to 7% faster than setup's 13 in
-three rounds of four and no faster in the fourth: the count stays.
+merge of the Strata project's 0.1.41 the server takes the engines it starts out of that power throttling, and
+strata-poly does the same at its start, for an engine that anything else starts. In one hour, with the server
+from before the merge, Qwen3.6 wrote the answer after a 31,000-token prompt at 39 tokens/s in four runs of
+four, with the server of the merge at 57 to 62, and with the old server and its engine taken out from outside
+at 58. Started from a shell, the engine wrote 300 tokens after 7,709 at 48 to 50 tokens/s in four runs of six
+and at 66 in the other two, and with its own leaving at 66 to 72 in six of six. The laptop was on mains power,
+on the High performance plan, and its owner was at work on it. The pass of the night before, with nobody at
+it, wrote that answer at 59: it had not met the throttling. The threads that left the performance cores in
+the first measurements here ([On a laptop with 8 GB of VRAM](#on-a-laptop-with-8-gb-of-vram)) may have been
+this, which was not tried again. Without the throttling, 16 and 20 threads wrote two short answers 2% to 7%
+faster than setup's 13 in three rounds of four and no faster in the fourth: the count stays.
 
 These eight were built and measured on Windows only, and GLM 5.3 Flash, whose attention has kernels of its own,
 was not run with them.
