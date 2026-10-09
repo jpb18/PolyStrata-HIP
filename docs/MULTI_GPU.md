@@ -42,7 +42,11 @@ now on; the answer is kept.
 ```
 
 **Not supported** (setup says so and names the cards that can be used instead):
-- a card older than the RTX 20 series (compute capability below 7.5: GTX 10 and older);
+- a card older than the RTX 20 series (compute capability below 7.5: GTX 10 and older), unless you name it: Pascal
+  and Volta cards (Tesla P100 / P40, GTX 10, V100) are admitted when you choose them with `--gpus` (or `--gpu`,
+  `--cuda 12`) and then run the experimental CUDA 12 engine, see [OLDER_GPUS.md](OLDER_GPUS.md). Two Tesla P40s
+  (`"gpu": [0, 1]` in the config) ran the layer split in a community benchmark: IQ2_XS decode 19.6 tok/s on one card,
+  34.8 on both (#1028, experimental, one report);
 - a card with less than 8 GB of VRAM, together with others (each card holds a copy of the dense weights and its
   own prompt buffers) - unless you name it with `--gpus`: then setup says the risk and asks (`--yes` with the named
   cards goes ahead);
@@ -60,6 +64,8 @@ Or edit an existing config (`strata-*.json`), then restart:
 number per card after the first, not a count of layers per card. With 4 cards and a 48-layer model, `"24,36,42"`
 (or `[24, 36, 42]`) puts layers 0-23 on the first card, 24-35 on the second, 36-41 on the third and 42-47 on the last.
 The server checks it before the start and says what is wrong (0.1.39, #644).
+
+**Card order with `"auto"`** (NVIDIA, #1352): the faster card (multiprocessors x max clock) goes **last** - the last stage runs the head, the draft layer and the verify, and a prompt chunk waits on it (a 4070 Ti SUPER + 5060 Ti read a 6K prompt in 50 s one way round and 15 s the other). Equal cards keep your order; a manual split keeps it too. `"gpu_order": "as_given"` keeps the order you wrote under `"auto"` as well. The engine log line `layer split: card order ...` says when it changed.
 
 **Skip the split when the first card holds everything** (opt-in, 0.1.31): `"split_skip_if_fits": true` in the config
 (engine flag `--split-skip-if-fits`, with `--layer-split auto`) runs on the first card alone when it holds every
@@ -102,7 +108,30 @@ it goes).
 A card holding more experts can change which experts run on the GPU, so the output can differ slightly from a run
 without it.
 
-**auto** tries every placement (all of them for two or three cards; proportional to the free VRAM beyond that) and
+**The resident RAM mode works on a split** (`--resident-experts`, the low-RAM mode). The RAM copy of the experts
+leaves out the ones every card's cache holds, not only the first card's, and when the rest does not fit whole it keeps
+the hottest by the expert profile over all the layers. An adaptive swap copies the evicted expert back into RAM from
+the card that owns its layer. Before, `--resident-experts` with a split ran as `--mmap-experts`, and setup recommended
+one card in the low-RAM mode; with an engine that has it (`RESIDENT_SPLIT_ENGINE` in setup.py), setup keeps the cards
+together and the experts no card holds in RAM. Swift 1.5 IQ3_XXS at
+160K (q4_0 KV, `--prefill 4096`, `--spec 4` with the stock draft layer), RTX 4060 Ti (layers 0-19) + RTX 5080 (20-47),
+i9-14900KF, 32 GB of RAM, Windows 11, four greedy prompts at a time, decode tok/s:
+
+| | first four prompts | after three more rounds |
+|---|---|---|
+| 5080 alone, `--resident-experts` | 25 | 29 |
+| split, `--mmap-experts` (what `--resident-experts` became on a split) | 32 | 64 |
+| split, `--resident-experts` (22 GiB of experts locked in RAM) | 71 | 69 |
+
+The split with `--mmap-experts` catches up once the OS file cache holds the experts, on a PC with nothing else
+running; the resident copy is there from the first request and stays locked when other programs need the RAM. With
+`--pcie-frac 0 --adapt-every 0` the split's greedy output is the same with either mode.
+
+**A separate VRAM reserve for the later cards:** `--vram-reserve-later-mib N` (default: `--vram-reserve-mib`'s value).
+The card that drives the monitors needs more headroom than one that drives none; with the display on the last card,
+`--vram-reserve-mib 300 --vram-reserve-later-mib 1800` gives the first card's cache that VRAM.
+
+**auto** tries every placement (all of them for two, three or, since 0.1.40, four cards; proportional to the free VRAM beyond that) and
 keeps the one whose caches would hold the most of the expert profile, hottest pairs weighted most; ties go to the
 placement that leaves the fullest card the most room. The startup log prints the choice:
 
@@ -167,6 +196,80 @@ The Coder on an RTX 5080 + RTX 3090 (Ryzen 9 9950X3D), 32K context; details in
 - Leave out a much slower card when two already hold the model. An RTX 2080 Ti as a third card made the 5080 +
   3090 pair slower (68 / 90 tok/s decode): every extra card costs its own round per window.
 - More cards pay off when the model's routed experts do not fit the faster ones.
+
+## One conversation with both cards busy (`--pipeline-windows`, opt-in)
+
+With a split the cards take turns on a verify window: the first card runs its layers and hands off, then waits while
+the last card runs the rest, the head and the draft. `--pipeline-windows 2` lets the first card start the **next**
+window while the last card still verifies this one. The next window is a guess: that this window is accepted whole
+and that its bonus token is the one the draft layer predicts (the draft layer is run on through the drafts of the
+window in flight). When the guess holds, half of the next window is already done; when it does not, the first card
+puts its state back (a copy of its recurrent state taken while the window ran) and the next window is built from the
+real tokens. A guessed window is only started when the draft layer's estimate says it is likely to be kept. Windows
+copied from earlier context (`--suffix-draft`) are guessed past as well, which is where edits that copy text gain
+most. `--pipeline-windows 1` overlaps only the short prompt reads that go through the verify windows
+(`--short-read`).
+
+Two cards, exactly two stages, `--serve`. In the config:
+
+```
+"args": [ ..., "--pipeline-windows", "2" ],
+"layer_split": "20"
+```
+
+- **Cost**: a second verify window on each card, 160 MiB more kept out of each card's expert cache, plus two copies
+  of the first card's recurrent state (about 3 MiB per GDN layer it runs) on the first card with `2`.
+- **Same text**: the last card only ever runs windows that are verified, and every window row computes what it
+  would in any other window, so the tokens are the serial loop's. With `STRATA_IQ_MT_MIN=1 --pcie-frac 0
+  --adapt-every 0` the greedy output is identical bit for bit to the serial loop's with the same expert caches. The pipeline keeps
+  its VRAM out of the caches, so against a run without the flag a few experts move from a card to the CPU, which
+  rounds them differently, and a near-tie can flip (a serial run given the same caches through `--vram-reserve-mib`
+  matches it exactly).
+- **Off, with one line in the log saying why**, with `--batch` slots, `--peer-device`, the helper caches
+  (`--expert-cache-device1..3`, which `--remote-expert-opt` builds on), a split into three or more stages or onto one GPU
+  (`--split-device 0`), or no draft layer. A request with repetition penalties (`penalty_last_n`) or coupled
+  draft sampling decodes serially.
+- **With the resident RAM mode's asynchronous swaps** (`--adapt-async 1`, [DETAILS.md](DETAILS.md)) a round's steps
+  advance between the verified windows. Each card's copies are queued by the decode loop itself while that card has
+  no window in flight, after every window that may still read what they overwrite has finished; the moves into RAM
+  wait the same way.
+- **Measured** (Swift 1.5 IQ3_XXS, 160K context, q4_0 KV, the stock draft layer, RTX 4060 Ti (layers 0-19) +
+  RTX 5080 (20-47), i9-14900KF, 32 GB of RAM with the resident RAM mode on the split (#848); greedy, 500 tokens, two
+  interleaved pairs of three rounds, decode tok/s): Python code 90.4 -> 103.1, C code 76.6 -> 81.6, English prose
+  63.0 -> 71.1, Italian prose 41.6 -> 46.3, a copy-heavy edit (a 5 KB file back with a rename) 90.5 -> 117.9; mean
+  72.4 -> 84.0 (+16%). It pays when the windows are GPU-bound: with the experts read through the OS file cache
+  (`--mmap-experts` on that 32 GB PC) the file reads dominate and it measured no faster.
+
+The `STRATA_PIPELINE_*` tuning and test variables (THETA, FORCE_MISS, SWITCH, LOG, TRACE and the like) are read only with
+`STRATA_PIPELINE_DEBUG=1`. `--pipeline-windows` and `--adapt-async 1` combine: the engine turns the asynchronous tier
+off beside `--pipeline-windows 2` only when `STRATA_PIPELINE_ADAPT_ASYNC=0` is set. What switches either one off is
+printed once at start ("is off: ..."). `--remote-expert-opt` does something only with a helper cache
+(`--expert-cache-device1..3`); on a plain layer split it is inert, and setup no longer writes it there (#1447).
+
+Measured on 2x RTX 3090 (sm_86, 250 W limits; GPU0 PCIe 4.0 x16, GPU1 x4, no NVLink; Ryzen 7 9800X3D, 32 GB RAM),
+Qwen3.8-Flash-Next GSQ-RCO IQ3_S, `--resident-experts`, KV int8, `--spec 4 --mtp`, `"layer_split": "29"` for the
+`--pipeline-windows` rows (without `--remote-expert-opt`); the others are setup's config (`auto`). Decode is the mean of
+runs 2-6 of 1,500-token coding replies at temperature 0.6, prefill one cold 19.9K-token prompt; one run per arm unless
+noted (reported by adambenhassen, #1447; not repeated on our boxes):
+
+| Arm | Decode tok/s | Prefill tok/s |
+|---|---:|---:|
+| setup defaults (two runs) | 137.0 / 136.9 | 1798 |
+| `--adapt-async 1` (two runs) | 145.2 / 143.7 | 1800 / 1797 |
+| `--adapt-async 1`, no `--remote-expert-opt` | 145.0 | 1807 |
+| `STRATA_ADAPT_LAG=2` | 142.8 | 1800 |
+| `STRATA_EXCHANGE_ROTATE=1` | 139.6 | 1800 |
+| `STRATA_PF_FUSED=1` | 137.2 | 1913 |
+| `--pipeline-windows 2` | 136.7 | 2097 |
+| `STRATA_SPEC_COUPLED=1` | 137.6 | 1804 |
+| `STRATA_SPEC_PROB=1` | 137.2 | 1788 |
+| `STRATA_SPEC_COUPLED=1` + `STRATA_SPEC_GUMBEL=1` | 136.5 | 1805 |
+| async + lag 2 + rotate + pf_fused | 145.0 | 1829 |
+| pw2 + lag 2 + rotate + pf_fused | 135.9 | 2296 |
+| pw2 + async + lag 2 + rotate + pf_fused | 142.0 | 2302 |
+
+The last row keeps most of the asynchronous tier's decode gain and the pipeline's +28% prefill; no stalls in any arm.
+These are opt-in settings on one rig, not defaults.
 
 ## Several conversations at once
 

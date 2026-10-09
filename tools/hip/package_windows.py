@@ -7,7 +7,7 @@
 tools/hip/build_windows.bat runs it after the build.  The zip holds:
 
     strata.exe, strata-device.exe, BUILD.json      (backend "hip", the archs, the ROCm and hipBLASLt versions)
-    amdhip64_7.dll, amd_comgr.dll                 the HIP runtime beside the exes too (#468 #461: before System32)
+    amdhip64_7.dll, amd_comgr.dll + what they import   the HIP runtime beside the exes too (#468 #461: before System32)
     rocm/bin/*.dll                                 the ROCm DLLs the two programs load (their import tables, followed
                                                    through the ROCm DLLs, + amd_comgr.dll, which the HIP runtime loads
                                                    by name) and the Microsoft C++ runtime they import
@@ -108,9 +108,13 @@ def main() -> int:
     # #468 #461: the HIP runtime (and the compiler it loads by name) next to the exes as well - Windows searches the
     # exe's folder before System32, where an AMD driver may install its own amdhip64_7.dll (found before PATH's
     # rocm/bin); rocBLAS/hipBLASLt stay in rocm/bin, which they resolve their kernel libraries and ../.kpack from
-    for pat in ("amdhip64_*.dll", "amd_comgr*.dll"):
-        for f in (stage / "rocm" / "bin").glob(pat):
-            shutil.copy2(f, stage / f.name)
+    # #461: and everything those two import (amdhip64_7.dll needs rocm_kpack.dll and the C++ runtime, or its full-path
+    # load fails with error 126 and Windows falls back to System32's copy): the closure of their PE import tables
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dll_closure import dll_closure
+    roots = sorted(f.name for pat in ("amdhip64_*.dll", "amd_comgr*.dll") for f in (stage / "rocm" / "bin").glob(pat))
+    for name in dll_closure(stage / "rocm" / "bin", roots):
+        shutil.copy2(stage / "rocm" / "bin" / name, stage / name)
 
     # the GEMM kernels and the libraries' own device code, for these archs
     lib = stage / "rocm" / "bin" / "rocblas" / "library"
@@ -118,7 +122,10 @@ def main() -> int:
     for f in (rbin / "rocblas" / "library").iterdir():
         m = re.search(r"gfx[0-9a-f]+", f.name)
         if m is None or m.group() in archs:
-            shutil.copy2(f, lib / f.name)
+            if f.is_dir():                                # the gfx1151 wheel keeps its rocBLAS kernels in library/gfx1151/
+                shutil.copytree(f, lib / f.name)
+            else:
+                shutil.copy2(f, lib / f.name)
     for arch in archs:
         src = rbin / "hipblaslt" / "library" / arch
         if src.is_dir():                                  # hipBLASLt has no RDNA2 (gfx1030) kernels
@@ -142,8 +149,8 @@ def main() -> int:
     (lic / "NOTICE.txt").write_text(NOTICE.format(rocm=a.rocm_version, dlls="\n".join("  " + d for d in shipped)),
                                     encoding="utf-8")
 
-    version = re.search(r"project\(strata VERSION ([\d.]+)", (ROOT / "CMakeLists.txt").read_text()).group(1)
-    hl = (a.rocm / "include" / "hipblaslt" / "hipblaslt-version.h").read_text()
+    version = re.search(r"project\(strata VERSION ([\d.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")).group(1)
+    hl = (a.rocm / "include" / "hipblaslt" / "hipblaslt-version.h").read_text(encoding="utf-8")
     hlv = [int(re.search(rf"#define\s+HIPBLASLT_VERSION_{k}\s+(\d+)", hl).group(1)) for k in ("MAJOR", "MINOR", "PATCH")]
     meta = {"source": "prebuilt", "backend": "hip", "platform": "windows-x64", "version": version, "archs": archs,
             "rocm": a.rocm_version, "hipblaslt_version": hlv[0] * 100000 + hlv[1] * 100 + hlv[2], "vision": "none",

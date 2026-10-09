@@ -19,11 +19,20 @@ There is **no ready-made Intel engine** in the release zips. You build it from s
 | Community | 2x Arc Pro B70, `--layer-split` | Flash-Next IQ3_XXS 66 tok/s decode, 394 tok/s prompt (with the `stage_room` fix that is now in 0.1.39) | #423 |
 | Community | Arc Pro B50 16 GB | Coder IQ1_M ~23 tok/s, IQ2_XS ~25-27 tok/s, up to 128K | #423 |
 | Community | Arc B580 12 GB, WSL2 | IQ2_XS ~21 tok/s, Coder ~15 tok/s; **device loss also seen** | #423 |
-| Strata maintainers | no Arc | compile check and kernel tests on a CPU device only (below) | this release |
+| Community | 2x Arc Pro B60 24 GB, `--layer-split` | Coder IQ1_M: 56.6 tok/s decode, 428 tok/s prompt (2,129 tokens); Flash-Next IQ2_XS: 58.6-61.3 tok/s decode, 436 tok/s prompt; all experts in VRAM; 8K context | [bench/results/2026-10-04-community-2x-arc-pro-b60](../bench/results/2026-10-04-community-2x-arc-pro-b60/README.md) |
+| Community | one Arc Pro B60 24 GB | Coder IQ1_M with 4,042 of 12,288 experts mirrored in RAM: 11.9 tok/s decode (needs the ring-wait fix from the same report) | same |
+| Strata maintainers (0.1.40.2 and later) | Arc Pro B70 32 GB (xe) and Arc A750 8 GB (i915), test machines | Flash-Next IQ3_S on the B70 with 11.5k of 24.6k experts resident: 10-prompt gate passes, prompt 980-1,000 tok/s on 4K tokens, decode 30 (prose) to 41 (code) tok/s; the xe aliased-pages fix and the `NO_HOST` requirement are in [INTEL.md](INTEL.md) | INTEL.md, "Arc Pro B70 with a model that does not fit" |
 
 The 0.1.39 port re-migrates 0.1.38's port onto the 0.1.39 engine sources (the #606 NaN fix, the #649 verify
-trace, the new prompt paths). It compiles and its kernel tests run, but **nobody has run the 0.1.39 port on an Arc
-yet**. The numbers in the table were measured on earlier versions.
+trace, the new prompt paths). 0.1.39's `sycl/` did not compile against 0.1.39's own engine sources (#784: the
+`ThreadAffinity` type of #626 and the layer range of `NativeDense::load` from #559), and its ring waits never saw a
+slow layer as still running (#866, #867). Both are fixed in 0.1.40, and the two B60 reports below were measured with
+exactly those two fixes on top of 0.1.39. **No one has run an unpatched 0.1.39 port on an Arc**, and the other rows were
+measured on earlier versions.
+
+The two B60 rows ran `6f32ec0` plus two small `sycl/` fixes (the compile fix and the ring-wait fix), AOT `bmg-g21`, on Ubuntu 24.04 with
+`xe`, Level Zero V2, NEO 26.09.37435.12 and oneAPI 2026.1.1, without Docker. Host: Ryzen 5 5600, 64 GB RAM, PCIe 3.0 x8 per card.
+Full flags, per-request timings and engine logs are in the report linked in the table.
 
 ## What was tested here (0.1.39)
 
@@ -51,15 +60,35 @@ images (not wired on Intel).
 - **Intel oneAPI**: the DPC++ compiler (`icpx`, 2025.3 or newer; 2026.1 is what was built here) and **oneMKL**. About 5 GB.
 - `cmake` 3.24+, `ninja`, `git` (the build fetches ggml unless you point `STRATA_GGML_DIR` at a llama.cpp checkout),
   Python 3.
-- For `setup --backend sycl` today: **Docker**. `sycl/setup_intel.py` runs the engine in the `strata-sycl-dev`
-  image built from `sycl/tools/Dockerfile`. Note that the Dockerfile starts from a community llama.cpp SYCL image
-  (`ghcr.io/snailium/...`), not an Intel or PolyStrata image.
+- For `./setup.sh --backend sycl` today: **Docker**, and nothing else from the list above except the GPU driver.
+  `sycl/setup_intel.py` runs the engine in the `strata-sycl-dev` image built from `sycl/tools/Dockerfile`, and the
+  engine is built in that image too ("Build with Docker" below). On Ubuntu: `sudo apt install docker.io git`, then
+  `sudo usermod -aG docker,render $USER` and log in again. Note that the Dockerfile starts from a community
+  llama.cpp SYCL image (`ghcr.io/snailium/...`), not an Intel or PolyStrata image.
 - VRAM: the port keeps the experts on the card (`--stream-experts`). A 32 GB card holds the Coder IQ1_M or IQ2_XS.
   Smaller cards mirror part of the experts in RAM and are slower.
 
-## Build (Linux)
+## Build with Docker (what `setup --backend sycl` uses)
 
-Install oneAPI from Intel's apt repository (this is what was used here):
+Two commands, the same as in [INTEL.md](INTEL.md), "How to build it" (about 10 minutes the first time). From the checkout,
+called `PolyStrata` here:
+
+```sh
+cd PolyStrata
+docker build -t strata-sycl-dev sycl/tools            # once: ~6 minutes, a 13 GB image
+H=$(basename "$PWD")
+# Arc B-series: bmg-g31 (Pro B70), bmg-g21 (B580, B570, Pro B60). Arc A-series (Alchemist): leave out AOT (JIT) and use build-sycl
+docker run --rm -u $(id -u):$(id -g) -v "$PWD/..:/work" -e AOT=bmg-g31 -e REPO=/work/$H \
+    -e BUILD_DIR=/work/$H/build-sycl-aot strata-sycl-dev "cd /work/$H && bash sycl/tools/build.sh strata"
+```
+
+Then `./setup.sh --backend sycl` (below). Do not run `python3 sycl/setup_intel.py` by hand: on Ubuntu it fails with
+`externally-managed-environment`; `setup.sh` runs it in its own `.venv`.
+
+## Build without Docker (Linux)
+
+This builds the engine for running it by hand ("How to run it by hand" in [INTEL.md](INTEL.md)); `setup` itself uses the
+Docker build above. Install oneAPI from Intel's apt repository (this is what was used here):
 
 ```sh
 wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
@@ -97,8 +126,10 @@ top-level option the engine is at `build-sycl/sycl/strata`, so either use `-S sy
 ./setup.sh --backend sycl [setup's usual options, e.g. --model IQ2_XS --context 32768]
 ```
 
-This prints the experimental warning and continues with `sycl/setup_intel.py`. That script finds the Arc in sysfs,
-uses the SYCL engine you built, and writes the config and `run-<model>.sh`. It still downloads and packs the model
+This prints the experimental warning and continues with `sycl/setup_intel.py` (in setup's own Python environment).
+That script finds the Arc in sysfs, uses the SYCL engine you built, and writes the config and `run-<model>.sh`.
+On a card under 12 GB or an `i915` card (the A-series) it writes the small-card config ([INTEL.md](INTEL.md), "Arc A750
+and the other Alchemist cards"). It still downloads and packs the model
 the usual way. To run the engine by hand (no Docker), see "How to run it by hand" in [INTEL.md](INTEL.md).
 
 Things that matter on an Arc (details in INTEL.md):
@@ -108,9 +139,21 @@ Things that matter on an Arc (details in INTEL.md):
 - `SYCL_CACHE_PERSISTENT=0`: the persistent JIT cache crashed on Xe2 during the first compile.
 - Two cards: `ONEAPI_DEVICE_SELECTOR=level_zero:*` (the image pins `level_zero:0`; `strata-sycl.sh` now passes the
   variable through) and `--layer-split`.
-- `STRATA_VERIFY_NO_HOST=1` (set by `strata-sycl.sh`) is only valid when every expert is in VRAM. On smaller cards
-  that path is the one that has hung, and #667 found the likely reason: the GPU does not see the CPU's flag
-  stores without a system fence.
+- **Arc Pro B60:** the PCI id is `8086:e211` (`lspci -nn`, the kernel's `xe` id list files it with the BMG-G21 cards), `sycl-ls` prints
+  `Intel(R) Arc(TM) Pro B60 Graphics 20.1.0`, and `ocloc ids bmg-g21` prints 20.1.0, so `-DSTRATA_SYCL_AOT=bmg-g21` is the right target.
+  `setup_intel.py` knows both B60 ids, `e211` and `e221` (both seen on B60 cards). On a `--layer-split` the startup line "N experts are neither in VRAM nor mirrored"
+  counts the other card's layers; the lines `100% of the experts resident` that follow are the ones to read. Set `STRATA_MIRROR_MIB=0` there,
+  or the pinned mirror is allocated and not used.
+- **`setvars.sh` and `set -u`:** `source /opt/intel/oneapi/setvars.sh` in a shell with `set -u` stops at `OCL_ICD_FILENAMES: unbound variable`
+  (oneAPI 2026.1.1). Source it before `set -u`, or run `set +u` around it.
+- **Without Docker:** `sycl/serve/strata-sycl.sh` needs Docker. Natively, `source setvars.sh`, export `SYCL_CACHE_PERSISTENT=0`,
+  `ZES_ENABLE_SYSMAN=1` and `STRATA_VERIFY_DEVICE_PLAN=1`, then run `build-sycl-aot/strata` or `sycl/serve/server_intel.py` with an `exe` that does this.
+  A normal user is not in the `render` group on Ubuntu, and then `sycl-ls` shows only the CPU device.
+- `STRATA_VERIFY_NO_HOST=1` (set by `strata-sycl.sh` unless the config's `"env"` says otherwise) is needed on `xe`
+  cards when part of the experts is not in VRAM (the host-to-GPU flag stores are not visible there, NaN logits
+  otherwise) and is left off on the `i915` Arc A-series: see [INTEL.md](INTEL.md). The config's `"env"` block and any
+  `STRATA_*`, `ONEAPI_*`, `UR_*`, `IGC_*`, `SYCL_*` or `ZES_*` variable of the server's environment reach the engine
+  through `strata-sycl.sh` (for example `STRATA_MIRROR_MIB`, `IGC_EnableDPEmulation`).
 
 ## Windows
 

@@ -49,7 +49,7 @@ class KfdDetection(unittest.TestCase):
             (110001, 120, 128, "", 16 << 30),                     # gfx1101 without a product name
             (120000, 64, 129, None, 16 << 30),                    # gfx1200, no product_name file
             (120001, 128, 130, "AMD Radeon AI PRO R9700", 32 << 30),
-            (110002, 64, 131, None, 8 << 30),                     # gfx1102: listed, not supported
+            (110002, 64, 131, None, 8 << 30),                     # gfx1102: supported, unvalidated (#938)
             (100306, 4, 132, None, 512 << 20),                    # an integrated gfx1036: listed, not supported
             (110000, 192, 133, "Radeon RX 7900 XTX", 24 << 30),
         ])
@@ -59,11 +59,10 @@ class KfdDetection(unittest.TestCase):
         self.assertEqual(g[0]["name"], setup.AMD_NAMES["gfx1101"])
         self.assertEqual(g[1]["name"], setup.AMD_NAMES["gfx1200"])
         self.assertEqual(g[2]["name"], "AMD Radeon AI PRO R9700")
-        self.assertEqual(g[3]["name"], "AMD Radeon (gfx1102)")
+        self.assertEqual(g[3]["name"], setup.AMD_NAMES["gfx1102"])
         self.assertAlmostEqual(g[2]["vram_gb"], 32.0)
         ok = [x["arch"] for x in g if setup.amd_problem(x) is None]
-        self.assertEqual(ok, ["gfx1101", "gfx1200", "gfx1201", "gfx1100"])
-        self.assertIn("gfx1102", setup.amd_problem(g[3]))
+        self.assertEqual(ok, ["gfx1101", "gfx1200", "gfx1201", "gfx1102", "gfx1100"])
         self.assertIn("gfx1036", setup.amd_problem(g[4]))
 
     def test_no_kfd(self):
@@ -230,6 +229,22 @@ class WindowsDetection(unittest.TestCase):
         self.assertEqual(g[0]["driver"], "32.0.21013.1000")
         self.assertEqual([setup.amd_problem(x) is None for x in g], [True, False, True])
 
+    def test_rx_6800m_is_gfx1031(self):
+        """#881: PCI 73DF (RX 6700 XT / 6750 XT / 6800M) is gfx1031, not an unknown id."""
+        self.assertEqual(setup.win_amd_arch(0x73DF, "AMD Radeon RX 6800M"), "gfx1031")
+        self.assertIsNone(setup.amd_problem({"arch": "gfx1031"}))
+
+    def test_cpu_vision_build_uses_the_visual_studio_environment(self):
+        """#881: build_vision_cpu on Windows hands cmake_build the vcvars file and a real .bat name (it passed None and
+        an empty name before)."""
+        calls = []
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "WIN", True),                 mock.patch.object(setup, "find_vcvars", return_value=Path("C:/vs/vcvars64.bat")),                 mock.patch.object(setup, "cmake_build", lambda *a: calls.append(a)),                 mock.patch.object(setup, "ROOT", Path(d)), mock.patch.object(setup.shutil, "copy2"):
+            eng = Path(d) / "engine"
+            eng.mkdir()
+            setup.build_vision_cpu(eng, eng / "BUILD.json", {}, Path("llama"), "src1")
+        self.assertEqual(calls[0][4], Path("C:/vs/vcvars64.bat"))
+        self.assertTrue(calls[0][5].endswith(".bat"))
+
     def test_registry_alone(self):
         """No WMI answer: the registry's own list (which can hold a removed card)."""
         g = setup.amd_gpus_windows([], self.REGISTRY)
@@ -240,7 +255,7 @@ class WindowsDetection(unittest.TestCase):
                            ("AMD Radeon RX 9060 XT", "gfx1200"), ("AMD Radeon RX 7900 GRE", "gfx1100"),
                            ("AMD Radeon PRO W7800", "gfx1100"), ("AMD Radeon RX 7700 XT", "gfx1101"),
                            ("AMD Radeon RX 7600", "gfx1102"), ("AMD Radeon RX 6950 XT", "gfx1030"),
-                           ("AMD Radeon RX 6800M", ""), ("AMD Radeon 780M Graphics", ""), ("AMD Radeon RX 7700S", "")):
+                           ("AMD Radeon RX 6800M", ""), ("AMD Radeon 780M Graphics", "gfx1103"), ("AMD Radeon RX 7700S", "")):
             self.assertEqual(setup.win_amd_arch(None, name), arch, name)
         self.assertEqual(setup.win_amd_arch(0x744C, "whatever"), "gfx1100")
 
@@ -310,7 +325,7 @@ class WindowsDetection(unittest.TestCase):
 
             def publish(meta):
                 with zipfile.ZipFile(pub / setup.WIN_HIP_ASSET, "w") as z:
-                    z.writestr("strata.exe", "engine")
+                    z.writestr(setup.EXE, "engine")       # #975: "strata" on Linux
                     z.writestr("strata-device.exe", "probe")
                     z.writestr("rocm/bin/amdhip64_7.dll", "dll")
                     z.writestr("BUILD.json", json.dumps(meta))
@@ -448,6 +463,61 @@ class HipRuntimeBesideExe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             setup.hip_runtime_beside_exe(Path(d))                   # no BUILD.json (a CUDA or Linux engine)
             self.assertEqual(list(Path(d).iterdir()), [])
+
+
+class DeviceAccess(unittest.TestCase):
+    """Linux AMD: /dev/kfd and the render nodes must be openable by the user; setup warns, never refuses."""
+
+    def dev(self, d, kfd=True, nodes=("renderD128",)):
+        root = Path(d)
+        (root / "dri").mkdir()
+        if kfd:
+            (root / "kfd").write_text("")
+        for n in nodes:
+            (root / "dri" / n).write_text("")
+        return str(root)
+
+    def test_accessible_is_silent(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(setup.amd_device_access_problem(self.dev(d), access=lambda p, m: True))
+
+    def test_no_kfd_is_not_this_problem(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(setup.amd_device_access_problem(self.dev(d, kfd=False), access=lambda p, m: False))
+
+    def test_kfd_denied_names_the_fix(self):
+        with tempfile.TemporaryDirectory() as d:
+            msg = setup.amd_device_access_problem(self.dev(d), access=lambda p, m: not p.endswith("kfd"))
+            self.assertIn("kfd", msg)
+            self.assertNotIn("renderD128", msg)
+            self.assertIn("sudo usermod -aG render,video $USER", msg)
+            self.assertIn("log out and in", msg)
+
+    def test_render_node_denied(self):
+        with tempfile.TemporaryDirectory() as d:
+            msg = setup.amd_device_access_problem(self.dev(d), access=lambda p, m: "renderD" not in p)
+            self.assertIn("renderD128", msg)
+            self.assertNotIn("/kfd", msg)
+
+    def test_engine_names_the_permission_not_another_program(self):
+        src = (Path(setup.__file__).resolve().parent / "src/program/generate.cpp").read_text(encoding="utf-8")
+        i = src.index("cannot open /dev/kfd")
+        guard = src[src.rindex("#if", 0, i):i]
+        self.assertIn("cudaGetDeviceCount", guard)
+        self.assertIn('access("/dev/kfd", R_OK | W_OK)', guard)
+        self.assertIn("STRATA_USE_HIP", guard)               # CUDA builds keep the "another program" text
+        self.assertIn("another program (or an engine that is still exiting)", src)
+
+
+class TdrPointer(unittest.TestCase):
+    def test_setup_points_windows_gfx12_to_the_entry(self):
+        src = Path(setup.__file__).read_text(encoding="utf-8")
+        self.assertIn('WIN and str(gpu.get("arch") or "").startswith("gfx12")', src)
+        doc = (Path(setup.__file__).resolve().parent / "docs/TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        self.assertIn("Windows AMD: the driver resets", doc)
+        for env in ("STRATA_PF_STEP_SYNC", "STRATA_KV_HOST_DMA"):
+            self.assertIn(env, doc)
+            self.assertIn(env, (Path(setup.__file__).resolve().parent / "src/prefill/prefill.cpp").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

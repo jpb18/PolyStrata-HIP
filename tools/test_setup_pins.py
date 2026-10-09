@@ -7,6 +7,7 @@ requirements file, and an existing install left as it is.  Mocked network - noth
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import re
@@ -75,13 +76,35 @@ class HuggingFacePins(unittest.TestCase):
                 raise not_found(req.full_url)
             return Response(b"model bytes", status=200)
 
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen):
+        # the pinned Hugging Face path itself (setup's --source huggingface; auto may pick ModelScope)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
+                mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "huggingface"}):
             dst = Path(d) / "m.gguf"
             _, out = quiet(setup.download, setup.FAMILIES["qwen"]["mmproj_hf"] + "m.gguf", dst)
             self.assertEqual(dst.read_bytes(), b"model bytes")
         self.assertIn("not at the pinned revision any more", out)
         self.assertEqual([m for m, _ in seen], ["HEAD", "HEAD", "GET"])
         self.assertTrue(all("/resolve/main/" in u for _, u in seen[1:]))
+
+    def test_a_complete_part_is_finished_without_a_request(self):
+        """A .part with every byte (setup stopped between the last byte and the rename): renamed, not resumed with a
+        range past its end - the server answers that with 416, which download() retried 30 times, 10 s apart."""
+        seen = []
+
+        def urlopen(req, timeout=None):
+            seen.append((req.get_method(), req.headers.get("Range")))
+            if req.get_method() == "HEAD":
+                return Response(b"model bytes")
+            raise urllib.error.HTTPError(req.full_url, 416, "Range Not Satisfiable", {}, None)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(setup.time, "sleep", lambda s: None):
+            dst = Path(d) / "m.gguf"
+            dst.with_name("m.gguf.part").write_bytes(b"model bytes")
+            quiet(setup.download, "https://example.com/m.gguf", dst)
+            self.assertEqual(dst.read_bytes(), b"model bytes")
+            self.assertTrue(setup.done(dst))
+        self.assertEqual(seen, [("HEAD", None)])
 
     def test_mtp_fetch_is_pinned_and_falls_back(self):
         import mtp_fetch
@@ -158,16 +181,31 @@ class Engine(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
-    def fake_download(self, got):
+    def fake_download(self, got, wrote=None):
         def download(url, dst, what=None):
             got.append(url)
+            if wrote is not None:
+                wrote.append(Path(dst))
             with zipfile.ZipFile(dst, "w") as z:
                 z.writestr("BUILD.json", json.dumps({"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
                 z.writestr(setup.EXE, b"engine")
         return download
 
+    def fake_digest(self, wrote):
+        """The SHA-256 of whatever the fake download just wrote, computed for real.
+
+        `get_prebuilt()` now checks the archive against GitHub's size and SHA-256 before it unpacks
+        anything, so a test that mocks the download has to supply a hash or it stops at the check. These
+        tests are about WHICH release and WHICH asset are chosen, not about the bytes; what happens when
+        the hash is wrong has its own file (tools/test_setup_engine_hash.py).
+        """
+        def digest(asset, base):
+            data = Path(wrote[-1]).read_bytes()
+            return len(data), hashlib.sha256(data).hexdigest()
+        return digest
+
     def run_get(self, published):
-        heads, got = [], []
+        heads, got, wrote = [], [], []
 
         def urlopen(req, timeout=None):
             heads.append(req.full_url)
@@ -176,7 +214,8 @@ class Engine(unittest.TestCase):
             return Response()
 
         with mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(setup, "download", self.fake_download(got)):
+                mock.patch.object(setup, "download", self.fake_download(got, wrote)), \
+                mock.patch.object(setup, "engine_digest", self.fake_digest(wrote)):
             eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
         return eng, out, heads, got
 
@@ -204,19 +243,38 @@ class Engine(unittest.TestCase):
         for meta in ({"version": "0.1.0", "archs": [89]},
                      {"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [120]}):
             with self.subTest(meta=meta):
+                wrote = []
+
                 def download(url, dst, what=None):
+                    wrote.append(Path(dst))
                     with zipfile.ZipFile(dst, "w") as z:
                         z.writestr("BUILD.json", json.dumps(meta))
                         z.writestr(setup.EXE, b"engine")
                     setup.mark(dst)
 
                 with mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: Response()), \
-                        mock.patch.object(setup, "download", download):
+                        mock.patch.object(setup, "download", download), \
+                        mock.patch.object(setup, "engine_digest", self.fake_digest(wrote)):
                     eng, _ = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
                 self.assertIsNone(eng)
                 z = self.root / "engine" / setup.PREBUILT_ASSET
                 self.assertFalse(z.exists())
                 self.assertFalse(z.with_name(z.name + ".done").exists())
+
+    def test_an_archive_that_does_not_unpack_is_not_kept(self):
+        """#397, for an archive that does not unpack (not a zip, or a damaged one): it kept its zip and .done mark,
+        so every later run failed on it, even after the right one was published."""
+        with tempfile.TemporaryDirectory() as folder:  # a --prebuilt folder, through the real download()
+            asset = Path(folder) / setup.PREBUILT_ASSET
+            asset.write_bytes(b"<html>not a zip</html>")
+            with self.assertRaises(zipfile.BadZipFile):
+                quiet(setup.get_prebuilt, folder, {"arch": 89}, "gpu")
+            with zipfile.ZipFile(asset, "w") as z:
+                z.writestr("BUILD.json", json.dumps({"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
+                z.writestr(setup.EXE, b"engine")
+            eng, _ = quiet(setup.get_prebuilt, folder, {"arch": 89}, "gpu")
+        self.assertEqual(eng, self.root / "engine")
+        self.assertEqual((self.root / "engine" / setup.EXE).read_bytes(), b"engine")
 
     def test_an_installed_engine_is_kept(self):
         (self.root / "engine" / "BUILD.json").write_text(json.dumps(

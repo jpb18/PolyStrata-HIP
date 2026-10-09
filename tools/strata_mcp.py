@@ -61,7 +61,8 @@ FALLBACK_MODELS = {
               "ram_gb": 32, "arena_gb": 23.4, "families": ("coder",)},
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), EXPERIMENTAL: the best quality, but most experts come from the "
                             "SSD on a 64 GB PC (7-8.5 tokens/s measured)", "download_gb": 111.3, "ram_gb": 48,
-                   "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "experimental": True},
+                   "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "experimental": True,
+                   "vision": True},                       # #967: images allowed (setup warns: untested with this file)
     "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), between IQ3_S and UD-Q4_K_XL in quality; on a PC with "
                            "less than ~80 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
@@ -117,7 +118,7 @@ FALLBACK_FAMILIES = {
                           "UD-Q4_K_M": {"about": "4- and 5-bit experts (Unsloth Dynamic); the same draft model",
                                         "download_gb": 17.4, "ram_gb": 21, "arena_gb": 14.3}}},
 }
-FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
+FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
                 "Plain prose, no title.")
 
@@ -525,7 +526,8 @@ class Strata:
 
     # ---- what is installed
     def configs(self) -> list[Path]:
-        return sorted(self.root.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
+                      key=lambda p: p.stat().st_mtime, reverse=True)   # #346: the Chat settings file is no config
 
     @staticmethod
     def read_config(path: Path) -> dict:
@@ -1303,7 +1305,15 @@ class Tools:
         if vision in ("yes", "gpu", "cpu") and d.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is not None and backend == "hip" and vision != "no":
-            raise ToolError("images are not available on the AMD backend yet: use vision=no")
+            # setup.py's hip_vision rules (#990): the AMD backend has no GPU image encoder, but --vision cpu reads
+            # images on the CPU beside it (Linux; the ready-made Windows AMD engine has no encoder)
+            if vision == "cpu" and not WIN:
+                pass
+            elif vision == "cpu":
+                raise ToolError("images on the CPU with an AMD card are Linux-only for now: use vision=no")
+            else:
+                raise ToolError("the AMD backend has no GPU image encoder yet: use vision=cpu (images on the CPU, "
+                                "Linux) or vision=no")
         target = self.check_data_dir(data_dir) if data_dir else s.data_dir()
         tag = (families[family].get("tag", "") + model)
         have_dir = target / "models" / tag

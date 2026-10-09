@@ -338,12 +338,17 @@ class Telemetry:
         self.static = {
             "gpu_name": " + ".join(g.name() or "?" for _, g in self.gpus) if self.gpu.ok() else None,
             "gpu_count": len(self.gpus),
+            # #1380: the AMD readings are the amdgpu driver's Linux sysfs files; a Windows AMD card has none yet, and the
+            # dashboard said "not readable (NVML)" or showed empty tiles with no word why
+            "gpu_note": ("no GPU load or VRAM readings for AMD cards on Windows yet (Linux reads them from the amdgpu "
+                         "driver); the engine's own VRAM figures are in its log" if amd and not self.gpu.ok() else None),
             "cpu_name": _cpu_name(),
             "cores": None if self.quota else (self.ps.cpu_count(logical=False) if self.ps else None) or None,
             "threads": max(1, round(self.cgroup.cpus)) if self.quota else n,
             "psutil": self.ps is not None,
         }
         self._disk_prev = None
+        self._stop = threading.Event()
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _disk(self):
@@ -403,8 +408,12 @@ class Telemetry:
                 pass
         return s
 
+    def close(self):
+        """Ends the sampler thread (a server that stops, a test's service): it used to run for the life of the process."""
+        self._stop.set()
+
     def _loop(self):
-        while True:
+        while not self._stop.is_set():
             s = self.sample()
             with self.lock:
                 self.now = s
@@ -412,7 +421,7 @@ class Telemetry:
                           "disk_read_mb", "tok_s", "prefill_tok_s_mean"):
                     v = s.get(k)
                     self.hist[k].append(round(v, 2) if isinstance(v, float) else v)
-            time.sleep(1.0)
+            self._stop.wait(1.0)
 
     def snapshot(self):
         with self.lock:

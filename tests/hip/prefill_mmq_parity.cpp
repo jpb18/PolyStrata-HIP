@@ -137,7 +137,10 @@ Metrics run_product(Context & ctx, hipStream_t stream, const std::string & name,
     hip_check(hipMemcpy(ddst.p, dst_ids.data(), dst_ids.size() * sizeof(int32_t), hipMemcpyHostToDevice), "copy dst ids");
     hip_check(hipMemcpy(dbounds.p, bounds.data(), bounds.size() * sizeof(int32_t), hipMemcpyHostToDevice), "copy bounds");
     hip_check(hipMemcpy(dw.p, w.data(), w.size(), hipMemcpyHostToDevice), "copy weights and zero tail");
-    hip_check(hipMemset(dy.p, 0xff, (size_t) rows * (size_t) out_rows * sizeof(float)), "initialize output sentinel");
+    // On the product's stream: a plain hipMemset runs on the null stream, which a non-blocking stream does not wait
+    // for - on a Radeon 8060S (gfx1151, Windows) it landed after the MMQ kernel and left only the sentinel
+    hip_check(hipMemsetAsync(dy.p, 0xff, (size_t) rows * (size_t) out_rows * sizeof(float), stream),
+              "initialize output sentinel");
 
     quantize(dx.as<float>(), dsrc.as<int32_t>(), dxq.p, (int) type, cols, cols, rows, (void *) stream);
     const int max_rows = *std::max_element(counts.begin(), counts.end());
@@ -199,6 +202,30 @@ Metrics run_product(Context & ctx, hipStream_t stream, const std::string & name,
 std::vector<std::vector<uint8_t>> synthetic_q2(int experts, int64_t out_rows, int64_t cols, int trial) {
     std::vector<std::vector<uint8_t>> w;
     for (int e = 0; e < experts; ++e) w.push_back(make_q2_matrix(out_rows, cols, e, trial));
+    return w;
+}
+
+// A synthetic matrix of any ggml type with a host quantizer (the K-quants: the dense GGUF tensors the
+// STRATA_DENSE_MMQ path multiplies on HIP).  K stays a 256-value multiple: the dense path only takes
+// such K, and a partial 256-value chunk would read past the synthetic tensor's end.
+std::vector<std::vector<uint8_t>> synthetic_of_type(ggml_type type, int experts, int64_t out_rows, int64_t cols,
+                                                     int trial) {
+    const auto * tr = ggml_get_type_traits(type);
+    if (!tr || !tr->from_float_ref) throw std::runtime_error("no host quantizer for the type");
+    std::vector<std::vector<uint8_t>> w;
+    for (int e = 0; e < experts; ++e) {
+        std::vector<uint8_t> blocks((size_t) out_rows * row_bytes(type, cols));
+        std::vector<float> row((size_t) cols);
+        for (int64_t r = 0; r < out_rows; ++r) {
+            for (int64_t k = 0; k < cols; ++k) {
+                const int code = (int) ((k * 29 + r * 17 + e * 31 + trial * 13) % 97) - 48;
+                row[(size_t) k] = 0.02f * std::sin(0.011f * (float) (k + 2) + 0.29f * (float) r + 0.37f * (float) e) +
+                                  0.0009f * (float) code;
+            }
+            tr->from_float_ref(row.data(), blocks.data() + (size_t) r * row_bytes(type, cols), cols);
+        }
+        w.push_back(std::move(blocks));
+    }
     return w;
 }
 
@@ -267,6 +294,22 @@ int main(int argc, char ** argv) {
                             2560, 640, synthetic_q2(n, 2560, 640, trial + 9), counts,
                             make_activations(rows, 640, trial + 3), src, dst);
                 ++trial;
+            }
+            // The K-quant instances a STRATA_MMQ_KQUANTS build adds (the dense GGUF projections of the
+            // mixed-quant packs through Gemm::native).  Skipped when the build does not have them.
+            for (const auto & [name, type] : std::initializer_list<std::pair<const char *, ggml_type>>{
+                     {"Q4_K", GGML_TYPE_Q4_K}, {"Q5_K", GGML_TYPE_Q5_K}, {"Q6_K", GGML_TYPE_Q6_K},
+                     {"Q5_1", GGML_TYPE_Q5_1}}) {
+                if (!supported((int) type)) {
+                    std::cout << "synthetic-" << name << " skipped: not built (STRATA_MMQ_KQUANTS off?)\n";
+                    continue;
+                }
+                const int rows = 5;
+                const std::vector<int> counts{rows};
+                const auto src = permutation(rows, 3, false), dst = permutation(rows, 2, true);
+                run_product(ctx, stream, std::string("synthetic-") + name, type,
+                            1280, 2560, synthetic_of_type(type, 1, 1280, 2560, 5), counts,
+                            make_activations(rows, 2560, 77), src, dst);
             }
             if (argc == 2) run_real_iq3_first_expert(ctx, stream, argv[1]);
         }

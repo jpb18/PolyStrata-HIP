@@ -52,7 +52,7 @@ A card with more VRAM is faster, because more of the model fits on the GPU: an R
 RX 9060 XT, RX 6900 XT) are in [AMD_HIP.md](AMD_HIP.md#rdna4-gfx1201).
 
 Every PC is different: `START-HERE.bat --calibrate` measures a few engine settings on yours and keeps the fastest
-(about 5-10 minutes; on the PC above it made the Coder 7% faster; NVIDIA cards for now). Measured PolyStrata on your own
+(about 15-30 minutes, longer on a slow card; on the PC above it made the Coder 7% faster; NVIDIA cards for now). Measured PolyStrata on your own
 PC? See [Community benchmark results](COMMUNITY_BENCHMARKS.md) for a report template and how to share your results
 in a pull request.
 
@@ -143,6 +143,9 @@ NVIDIA GPU (no images yet). Details and measurements: [UD-Q4_K_XL](UNSLOTH_Q4.md
 START-HERE.bat --setup --family unsloth --model UD-Q4_K_XL
 ```
 
+**Unsloth's 6-bit UD-Q6_K_XL** (experimental, not in setup's menu) trades more bytes per expert for less precision
+loss against the same files: 169.2 GB together, its PLE table Q8_0 (read by the engine since 0.1.38). High RAM
+machines run it without a RAM budget. Manual workflow: [UD-Q6_K_XL](UNSLOTH_Q6.md).
 ### OrcaRouter Uncensored IQ3_XXS
 
 For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](ORCA.md). It needs an
