@@ -99,9 +99,9 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 
 | 规格 | 写回答 | 读提示 |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 74 tokens/s | 1,410 tokens/s |
-| **UD-Q2_K_XL** | 93 tokens/s | 1,340 tokens/s |
-| **UD-Q4_K_M** | 61-62 tokens/s | 990-1,370 tokens/s |
+| **UD-Q3_K_M** | 73-75 tokens/s | 1,390 tokens/s |
+| **UD-Q2_K_XL** | 91 tokens/s | 1,320 tokens/s |
+| **UD-Q4_K_M** | 58-61 tokens/s | 1,100-1,350 tokens/s |
 
 </td><td>
 
@@ -114,7 +114,7 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 </td></tr>
 </table>
 
-提示短一些读得更快：10,000 个 token 的提示，笔记本每秒读 1,480 个，工作站每秒读 5,500 个。在工作站的显卡上用 llama.cpp 把整个模型放进显存，
+提示短一些读得更快：10,000 个 token 的提示，笔记本每秒读 1,450 个，工作站每秒读 5,500 个。在工作站的显卡上用 llama.cpp 把整个模型放进显存，
 写回答每秒约 180 个 token，读提示每秒 6,000 到 9,000 个；它要求显卡放得下整个模型。
 把工作站的显卡限制到 8 GB 的那组数字是笔记本测出来之前的替身，现在放在 [docs/BACKENDS.md](docs/BACKENDS.md#with-8-gb-of-vram)（英文）里。
 
@@ -128,9 +128,9 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 
 | 规格 | 写回答 | 读提示 |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 70 tokens/s | 1,360 tokens/s |
-| **APEX-I-MINI** | 65-69 tokens/s | 1,320 tokens/s |
-| **APEX-I-QUALITY** | 47-48 tokens/s | 1,330-1,340 tokens/s |
+| **APEX-I-COMPACT** | 70 tokens/s | 1,340 tokens/s |
+| **APEX-I-MINI** | 63-68 tokens/s | 1,300-1,310 tokens/s |
+| **APEX-I-QUALITY** | 42-48 tokens/s | 1,290-1,320 tokens/s |
 
 </td><td>
 
@@ -143,7 +143,7 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 </td></tr>
 </table>
 
-10,000 个 token 的提示，笔记本每秒读 1,410 个，工作站每秒读 5,500 个。在工作站的显卡上用 llama.cpp 把整个模型放进显存，
+10,000 个 token 的提示，笔记本每秒读 1,380 个，工作站每秒读 5,500 个。在工作站的显卡上用 llama.cpp 把整个模型放进显存，
 写回答每秒约 180 个 token，读提示每秒 6,000 到 9,000 个。
 
 ### Gemma 4 26B-A4B
@@ -156,9 +156,9 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 
 | 规格 | 写回答 | 读提示 |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 70-72 tokens/s | 1,930 tokens/s |
-| **UD-Q2_K_XL** | 88-90 tokens/s | 1,860 tokens/s |
-| **UD-Q4_K_M** | 66 tokens/s | 1,860 tokens/s |
+| **UD-Q3_K_M** | 70-71 tokens/s | 1,910 tokens/s |
+| **UD-Q2_K_XL** | 86-87 tokens/s | 1,840 tokens/s |
+| **UD-Q4_K_M** | 67 tokens/s | 1,840 tokens/s |
 
 </td><td>
 
@@ -171,7 +171,7 @@ NVIDIA：Q2_0 用的是引擎 0.1.36，其他各行用的是 0.1.26（4K 回答�
 </td></tr>
 </table>
 
-10,000 个 token 的提示，笔记本每秒读 1,970 个，工作站每秒读 5,500 个。在工作站的显卡上用 llama.cpp 把整个模型放进显存，
+10,000 个 token 的提示，笔记本每秒读 1,950 个，工作站每秒读 5,500 个。在工作站的显卡上用 llama.cpp 把整个模型放进显存，
 写回答每秒约 165 个 token，读提示每秒 6,000 到 9,000 个。
 
 用 PolyStrata 自己引擎的这四个模型，都是用它自带的跑分测的，你也可以在自己的电脑上跑：

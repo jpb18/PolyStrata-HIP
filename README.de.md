@@ -107,9 +107,9 @@ deren Karte das ganze Modell hält.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 74 Tokens/s | 1,410 Tokens/s |
-| **UD-Q2_K_XL** | 93 Tokens/s | 1,340 Tokens/s |
-| **UD-Q4_K_M** | 61-62 Tokens/s | 990-1,370 Tokens/s |
+| **UD-Q3_K_M** | 73-75 Tokens/s | 1,390 Tokens/s |
+| **UD-Q2_K_XL** | 91 Tokens/s | 1,320 Tokens/s |
+| **UD-Q4_K_M** | 58-61 Tokens/s | 1,100-1,350 Tokens/s |
 
 </td><td>
 
@@ -122,7 +122,7 @@ deren Karte das ganze Modell hält.
 </td></tr>
 </table>
 
-Ein kürzerer Prompt wird schneller gelesen: einer von 10,000 Tokens mit 1,480 Tokens/s auf dem Laptop und mit 5,500
+Ein kürzerer Prompt wird schneller gelesen: einer von 10,000 Tokens mit 1,450 Tokens/s auf dem Laptop und mit 5,500
 auf der Workstation. llama.cpp mit dem ganzen Modell auf der Karte der Workstation schrieb etwa 180 Tokens/s und las
 Prompts mit 6,000 bis 9,000. Es braucht eine Karte, auf die das Modell passt. Die Zahlen der auf 8 GB begrenzten
 Workstation-Karte, ein Ersatz aus der Zeit vor der Messung auf dem Laptop, stehen in
@@ -138,9 +138,9 @@ Genauso gemessen, auf denselben zwei PCs.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 70 Tokens/s | 1,360 Tokens/s |
-| **APEX-I-MINI** | 65-69 Tokens/s | 1,320 Tokens/s |
-| **APEX-I-QUALITY** | 47-48 Tokens/s | 1,330-1,340 Tokens/s |
+| **APEX-I-COMPACT** | 70 Tokens/s | 1,340 Tokens/s |
+| **APEX-I-MINI** | 63-68 Tokens/s | 1,300-1,310 Tokens/s |
+| **APEX-I-QUALITY** | 42-48 Tokens/s | 1,290-1,320 Tokens/s |
 
 </td><td>
 
@@ -153,7 +153,7 @@ Genauso gemessen, auf denselben zwei PCs.
 </td></tr>
 </table>
 
-Ein Prompt von 10,000 Tokens wird auf dem Laptop mit 1,410 Tokens/s gelesen und auf der Workstation mit 5,500.
+Ein Prompt von 10,000 Tokens wird auf dem Laptop mit 1,380 Tokens/s gelesen und auf der Workstation mit 5,500.
 llama.cpp mit dem ganzen Modell auf der Karte der Workstation schrieb etwa 180 Tokens/s und las Prompts mit 6,000 bis
 9,000.
 
@@ -167,9 +167,9 @@ Genauso gemessen, auf denselben zwei PCs.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 70-72 Tokens/s | 1,930 Tokens/s |
-| **UD-Q2_K_XL** | 88-90 Tokens/s | 1,860 Tokens/s |
-| **UD-Q4_K_M** | 66 Tokens/s | 1,860 Tokens/s |
+| **UD-Q3_K_M** | 70-71 Tokens/s | 1,910 Tokens/s |
+| **UD-Q2_K_XL** | 86-87 Tokens/s | 1,840 Tokens/s |
+| **UD-Q4_K_M** | 67 Tokens/s | 1,840 Tokens/s |
 
 </td><td>
 
@@ -182,7 +182,7 @@ Genauso gemessen, auf denselben zwei PCs.
 </td></tr>
 </table>
 
-Ein Prompt von 10,000 Tokens wird auf dem Laptop mit 1,970 Tokens/s gelesen und auf der Workstation mit 5,500.
+Ein Prompt von 10,000 Tokens wird auf dem Laptop mit 1,950 Tokens/s gelesen und auf der Workstation mit 5,500.
 llama.cpp mit dem ganzen Modell auf der Karte der Workstation schrieb etwa 165 Tokens/s und las Prompts mit 6,000 bis
 9,000.
 

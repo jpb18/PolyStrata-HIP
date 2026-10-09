@@ -105,9 +105,9 @@ cuya tarjeta tiene el modelo entero.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 74 tokens/s | 1,410 tokens/s |
-| **UD-Q2_K_XL** | 93 tokens/s | 1,340 tokens/s |
-| **UD-Q4_K_M** | 61-62 tokens/s | 990-1,370 tokens/s |
+| **UD-Q3_K_M** | 73-75 tokens/s | 1,390 tokens/s |
+| **UD-Q2_K_XL** | 91 tokens/s | 1,320 tokens/s |
+| **UD-Q4_K_M** | 58-61 tokens/s | 1,100-1,350 tokens/s |
 
 </td><td>
 
@@ -120,7 +120,7 @@ cuya tarjeta tiene el modelo entero.
 </td></tr>
 </table>
 
-Un prompt más corto se lee más rápido: uno de 10,000 tokens a 1,480 tokens/s en el portátil y a 5,500 en la estación
+Un prompt más corto se lee más rápido: uno de 10,000 tokens a 1,450 tokens/s en el portátil y a 5,500 en la estación
 de trabajo. llama.cpp con el modelo entero en la tarjeta de la estación de trabajo escribió unos 180 tokens/s y leyó
 los prompts a entre 6,000 y 9,000. Necesita una tarjeta en la que quepa el modelo. Las cifras de la tarjeta de la
 estación limitada a 8 GB, un sustituto de antes de medir en el portátil, están en
@@ -136,9 +136,9 @@ Medido de la misma manera, en los mismos dos PC.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 70 tokens/s | 1,360 tokens/s |
-| **APEX-I-MINI** | 65-69 tokens/s | 1,320 tokens/s |
-| **APEX-I-QUALITY** | 47-48 tokens/s | 1,330-1,340 tokens/s |
+| **APEX-I-COMPACT** | 70 tokens/s | 1,340 tokens/s |
+| **APEX-I-MINI** | 63-68 tokens/s | 1,300-1,310 tokens/s |
+| **APEX-I-QUALITY** | 42-48 tokens/s | 1,290-1,320 tokens/s |
 
 </td><td>
 
@@ -151,7 +151,7 @@ Medido de la misma manera, en los mismos dos PC.
 </td></tr>
 </table>
 
-Un prompt de 10,000 tokens se lee a 1,410 tokens/s en el portátil y a 5,500 en la estación de trabajo. llama.cpp con
+Un prompt de 10,000 tokens se lee a 1,380 tokens/s en el portátil y a 5,500 en la estación de trabajo. llama.cpp con
 el modelo entero en la tarjeta de la estación de trabajo escribió unos 180 tokens/s y leyó los prompts a entre 6,000 y
 9,000.
 
@@ -165,9 +165,9 @@ Medido de la misma manera, en los mismos dos PC.
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 70-72 tokens/s | 1,930 tokens/s |
-| **UD-Q2_K_XL** | 88-90 tokens/s | 1,860 tokens/s |
-| **UD-Q4_K_M** | 66 tokens/s | 1,860 tokens/s |
+| **UD-Q3_K_M** | 70-71 tokens/s | 1,910 tokens/s |
+| **UD-Q2_K_XL** | 86-87 tokens/s | 1,840 tokens/s |
+| **UD-Q4_K_M** | 67 tokens/s | 1,840 tokens/s |
 
 </td><td>
 
@@ -180,7 +180,7 @@ Medido de la misma manera, en los mismos dos PC.
 </td></tr>
 </table>
 
-Un prompt de 10,000 tokens se lee a 1,970 tokens/s en el portátil y a 5,500 en la estación de trabajo. llama.cpp con
+Un prompt de 10,000 tokens se lee a 1,950 tokens/s en el portátil y a 5,500 en la estación de trabajo. llama.cpp con
 el modelo entero en la tarjeta de la estación de trabajo escribió unos 165 tokens/s y leyó los prompts a entre 6,000 y
 9,000.
 

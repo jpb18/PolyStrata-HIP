@@ -103,9 +103,9 @@ whole model.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 74 tokens/s | 1,410 tokens/s |
-| **UD-Q2_K_XL** | 93 tokens/s | 1,340 tokens/s |
-| **UD-Q4_K_M** | 61-62 tokens/s | 990-1,370 tokens/s |
+| **UD-Q3_K_M** | 73-75 tokens/s | 1,390 tokens/s |
+| **UD-Q2_K_XL** | 91 tokens/s | 1,320 tokens/s |
+| **UD-Q4_K_M** | 58-61 tokens/s | 1,100-1,350 tokens/s |
 
 </td><td>
 
@@ -118,7 +118,7 @@ whole model.
 </td></tr>
 </table>
 
-A shorter prompt is read faster: one of 10,000 tokens at 1,480 tokens/s on the laptop and at 5,500 on the workstation.
+A shorter prompt is read faster: one of 10,000 tokens at 1,450 tokens/s on the laptop and at 5,500 on the workstation.
 llama.cpp with the whole model on the workstation's card wrote about 180 tokens/s and read prompts at 6,000 to 9,000.
 It needs a card the model fits. The workstation's card held to 8 GB, a stand-in from before the laptop was measured,
 is in [docs/BACKENDS.md](docs/BACKENDS.md#with-8-gb-of-vram).
@@ -133,9 +133,9 @@ Measured the same way, on the same two PCs.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 70 tokens/s | 1,360 tokens/s |
-| **APEX-I-MINI** | 65-69 tokens/s | 1,320 tokens/s |
-| **APEX-I-QUALITY** | 47-48 tokens/s | 1,330-1,340 tokens/s |
+| **APEX-I-COMPACT** | 70 tokens/s | 1,340 tokens/s |
+| **APEX-I-MINI** | 63-68 tokens/s | 1,300-1,310 tokens/s |
+| **APEX-I-QUALITY** | 42-48 tokens/s | 1,290-1,320 tokens/s |
 
 </td><td>
 
@@ -148,7 +148,7 @@ Measured the same way, on the same two PCs.
 </td></tr>
 </table>
 
-A prompt of 10,000 tokens is read at 1,410 tokens/s on the laptop and at 5,500 on the workstation. llama.cpp with the
+A prompt of 10,000 tokens is read at 1,380 tokens/s on the laptop and at 5,500 on the workstation. llama.cpp with the
 whole model on the workstation's card wrote about 180 tokens/s and read prompts at 6,000 to 9,000.
 
 ### Gemma 4 26B-A4B
@@ -161,9 +161,9 @@ Measured the same way, on the same two PCs.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 70-72 tokens/s | 1,930 tokens/s |
-| **UD-Q2_K_XL** | 88-90 tokens/s | 1,860 tokens/s |
-| **UD-Q4_K_M** | 66 tokens/s | 1,860 tokens/s |
+| **UD-Q3_K_M** | 70-71 tokens/s | 1,910 tokens/s |
+| **UD-Q2_K_XL** | 86-87 tokens/s | 1,840 tokens/s |
+| **UD-Q4_K_M** | 67 tokens/s | 1,840 tokens/s |
 
 </td><td>
 
@@ -176,7 +176,7 @@ Measured the same way, on the same two PCs.
 </td></tr>
 </table>
 
-A prompt of 10,000 tokens is read at 1,970 tokens/s on the laptop and at 5,500 on the workstation. llama.cpp with the
+A prompt of 10,000 tokens is read at 1,950 tokens/s on the laptop and at 5,500 on the workstation. llama.cpp with the
 whole model on the workstation's card wrote about 165 tokens/s and read prompts at 6,000 to 9,000.
 
 The four models of PolyStrata's own engine were measured with its benchmark, which you can run on your PC:

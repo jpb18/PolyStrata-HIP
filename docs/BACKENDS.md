@@ -500,83 +500,79 @@ CUDA 13.0, the engine compiled with Visual Studio's 2022 compiler. Setup install
 models: a context of 32,768, the picture encoder on the CPU, and 13 threads for the experts that are not in
 VRAM. The numbers are the benchmark's through the server, as on the first machine, with a browser and the
 desktop on the same card and in the same RAM. They are one pass over the nine sizes with one build of the
-engine, the one with every change in [What was tuned](#what-was-tuned) but the last two, the longer windows.
-Gemma 4's three sizes were run again with the first of them: the short chat at 68 to 72, 88 and 67 tokens/s,
-the answer after the prompt at 51 to 55, 61 to 63 and 53. With the second, Qwen3.6 UD-Q3_K_M wrote the two at
-74 to 75 and 61 to 62 and Ornith APEX-I-Compact at 68 to 71 and 62 to 64.
+engine, the one with every change in [What was tuned](#what-was-tuned) and the merge of Strata 0.1.41.
 
 The README's test, `--prompt-tokens 24000`, three runs a size. A size's first run is the first after another
 model was in memory, and it starts without a profile of the experts' use. The table has the two runs after it.
-The card's memory was at 7.2 to 7.3 GiB of its 8 in every one of them.
+The card's memory was at 7.4 to 7.5 GiB of its 8 in every one of them.
 
 | Model | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM | Machine's RAM, GiB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Gemma 4 26B-A4B UD-Q3_K_M | 31,371 | 16.4 to 16.5 | 1,925 to 1,926 | 70 to 72 | 52 to 55 | 49% to 62% | 23.1 to 24.6 |
-| UD-Q2_K_XL | 31,371 | 17.0 | 1,862 to 1,863 | 88 to 90 | 64 to 65 | 68% to 78% | 21.1 to 22.6 |
-| UD-Q4_K_M | 31,371 | 17.0 | 1,864 | 66 | 50 to 51 | 36% to 50% | 27.1 to 28.6 |
-| Qwen3.6-35B-A3B UD-Q3_K_M | 31,699 | 22.5 | 1,412 | 74 | 59 | 49% to 55% | 25.9 to 26.6 |
-| UD-Q2_K_XL | 31,699 | 23.8 | 1,338 | 93 | 70 to 71 | 62% to 75% | 21.7 to 22.5 |
-| UD-Q4_K_M | 31,699 | 23.2 and 32.2 | 1,371 and 988 | 61 to 62 | 60 | 42% to 46% | 26.1 to 31.3 |
-| Ornith 1.5 APEX-I-Compact | 31,699 | 23.4 | 1,360 to 1,361 | 70 | 58 to 60 | 57% to 63% | 26.0 to 26.7 |
-| APEX-I-Mini | 31,699 | 24.1 | 1,318 to 1,321 | 65 to 69 | 61 to 63 | 61% to 73% | 23.2 to 23.9 |
-| APEX-I-Quality | 31,699 | 23.8 to 23.9 | 1,331 to 1,338 | 47 to 48 | 47 to 55 | 46% to 49% | 26.6 to 31.4 |
+| Gemma 4 26B-A4B UD-Q3_K_M | 31,209 | 16.4 | 1,907 | 70 to 71 | 51 to 53 | 51% to 62% | 23.4 to 24.9 |
+| UD-Q2_K_XL | 31,209 | 17.0 | 1,844 to 1,845 | 86 to 87 | 60 to 62 | 70% to 78% | 21.3 to 22.8 |
+| UD-Q4_K_M | 31,209 | 17.0 to 17.1 | 1,837 to 1,839 | 67 | 53 to 54 | 36% to 50% | 27.3 to 28.9 |
+| Qwen3.6-35B-A3B UD-Q3_K_M | 31,364 | 22.6 | 1,390 to 1,392 | 73 to 75 | 60 to 62 | 49% to 55% | 26.3 to 27.1 |
+| UD-Q2_K_XL | 31,364 | 23.8 | 1,320 | 91 | 70 to 72 | 62% to 76% | 22.2 to 23.0 |
+| UD-Q4_K_M | 31,364 | 23.2 and 28.6 | 1,354 and 1,096 | 58 to 61 | 56 | 42% to 55% | 25.6 to 31.3 |
+| Ornith 1.5 APEX-I-Compact | 31,364 | 23.4 | 1,343 to 1,345 | 70 | 59 | 57% to 58% | 26.4 to 27.2 |
+| APEX-I-Mini | 31,364 | 24.0 to 24.1 | 1,302 to 1,308 | 63 to 68 | 58 | 60% to 72% | 23.6 to 24.4 |
+| APEX-I-Quality | 31,364 | 23.8 to 24.3 | 1,294 to 1,322 | 42 to 48 | 55 to 56 | 43% to 49% | 27.3 to 31.4 |
 
 The prompt is longer than in the tables above because its text is the start of two of this repository's
 documents, which have grown. For Gemma 4 it is more than the context, and the benchmark sends 95% of it.
 
-The first runs, with the file coming from the disk during the short chat and a cache filled without counts,
-wrote the short chat at 45 to 67 tokens/s (Gemma 4 UD-Q2_K_XL at 88) and after the prompt at 43 to 63. For
-Gemma 4 that is within a tenth of the table. Qwen3.6 UD-Q3_K_M wrote 53 and 44 where the table has 74 and 59,
-and Ornith APEX-I-Mini 65 and 52 where 65 to 69 and 61 to 63.
+The first runs, with a cache filled without counts, wrote the short chat at 43 to 67 tokens/s (Gemma 4
+UD-Q2_K_XL at 83) and after the prompt at 40 to 60. For Gemma 4 that is within a tenth of the table. Qwen3.6
+UD-Q2_K_XL wrote the short chat at 66 where the table has 91, and UD-Q4_K_M wrote 44 and 40 where 58 to 61 and
+56.
 
 The two largest files, Qwen3.6 UD-Q4_K_M and Ornith APEX-I-Quality, take the machine's RAM to 31.3 and 31.4 GiB
 with what else runs on it. Part of a file then comes from the disk again: one of Qwen3.6 UD-Q4_K_M's two runs
-read the prompt at 988 tokens/s, and in the default benchmark below the two read the middle prompt at 459 and
-559.
+read the prompt at 1,096 tokens/s, and in the default benchmark below the two read the middle prompt at 458 and
+655.
 
-The default benchmark, the second of two runs. The first was within an eighth of it.
+The default benchmark, the second of two runs. The first wrote within a seventh of it.
 
 | Model | Prompt, tokens | First token, s | Reads, tokens/s | Writes, tokens/s | Experts from VRAM | Guesses right |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Gemma 4 26B-A4B UD-Q3_K_M | 26 | 0.61 | 48 | 73 | 62% | 78% |
-| | 2,847 | 1.97 | 1,490 | 62 | 49% | 81% |
-| | 11,109 | 4.71 | 1,973 | 66 | 61% | 82% |
-| UD-Q2_K_XL | 26 | 0.46 | 66 | 92 | 78% | 76% |
-| | 2,847 | 1.83 | 1,616 | 81 | 70% | 72% |
-| | 11,109 | 4.69 | 1,966 | 83 | 79% | 72% |
-| UD-Q4_K_M | 26 | 0.79 | 38 | 68 | 50% | 69% |
-| | 2,847 | 2.38 | 1,226 | 66 | 35% | 72% |
-| | 11,109 | 5.10 | 1,815 | 67 | 48% | 80% |
-| Qwen3.6-35B-A3B UD-Q3_K_M | 21 | 0.39 | 56 | 77 | 49% | 89% |
-| | 2,743 | 2.50 | 1,101 | 68 | 56% | 74% |
-| | 10,724 | 5.92 | 1,477 | 73 | 68% | 84% |
-| UD-Q2_K_XL | 21 | 0.26 | 80 | 93 | 62% | 85% |
-| | 2,743 | 2.28 | 1,214 | 92 | 72% | 78% |
-| | 10,724 | 5.98 | 1,458 | 94 | 82% | 84% |
-| UD-Q4_K_M | 21 | 0.50 | 42 | 67 | 41% | 87% |
-| | 2,743 | 6.00 | 459 | 68 | 46% | 85% |
-| | 10,724 | 10.61 | 821 | 67 | 60% | 84% |
-| Ornith 1.5 APEX-I-Compact | 21 | 0.33 | 68 | 70 | 58% | 83% |
-| | 2,743 | 2.58 | 1,070 | 77 | 60% | 79% |
-| | 10,724 | 6.18 | 1,409 | 74 | 66% | 81% |
-| APEX-I-Mini | 21 | 0.27 | 80 | 65 | 62% | 68% |
-| | 2,743 | 2.41 | 1,152 | 86 | 66% | 85% |
-| | 10,724 | 6.19 | 1,410 | 80 | 76% | 82% |
-| APEX-I-Quality | 21 | 0.61 | 35 | 54 | 48% | 80% |
-| | 2,743 | 4.94 | 559 | 61 | 46% | 82% |
-| | 10,724 | 6.71 | 1,300 | 64 | 53% | 86% |
+| Gemma 4 26B-A4B UD-Q3_K_M | 26 | 0.61 | 48 | 72 | 62% | 69% |
+| | 2,847 | 1.98 | 1,482 | 70 | 49% | 79% |
+| | 10,980 | 4.65 | 1,952 | 70 | 61% | 75% |
+| UD-Q2_K_XL | 26 | 0.48 | 62 | 88 | 78% | 82% |
+| | 2,847 | 1.82 | 1,602 | 81 | 69% | 81% |
+| | 10,980 | 4.70 | 1,926 | 82 | 78% | 82% |
+| UD-Q4_K_M | 26 | 0.83 | 35 | 67 | 50% | 68% |
+| | 2,847 | 2.38 | 1,228 | 59 | 38% | 63% |
+| | 10,980 | 5.08 | 1,787 | 70 | 48% | 83% |
+| Qwen3.6-35B-A3B UD-Q3_K_M | 21 | 0.41 | 54 | 72 | 49% | 83% |
+| | 2,743 | 2.51 | 1,097 | 69 | 52% | 81% |
+| | 10,600 | 5.92 | 1,448 | 74 | 64% | 87% |
+| UD-Q2_K_XL | 21 | 0.28 | 76 | 92 | 64% | 89% |
+| | 2,743 | 2.27 | 1,211 | 90 | 72% | 84% |
+| | 10,600 | 5.98 | 1,434 | 89 | 81% | 90% |
+| UD-Q4_K_M | 21 | 0.57 | 38 | 63 | 42% | 84% |
+| | 2,743 | 6.00 | 458 | 68 | 46% | 83% |
+| | 10,600 | 6.46 | 1,326 | 72 | 58% | 84% |
+| Ornith 1.5 APEX-I-Compact | 21 | 0.32 | 66 | 68 | 59% | 79% |
+| | 2,743 | 2.59 | 1,062 | 78 | 59% | 88% |
+| | 10,600 | 6.19 | 1,383 | 74 | 67% | 80% |
+| APEX-I-Mini | 21 | 0.28 | 76 | 67 | 63% | 75% |
+| | 2,743 | 2.40 | 1,143 | 81 | 69% | 83% |
+| | 10,600 | 6.18 | 1,386 | 76 | 80% | 81% |
+| APEX-I-Quality | 21 | 0.66 | 32 | 51 | 48% | 82% |
+| | 2,743 | 4.20 | 655 | 59 | 47% | 72% |
+| | 10,600 | 6.78 | 1,263 | 71 | 50% | 89% |
 
 What guessing gains here, over the engine's protocol and from the profile the benchmark left: two answers of
 400 tokens after short prompts, the second of two runs, in tokens/s.
 
 | Model | With guesses | Without |
 | --- | ---: | ---: |
-| Gemma 4 26B-A4B UD-Q3_K_M | 80 and 79 | 52 and 51 |
-| Qwen3.6-35B-A3B UD-Q3_K_M | 74 and 76 | 55 and 57 |
-| Ornith 1.5 APEX-I-Compact | 74 and 70 | 63 and 66 |
+| Gemma 4 26B-A4B UD-Q3_K_M | 81 and 79 | 51 and 50 |
+| Qwen3.6-35B-A3B UD-Q3_K_M | 75 and 80 | 55 and 56 |
+| Ornith 1.5 APEX-I-Compact | 72 and 70 | 62 and 65 |
 
-Ornith's second answer ends after 122 tokens with guesses and after 106 without. In the first of the two runs
-Qwen3.6's second answer came at 82 with guesses.
+Ornith's second answer ends after 332 tokens with guesses and after 122 without.
 
 Without guesses and over the engine's protocol, against llama.cpp's 64 tokens after the five prompts of
 [the check](#how-each-backend-was-checked), whose references are from the first machine:
@@ -594,21 +590,28 @@ Without guesses and over the engine's protocol, against llama.cpp's 64 tokens af
 | APEX-I-Quality | 61 of 61, 64, 64, 22, 64 |
 
 The table there is of the first machine's build, from before the two changes to an answer's attention, which
-sum in another order. Through the server each size answered a picture, with the encoder on the CPU: in 3.8 to
-4.4 s, and the two largest files of Qwen3.6 and Ornith in 6.0 and 7.4 s.
+sum in another order. Through the server each size answered a picture, with the encoder on the CPU: in 3.9 to
+4.7 s, and the two largest files of Qwen3.6 and Ornith in 6.5 s.
+
+A pass of the build from before the merge and before the last four changes of
+[What was tuned](#what-was-tuned), run the night before with nobody at the laptop, read the prompt 1% to 1.5%
+faster in every size that was not held up by the disk (1,925 tokens/s where 1,907, 1,412 where 1,391, 1,360
+where 1,344). It wrote the short chat at 47 to 93 tokens/s where this one wrote it at 42 to 91, and the answer
+after the prompt at 47 to 71 where 51 to 72. The tokens against llama.cpp's were the same lists.
 
 Setup, the engine and the benchmark each did something on this PC that the first machine could not show, and
 were changed for it:
 
 - No expert of Gemma 4's went to VRAM. The staging buffer took 2 GiB before the expert cache, and less than
   the reserve was left. It is now no larger than a layer's experts, and the reserve on a card of 8 GB is 512
-  MiB where it was 1,024. As setup installs them, the first sizes start with 639 of Gemma 4's 3,840 experts
-  in VRAM, 1,976 of Qwen3.6's 10,496 and 2,452 of Ornith's; the smallest sizes with 1,106, 3,427 and 3,295,
-  and the largest with 405, 1,425 and 1,550.
+  MiB where it was 1,024. As setup installs them, the first sizes start with 637 of Gemma 4's 3,840 experts
+  in VRAM, 1,973 of Qwen3.6's 10,496 and 2,448 of Ornith's; the smallest sizes with 1,104, 3,421 and 3,286,
+  and the largest with 403, 1,422 and 1,548.
 - Some six seconds into a load on every core, this laptop stops running threads on its 16 performance threads
   and goes on with the 12 efficiency cores, for 40 seconds in one run. Gemma 4 with its experts on the CPU and
   20 threads then wrote 0.7 tokens/s where it had written 37. [What was tuned](#what-was-tuned) has what the
-  pool of those threads did, and what it does now.
+  pool of those threads did, and what it does now, and Windows' power throttling, which may have been what moved
+  the threads.
 - The engine took a thread for every logical CPU, 28, which is the slowest count on this processor: Gemma 4
   with every expert on the CPU wrote 24.5 tokens/s with 28 threads, 30.0 with 8, 32.6 with 12, 34.3 with 16
   and 35.1 with 20, and once the performance cores were gone 12 threads wrote 26 where 20 wrote 16 to 17.
@@ -620,12 +623,15 @@ were changed for it:
   90% and 85% and says so.
 - No run had left a profile of the experts' use, so every start filled its cache without counts. On Windows the
   server's engine ends with the server, before it saves, and a save over an old profile failed there.
+- Setup said of the three models that they had run on no card under 8 GB, on the card they had run on: it
+  reports 8,188 MiB. Setup now compares the size in whole GB.
 
 What an answer waits for on this PC is other than on the first machine: the card's memory, which moves a
 seventh of the 5090's bytes a second, and the experts the CPU computes. The changes that came of it are in
 [What was tuned](#what-was-tuned): a window whole or in halves, the reserve by the card's size, a prompt in one
-read, an answer's attention after a long prompt, and the profile. Before them the first sizes wrote a short
-chat at 45 to 54 tokens/s here and after the long prompt at 21 to 32, and read it at 870 to 1,610.
+read, an answer's attention after a long prompt, the profile, the longer window for an answer that copies, and
+the engine out of Windows' power throttling. Before them the first sizes wrote a short chat at 45 to 54
+tokens/s here and after the long prompt at 21 to 32, and read it at 870 to 1,610.
 
 Not run on this laptop: GLM 5.3 Flash, for which it has not the RAM, and a build on Linux of the changes that
 were made on it.
@@ -920,6 +926,9 @@ picture in its place, and a prompt without pictures after them.
 | | Qwen3.6 there, quoting the function | 77 | 83 to 85 |
 | | Ornith there, giving the file back | 99 to 102 | 120 to 121 |
 | | Ornith there, quoting the function | 82 to 83 | 86 to 90 |
+| A window past four tokens only from a repeat of eight | Gemma 4 there, a story of 400 tokens | 72 to 79 | 76 to 86 |
+| The engine out of Windows' power throttling | Qwen3.6 there, the answer after a 31,000-token prompt, through the server | 39 | 57 to 62 |
+| | the same after 7,709 tokens, the engine started from a shell | 48 to 50 in four runs of six | 66 to 72 |
 
 All but Gemma 4's draft model and GLM's recurrent step, indexer and selection are in the shared runtime or its
 kernels, so every architecture with that kind of layer has them. Gemma 4's row for the routing has the two
@@ -1315,12 +1324,33 @@ puts the one or two right tokens after it through the layers again, which come o
 writes the copy at 112 to 113 tokens/s where 90 to 92 and the quote at 83 to 85 where 77, and Ornith at 120 to
 121 where 99 to 102 and at 86 to 90 where 82 to 83. Qwen3.6's cache starts with 1,972 experts where 1,976, and
 the card's memory in use after the two answers was 7.73 to 7.75 GiB where 7.65 to 7.66: the longer windows'
-launches are recorded too, out of the reserve the cache leaves. With every expert on the CPU, where two runs write the same tokens, the three models
-wrote the same text for the two requests as without guesses, and Qwen3.6 also with a switch for the test that
-cut its windows short at two to seven tokens. GLM 5.3 Flash's recurrent kernels leave the state after a call's
-first tokens only, so its window stays at four.
+launches are recorded too, out of the reserve the cache leaves. With every expert on the CPU, where two runs
+write the same tokens, the three models wrote the same text for the two requests as without guesses, and
+Qwen3.6 also with a switch for the test that cut its windows short at two to seven tokens. GLM 5.3 Flash's
+recurrent kernels leave the state after a call's first tokens only, so its window stays at four.
 
-These six were built and measured on Windows only, and GLM 5.3 Flash, whose attention has kernels of its own,
+At first any repeat could fill a window of eight. A repeat of three or four tokens is in any text, and what
+followed it the first time is seldom what follows now for seven tokens, so the later guesses of such a window
+were computed for nothing: Gemma 4 wrote a story at 68 to 71 tokens/s where 76 to 79 with a window of four. A
+window is now longer than the draft block's four only when the repeat's match is eight tokens or more. Gemma 4
+then wrote the story at 76 to 86 where 72 to 79 in the same hour, and gives the file back at 103 tokens/s where
+101.
+
+The laptop's processor has cores of two kinds, and Windows may hold the threads of a process it takes for
+background work to the slower kind. The experts that are not in VRAM are computed on those threads. Since the
+merge of Strata 0.1.41 the server takes the engines it starts out of that power throttling, and strata-poly does
+the same at its start, for an engine that anything else starts. In one hour, with the server from before the
+merge, Qwen3.6 wrote the answer after a 31,000-token prompt at 39 tokens/s in four runs of four, with the server
+of the merge at 57 to 62, and with the old server and its engine taken out from outside at 58. Started from a
+shell, the engine wrote 300 tokens after 7,709 at 48 to 50 tokens/s in four runs of six and at 66 in the other
+two, and with its own leaving at 66 to 72 in six of six. The laptop was on mains power, on the High performance
+plan, and its owner was at work on it. The pass of the night before, with nobody at it, wrote that answer at 59:
+it had not met the throttling. The threads that left the performance cores in the first measurements here
+([On a laptop with 8 GB of VRAM](#on-a-laptop-with-8-gb-of-vram)) may have been this, which was not tried
+again. Without the throttling, 16 and 20 threads wrote two short answers 2% to 7% faster than setup's 13 in
+three rounds of four and no faster in the fourth: the count stays.
+
+These eight were built and measured on Windows only, and GLM 5.3 Flash, whose attention has kernels of its own,
 was not run with them.
 
 ## Adding a model of an architecture that is there
@@ -1367,15 +1397,18 @@ Setup knows the files in the table above. Another file of one of these architect
   laptop as well. GLM 5.3 Flash was not run on Windows.
 - The changes that came from the laptop were built on Windows only: the staging buffer's size, the waiting of
   the CPU's pool, a window whole or in halves, the reserve and the cache that is sized again, a prompt in one
-  read, the kernels of an answer's attention, the saving of the profile, a window's length by the model, and
-  the states a long window leaves.
+  read, the kernels of an answer's attention, the saving of the profile, a window's length by the model, the
+  states a long window leaves, and the engine's leaving of the power throttling, which is Windows' alone.
   The pool sleeps with `std::atomic`'s `wait`, which on Linux needs libstdc++ 11 or newer.
 - The target of 8 GB of VRAM with 32 GB of RAM was measured on that one laptop. Each model's largest file
   takes its RAM to 28.6 to 31.4 GiB of 31.8 with what else runs there, and the two largest of all then read
   part of a prompt from the disk.
-- On the laptop writing moves with the cores Windows runs threads on, and an answer on another subject than
-  the one before starts with fewer of its experts in VRAM than it ends with: the cache makes that up over the
-  answer's first windows. Neither was worked on.
+- On the laptop an answer on another subject than the one before starts with fewer of its experts in VRAM
+  than it ends with: the cache makes that up over the answer's first windows. That was not worked on.
+- Writing on the laptop still moves with what else it does. On a day with its owner at work on it, runs of
+  two short prompts wrote at 40 to 84 tokens/s, and in three answers of eighty the guessing stopped after a few
+  dozen tokens and did not come back in that answer: 44 to 53 tokens/s where 72. The cause was looked for and
+  not found.
 - Setup installed the three new models from files that were already on the disk, on both machines. Of the new
   files its own download fetched Gemma 4's draft model (0.46 GB, through a mirror) and found the pinned
   SHA-256; the three addresses of the model files were asked for their headers only, and each states the

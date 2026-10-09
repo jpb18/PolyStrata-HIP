@@ -105,9 +105,9 @@ guarda o modelo inteiro.
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 74 tokens/s | 1,410 tokens/s |
-| **UD-Q2_K_XL** | 93 tokens/s | 1,340 tokens/s |
-| **UD-Q4_K_M** | 61-62 tokens/s | 990-1,370 tokens/s |
+| **UD-Q3_K_M** | 73-75 tokens/s | 1,390 tokens/s |
+| **UD-Q2_K_XL** | 91 tokens/s | 1,320 tokens/s |
+| **UD-Q4_K_M** | 58-61 tokens/s | 1,100-1,350 tokens/s |
 
 </td><td>
 
@@ -120,7 +120,7 @@ guarda o modelo inteiro.
 </td></tr>
 </table>
 
-Um prompt mais curto é lido mais rápido: um de 10,000 tokens a 1,480 tokens/s no notebook e a 5,500 na estação de
+Um prompt mais curto é lido mais rápido: um de 10,000 tokens a 1,450 tokens/s no notebook e a 5,500 na estação de
 trabalho. O llama.cpp, com o modelo inteiro na placa da estação de trabalho, escreveu cerca de 180 tokens/s e leu
 prompts a 6,000 a 9,000. Ele precisa de uma placa em que o modelo caiba. Os números da placa da estação limitada a 8
 GB, um substituto de antes da medição no notebook, estão em [docs/BACKENDS.md](docs/BACKENDS.md#with-8-gb-of-vram) (em
@@ -136,9 +136,9 @@ Medido do mesmo jeito, nos mesmos dois PCs.
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 70 tokens/s | 1,360 tokens/s |
-| **APEX-I-MINI** | 65-69 tokens/s | 1,320 tokens/s |
-| **APEX-I-QUALITY** | 47-48 tokens/s | 1,330-1,340 tokens/s |
+| **APEX-I-COMPACT** | 70 tokens/s | 1,340 tokens/s |
+| **APEX-I-MINI** | 63-68 tokens/s | 1,300-1,310 tokens/s |
+| **APEX-I-QUALITY** | 42-48 tokens/s | 1,290-1,320 tokens/s |
 
 </td><td>
 
@@ -151,7 +151,7 @@ Medido do mesmo jeito, nos mesmos dois PCs.
 </td></tr>
 </table>
 
-Um prompt de 10,000 tokens é lido a 1,410 tokens/s no notebook e a 5,500 na estação de trabalho. O llama.cpp, com o
+Um prompt de 10,000 tokens é lido a 1,380 tokens/s no notebook e a 5,500 na estação de trabalho. O llama.cpp, com o
 modelo inteiro na placa da estação de trabalho, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
 
 ### Gemma 4 26B-A4B
@@ -164,9 +164,9 @@ Medido do mesmo jeito, nos mesmos dois PCs.
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 70-72 tokens/s | 1,930 tokens/s |
-| **UD-Q2_K_XL** | 88-90 tokens/s | 1,860 tokens/s |
-| **UD-Q4_K_M** | 66 tokens/s | 1,860 tokens/s |
+| **UD-Q3_K_M** | 70-71 tokens/s | 1,910 tokens/s |
+| **UD-Q2_K_XL** | 86-87 tokens/s | 1,840 tokens/s |
+| **UD-Q4_K_M** | 67 tokens/s | 1,840 tokens/s |
 
 </td><td>
 
@@ -179,7 +179,7 @@ Medido do mesmo jeito, nos mesmos dois PCs.
 </td></tr>
 </table>
 
-Um prompt de 10,000 tokens é lido a 1,970 tokens/s no notebook e a 5,500 na estação de trabalho. O llama.cpp, com o
+Um prompt de 10,000 tokens é lido a 1,950 tokens/s no notebook e a 5,500 na estação de trabalho. O llama.cpp, com o
 modelo inteiro na placa da estação de trabalho, escreveu cerca de 165 tokens/s e leu prompts a 6,000 a 9,000.
 
 Os quatro modelos do motor próprio do PolyStrata foram medidos com o benchmark dele, que você pode rodar no seu PC:

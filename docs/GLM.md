@@ -237,7 +237,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--any-node` | | on a PC with several NUMA nodes, let the CPU threads run on any of them |
 | `--no-graphs` | | launch a token's kernels one by one, not as the CUDA graph a layer that is recorded at the first token |
 | `--expert-swaps N` | 16 | while an answer is written, experts on their way into VRAM at a time, each in place of a cached one the answer uses less; 0 = the cache stays as it was loaded |
-| `--window N` | 4; 8 for the three smaller models | the most tokens that go through the model together while an answer is written: the known one and guesses after it, the draft block's three at most; 1 = no guesses |
+| `--window N` | 4; 8 for the three smaller models | the most tokens that go through the model together while an answer is written: the known one and guesses after it: the draft block's three at most, and more than three only from a repeat of eight tokens or more; 1 = no guesses |
 | `--lookup N` | 3 | guess what followed an earlier repeat of the last N or more tokens; 0 = never |
 | `--no-draft` | | do not run the block that guesses ahead |
 | `--draft-model FILE.gguf` | | a file of the same model to take that block from, when `--model` has none; setup passes the one it downloaded |
