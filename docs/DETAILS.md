@@ -453,6 +453,14 @@ own. Not with a layer split, the helper caches, `--peer-device` or the resident 
 the prompt path), decode 44 -> 33 tok/s; growing back took 92 ms and the answers were token for token the ones before
 the shrink. Without the flag nothing changes (the same answers as without it).
 
+GLM 5.3 Flash, Qwen3.6-35B-A3B, Ornith 1.5 and Gemma 4 26B-A4B take the same request without a switch in the
+config. Their expert cache is emptied and filled again for the new reserve, with the experts used most so far, and
+gets no larger than it was at the start; `{"reserve_mib": null}` is the reserve the engine started with. Gemma 4
+on a laptop's 8 GB card: `{"reserve_mib": 2500}` left no expert in VRAM and 2.0 GiB of it free, and the answer
+after it came at 55 tokens/s where the one before came at 66; `{"reserve_mib": null}` put 592 of the 635 experts
+back, and the next answer came at 74. On its own that engine sizes its cache again only when what it allocated
+since the start has left less than a quarter of its reserve free. GLM 5.3 Flash was not tried.
+
 **Keep what the expert cache learned across restarts (opt-in, engine 0.1.36, #477):** a start fills the GPU's expert
 cache from the shipped profile, and the adaptive tier (`--adapt-every`) then moves in the experts your requests use.
 With `"expert_profile_save": "expert-profile-learned.bin"` in `strata-<model>.json` the engine saves that as a
