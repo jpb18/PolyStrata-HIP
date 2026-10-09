@@ -283,12 +283,13 @@ FAMILIES = {
     # "vision_vram_gb" is what it holds on the GPU once it has warmed up at 1,024 image tokens (measured there too).
     # A family's first size is the one setup takes on a PC with the RAM for it, the second the one it takes with
     # less, and the third is by name (poly_default()).  "windows": installed by setup and run there, on one PC.
+    # "ran_on_gb": the smallest card it has run on, 32 GB without the key.
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
                "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a 17 GB file, ~21 GB of RAM "
                         "beside an 8 GB card; a smaller and a larger size too",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
                "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": True, "experimental": True,
-               "windows": True,
+               "windows": True, "ran_on_gb": 8,
                "row_bytes": 26624, "mmproj_hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "mmproj": "mmproj-F16.gguf",
                "vision_gb": 0.9, "vision_vram_gb": 1.6,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
@@ -313,7 +314,7 @@ FAMILIES = {
                         "a smaller and a larger size too",
                "hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf",
                "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "poly", "vision": True,
-               "experimental": True, "windows": True, "row_bytes": 26624,
+               "experimental": True, "windows": True, "ran_on_gb": 8, "row_bytes": 26624,
                "mmproj_hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "mmproj": "mmproj.gguf", "vision_gb": 0.9,
                "vision_vram_gb": 1.6,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the file",
@@ -341,7 +342,7 @@ FAMILIES = {
                         "larger size too",
                "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
                "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "poly", "vision": True, "experimental": True,
-               "windows": True,
+               "windows": True, "ran_on_gb": 8,
                "row_bytes": 28672, "mmproj_hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "mmproj": "mmproj-F16.gguf",
                "vision_gb": 1.2, "vision_vram_gb": 2.4, "vision_most": 1024,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
@@ -3957,9 +3958,11 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
                      f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
     elif vram < 30:
-        warn(f"{title} has run on a 32 GB card only. On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of its "
-             f"experts fit in VRAM ({100 * poly_held_gb(d, 31.84) / d['arena_gb']:.0f}% there): more of every "
-             "answer is computed on the CPU, so it is slower")
+        ran = fam.get("ran_on_gb", 32)
+        warn((f"{title} has run on no card under {ran} GB. " if vram < ran else "") +
+             f"On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of {title}'s experts fit in VRAM "
+             f"({100 * poly_held_gb(d, 31.84) / d['arena_gb']:.0f}% on a 32 GB card): more of every answer is "
+             "computed on the CPU, so it is slower")
     if ram < need_ram - 4:
         confirm_risk(f"RAM: {ram:.0f} GB. {title} wants about {need_ram:.0f} GB on this card by setup's estimate: the "
                      f"{d['arena_gb'] - held:.0f} GB of experts the GPU does not hold are read through the OS file "

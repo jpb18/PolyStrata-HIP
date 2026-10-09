@@ -139,7 +139,8 @@ class Main(unittest.TestCase):
                 self.assertEqual(cfg["model_name"], f"{fam['name']}-{size.lower()}")
                 self.assertEqual(cfg["display_name"], f"{fam['title']} {size}")
                 self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE)
-                self.assertIn("% of its experts fit in VRAM (100% there)", out)
+                self.assertIn("experts fit in VRAM (100% on a 32 GB card)", out)
+                self.assertNotIn("has run on no card", out)   # each has run on one of 8 GB
                 self.assertEqual((self.encoder, cfg.get("vision")), ("none", None))   # --yes: no images
 
     def test_a_hybrid_cpu_gets_a_thread_count(self):

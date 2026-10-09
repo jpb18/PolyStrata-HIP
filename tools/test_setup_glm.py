@@ -367,7 +367,7 @@ class Main(unittest.TestCase):
     def test_a_smaller_card(self):
         code, out, cfg = self.main(ram=256.0, vram=23.9)
         self.assertEqual(code, 0, out)
-        self.assertIn("has run on a 32 GB card only", out)
+        self.assertIn("has run on no card under 32 GB", out)
         code, out, cfg = self.main(ram=256.0, vram=11.9)
         self.assertNotEqual(code, 0)
         self.assertIn("needs more VRAM than 12 GB", out)
