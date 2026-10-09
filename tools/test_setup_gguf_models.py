@@ -115,7 +115,7 @@ class Main(unittest.TestCase):
         for family, (size, file, _repo, _n) in NEW.items():
             with self.subTest(family):
                 self.downloads, self.runs, self.verified = [], [], []
-                code, out, cfg = self.main(family=family, ram=32.0, vram=8.0)
+                code, out, cfg = self.main(family=family, ram=32.0, vram=8188 / 1024)   # what an 8 GB card reports
                 self.assertEqual(code, 0, out)
                 fam = setup.FAMILIES[family]
                 guesser = fam["models"][size].get("draft_model")      # Gemma 4's: a second file, beside the model's

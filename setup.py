@@ -3958,8 +3958,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
                      f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {vram:.0f} GB of VRAM, as you chose")
     elif vram < 30:
-        ran = fam.get("ran_on_gb", 32)
-        warn((f"{title} has run on no card under {ran} GB. " if vram < ran else "") +
+        ran = fam.get("ran_on_gb", 32)                 # a card of 8 GB reports 8,188 MiB
+        warn((f"{title} has run on no card under {ran} GB. " if round(vram) < ran else "") +
              f"On {vram:.0f} GB about {100 * held / d['arena_gb']:.0f}% of {title}'s experts fit in VRAM "
              f"({100 * poly_held_gb(d, 31.84) / d['arena_gb']:.0f}% on a 32 GB card): more of every answer is "
              "computed on the CPU, so it is slower")
