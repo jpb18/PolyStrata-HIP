@@ -41,6 +41,11 @@ constexpr size_t kTail = 256;
 // noisy, and an upload gets in the way of the work: a slot goes to an expert that will clearly be used more.
 constexpr float kSwapMin = 2.f;
 constexpr int kSwapHalf = 128;
+// Engine::pick_way(): each way of a window is timed this many times before the faster one is taken, the other
+// gets every kWayAgain-th window of that size from then on, and a time counts kWayWeight against the ones before.
+constexpr int kWayFirst = 3;
+constexpr int kWayAgain = 32;
+constexpr double kWayWeight = 0.125;
 
 using Clock = std::chrono::steady_clock;
 

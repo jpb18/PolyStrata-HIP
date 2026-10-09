@@ -306,6 +306,8 @@ protected:
     void fill_expert_cache();
     void plan_ahead(Layer& L, int il);
     void run(const int32_t* tokens, int n);
+    bool pick_way(int t);
+    void took_way(int t, double ms);
     void layer(int il, int n);
     void save_last(uint8_t* dst);
     void moe_router(const Layer& L, int n);
@@ -395,6 +397,16 @@ protected:
     float* snap_ = nullptr;      ///< window(): the recurrent state after each token but the last, rec_n_ apart
     int n_snap_ = 0;             ///< how many of those the eval under way leaves
     int win_ = 0;                ///< the tokens of the window that keep() has not settled yet
+    // A window with experts on the CPU goes through the layers whole, or in two halves one behind the other
+    // (run()).  Which takes less time depends on the card, on the CPU and on how many of the experts the cache
+    // has, so each way's time is kept for each window size (pick_way(), took_way()).
+    struct Way {
+        double ms = 0;           ///< what a window took this way, the later ones counting for more
+        int n = 0;               ///< how many were timed
+    };
+    Way way_[2][9];              ///< [in halves][the window's tokens]
+    int way_calls_[9] = {};      ///< windows of each size so far
+    bool halves_ = false;        ///< the way of the window under way
     float *wlogits_ = nullptr, *h_wlogits_ = nullptr;   ///< a window's logits, token after token: VRAM and pinned
     int cached_ = 0;
 

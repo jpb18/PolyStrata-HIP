@@ -1480,8 +1480,9 @@ void Engine::run(const int32_t* tokens, int n) {
     }
     // A layer's launches around its routed experts.  up(): to its router's copy, with the shared expert behind it.
     // tail(): what the layer does with the experts' sum.  `rec` numbers the recording of m tokens' launches: a
-    // call's tokens together are [0, window) by their number, and a window's row alone comes after those.
-    const size_t recs = 3 * (size_t) opt_.window;
+    // call's tokens together are [0, window) by their number, and a part of a window comes after those, by its
+    // first row, its tokens and whether the window's last token is among them.
+    const size_t wn = (size_t) opt_.window, recs = wn + 2 * wn * wn;
     const auto up = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
@@ -1499,69 +1500,84 @@ void Engine::run(const int32_t* tokens, int n) {
         else layer_tail(L, il, m);
     };
 
-    // A window's tokens, with experts on the CPU, go through the layers a token at a time and one behind the
-    // other.  With the tokens together the card's part of a layer and the CPU's take turns: the card waits out
-    // the CPU's experts and the CPU the card's layer, and for such a model each is as long as the other.  A token
-    // alone has nothing else to do.  A window has: this thread does nothing but route a token and compute its
-    // experts, token after token, and while it does, one of the experts' threads hands the card the token before:
-    // its experts' sum, the rest of its layer and the next layer up to the router.  That token's scores are there
-    // when its turn comes again.  A token's launches are the ones it has alone, at its own rows of the buffers
-    // (shift_rows()), so it comes out as it would alone.
-    if (n > 1 && n_snap_ == n - 1 && cached_ < total_experts()) {
+    // A window's tokens, with experts on the CPU, go through the layers together or in two halves, one behind
+    // the other (halves_, which window() sets).  Together, the card's part of a layer and the CPU's take turns:
+    // the card waits out the CPU's experts and the CPU the card's layer.  In halves each has work while the
+    // other is busy: this thread does nothing but route a half and compute its experts, half after half, and
+    // while it does, one of the experts' threads hands the card the other half: its experts' sum, the rest of
+    // its layer and the next layer up to the router.  That half's scores are there when its turn comes again.
+    //
+    // The card's part of a layer takes about as long for two tokens as for one: it reads the layer's dense
+    // weights once for all of them, and its launches are the same.  So a window is two halves and not a part a
+    // token, which had the card read every layer once for each token.  Halves have the card read it twice where
+    // the tokens together have it read once, and that is what the choice between the two turns on.
+    //
+    // A half's launches are the ones its tokens have in a call of their own, at their rows of the buffers
+    // (shift_rows()), so each token comes out as it would alone.
+    if (n > 1 && n_snap_ == n - 1 && cached_ < total_experts() && halves_) {
+        const int first[3] = {0, (n + 1) / 2, n};   // half k is the tokens [first[k], first[k + 1])
         int at = 0;
-        const auto row = [&](int r) {
-            shift_rows(r - at);
-            at = r;
-            n_snap_ = r < n - 1 ? 1 : 0;   // its launches leave the recurrent state after it, but the last one's
-            ev_ = ev_row_[r];
+        // The buffers at half k's rows.  Each of its tokens leaves the recurrent state after it, but the
+        // window's last one.  Returns the half's tokens.
+        const auto half = [&](int k) {
+            shift_rows(first[k] - at);
+            at = first[k];
+            const int m = first[k + 1] - at;
+            n_snap_ = first[k + 1] < n ? m : m - 1;
+            ev_ = ev_row_[k];
+            return m;
         };
-        // Token r on from layer il, whose experts it has (-1: from its start), to the next router's copy.
-        const auto go_on = [&](int r, int il, bool add) {
-            const size_t rec = (size_t) opt_.window + 2 * (size_t) r + (r < n - 1 ? 1 : 0);
-            row(r);
+        // Half k on from layer il, whose experts it has (-1: from its start), to the next router's copy.
+        const auto go_on = [&](int k, int il, bool add) {
+            const int m = half(k);
+            const size_t rec = wn + 2 * ((size_t) first[k] * wn + (size_t) (m - 1)) + (first[k + 1] < n ? 1 : 0);
             if (il >= 0) {
-                if (add) moe_add(1);
-                tail(il, 1, rec);
+                if (add) moe_add(m);
+                tail(il, m, rec);
             }
             for (int j = il + 1; j < n_layer_; ++j) {
-                up(j, 1, rec);
+                up(j, m, rec);
                 if (layers_[(size_t) j].moe) break;
             }
         };
+        const auto back = [&] {
+            shift_rows(-at);
+            at = 0;
+            ev_ = ev_row_[0];
+            n_snap_ = n - 1;
+        };
         struct {
-            int r = -1, il = -1;
+            int k = -1, il = -1;
             bool add = false;
-        } late;   // the token whose experts are computed and that has not gone on
+        } late;   // the half whose experts are computed and that has not gone on
         std::exception_ptr failed;
         try {
-            for (int r = 0; r < n; ++r) go_on(r, -1, false);
+            for (int k = 0; k < 2; ++k) go_on(k, -1, false);
             for (int il = 0; il < n_layer_; ++il) {
                 Layer& L = layers_[(size_t) il];
                 if (!L.moe) continue;
-                for (int r = 0; r < n; ++r) {
+                for (int k = 0; k < 2; ++k) {
                     // by another thread while this one computes: it must leave the rows as it found them
                     const std::function<void()> other = [&] {
                         try {
-                            go_on(late.r, late.il, late.add);
-                            row(r);
+                            go_on(late.k, late.il, late.add);
+                            half(k);
                         } catch (...) {
                             failed = std::current_exception();
                         }
                     };
-                    row(r);
-                    const bool add = moe(L, il, 1, late.r >= 0 ? &other : nullptr);
+                    const int m = half(k);
+                    const bool add = moe(L, il, m, late.k >= 0 ? &other : nullptr);
                     if (failed) std::rethrow_exception(failed);
-                    late = {r, il, add};
+                    late = {k, il, add};
                 }
             }
-            if (late.r >= 0) go_on(late.r, late.il, late.add);
+            if (late.k >= 0) go_on(late.k, late.il, late.add);
         } catch (...) {
-            row(0);
-            n_snap_ = n - 1;
+            back();
             throw;
         }
-        row(0);
-        n_snap_ = n - 1;
+        back();
         return;
     }
     for (int il = 0; il < n_layer_; ++il) {
@@ -1771,11 +1787,17 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
 // the last (snap_), and keep() puts back the one after the last token that was right.
 void Engine::window(const int32_t* tokens, int t) {
     if (t < 1 || t > opt_.window) throw std::logic_error("a window takes 1 to max_window() tokens");
+    // the two ways are a choice only with experts on the CPU; a call that records launches says nothing of them
+    const bool timed = t > 1 && cached_ < total_experts();
+    const bool recorded = std::exchange(recorded_, false);
+    if (timed) halves_ = pick_way(t);
+    const Clock::time_point t0 = Clock::now();
     n_snap_ = t - 1;
     try {
         run(tokens, t);
     } catch (...) {
         n_snap_ = 0;
+        recorded_ = recorded_ || recorded;
         throw;
     }
     n_snap_ = 0;
@@ -1786,8 +1808,29 @@ void Engine::window(const int32_t* tokens, int t) {
     ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "logits");
     ck(cudaStreamSynchronize(cs(st_)), "window");
+    if (timed && !recorded_) took_way(t, ms_since(t0));
+    recorded_ = recorded_ || recorded;
     std::copy(tokens, tokens + t, win_tok_);
     win_ = t;
+}
+
+// How a window of t tokens goes through the layers: in halves, or its tokens together.  Each way is timed a few
+// times, then the one that took less is taken.  The other still gets a window now and then: what each takes
+// moves with the experts the cache holds and with what else the machine is doing.
+bool Engine::pick_way(int t) {
+    const Way& whole = way_[0][t];
+    const Way& split = way_[1][t];
+    const int call = way_calls_[t]++;
+    if (split.n < kWayFirst || whole.n < kWayFirst)
+        return split.n <= whole.n;   // in turn, the halves first: a window of two was always in halves
+    const bool halves = split.ms <= whole.ms;
+    return call % kWayAgain == 0 ? !halves : halves;
+}
+
+void Engine::took_way(int t, double ms) {
+    Way& w = way_[halves_ ? 1 : 0][t];
+    w.ms = w.n < kWayFirst ? (w.ms * w.n + ms) / (w.n + 1) : w.ms + kWayWeight * (ms - w.ms);
+    ++w.n;
 }
 
 void Engine::keep(int n) {
