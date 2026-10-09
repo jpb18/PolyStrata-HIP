@@ -4,8 +4,9 @@ PolyStrata runs more than one model family. This page says which, how the engine
 how a model is recognized, how to add one, and how to change the model that answers.
 
 One model is in memory at a time. The measurements below are from one machine: an RTX 5090 (32 GB), 24 threads of
-a Xeon Platinum 8470Q, 120 GiB of RAM, Linux, CUDA 12.8. On that card the three new models fit in VRAM whole. A
-card with 8 GB was not there: [one table](#with-8-gb-of-vram) holds the 5090 to 8 GB instead.
+a Xeon Platinum 8470Q, 120 GiB of RAM, Linux, CUDA 12.8. On that card the three new models fit in VRAM whole.
+[One table](#with-8-gb-of-vram) holds the 5090 to 8 GB, and [one section](#on-a-laptop-with-8-gb-of-vram) is from
+a second machine, a Windows laptop whose card has 8 GB.
 
 ## What runs
 
@@ -65,6 +66,12 @@ model. `--gguf-dir /folder/with/the/file` takes a file you already have; a draft
 downloaded to setup's own. The engine is compiled once for all of them. On the test machine, with the files on the
 disk, the first install took a minute, most of it the compile, and the other two 17 seconds each.
 
+On Windows the three are installed the same way, with `START-HERE.bat` or `python setup.py` in place of
+`./setup.sh`. The engine is compiled there with the CUDA Toolkit and Visual Studio's 2022 compiler, which is the
+newest that CUDA 13 takes. A newer Visual Studio serves when it has the 2022 toolset (v143) among its
+components; setup offers to install what is missing. GLM 5.3 Flash was not run on Windows, and setup says so
+before it installs it there.
+
 Each install is a model of its own: `--list-models`, `/model` and the web page's list show all of them, and
 `./setup.sh --check` has a line for each with what this PC's card and RAM make of it.
 
@@ -79,9 +86,11 @@ the engine and writes both into the run config. On the GPU the encoder holds 1.6
 which a small card needs for the model, so on a card with less than 16 GB it runs on the CPU and a picture takes
 a few seconds. `--vision gpu` and `--vision cpu` choose the place. GLM 5.3 Flash reads no pictures.
 
-The RAM column is the experts an 8 GB card does not hold, plus 10 GB for the rest. It is setup's estimate and was
-not checked on such a PC. Setup does not stop a PC below the 32 GB that Qwen3.8 needs when one of these families is
-named.
+The RAM column is the experts an 8 GB card does not hold, plus 10 GB for the rest. It is setup's estimate. The
+first sizes ran on the [laptop](#on-a-laptop-with-8-gb-of-vram), which has 32 GB. The machine's RAM in use, 9 GiB
+with no model, was at most 28.4 GiB with Qwen3.6, 28.8 with Ornith and 26.3 with Gemma 4 in the last two passes of
+the benchmark there, and 31.5, 31.4 and 30.5 of its 31.8 in the first. Setup does not stop a PC below the 32 GB
+that Qwen3.8 needs when one of these families is named.
 
 ## How a backend works
 
@@ -262,7 +271,9 @@ It sends a short prompt and two long ones (2000 and 8000 tokens, roughly; `--pro
 tokens of answer each, greedy, and prints for each: the time to the first token, the prefill and decode speeds,
 the expert cache's hit rate, the share of guessed tokens that were right, and the machine's highest VRAM and RAM
 use and mean GPU and CPU load while it ran. The speeds and the cache figures are the engine's own clock and
-counters.
+counters. A long prompt is so many characters of this repository's documents, four a token, so its length in
+tokens moves with the tokenizer and with those documents. One that the server refuses as longer than the
+context is sent again at 95%, 90% and 85% of its text.
 
 Tokens per second on the machine above, context 32768, every expert in VRAM for the three new models, as setup
 installs them. The first build of each backend read the longest prompt at 636, 632 and 213 tokens/s and wrote
@@ -371,7 +382,8 @@ not fit, which is the case this engine is for.
 The same card with 24.4 GB kept free (`--vram-reserve-mib 24400`), so the engine has about 8 GB: the dense
 weights, the caches and as many experts as fit. The rest of the experts are computed on the CPU, and the cache
 follows what the answer uses. This is not an 8 GB PC: the CPU, the RAM and the card's speed are the machine's
-above. 300-token answers, tokens per second; the two numbers are without and with guessed tokens.
+above, and a laptop whose card has 8 GB is [two to four times slower](#on-a-laptop-with-8-gb-of-vram).
+300-token answers, tokens per second; the two numbers are without and with guessed tokens.
 
 | Model | Experts from VRAM | Writes after a short prompt | after about 2,100 tokens | after about 7,700 | Reads about 2,100 tokens | about 7,700 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -478,6 +490,89 @@ guess costs.
 A run with the picture encoder left on the card is not
 in the table: the encoder holds 1.6 GB there, no expert fit beside it, and Qwen3.6 wrote 127 tokens/s and read
 the prompt at 2,023, with the build before a prompt batch's attention took its rows a block at a time.
+
+### On a laptop with 8 GB of VRAM
+
+The kind of PC the three new models are for: an RTX 4070 Laptop with 8 GB, an i7-14700HX (8 performance cores
+of two threads each and 12 efficiency cores, AVX2 and no AVX-512), 32 GB of RAM, Windows 10, driver 610.74,
+CUDA 13.0, the engine compiled with Visual Studio's 2022 compiler. Setup installed each model's first size: a
+context of 32,768, the picture encoder on the CPU, and 13 threads for the experts that are not in VRAM. The
+numbers are the benchmark's through the server, as on the first machine, with a browser and the desktop on the
+same card and in the same RAM.
+
+The README's test, `--prompt-tokens 24000`, in two passes of two runs each, with the model's file in the file
+cache. Gemma 4's first run of the first pass still read its file from the disk during the short chat and wrote
+it at 28 tokens/s; the row has the other run's.
+
+| Model | Pass | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM | Machine's RAM, GiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-35B-A3B UD-Q3_K_M | first | 31,578 | 28.6 and 36.5 | 1,109 and 870 | 47 to 48 | 23 to 25 | 45% to 48% | 31.5 |
+| | second | 31,662 | 26.8 to 27.6 | 1,150 to 1,188 | 52 to 53 | 25 to 26 | 45% to 48% | 28.4 |
+| Ornith 1.5 APEX-I-Compact | first | 31,578 | 32.2 and 36.4 | 985 and 871 | 50 to 51 | 24 to 25 | 48% to 56% | 31.4 |
+| | second | 31,662 | 28.8 to 29.1 | 1,093 to 1,101 | 52 to 54 | 31 to 32 | 49% to 57% | 28.6 |
+| Gemma 4 26B-A4B UD-Q3_K_M | first | 31,168 | 20.6 to 20.8 | 1,520 to 1,534 | 48 | 21 | 37% to 48% | 29.4 |
+| | second | 31,331 | 19.6 to 20.8 | 1,519 to 1,609 | 45 to 46 | 25 to 28 | 37% to 48% | 25.9 |
+
+The prompt is longer than in the tables above because its text is the start of two of this repository's
+documents, which have grown. For Gemma 4 it is now more than the context, and the benchmark sends 95% of it.
+The second pass came after the documents had changed again. In the first pass the machine's RAM was within
+half a GiB of full, which the second was not; what else held RAM then was not looked into.
+
+The default benchmark, the run after one that had read the model's file from the disk:
+
+| Model | Prompt, tokens | First token, s | Reads, tokens/s | Writes, tokens/s | Experts from VRAM | Guesses right |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.6-35B-A3B | 21 | 0.47 | 46 | 50 | 45% | 96% |
+| | 2,739 | 2.6 | 1,067 | 51 | 45% | 95% |
+| | 10,702 | 7.1 | 1,221 | 44 | 59% | 96% |
+| Ornith 1.5 | 21 | 0.43 | 50 | 58 | 56% | 82% |
+| | 2,739 | 2.7 | 1,037 | 60 | 51% | 95% |
+| | 10,702 | 7.4 | 1,173 | 50 | 60% | 90% |
+| Gemma 4 26B-A4B | 26 | 0.71 | 42 | 48 | 48% | 84% |
+| | 2,843 | 2.0 | 1,433 | 46 | 37% | 90% |
+| | 11,090 | 5.6 | 1,644 | 38 | 49% | 85% |
+
+The run before it, the first after another model had been in memory, took 3.5 to 4.6 s to its first token and
+wrote the short chat at 28 to 37 tokens/s while the file came from the disk. From its second prompt on it read
+within a tenth of the table and wrote at 36 to 60 tokens/s. On a first pass of the same benchmark, with the RAM
+as full as in the first pass above, those first runs read the middle prompt at 444 to 450 tokens/s for Qwen3.6
+and Ornith and wrote after the two long prompts at 30 to 37.
+
+Without guesses and over the engine's protocol, the three write what they write on the first machine after the
+five prompts of [the check against llama.cpp](#how-each-backend-was-checked): the reference's 64 tokens after
+each of the five for Gemma 4; 64, 64, 40, 64 and 64 for Qwen3.6; 60 of 60, 7, 64, 2 and 21 for Ornith. Through
+the server a picture was answered in 4.6 s by Gemma 4 and in 7.9 s by Qwen3.6, with the encoder on the CPU.
+
+Setup, the engine and the benchmark each did something on this PC that the first machine could not show, and
+were changed for it:
+
+- No expert of Gemma 4's went to VRAM. The staging buffer took 2 GiB before the expert cache, and less than
+  the reserve was left. It is now no larger than a layer's experts. As setup installs them, Gemma 4 starts
+  with 435 of its 3,840 experts in VRAM, Qwen3.6 with 1,574 of 10,496 and Ornith with 1,957; without the draft
+  model or block, with 625, 1,832 and 2,262.
+- Some six seconds into a load on every core, this laptop stops running threads on its 16 performance threads
+  and goes on with the 12 efficiency cores, for 40 seconds in one run. Gemma 4 with its experts on the CPU and
+  20 threads then wrote 0.7 tokens/s where it had written 37. [What was tuned](#what-was-tuned) has what the
+  pool of those threads did, and what it does now.
+- The engine took a thread for every logical CPU, 28, which is the slowest count on this processor: Gemma 4
+  with every expert on the CPU wrote 24.5 tokens/s with 28 threads, 30.0 with 8, 32.6 with 12, 34.3 with 16
+  and 35.1 with 20, and once the performance cores were gone 12 threads wrote 26 where 20 wrote 16 to 17.
+  Setup now writes a count for a processor with more efficiency cores than performance cores: the
+  performance cores but one and half of the efficiency cores, 13 here.
+- Setup did not find the compiler in Visual Studio 2026 and would have installed the 2022 Build Tools beside
+  it. It now takes a newer Visual Studio that has the 2022 toolset.
+- The benchmark ended with the server's refusal of Gemma 4's long prompt. It now cuts a refused prompt to 95%,
+  90% and 85% and says so.
+
+What a token costs here is split otherwise than on the first machine. One at a time, Gemma 4 with half of its
+experts from VRAM takes 22 to 28 ms a token: 7 to 10 for the CPU's experts and 11 to 13 waiting for the card
+at the routers, where a token of Qwen3.6 waits 3.3 ms on the 5090. With every expert on the CPU those are 13
+to 15 and 8 to 9 ms. So the experts that the smaller staging buffer let into VRAM took work from the CPU and
+gave the card about as much: a 160-token answer came at 35.4 tokens/s with them and at 36.4 without. The card
+is on the Windows display driver with the desktop on it, and what part of its wait is that was not measured.
+
+Not run on this laptop: the six other sizes, GLM 5.3 Flash, for which it has not the RAM, and a build on Linux
+of the changes above.
 
 ## How each backend was checked
 
@@ -735,6 +830,9 @@ picture in its place, and a prompt without pictures after them.
 | | Ornith, a 256-token answer about code | 238 | 291 |
 | | Ornith held to 8 GB, the same answer | 152 | 166 |
 | | Qwen3.6 UD-Q2_K_XL, an answer whose first 16 rounds take 3 ms longer each | 243 to 310 | 332 to 342 |
+| The staging buffer no larger than a layer's experts | Gemma 4 on the laptop's 8 GB card: experts in VRAM at a start | 0 | 625 |
+| A worker of the CPU's pool leaves a finished batch alone and sleeps on the batch count | Gemma 4 on the laptop, one token at a time, its experts on the CPU: 20 threads on 12 cores | 0.33 | 16.6 |
+| | the same, 12 threads | 16.3 | 23.3 |
 
 All but Gemma 4's draft model and GLM's recurrent step, indexer and selection are in the shared runtime or its
 kernels, so every architecture with that kind of layer has them. Gemma 4's row for the routing has the two
@@ -1004,6 +1102,26 @@ longer each: UD-Q2_K_XL then wrote at 332 to 342 tokens/s in four runs, where th
 251 in three of four and at 310 in the fourth. GLM writes as it did: a 400-token answer came at 60 to 66
 tokens/s before and at 60 to 67 after.
 
+The last two changes are from [the laptop](#on-a-laptop-with-8-gb-of-vram). The staging buffer was 2 GiB for
+every model, about what a layer of GLM's leaves out of the cache. A layer of Gemma 4 UD-Q3_K_M has 328 MiB of
+experts in all and one of Qwen3.6 UD-Q3_K_M 341, so the rest of the buffer was never written, and it is
+allocated before the expert cache, which takes what is left. On the laptop's card, with 394 MiB of it in use by
+the desktop, Gemma 4 at a context of 32,768 left 801 MiB free, less than the 1,024 the engine leaves alone. The
+buffer is now the smaller of `--stage-mib` and what the largest layer's experts take. A layer's experts still
+pass in one round, and GLM keeps the buffer it had.
+
+The pool that computes the CPU's experts posts a batch, takes tasks beside its workers and takes the batch
+down when its tasks are taken. Between a batch's last task and that, a worker that found the batch still posted
+went round it without a pause: it counted itself in, found no task and counted itself out. While the thread
+that posted has a CPU, the gap is a few instructions long. It has none when there are more threads than CPUs
+that run them, and then the workers spent their time slices going round, at every batch, of which a token has
+60 or more. The first machine never had fewer CPUs than threads. The laptop has once its performance cores
+stop taking threads. A worker now keeps the batch count at which it found nothing to do and only reads the
+count until it moves. It sleeps on the count too, so the mutex and the condition variable are gone, and with
+them the turns the woken workers took at the lock. With every core allowed and 20 threads, through the
+laptop's own loss of its cores, the answer went from 37 tokens/s to 0.7 before the change and to 16 to 17
+after it, and with 12 threads from 35 to 26. Both changes were built and measured on Windows only.
+
 ## Adding a model of an architecture that is there
 
 Setup knows the files in the table above. Another file of one of these architectures runs after these steps:
@@ -1044,16 +1162,25 @@ Setup knows the files in the table above. Another file of one of these architect
 
 ## Limits
 
-- Linux and one NVIDIA card. Built and run on one machine.
-- The three new models have run with all their experts in VRAM and with the card held to 8 GB, not on a card
-  that has 8 GB, nor on a PC with 32 GB of RAM. The target of 8 GB of VRAM with 32 GB of RAM is not measured.
-- Setup installed the three new models from files that were already on the disk. Of the new files its own
-  download fetched Gemma 4's draft model (0.46 GB, through a mirror) and found the pinned SHA-256; the three
-  addresses of the model files were asked for their headers only, and each states the pinned size.
+- One NVIDIA card. Built and run on one Linux machine, and the three new models' first sizes on one Windows
+  laptop as well. GLM 5.3 Flash was not run on Windows.
+- The two changes that came from the laptop, the staging buffer's size and the waiting of the CPU's pool,
+  were built on Windows only. The pool sleeps with `std::atomic`'s `wait`, which on Linux needs libstdc++ 11
+  or newer.
+- The target of 8 GB of VRAM with 32 GB of RAM was measured on that one laptop, with each new model's first
+  size. The other six sizes have run with all their experts in VRAM and with the 5090 held to 8 GB.
+- On the laptop a token waits 11 to 13 ms for the card at the routers, longer than its experts on the CPU
+  take, and writing there moves with the cores Windows runs threads on. Neither was worked on.
+- Setup installed the three new models from files that were already on the disk, on both machines. Of the new
+  files its own download fetched Gemma 4's draft model (0.46 GB, through a mirror) and found the pinned
+  SHA-256; the three addresses of the model files were asked for their headers only, and each states the
+  pinned size. For the laptop the files were fetched by setup's download and checksum functions, called from
+  a script. The CUDA Toolkit and Visual Studio were on the laptop before setup ran, so its install of the
+  two was not run for this engine.
 - Setup's RAM figures for them are estimates.
-- Pictures were read with the encoder on the GPU of the one machine. Setup puts it on the CPU of a card with
-  less than 16 GB: that was run through the server with Qwen3.6 (a new picture took 3 to 5 s with 12 threads),
-  and not on such a card.
+- Pictures were read with the encoder on the GPU of the first machine. Setup puts it on the CPU of a card with
+  less than 16 GB: that was run through the server with Qwen3.6 on the first machine (a new picture took 3 to
+  5 s with 12 threads), and on the laptop with Gemma 4 and Qwen3.6, a picture each (4.6 and 7.9 s).
 - Setup's install with images ran on the test machine for the three models, with the encoder files already
   beside the models' files: it compiled the encoder and wrote the run configs, and the server read pictures
   with them. The files had been fetched before with setup's download and checked against the pinned SHA-256.
@@ -1072,5 +1199,5 @@ Setup knows the files in the table above. Another file of one of these architect
   fewer than 32 tokens, which is all of them while it writes. Its writing is bound by the experts that are not
   in VRAM, so it was left.
 - No test runs the engine without a GPU and the model files: what is said of it here was measured by hand on the
-  one machine.
+  two machines.
 - The benchmark's VRAM and RAM figures are the machine's, not the engine's alone.

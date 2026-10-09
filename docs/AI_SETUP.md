@@ -83,11 +83,12 @@ By the PC's RAM (ask the user whether they mainly want it for code - then the Co
 [GLM.md](GLM.md) first.
 
 `--family qwen36`, `--family ornith` and `--family gemma4` (Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B) are
-smaller models on GLM's engine, and experimental too: Linux, one NVIDIA card, an 11 to 24 GB download, about 15 to
-28 GB of RAM beside an 8 GB card by setup's estimate, by size. They read pictures with `--vision yes` (about 1 GB
-more to download; the encoder runs on the CPU of a card with less than 16 GB). Each has three sizes. Leave
-`--model` out: setup takes UD-Q3_K_M (APEX-I-COMPACT for Ornith), or the smallest on a PC with too little RAM
-for it. The largest is by name, `--model UD-Q4_K_M` or `--model APEX-I-QUALITY`.
+smaller models on GLM's engine, and experimental too: Linux or Windows, one NVIDIA card, an 11 to 24 GB download,
+about 15 to 28 GB of RAM beside an 8 GB card by setup's estimate, by size. On Windows setup compiles the engine
+(the CUDA Toolkit and Visual Studio's 2022 compiler, which it offers to install). They read pictures with
+`--vision yes` (about 1 GB more to download; the encoder runs on the CPU of a card with less than 16 GB). Each
+has three sizes. Leave `--model` out: setup takes UD-Q3_K_M (APEX-I-COMPACT for Ornith), or the smallest on a PC
+with too little RAM for it. The largest is by name, `--model UD-Q4_K_M` or `--model APEX-I-QUALITY`.
 Take one only when the user asks for it; [BACKENDS.md](BACKENDS.md#install) has what was measured.
 
 ## 4. Run setup without questions

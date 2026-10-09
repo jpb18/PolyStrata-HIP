@@ -18,8 +18,9 @@ Il fait tourner cinq modèles, avec deux moteurs :
   de 12 Go ou plus, sous Windows ou Linux. Il lit aussi les images. Son moteur est celui de
   [Strata](https://github.com/Niko1221/Strata), inchangé.
 
-Les quatre autres tournent sur un moteur écrit pour PolyStrata, sous Linux avec une carte NVIDIA. Ils sont
-expérimentaux : ils n'ont tourné que sur un seul PC, avec une carte de 32 Go.
+Les quatre autres tournent sur un moteur écrit pour PolyStrata, avec une carte NVIDIA : tous les quatre sous Linux, et
+les trois plus petits aussi sous Windows. Ils sont expérimentaux : ils n'ont tourné que sur un seul PC avec une carte
+de 32 Go, et les trois plus petits en plus sur un portable avec une carte de 8 Go.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, le plus grand : un fichier de 79 à 114 Go, dont la plus grande part reste en RAM.
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, un fichier de 13 à 23 Go. Il lit aussi les images.
@@ -123,6 +124,9 @@ ceux de cette station de travail. Un prompt plus court est lu plus vite : un pro
 avec le modèle entier sur la carte. llama.cpp, avec le modèle entier sur la même carte, a écrit environ 180 tokens/s
 et lu les prompts à 6,000 à 9,000. Il lui faut une carte où le modèle tient.
 
+Sur un portable avec une carte de 8 Go (RTX 4070 Laptop, i7-14700HX, 32 Go de RAM, Windows 10), UD-Q3_K_M écrit 47-53
+tokens/s dans un chat court et 23-26 après un prompt de 31,600-31,700 tokens, qu'il lit à 870-1,190 tokens/s.
+
 ### Ornith 1.5
 
 Mesuré de la même façon, avec le même prompt de 30K tokens.
@@ -151,6 +155,9 @@ Mesuré de la même façon, avec le même prompt de 30K tokens.
 Un prompt de 10,000 tokens est lu à 5,500 tokens/s avec le modèle entier sur la carte. llama.cpp, avec le modèle
 entier sur la même carte, a écrit environ 180 tokens/s et lu les prompts à 6,000 à 9,000.
 
+Sur un portable avec une carte de 8 Go (RTX 4070 Laptop, i7-14700HX, 32 Go de RAM, Windows 10), APEX-I-COMPACT écrit
+50-54 tokens/s dans un chat court et 24-32 après un prompt de 31,600-31,700 tokens, qu'il lit à 870-1,100 tokens/s.
+
 ### Gemma 4 26B-A4B
 
 Mesuré de la même façon, avec un prompt de 31K tokens.
@@ -178,6 +185,9 @@ Mesuré de la même façon, avec un prompt de 31K tokens.
 
 Un prompt de 10,000 tokens est lu à 5,500 tokens/s avec le modèle entier sur la carte. llama.cpp, avec le
 modèle entier sur la même carte, a écrit environ 165 tokens/s et lu les prompts à 6,000 à 9,000.
+
+Sur un portable avec une carte de 8 Go (RTX 4070 Laptop, i7-14700HX, 32 Go de RAM, Windows 10), UD-Q3_K_M écrit 45-48
+tokens/s dans un chat court et 21-28 après un prompt de 31,200-31,300 tokens, qu'il lit à 1,520-1,610 tokens/s.
 
 Les quatre modèles du moteur propre à PolyStrata ont été mesurés avec son benchmark, que vous pouvez lancer sur votre
 PC : `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
@@ -222,34 +232,40 @@ La liste complète : [docs/GLM.md](docs/GLM.md#what-you-need) (en anglais).
 
 | | |
 | --- | --- |
-| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 5 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, et sur cette carte limitée à 8 Go. |
+| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 5 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, sur cette carte limitée à 8 Go, et sur la carte de 8 Go d'un portable. |
 | **RAM** | Environ **17, 21 ou 27 Go** à côté d'une carte de 8 Go pour les trois tailles, d'après l'estimation de l'installeur. Une carte de 24 Go contient en entier les deux plus petites. |
 | **Disque** | 13, 17 ou 23 Go pour le fichier du modèle, 1 Go de plus pour lire les images. |
-| **Système** | Linux, et un pilote NVIDIA récent. |
+| **Système** | Linux ou Windows 10 / 11, et un pilote NVIDIA récent. |
 
-L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : Windows, les cartes AMD, plusieurs cartes.
+L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Sous Windows, il compile le moteur avec le
+compilateur 2022 de Visual Studio et le CUDA Toolkit, et propose de les installer. Pas encore : les cartes AMD,
+plusieurs cartes.
 
 ### Ornith 1.5
 
 | | |
 | --- | --- |
-| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 4 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, et sur cette carte limitée à 8 Go. |
+| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 4 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, sur cette carte limitée à 8 Go, et sur la carte de 8 Go d'un portable. |
 | **RAM** | Environ **18, 22 ou 28 Go** à côté d'une carte de 8 Go pour les trois tailles, d'après l'estimation de l'installeur. Une carte de 24 Go contient en entier les deux plus petites. |
 | **Disque** | 14, 17 ou 24 Go pour le fichier du modèle, 1 Go de plus pour lire les images. |
-| **Système** | Linux, et un pilote NVIDIA récent. |
+| **Système** | Linux ou Windows 10 / 11, et un pilote NVIDIA récent. |
 
-L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : Windows, les cartes AMD, plusieurs cartes.
+L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Sous Windows, il compile le moteur avec le
+compilateur 2022 de Visual Studio et le CUDA Toolkit, et propose de les installer. Pas encore : les cartes AMD,
+plusieurs cartes.
 
 ### Gemma 4 26B-A4B
 
 | | |
 | --- | --- |
-| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 6 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, et sur cette carte limitée à 8 Go. |
+| **Carte graphique** | Une carte **NVIDIA** GeForce RTX série 20 ou plus récente avec **8 Go de VRAM ou plus**. Environ 6 Go sont pris avant le premier expert. Il a tourné sur une carte de 32 Go, sur cette carte limitée à 8 Go, et sur la carte de 8 Go d'un portable. |
 | **RAM** | Environ **15, 18 ou 21 Go** à côté d'une carte de 8 Go pour les trois tailles, d'après l'estimation de l'installeur. D'après la même estimation, une carte de 16 Go contient en entier les deux plus petites. |
 | **Disque** | 11, 13 ou 17 Go pour le fichier du modèle et son modèle brouillon, 1 Go de plus pour lire les images. |
-| **Système** | Linux, et un pilote NVIDIA récent. |
+| **Système** | Linux ou Windows 10 / 11, et un pilote NVIDIA récent. |
 
-L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Pas encore : Windows, les cartes AMD, plusieurs cartes.
+L'installeur s'occupe de tout le reste, comme pour GLM 5.3 Flash. Sous Windows, il compile le moteur avec le
+compilateur 2022 de Visual Studio et le CUDA Toolkit, et propose de les installer. Pas encore : les cartes AMD,
+plusieurs cartes.
 
 Ce qu'il faut à chacun des trois et comment il a été vérifié : [docs/BACKENDS.md](docs/BACKENDS.md#install) (en anglais).
 

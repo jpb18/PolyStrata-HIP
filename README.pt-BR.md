@@ -18,8 +18,9 @@ Ele roda cinco modelos, com dois motores:
   12 GB ou mais, no Windows ou no Linux. Ele também entende imagens. O motor dele é o do
   [Strata](https://github.com/Niko1221/Strata), sem mudanças.
 
-Os outros quatro usam um motor escrito para o PolyStrata, no Linux com uma placa NVIDIA. São experimentais: só
-rodaram em um PC, com uma placa de 32 GB.
+Os outros quatro usam um motor escrito para o PolyStrata, com uma placa NVIDIA: os quatro no Linux, e os três menores
+também no Windows. São experimentais: só rodaram em um PC com uma placa de 32 GB, e os três menores também em um
+notebook com uma placa de 8 GB.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, o maior: um arquivo de 79 a 114 GB, que fica na maior parte na RAM.
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, um arquivo de 13 a 23 GB. Ele também entende imagens.
@@ -123,6 +124,9 @@ de trabalho. Um prompt mais curto é lido mais rápido: um de 10,000 tokens a 5,
 placa. O llama.cpp, com o modelo inteiro na mesma placa, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
 Ele precisa de uma placa em que o modelo caiba.
 
+Em um notebook com placa de 8 GB (RTX 4070 Laptop, i7-14700HX, 32 GB de RAM, Windows 10), o UD-Q3_K_M escreve 47-53
+tokens/s em um chat curto e 23-26 depois de um prompt de 31,600-31,700 tokens, que ele lê a 870-1,190 tokens/s.
+
 ### Ornith 1.5
 
 Medido do mesmo jeito, com o mesmo prompt de 30K tokens.
@@ -151,6 +155,9 @@ Medido do mesmo jeito, com o mesmo prompt de 30K tokens.
 Um prompt de 10,000 tokens é lido a 5,500 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo inteiro
 na mesma placa, escreveu cerca de 180 tokens/s e leu prompts a 6,000 a 9,000.
 
+Em um notebook com placa de 8 GB (RTX 4070 Laptop, i7-14700HX, 32 GB de RAM, Windows 10), o APEX-I-COMPACT escreve
+50-54 tokens/s em um chat curto e 24-32 depois de um prompt de 31,600-31,700 tokens, que ele lê a 870-1,100 tokens/s.
+
 ### Gemma 4 26B-A4B
 
 Medido do mesmo jeito, com um prompt de 31K tokens.
@@ -178,6 +185,9 @@ Medido do mesmo jeito, com um prompt de 31K tokens.
 
 Um prompt de 10,000 tokens é lido a 5,500 tokens/s com o modelo inteiro na placa. O llama.cpp, com o modelo
 inteiro na mesma placa, escreveu cerca de 165 tokens/s e leu prompts a 6,000 a 9,000.
+
+Em um notebook com placa de 8 GB (RTX 4070 Laptop, i7-14700HX, 32 GB de RAM, Windows 10), o UD-Q3_K_M escreve 45-48
+tokens/s em um chat curto e 21-28 depois de um prompt de 31,200-31,300 tokens, que ele lê a 1,520-1,610 tokens/s.
 
 Os quatro modelos do motor próprio do PolyStrata foram medidos com o benchmark dele, que você pode rodar no seu PC:
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
@@ -222,34 +232,37 @@ A lista completa: [docs/GLM.md](docs/GLM.md#what-you-need) (em inglês).
 
 | | |
 | --- | --- |
-| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 5 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, e nessa placa limitada a 8 GB. |
+| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 5 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, nessa placa limitada a 8 GB e na placa de 8 GB de um notebook. |
 | **RAM** | Cerca de **17, 21 ou 27 GB** ao lado de uma placa de 8 GB para os três tamanhos, pela estimativa do instalador. Uma placa de 24 GB guarda inteiros os dois tamanhos menores. |
 | **Disco** | 13, 17 ou 23 GB para o arquivo do modelo, 1 GB a mais para ler imagens. |
-| **Sistema** | Linux e um driver NVIDIA atual. |
+| **Sistema** | Linux ou Windows 10 / 11, e um driver NVIDIA atual. |
 
-O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. Ainda não: Windows, placas AMD, várias placas.
+O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. No Windows ele compila o motor com o compilador de
+2022 do Visual Studio e o CUDA Toolkit, e oferece instalar os dois. Ainda não: placas AMD, várias placas.
 
 ### Ornith 1.5
 
 | | |
 | --- | --- |
-| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 4 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, e nessa placa limitada a 8 GB. |
+| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 4 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, nessa placa limitada a 8 GB e na placa de 8 GB de um notebook. |
 | **RAM** | Cerca de **18, 22 ou 28 GB** ao lado de uma placa de 8 GB para os três tamanhos, pela estimativa do instalador. Uma placa de 24 GB guarda inteiros os dois tamanhos menores. |
 | **Disco** | 14, 17 ou 24 GB para o arquivo do modelo, 1 GB a mais para ler imagens. |
-| **Sistema** | Linux e um driver NVIDIA atual. |
+| **Sistema** | Linux ou Windows 10 / 11, e um driver NVIDIA atual. |
 
-O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. Ainda não: Windows, placas AMD, várias placas.
+O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. No Windows ele compila o motor com o compilador de
+2022 do Visual Studio e o CUDA Toolkit, e oferece instalar os dois. Ainda não: placas AMD, várias placas.
 
 ### Gemma 4 26B-A4B
 
 | | |
 | --- | --- |
-| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 6 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, e nessa placa limitada a 8 GB. |
+| **Placa de vídeo** | Uma placa **NVIDIA** GeForce RTX série 20 ou mais nova com **8 GB de VRAM ou mais**. Cerca de 6 GB são ocupados antes do primeiro expert. Ele rodou numa placa de 32 GB, nessa placa limitada a 8 GB e na placa de 8 GB de um notebook. |
 | **RAM** | Cerca de **15, 18 ou 21 GB** ao lado de uma placa de 8 GB para os três tamanhos, pela estimativa do instalador. Pela mesma estimativa, uma placa de 16 GB guarda inteiros os dois tamanhos menores. |
 | **Disco** | 11, 13 ou 17 GB para o arquivo do modelo e o modelo de rascunho dele, 1 GB a mais para ler imagens. |
-| **Sistema** | Linux e um driver NVIDIA atual. |
+| **Sistema** | Linux ou Windows 10 / 11, e um driver NVIDIA atual. |
 
-O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. Ainda não: Windows, placas AMD, várias placas.
+O instalador cuida de todo o resto, como faz com o GLM 5.3 Flash. No Windows ele compila o motor com o compilador de
+2022 do Visual Studio e o CUDA Toolkit, e oferece instalar os dois. Ainda não: placas AMD, várias placas.
 
 Do que cada um dos três precisa e como foi conferido: [docs/BACKENDS.md](docs/BACKENDS.md#install) (em inglês).
 

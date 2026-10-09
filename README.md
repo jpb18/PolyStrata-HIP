@@ -17,8 +17,9 @@ It runs five models, on two engines:
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** on an NVIDIA or AMD graphics card with
   12 GB or more, on Windows or Linux. It also reads pictures. Its engine is the Strata project's, unchanged.
 
-The other four run on an engine written for PolyStrata, on Linux with one NVIDIA card. They are experimental: they
-have run on one PC, with a 32 GB card.
+The other four run on an engine written for PolyStrata, with one NVIDIA card: on Linux, and the three smaller ones on
+Windows too. They are experimental: they have run on one PC with a 32 GB card, and the three smaller ones on a laptop
+with an 8 GB card as well.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, the largest: a file of 79 to 114 GB, most of which stays in RAM.
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, a file of 13 to 23 GB. It also reads pictures.
@@ -121,6 +122,9 @@ prompt is read faster: one of 10,000 tokens at 5,500 tokens/s with the whole mod
 whole model on the same card wrote about 180 tokens/s and read prompts at 6,000 to 9,000. It needs a card the model
 fits.
 
+On a laptop with an 8 GB card (RTX 4070 Laptop, i7-14700HX, 32 GB of RAM, Windows 10), UD-Q3_K_M writes 47-53 tokens/s
+in a short chat and 23-26 after a prompt of 31,600-31,700 tokens, which it reads at 870-1,190 tokens/s.
+
 ### Ornith 1.5
 
 Measured the same way, with the same 30K-token prompt.
@@ -149,6 +153,9 @@ Measured the same way, with the same 30K-token prompt.
 A prompt of 10,000 tokens is read at 5,500 tokens/s with the whole model on the card. llama.cpp with the whole model
 on the same card wrote about 180 tokens/s and read prompts at 6,000 to 9,000.
 
+On a laptop with an 8 GB card (RTX 4070 Laptop, i7-14700HX, 32 GB of RAM, Windows 10), APEX-I-COMPACT writes 50-54
+tokens/s in a short chat and 24-32 after a prompt of 31,600-31,700 tokens, which it reads at 870-1,100 tokens/s.
+
 ### Gemma 4 26B-A4B
 
 Measured the same way, with a 31K-token prompt.
@@ -176,6 +183,9 @@ Measured the same way, with a 31K-token prompt.
 
 A prompt of 10,000 tokens is read at 5,500 tokens/s with the whole model on the card. llama.cpp with the
 whole model on the same card wrote about 165 tokens/s and read prompts at 6,000 to 9,000.
+
+On a laptop with an 8 GB card (RTX 4070 Laptop, i7-14700HX, 32 GB of RAM, Windows 10), UD-Q3_K_M writes 45-48 tokens/s
+in a short chat and 21-28 after a prompt of 31,200-31,300 tokens, which it reads at 1,520-1,610 tokens/s.
 
 The four models of PolyStrata's own engine were measured with its benchmark, which you can run on your PC:
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
@@ -220,34 +230,37 @@ The full list: [docs/GLM.md](docs/GLM.md#what-you-need).
 
 | | |
 | --- | --- |
-| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 5 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
+| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 5 GB are taken before any expert. It has run on a 32 GB card, on that card held to 8 GB, and on a laptop's 8 GB card. |
 | **RAM** | About **17, 21 or 27 GB** beside an 8 GB card for the three sizes, the installer's estimate. A card with 24 GB holds the two smaller sizes whole. |
 | **Disk** | 13, 17 or 23 GB for the model file, 1 GB more to read pictures. |
-| **System** | Linux, and a current NVIDIA driver. |
+| **System** | Linux or Windows 10 / 11, and a current NVIDIA driver. |
 
-The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
+The installer sets up everything else, as it does for GLM 5.3 Flash. On Windows it compiles the engine with Visual
+Studio's 2022 compiler and the CUDA toolkit, and offers to install them. Not yet: AMD cards, several cards.
 
 ### Ornith 1.5
 
 | | |
 | --- | --- |
-| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 4 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
+| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 4 GB are taken before any expert. It has run on a 32 GB card, on that card held to 8 GB, and on a laptop's 8 GB card. |
 | **RAM** | About **18, 22 or 28 GB** beside an 8 GB card for the three sizes, the installer's estimate. A card with 24 GB holds the two smaller sizes whole. |
 | **Disk** | 14, 17 or 24 GB for the model file, 1 GB more to read pictures. |
-| **System** | Linux, and a current NVIDIA driver. |
+| **System** | Linux or Windows 10 / 11, and a current NVIDIA driver. |
 
-The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
+The installer sets up everything else, as it does for GLM 5.3 Flash. On Windows it compiles the engine with Visual
+Studio's 2022 compiler and the CUDA toolkit, and offers to install them. Not yet: AMD cards, several cards.
 
 ### Gemma 4 26B-A4B
 
 | | |
 | --- | --- |
-| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 6 GB are taken before any expert. It has run on a 32 GB card, and on that card held to 8 GB. |
+| **Graphics card** | One **NVIDIA** GeForce RTX 20 series card or newer with **8 GB of VRAM or more**. About 6 GB are taken before any expert. It has run on a 32 GB card, on that card held to 8 GB, and on a laptop's 8 GB card. |
 | **RAM** | About **15, 18 or 21 GB** beside an 8 GB card for the three sizes, the installer's estimate. By the same estimate a card with 16 GB holds the two smaller sizes whole. |
 | **Disk** | 11, 13 or 17 GB for the model file and its draft model, 1 GB more to read pictures. |
-| **System** | Linux, and a current NVIDIA driver. |
+| **System** | Linux or Windows 10 / 11, and a current NVIDIA driver. |
 
-The installer sets up everything else, as it does for GLM 5.3 Flash. Not yet: Windows, AMD cards, several cards.
+The installer sets up everything else, as it does for GLM 5.3 Flash. On Windows it compiles the engine with Visual
+Studio's 2022 compiler and the CUDA toolkit, and offers to install them. Not yet: AMD cards, several cards.
 
 What each of the three needs and how it was checked: [docs/BACKENDS.md](docs/BACKENDS.md#install).
 
