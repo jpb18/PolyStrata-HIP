@@ -534,9 +534,11 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
 int serve(Session& ss) {
     Engine& engine = ss.engine;
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
-                "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld engine=" STRATA_VERSION "\n",
+                "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
+                "engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
-                engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib);
+                engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
+                (long long) engine.vram_free_mib());
     std::printf("READY %d stop\n", engine.max_context());
     std::fflush(stdout);
 
@@ -552,6 +554,37 @@ int serve(Session& ss) {
         std::vector<int32_t> ids;
         int32_t pad = -1;
         std::string file;
+        // VRAM [reserve_mib], the server's POST /v1/vram: the expert cache sized again between requests, to leave
+        // that much VRAM to other programs; alone, back to what the engine started with
+        if (line.rfind("VRAM", 0) == 0 && (line.size() == 4 || line[4] == ' ')) {
+            char* end = nullptr;
+            const bool bare = line.find_first_not_of(' ', 4) == std::string::npos;
+            const long long reserve = bare ? -1 : std::strtoll(line.c_str() + 4, &end, 10);
+            if (!bare && (end == line.c_str() + 4 || reserve < 0 || reserve > (1LL << 24))) {
+                std::printf("ERR expected: VRAM [reserve_mib]\n");
+                std::fflush(stdout);
+                continue;
+            }
+            try {
+                const Clock::time_point t0 = Clock::now();
+                const int before = engine.cached_experts();
+                engine.resize_cache((int) reserve);
+                const long long free_mib = (long long) engine.vram_free_mib();
+                std::fprintf(stderr, "strata-poly: VRAM %d MiB kept free: the expert cache %d -> %d of %d experts "
+                                     "(%.2f of %.2f GiB), %lld MiB free now, in %.0f ms\n",
+                             engine.reserve_mib(), before, engine.cached_experts(), engine.full_experts(),
+                             engine.cached_gib(), engine.full_gib(), free_mib, ms_since(t0));
+                std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_cache_mib=%lld "
+                            "expert_cache_full_mib=%lld vram_free_mib=%lld prompt_chunk=%d\n",
+                            engine.reserve_mib(), engine.cached_experts(), engine.full_experts(),
+                            (long long) (engine.cached_gib() * 1024.0), (long long) (engine.full_gib() * 1024.0),
+                            free_mib, engine.max_rows());
+            } catch (const std::exception& e) {
+                std::printf("ERR VRAM: %s\n", e.what());
+            }
+            std::fflush(stdout);
+            continue;
+        }
         if (line.rfind("GEN ", 0) != 0 && line.rfind("GENI ", 0) != 0) {
             std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> image_pad=<id> <file> <id,id,...>\n");
             std::fflush(stdout);
@@ -588,6 +621,11 @@ int serve(Session& ss) {
         int64_t resume = 0;
         Session::Result r;
         try {
+            const int had = engine.cached_experts();
+            if (engine.mind_vram())
+                std::fprintf(stderr, "strata-poly: the card had little VRAM left: the expert cache %d -> %d experts, "
+                                     "%lld MiB free now\n",
+                             had, engine.cached_experts(), (long long) engine.vram_free_mib());
             r = ss.generate(
                 ids, pictures, pad, max_new, s, lines.stop,
                 [](int32_t t) {
@@ -624,9 +662,9 @@ int serve(Session& ss) {
         std::fflush(stdout);
     }
     std::fprintf(stderr, "strata-poly: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
-                         "parked in %zu MiB, %zu pushed out\n",
+                         "parked in %zu MiB, %zu pushed out; %lld MiB of VRAM free at the end\n",
                  ss.reused, ss.asked, ss.asked > 0 ? 100.0 * (double) ss.reused / (double) ss.asked : 0.0,
-                 ss.kept.parked(), ss.kept.parked_bytes() >> 20, ss.kept.evictions());
+                 ss.kept.parked(), ss.kept.parked_bytes() >> 20, ss.kept.evictions(), (long long) engine.vram_free_mib());
     return 0;
 }
 
@@ -678,7 +716,8 @@ void usage() {
                  "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
                  "  --max-context N        tokens the attention caches hold (default 8192)\n"
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
-                 "  --vram-reserve-mib N   VRAM left free beside the expert cache (default 1024)\n"
+                 "  --vram-reserve-mib N   VRAM left free beside the expert cache (default: a sixteenth of the\n"
+                 "                         card, 512 to 1024)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, updated on exit\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
                  "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"

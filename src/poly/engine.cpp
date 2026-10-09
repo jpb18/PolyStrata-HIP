@@ -462,12 +462,27 @@ Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, i
     return d;
 }
 
-// Experts go to VRAM by use per byte when a profile has counts, and otherwise the same number from every layer.
+int64_t Engine::vram_free_mib() const {
+    size_t free_b = 0, total_b = 0;
+    ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    return (int64_t) (free_b >> 20);
+}
+
+// Experts go to VRAM by use per byte when there are counts, the profile's and this run's, and otherwise the same
+// number from every layer.
+//
+// The cache takes what is free but for a reserve.  What the engine allocates after it comes out of the reserve:
+// the recorded launches and a library's work space were 80 to 130 MiB on an 8 GB card.  Unless the caller names
+// it, the reserve is a sixteenth of the card, between 512 and 1,024 MiB.  Under Windows a card that is asked for
+// more than it has does not refuse: memory moves to the system's, and an answer came at 13 tokens/s where it
+// comes at 30.
 void Engine::fill_expert_cache() {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
-    const size_t reserve = size_t(std::max(opt_.vram_reserve_mib, 0)) << 20;
+    reserve_mib_ = opt_.vram_reserve_mib >= 0 ? opt_.vram_reserve_mib
+                                              : (int) std::clamp<size_t>(total_b >> 24, 512, 1024);
+    const size_t reserve = size_t(reserve_mib_) << 20;
     if (free_b <= reserve) return;
 
     struct Cand {
@@ -495,7 +510,8 @@ void Engine::fill_expert_cache() {
         L.trade = (int) (std::find(sizes.begin(), sizes.end(), bytes) - sizes.begin());
         slot_max_ = std::max(slot_max_, bytes);
         for (int e = 0; e < n_expert_; ++e) {
-            const double used = prior_.empty() ? 0.0 : (double) prior_[(size_t) il * n_expert_ + e];
+            const size_t i = (size_t) il * n_expert_ + e;
+            const double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
             cands.push_back({il, e, bytes, used / (double) bytes});
             all += bytes;
         }
@@ -504,7 +520,8 @@ void Engine::fill_expert_cache() {
                      [](const Cand& a, const Cand& b) { return a.value != b.value ? a.value > b.value : a.e < b.e; });
 
     n_trade_ = (int) sizes.size();
-    const size_t arena = std::min(all, free_b - reserve);
+    // sized again (resize_cache()), it is no larger than load() made it
+    const size_t arena = std::min({all, free_b - reserve, full_bytes_ > 0 ? full_bytes_ : all});
     if (arena == 0) return;
     exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
     ck(cudaMemset(exp_, 0, arena + 256), "the expert cache");   // the slots' tails stay zero (kTail)
@@ -531,6 +548,65 @@ void Engine::fill_expert_cache() {
         L.slot[e] = s;
         ++cached_;
     }
+    if (full_bytes_ == 0) {
+        full_bytes_ = arena;
+        full_cached_ = cached_;
+    }
+}
+
+// The thread and the stream that bring experts into the cache while an answer is written (follow()).
+void Engine::start_swaps() {
+    if (swap_ || cached_ == 0 || opt_.expert_swaps == 0) return;
+    swap_ = std::make_unique<Swap[]>((size_t) opt_.expert_swaps);
+    cudaStream_t up = nullptr;
+    ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
+    swap_st_ = up;
+    for (; n_swap_ < opt_.expert_swaps; ++n_swap_) {
+        Swap& s = swap_[(size_t) n_swap_];
+        s.pinned = (uint8_t*) hmalloc(slot_max_, "pinned memory");
+        ck(cudaEventCreateWithFlags(&s.done, cudaEventDisableTiming), "cudaEventCreate");
+    }
+    recent_.assign(use_.size(), 0.f);
+    coming_.assign(use_.size(), 0);
+    follower_ = std::thread([this] { follow_loop(); });
+}
+
+// The cache gives up what it has and is filled again for another reserve.  The experts on their way into it
+// arrive first: their slots are about to go.
+void Engine::resize_cache(int mib) {
+    if (!opt_.gpu_experts || n_moe_ == 0) return;
+    ck(cudaStreamSynchronize(cs(st_)), "resize");
+    const auto failed = [&] {
+        std::lock_guard<std::mutex> l(swap_m_);
+        return !swap_error_.empty();
+    };
+    for (int j = 0; j < n_swap_; ++j)   // one that is asked for is the follower's, now or in a moment
+        while (swap_[(size_t) j].at.load() == Swap::kAsked && !failed()) std::this_thread::yield();
+    if (failed()) throw std::runtime_error("expert upload: " + swap_error_);
+    if (swap_st_) ck(cudaStreamSynchronize(cs(swap_st_)), "resize");
+    for (int j = 0; j < n_swap_; ++j) swap_[(size_t) j].at.store(Swap::kFree);
+    std::fill(coming_.begin(), coming_.end(), (uint8_t) 0);
+    for (Layer& L : layers_) std::fill(L.slot.begin(), L.slot.end(), nullptr);
+    staged_il_ = -1;
+    cached_ = 0;
+    exp_at_ = 0;
+    if (exp_) {
+        dev_allocs_.erase(std::find(dev_allocs_.begin(), dev_allocs_.end(), (void*) exp_));
+        ck(cudaFree(exp_), "resize");
+        exp_ = nullptr;
+    }
+    opt_.vram_reserve_mib = mib < 0 ? asked_reserve_mib_ : mib;
+    fill_expert_cache();
+    start_swaps();
+}
+
+// The launches the engine records as it runs take VRAM after the cache was sized: 200 MiB of an 8 GB card over
+// prompts of 25 to 31,000 tokens.  That is what the reserve is for, and when most of it is gone the cache gives
+// some back, before the card has nothing free.
+bool Engine::mind_vram() {
+    if (!exp_ || reserve_mib_ <= 0 || vram_free_mib() >= reserve_mib_ / 4) return false;
+    resize_cache(opt_.vram_reserve_mib);
+    return true;
 }
 
 // What a layer copies to the staging buffer ahead of its routing: the experts outside the cache, the most used
@@ -683,6 +759,7 @@ void Engine::follow(int written) {
 
 void Engine::load(const Options& o) {
     opt_ = o;
+    asked_reserve_mib_ = o.vram_reserve_mib;
     if (opt_.max_context < 16) throw std::runtime_error("the context must be at least 16 tokens");
     if (opt_.prompt_batch < 1 || opt_.prompt_batch > 4096)
         throw std::runtime_error("a prompt batch is 1 to 4096 tokens");
@@ -758,20 +835,7 @@ void Engine::load(const Options& o) {
     }
     workers_ = std::make_unique<Workers>(threads);
     route_tmp_.assign((size_t) workers_->threads() * 2 * n_expert_, 0.f);
-    if (cached_ > 0 && opt_.expert_swaps > 0) {
-        swap_ = std::make_unique<Swap[]>((size_t) opt_.expert_swaps);
-        cudaStream_t up = nullptr;
-        ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
-        swap_st_ = up;
-        for (; n_swap_ < opt_.expert_swaps; ++n_swap_) {
-            Swap& s = swap_[(size_t) n_swap_];
-            s.pinned = (uint8_t*) hmalloc(slot_max_, "pinned memory");
-            ck(cudaEventCreateWithFlags(&s.done, cudaEventDisableTiming), "cudaEventCreate");
-        }
-        recent_.assign(use_.size(), 0.f);
-        coming_.assign(use_.size(), 0);
-        follower_ = std::thread([this] { follow_loop(); });
-    }
+    start_swaps();
     reset();
     // nothing is read from the files when every expert is in VRAM
     if (cached_ < total_experts())

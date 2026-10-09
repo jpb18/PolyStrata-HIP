@@ -34,7 +34,7 @@ struct Options {
     std::string model;
     int max_context = 8192;
     int threads = 0;              ///< 0: the CPUs this process may use
-    int vram_reserve_mib = 1024;  ///< left free after the expert cache is filled
+    int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
     bool gpu_experts = true;
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
@@ -211,6 +211,19 @@ public:
     int cached_experts() const { return cached_; }
     int total_experts() const { return n_moe_ * n_expert_; }
     double cached_gib() const { return double(exp_at_) / double(1ull << 30); }
+    /// The cache as load() filled it, which is as large as resize_cache() makes it again.
+    int full_experts() const { return full_cached_; }
+    double full_gib() const { return double(full_bytes_) / double(1ull << 30); }
+    /// The VRAM the cache was last sized to leave free, and what is free now, in MiB.
+    int reserve_mib() const { return reserve_mib_; }
+    int64_t vram_free_mib() const;
+    /// The expert cache sized again, to leave `mib` of VRAM free (below 0: what load() left), and filled with the
+    /// experts used most so far.  It gets no larger than load() made it.  Between calls that feed tokens: the
+    /// experts it gives up are computed on the CPU from then on, as any expert outside it.
+    void resize_cache(int mib);
+    /// Between requests: sizes the cache again when what the engine allocated since has left less than a quarter
+    /// of the reserve free.  True when it did.
+    bool mind_vram();
     void save_profile() const;
 
 protected:
@@ -304,6 +317,7 @@ protected:
     bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void fill_expert_cache();
+    void start_swaps();
     void plan_ahead(Layer& L, int il);
     void run(const int32_t* tokens, int n);
     bool pick_way(int t);
@@ -383,6 +397,10 @@ protected:
     size_t dense_bytes_ = 0, dense_at_ = 0;
     uint8_t* exp_ = nullptr;     ///< the routed experts' arena
     size_t exp_at_ = 0;
+    int asked_reserve_mib_ = -1; ///< Options::vram_reserve_mib as load() got it
+    int reserve_mib_ = 0;        ///< what the cache was sized to leave free
+    int full_cached_ = 0;        ///< the cache as load() filled it: its experts and their bytes
+    size_t full_bytes_ = 0;
     float* scratch_ = nullptr;
     size_t scratch_at_ = 0;
     float* state_ = nullptr;     ///< every recurrent layer's state; with a draft block, hn_'s first row

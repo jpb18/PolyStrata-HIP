@@ -230,7 +230,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--serve` | | take requests from the server (the server passes this) |
 | `--max-context N` | 8192 | tokens a conversation can hold |
 | `--threads N` | all usable | CPU threads for the experts that are not in VRAM |
-| `--vram-reserve-mib N` | 1024 | VRAM left free beside the expert cache |
+| `--vram-reserve-mib N` | a sixteenth of the card, 512 to 1024 | VRAM left free beside the expert cache |
 | `--expert-profile FILE` | | expert use counts, read at the start and written back at the end |
 | `--no-gpu-experts` | | keep every routed expert on the CPU |
 | `--any-node` | | on a PC with several NUMA nodes, let the CPU threads run on any of them |
