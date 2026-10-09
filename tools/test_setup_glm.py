@@ -195,9 +195,11 @@ class Main(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def main(self, argv=(), ram=128.0, vram=31.84, model=False, answers=None, win=False, n_gpus=1, family="glm"):
+    def main(self, argv=(), ram=128.0, vram=31.84, model=False, answers=None, win=False, n_gpus=1, family="glm",
+             cores=None):
         """answers: None = --yes; else {words of a question: its answer} (Enter for the others); the questions asked
-        are kept in self.asked.  model: False, True (this file's M) or a size's name."""
+        are kept in self.asked.  model: False, True (this file's M) or a size's name.  cores: (performance,
+        efficiency) of a hybrid CPU."""
         self.asked = []
 
         def fake_input(prompt=""):
@@ -233,6 +235,7 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "amd_gpus", lambda *a: []),
             mock.patch.object(setup, "ram_gb", lambda: ram),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, True)),
+            mock.patch.object(setup, "cpu_cores", lambda: cores),
             mock.patch.object(setup, "page_file_gb", lambda: 16.0),
             mock.patch.object(setup, "free_gb", lambda p: 500.0),
             mock.patch.object(setup, "pip_install", lambda *a, **k: None),

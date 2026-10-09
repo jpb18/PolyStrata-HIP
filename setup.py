@@ -4111,6 +4111,14 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
         ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
            "that much less)")
+    # The engine's own count is every logical CPU.  On a hybrid CPU that is the slowest: an efficiency core runs
+    # an expert at half the speed, and a layer waits for its slowest part (hybrid_pool_workers()).
+    cores = cpu_cores()
+    threads = hybrid_pool_workers(cores)
+    if threads is not None:
+        args += ["--threads", str(threads)]
+        ok(f"hybrid CPU ({cores[0]} performance + {cores[1]} efficiency cores): {threads} CPU threads for the experts "
+           "outside VRAM (--threads in the config)")
     cfg = {"exe": str(eng / POLY_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "display_name": f"{title} {model}",
            "log": str(ROOT / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}

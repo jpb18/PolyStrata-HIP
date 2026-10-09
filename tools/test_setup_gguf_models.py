@@ -142,6 +142,18 @@ class Main(unittest.TestCase):
                 self.assertIn("% of its experts fit in VRAM (100% there)", out)
                 self.assertEqual((self.encoder, cfg.get("vision")), ("none", None))   # --yes: no images
 
+    def test_a_hybrid_cpu_gets_a_thread_count(self):
+        """The engine's own count is every logical CPU, which is the slowest on a hybrid one."""
+        code, out, cfg = self.main(family="gemma4", ram=32.0, vram=8.0, cores=(8, 12))
+        self.assertEqual(code, 0, out)
+        args = cfg["args"]
+        self.assertEqual(args[args.index("--threads") + 1], "13")
+        self.assertIn("hybrid CPU (8 performance + 12 efficiency cores): 13 CPU threads", out)
+        for cores in (None, (8, 8)):
+            code, out, cfg = self.main(family="gemma4", ram=32.0, vram=8.0, cores=cores)
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("--threads", cfg["args"])
+
     def test_images(self):
         for family, (size, file, _repo, _n) in NEW.items():
             fam = setup.FAMILIES[family]
