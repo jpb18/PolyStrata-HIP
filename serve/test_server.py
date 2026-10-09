@@ -1967,7 +1967,8 @@ class PeerDevice(unittest.TestCase):
         done = args + ["--vision", "--vram-reserve-mib", "700"]                  # setup wrote it: unchanged
         self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
         self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
-        for exe in ("engine-poly/strata-poly", r"E:\x\engine-poly\strata-poly.exe"):   # it has no such option
+        # it has no such option; setup writes its path as this system writes one
+        for exe in ("engine-poly/strata-poly", os.path.join(os.sep, "x", "engine-poly", "strata-poly.exe")):
             poly = ["--model", "x.gguf"]
             self.assertEqual(engine_args({"exe": exe, "args": list(poly), "vision": {"exe": "v", "gpu": True}}), poly)
 
