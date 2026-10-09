@@ -23,6 +23,8 @@ void init_once() {
     std::call_once(once, [] { ggml_cpu_init(); });
 }
 
+thread_local bool in_task = false;   // this thread is running a task of a batch
+
 }  // namespace
 
 Workers::Workers(int threads) {
@@ -43,7 +45,9 @@ bool Workers::drain(Batch& b) {
     while (b.next.load(std::memory_order_relaxed) < b.n) {
         const int i = b.next.fetch_add(1, std::memory_order_relaxed);
         if (i >= b.n) break;
+        in_task = true;
         (*b.fn)(i);
+        in_task = false;
         b.left.fetch_sub(1, std::memory_order_release);
         ran = true;
     }
@@ -93,7 +97,12 @@ void Workers::loop() {
 
 void Workers::run(int n, const std::function<void(int)>& fn) {
     if (n <= 0) return;
-    if (n == 1) return fn(0);   // nothing to share out
+    // One task is nothing to share out.  And a task that shares out work of its own does it alone: there is one
+    // batch at a time, and a worker that waited below for the others to let go of theirs would wait for itself.
+    if (n == 1 || in_task) {
+        for (int i = 0; i < n; ++i) fn(i);
+        return;
+    }
     Batch b;
     b.fn = &fn;
     b.n = n;

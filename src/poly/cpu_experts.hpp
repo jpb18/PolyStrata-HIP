@@ -14,7 +14,8 @@
 
 namespace strata::poly {
 
-/// Runs fn(0..n-1) on the workers and the calling thread, and returns when all of them are done.
+/// Runs fn(0..n-1) on the workers and the calling thread, and returns when all of them are done.  A call from
+/// inside fn does its work on the thread it is on.
 class Workers {
 public:
     explicit Workers(int threads);
