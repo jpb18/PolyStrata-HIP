@@ -95,13 +95,21 @@ escribe más despacio. Qué se midió y cómo: [docs/GLM.md](docs/GLM.md#what-it
 
 ### Qwen3.6-35B-A3B
 
-Medido para PolyStrata en la misma estación de trabajo, con un prompt de 30K tokens. A la izquierda, la tarjeta
-guarda el modelo entero. A la derecha, la misma tarjeta está limitada a 8 GB y la mayoría de los expertos los calcula
-el procesador.
+Medido por PolyStrata en dos PC, con un prompt de 30,000 a 32,000 tokens: a la izquierda un portátil con una tarjeta
+de 8 GB, donde el procesador calcula los expertos que no caben en la tarjeta, y a la derecha una estación de trabajo
+cuya tarjeta tiene el modelo entero.
 
 <table>
-<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th><th>El mismo PC, con la tarjeta limitada a 8 GB</th></tr>
+<tr><th>NVIDIA: RTX 4070 Laptop (8 GB), Core i7-14700HX, 32 GB de RAM</th><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th></tr>
 <tr><td>
+
+| Tamaño | Escribe respuestas | Lee tu prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 74 tokens/s | 1,410 tokens/s |
+| **UD-Q2_K_XL** | 93 tokens/s | 1,340 tokens/s |
+| **UD-Q4_K_M** | 61-62 tokens/s | 990-1,370 tokens/s |
+
+</td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
@@ -109,32 +117,30 @@ el procesador.
 | **UD-Q2_K_XL** | 345-359 tokens/s | 5,120-5,140 tokens/s |
 | **UD-Q4_K_M** | 328-332 tokens/s | 5,220-5,250 tokens/s |
 
-</td><td>
-
-| Tamaño | Escribe respuestas | Lee tu prompt |
-| --- | ---: | ---: |
-| **UD-Q3_K_M** | 156-164 tokens/s | 3,880-3,900 tokens/s |
-| **UD-Q2_K_XL** | 157 tokens/s | 3,880-3,900 tokens/s |
-| **UD-Q4_K_M** | 163-164 tokens/s | 3,760-3,800 tokens/s |
-
 </td></tr>
 </table>
 
-La tabla de la derecha no es un PC con una tarjeta de 8 GB: el procesador, la RAM y la velocidad de la tarjeta son
-los de esta estación de trabajo. Un prompt más corto se lee más rápido: uno de 10,000 tokens a 5,500 tokens/s con el
-modelo entero en la tarjeta. llama.cpp, con el modelo entero en la misma tarjeta, escribió unos 180 tokens/s y leyó
-prompts a entre 6,000 y 9,000. Necesita una tarjeta en la que quepa el modelo.
-
-En un portátil con una tarjeta de 8 GB (RTX 4070 Laptop, i7-14700HX, 32 GB de RAM, Windows 10), UD-Q3_K_M escribe
-47-53 tokens/s en un chat corto y 23-26 después de un prompt de 31,600-31,700 tokens, que lee a 870-1,190 tokens/s.
+Un prompt más corto se lee más rápido: uno de 10,000 tokens a 1,480 tokens/s en el portátil y a 5,500 en la estación
+de trabajo. llama.cpp con el modelo entero en la tarjeta de la estación de trabajo escribió unos 180 tokens/s y leyó
+los prompts a entre 6,000 y 9,000. Necesita una tarjeta en la que quepa el modelo. Las cifras de la tarjeta de la
+estación limitada a 8 GB, un sustituto de antes de medir en el portátil, están en
+[docs/BACKENDS.md](docs/BACKENDS.md#with-8-gb-of-vram) (en inglés).
 
 ### Ornith 1.5
 
-Medido igual, con el mismo prompt de 30K tokens.
+Medido de la misma manera, en los mismos dos PC.
 
 <table>
-<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th><th>El mismo PC, con la tarjeta limitada a 8 GB</th></tr>
+<tr><th>NVIDIA: RTX 4070 Laptop (8 GB), Core i7-14700HX, 32 GB de RAM</th><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th></tr>
 <tr><td>
+
+| Tamaño | Escribe respuestas | Lee tu prompt |
+| --- | ---: | ---: |
+| **APEX-I-COMPACT** | 70 tokens/s | 1,360 tokens/s |
+| **APEX-I-MINI** | 65-69 tokens/s | 1,320 tokens/s |
+| **APEX-I-QUALITY** | 47-48 tokens/s | 1,330-1,340 tokens/s |
+
+</td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
@@ -142,30 +148,28 @@ Medido igual, con el mismo prompt de 30K tokens.
 | **APEX-I-MINI** | 265-279 tokens/s | 5,090-5,110 tokens/s |
 | **APEX-I-QUALITY** | 263-265 tokens/s | 5,050-5,150 tokens/s |
 
-</td><td>
-
-| Tamaño | Escribe respuestas | Lee tu prompt |
-| --- | ---: | ---: |
-| **APEX-I-COMPACT** | 153-165 tokens/s | 3,780-3,810 tokens/s |
-| **APEX-I-MINI** | 136-159 tokens/s | 3,720-3,730 tokens/s |
-| **APEX-I-QUALITY** | 147-150 tokens/s | 3,570-3,580 tokens/s |
-
 </td></tr>
 </table>
 
-Un prompt de 10,000 tokens se lee a 5,500 tokens/s con el modelo entero en la tarjeta. llama.cpp, con el modelo
-entero en la misma tarjeta, escribió unos 180 tokens/s y leyó prompts a entre 6,000 y 9,000.
-
-En un portátil con una tarjeta de 8 GB (RTX 4070 Laptop, i7-14700HX, 32 GB de RAM, Windows 10), APEX-I-COMPACT escribe
-50-54 tokens/s en un chat corto y 24-32 después de un prompt de 31,600-31,700 tokens, que lee a 870-1,100 tokens/s.
+Un prompt de 10,000 tokens se lee a 1,410 tokens/s en el portátil y a 5,500 en la estación de trabajo. llama.cpp con
+el modelo entero en la tarjeta de la estación de trabajo escribió unos 180 tokens/s y leyó los prompts a entre 6,000 y
+9,000.
 
 ### Gemma 4 26B-A4B
 
-Medido igual, con un prompt de 31K tokens.
+Medido de la misma manera, en los mismos dos PC.
 
 <table>
-<tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th><th>El mismo PC, con la tarjeta limitada a 8 GB</th></tr>
+<tr><th>NVIDIA: RTX 4070 Laptop (8 GB), Core i7-14700HX, 32 GB de RAM</th><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB de RAM</th></tr>
 <tr><td>
+
+| Tamaño | Escribe respuestas | Lee tu prompt |
+| --- | ---: | ---: |
+| **UD-Q3_K_M** | 70-72 tokens/s | 1,930 tokens/s |
+| **UD-Q2_K_XL** | 88-90 tokens/s | 1,860 tokens/s |
+| **UD-Q4_K_M** | 66 tokens/s | 1,860 tokens/s |
+
+</td><td>
 
 | Tamaño | Escribe respuestas | Lee tu prompt |
 | --- | ---: | ---: |
@@ -173,22 +177,12 @@ Medido igual, con un prompt de 31K tokens.
 | **UD-Q2_K_XL** | 273-274 tokens/s | 5,520-5,530 tokens/s |
 | **UD-Q4_K_M** | 270-272 tokens/s | 5,650-5,680 tokens/s |
 
-</td><td>
-
-| Tamaño | Escribe respuestas | Lee tu prompt |
-| --- | ---: | ---: |
-| **UD-Q3_K_M** | 131-145 tokens/s | 4,630-4,690 tokens/s |
-| **UD-Q2_K_XL** | 154-156 tokens/s | 4,590-4,640 tokens/s |
-| **UD-Q4_K_M** | 137 tokens/s | 4,380-4,400 tokens/s |
-
 </td></tr>
 </table>
 
-Un prompt de 10,000 tokens se lee a 5,500 tokens/s con el modelo entero en la tarjeta. llama.cpp, con
-el modelo entero en la misma tarjeta, escribió unos 165 tokens/s y leyó prompts a entre 6,000 y 9,000.
-
-En un portátil con una tarjeta de 8 GB (RTX 4070 Laptop, i7-14700HX, 32 GB de RAM, Windows 10), UD-Q3_K_M escribe
-45-48 tokens/s en un chat corto y 21-28 después de un prompt de 31,200-31,300 tokens, que lee a 1,520-1,610 tokens/s.
+Un prompt de 10,000 tokens se lee a 1,970 tokens/s en el portátil y a 5,500 en la estación de trabajo. llama.cpp con
+el modelo entero en la tarjeta de la estación de trabajo escribió unos 165 tokens/s y leyó los prompts a entre 6,000 y
+9,000.
 
 Los cuatro modelos del motor propio de PolyStrata se midieron con su benchmark, que puedes ejecutar en tu PC:
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
@@ -234,7 +228,7 @@ La lista completa: [docs/GLM.md](docs/GLM.md#what-you-need) (en inglés).
 | | |
 | --- | --- |
 | **Tarjeta gráfica** | Una tarjeta **NVIDIA** GeForce RTX serie 20 o más nueva con **8 GB de VRAM o más**. Unos 5 GB se ocupan antes del primer experto. Ha funcionado en una tarjeta de 32 GB, en esa tarjeta limitada a 8 GB y en la tarjeta de 8 GB de un portátil. |
-| **RAM** | Unos **17, 21 o 27 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Una tarjeta de 24 GB guarda enteros los dos tamaños más pequeños. |
+| **RAM** | Unos **17, 21 o 27 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Una tarjeta de 24 GB guarda enteros los dos tamaños más pequeños. Los tres tamaños han funcionado en un portátil con 32 GB. |
 | **Disco** | 13, 17 o 23 GB para el archivo del modelo, 1 GB más para leer imágenes. |
 | **Sistema** | Linux o Windows 10 / 11, y un controlador de NVIDIA actual. |
 
@@ -246,7 +240,7 @@ El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. En Windows c
 | | |
 | --- | --- |
 | **Tarjeta gráfica** | Una tarjeta **NVIDIA** GeForce RTX serie 20 o más nueva con **8 GB de VRAM o más**. Unos 4 GB se ocupan antes del primer experto. Ha funcionado en una tarjeta de 32 GB, en esa tarjeta limitada a 8 GB y en la tarjeta de 8 GB de un portátil. |
-| **RAM** | Unos **18, 22 o 28 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Una tarjeta de 24 GB guarda enteros los dos tamaños más pequeños. |
+| **RAM** | Unos **18, 22 o 28 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Una tarjeta de 24 GB guarda enteros los dos tamaños más pequeños. Los tres tamaños han funcionado en un portátil con 32 GB. |
 | **Disco** | 14, 17 o 24 GB para el archivo del modelo, 1 GB más para leer imágenes. |
 | **Sistema** | Linux o Windows 10 / 11, y un controlador de NVIDIA actual. |
 
@@ -258,7 +252,7 @@ El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. En Windows c
 | | |
 | --- | --- |
 | **Tarjeta gráfica** | Una tarjeta **NVIDIA** GeForce RTX serie 20 o más nueva con **8 GB de VRAM o más**. Unos 6 GB se ocupan antes del primer experto. Ha funcionado en una tarjeta de 32 GB, en esa tarjeta limitada a 8 GB y en la tarjeta de 8 GB de un portátil. |
-| **RAM** | Unos **15, 18 o 21 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Según la misma estimación, una tarjeta de 16 GB guarda enteros los dos tamaños más pequeños. |
+| **RAM** | Unos **15, 18 o 21 GB** junto a una tarjeta de 8 GB para los tres tamaños, según la estimación del instalador. Según la misma estimación, una tarjeta de 16 GB guarda enteros los dos tamaños más pequeños. Los tres tamaños han funcionado en un portátil con 32 GB. |
 | **Disco** | 11, 13 o 17 GB para el archivo del modelo y su modelo borrador, 1 GB más para leer imágenes. |
 | **Sistema** | Linux o Windows 10 / 11, y un controlador de NVIDIA actual. |
 
@@ -430,7 +424,7 @@ En qué se diferencian:
 | **Imágenes** | Responde que sí a "Images?" en la instalación. Luego haz clic en **Picture** en el chat, o adjunta imágenes en tu aplicación. Las tarjetas AMD leen imágenes en Linux a través del procesador; en Windows todavía no. | Todavía no. | Responde que sí a "Images?" en la instalación, y luego como con Qwen3.8-Flash-Next. En una tarjeta de menos de 16 GB el codificador de imágenes funciona en el procesador, y una imagen tarda unos segundos. |
 | **Una petición cada vez** | Por defecto PolyStrata responde una petición y las demás esperan. Para responder varias a la vez, pon `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). En una tarjeta de 12 GB, cada respuesta va más lenta. | Una cada vez, las demás esperan. | Una cada vez, las demás esperan. |
 | **Varias conversaciones** | La última se conserva, así que los mensajes siguientes empiezan en segundos. Dos argumentos del motor guardan varias en RAM ([detalles](docs/DETAILS.md#using-it)). | La última se conserva. La instalación pregunta si guardar varias en RAM, para que un agente y sus subagentes se turnen sin que se vuelvan a leer sus prompts ([cómo](docs/GLM.md#several-conversations-at-once)). | Como GLM 5.3 Flash. |
-| **Prompts largos** | PolyStrata lee entero el primer mensaje de un chat, más o menos 1 minuto por cada 30,000 tokens. Los mensajes siguientes empiezan en segundos. | El primer mensaje se lee entero, más o menos 40 segundos por cada 30,000 tokens. | El primer mensaje se lee entero, entre 6 y 8 segundos por cada 30,000 tokens. |
+| **Prompts largos** | PolyStrata lee entero el primer mensaje de un chat, más o menos 1 minuto por cada 30,000 tokens. Los mensajes siguientes empiezan en segundos. | El primer mensaje se lee entero, más o menos 40 segundos por cada 30,000 tokens. | El primer mensaje se lee entero: 30,000 tokens tardan de 6 a 8 segundos en la estación de trabajo y de 16 a 22 segundos en el portátil de 8 GB. |
 
 Más: [dónde se guardan tus chats](docs/INSTALL.md#where-things-are-stored), [la API](docs/DETAILS.md#using-it).
 
@@ -475,50 +469,87 @@ La explicación larga: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Cada parte 
 
 ### GLM 5.3 Flash
 
-- **El modelo tiene 12,096 expertos**, 288 en cada una de 42 capas. Cada palabra necesita 8 de cada capa.
-- **Tu tarjeta gráfica** guarda los más usados, unos 2,470 en una tarjeta de 32 GB. El motor cuenta cuáles usa
-  tu trabajo y vuelve a elegir en el siguiente arranque.
-- **Mientras escribe**, tu procesador calcula los expertos que la tarjeta no tiene. **Mientras lee un prompt**,
-  pasan por la tarjeta, 1,024 tokens cada vez.
-- **Adivinar y comprobar:** un bloque del modelo hecho para adivinar propone las siguientes palabras, y el modelo las
-  comprueba a la vez.
-- **El archivo del modelo se usa donde está**, sin una segunda copia en el disco. Un arranque tarda unos 6 segundos
-  cuando el archivo ya está en tu RAM.
+<p align="center"><img src="docs/media/how-it-works-glm.svg" width="860" alt="Los 12,096 expertos del modelo: los más usados en la tarjeta gráfica, los demás en la RAM y el archivo del modelo en el SSD"></p>
+
+- **El modelo es un equipo de 12,096 pequeños expertos**, 288 en cada una de 42 capas. Cada palabra solo necesita 8 de
+  cada capa.
+- **Tu tarjeta gráfica** guarda los más usados, unos 2,470 en una tarjeta de 32 GB: el motor cuenta cuáles usa tu
+  trabajo y vuelve a elegir en el siguiente arranque. **Tu RAM** tiene los demás, y **tu procesador** los calcula al
+  mismo tiempo. **Tu SSD** guarda el archivo del modelo, que se usa donde está, sin una segunda copia; un arranque
+  tarda unos 6 segundos cuando el archivo ya está en tu RAM.
+
+<p align="center"><img src="docs/media/guess-and-check-glm.svg" width="860" alt="Un bloque del modelo adivina las siguientes palabras; el modelo las comprueba todas a la vez y se queda con las correctas"></p>
+
+- **Adivinar y comprobar:** un bloque del modelo hecho para adivinar propone las siguientes palabras. El modelo las
+  comprueba todas a la vez. Recibes la misma respuesta, 1.1-1.2x antes.
+- **Los textos largos se leen en trozos grandes** (1,024 tokens cada vez; los expertos que la tarjeta no tiene pasan
+  por ella), a entre 780 y 1,250 tokens por segundo.
 
 Cada parte y sus cifras: [docs/GLM.md](docs/GLM.md#how-it-uses-the-card) (en inglés).
 
 ### Qwen3.6-35B-A3B
 
-- **El modelo tiene 10,240 expertos**, 256 en cada una de 40 capas. Cada palabra necesita 8 de cada capa.
-- **Tu tarjeta gráfica** guarda todos los que caben, y a partir de 24 GB caben todos. Limitada a 8 GB, la tarjeta de
-  pruebas guardó unos 1,200, y sirvieron más o menos la mitad de lo que usó una respuesta: mientras escribe, el motor
-  trae a la tarjeta los expertos que la respuesta elige una y otra vez.
+<p align="center"><img src="docs/media/how-it-works-qwen36.svg" width="860" alt="Los 10,240 expertos del modelo: los que una respuesta elige una y otra vez en la tarjeta gráfica, los demás en la RAM y el archivo del modelo en el SSD"></p>
+
+- **El modelo es un equipo de 10,240 pequeños expertos**, 256 en cada una de 40 capas. Cada palabra solo necesita 8 de
+  cada capa.
+- **Tu tarjeta gráfica** guarda todos los que caben: unos 2,000 en una tarjeta de 8 GB, y a partir de 24 GB caben
+  todos. Mientras escribe, el motor trae a la tarjeta los expertos que la respuesta elige una y otra vez, y en la
+  tarjeta de 8 GB los que tiene sirven alrededor del 55 % de lo que usa una respuesta. **Tu RAM** tiene los demás, y
+  **tu procesador** los calcula al mismo tiempo. **Tu SSD** guarda el archivo del modelo, que se usa donde está, sin
+  una segunda copia.
+
+<p align="center"><img src="docs/media/guess-and-check-qwen36.svg" width="860" alt="El bloque borrador del modelo adivina las siguientes palabras; el modelo las comprueba todas a la vez y se queda con las correctas"></p>
+
 - **Adivinar y comprobar:** el bloque borrador del propio modelo, que está en su archivo, propone las siguientes
-  palabras, y el modelo las comprueba a la vez.
-- **El archivo del modelo se usa donde está**, sin una segunda copia en el disco.
+  palabras. El modelo las comprueba todas a la vez. Recibes la misma respuesta, 1.2-1.5x antes.
+- **Los textos largos se leen en trozos grandes** (1,024 tokens cada vez). Cuando la tarjeta no tiene todos los
+  expertos, los demás pasan por ella una sola vez para todo el prompt.
+
+Cada parte y sus cifras: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works) (en inglés).
 
 ### Ornith 1.5
 
-- **La arquitectura de Qwen3.6-35B-A3B con otros pesos:** 10,240 expertos, 256 en cada una de 40 capas, y 8 de cada
-  capa para cada palabra.
-- **Tu tarjeta gráfica** guarda todos los que caben, y a partir de 24 GB caben todos. Limitada a 8 GB, la tarjeta de
-  pruebas guardó unos 1,600, y sirvieron más o menos la mitad de lo que usó una respuesta.
-- **Adivinar y comprobar:** su bloque borrador también está en su archivo. Acierta menos veces que el de
-  Qwen3.6-35B-A3B.
-- **El archivo del modelo se usa donde está**, sin una segunda copia en el disco.
+<p align="center"><img src="docs/media/how-it-works-ornith.svg" width="860" alt="Los 10,240 expertos del modelo: los que una respuesta elige una y otra vez en la tarjeta gráfica, los demás en la RAM y el archivo del modelo en el SSD"></p>
+
+- **La arquitectura de Qwen3.6-35B-A3B con otros pesos:** un equipo de 10,240 pequeños expertos, 256 en cada una de 40
+  capas, y solo 8 de cada capa para cada palabra.
+- **Tu tarjeta gráfica** guarda todos los que caben: unos 2,500 en una tarjeta de 8 GB, y a partir de 24 GB caben
+  todos. Mientras escribe, el motor trae a la tarjeta los expertos que la respuesta elige una y otra vez, y en la
+  tarjeta de 8 GB los que tiene sirven alrededor del 60 % de lo que usa una respuesta. **Tu RAM** tiene los demás, y
+  **tu procesador** los calcula al mismo tiempo. **Tu SSD** guarda el archivo del modelo, que se usa donde está, sin
+  una segunda copia.
+
+<p align="center"><img src="docs/media/guess-and-check-ornith.svg" width="860" alt="El bloque borrador del modelo adivina las siguientes palabras; el modelo las comprueba todas a la vez y se queda con las correctas"></p>
+
+- **Adivinar y comprobar:** su bloque borrador también está en su archivo y propone las siguientes palabras. Acierta
+  menos veces que el de Qwen3.6-35B-A3B, así que recibes la misma respuesta 1.1-1.2x antes.
+- **Los textos largos se leen en trozos grandes** (1,024 tokens cada vez). Cuando la tarjeta no tiene todos los
+  expertos, los demás pasan por ella una sola vez para todo el prompt.
+
+Cada parte y sus cifras: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works) (en inglés).
 
 ### Gemma 4 26B-A4B
 
-- **El modelo tiene 3,840 expertos**, 128 en cada una de 30 capas. Cada palabra necesita 8 de cada capa, además de
-  una parte de la capa que usan todas las palabras.
-- **Tu tarjeta gráfica** guarda todos los que caben, y según la estimación del instalador a partir de 16 GB caben
-  todos. Limitada a 8 GB, la tarjeta de pruebas guardó unos 200, y con los que el motor trajo mientras escribía
-  sirvieron entre un tercio y la mitad de lo que usó una respuesta.
-- **Adivinar y comprobar:** el pequeño modelo borrador de Google para él, un archivo de 0.5 GB que el instalador
-  descarga con el modelo, propone las siguientes palabras.
-- **El archivo del modelo se usa donde está**, sin una segunda copia en el disco.
+<p align="center"><img src="docs/media/how-it-works-gemma4.svg" width="860" alt="Los 3,840 expertos del modelo: los que una respuesta elige una y otra vez en la tarjeta gráfica, los demás en la RAM y el archivo del modelo en el SSD"></p>
 
-Cada parte de los tres y sus cifras: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works) (en inglés).
+- **El modelo es un equipo de 3,840 pequeños expertos**, 128 en cada una de 30 capas. Cada palabra solo necesita 8 de
+  cada capa, además de una parte de la capa que usan todas las palabras.
+- **Tu tarjeta gráfica** guarda todos los que caben: unos 640 en una tarjeta de 8 GB, y según la estimación del
+  instalador a partir de 16 GB caben todos. Mientras escribe, el motor trae a la tarjeta los expertos que la respuesta
+  elige una y otra vez, y en la tarjeta de 8 GB los que tiene sirven alrededor del 55 % de lo que usa una respuesta.
+  **Tu RAM** tiene los demás, y **tu procesador** los calcula al mismo tiempo. **Tu SSD** guarda el archivo del modelo
+  y su modelo borrador, que se usan donde están, sin una segunda copia.
+
+<p align="center"><img src="docs/media/guess-and-check-gemma4.svg" width="860" alt="El pequeño modelo borrador de Google adivina las siguientes palabras; el modelo las comprueba todas a la vez y se queda con las correctas"></p>
+
+- **Adivinar y comprobar:** el pequeño modelo borrador de Google para él, un archivo de 0.5 GB que el instalador
+  descarga con el modelo, propone las siguientes palabras. El modelo las comprueba todas a la vez. Recibes la misma
+  respuesta, 1.3-1.6x antes.
+- **Los textos largos se leen en trozos grandes** (1,024 tokens cada vez). Cuando la tarjeta no tiene todos los
+  expertos, los demás pasan por ella una sola vez para todo el prompt.
+
+Cada parte y sus cifras: [docs/BACKENDS.md](docs/BACKENDS.md#how-a-backend-works) (en inglés).
 
 ## Créditos y licencia
 

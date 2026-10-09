@@ -2,7 +2,9 @@
 (serve/web/tokens.css), its icons (serve/web/sprite.svg) and its font (Outfit, embedded, SIL OFL 1.1).  Light and dark
 follow the reader's system setting.
 
-    python docs/media/make_figures.py        # writes docs/media/how-it-works.svg and docs/media/guess-and-check.svg
+Every model has the same two: where its experts are, and how guessed words are checked.
+
+    python docs/media/make_figures.py        # writes docs/media/how-it-works*.svg and docs/media/guess-and-check*.svg
 """
 import base64
 import random
@@ -38,6 +40,107 @@ text,.ink{fill:#eef1f3}.bg{fill:#0e1113}.card{fill:#161a1d;stroke:#2a3036}.soft{
 .on-acc{fill:#052e20}.icon-acc{color:#4ade80}.icon-dan{color:#ff8a98}
 }
 """ % FONT
+
+# What the two figures say of each model.  A card is (subtitle, its three lines, the caption under its drawing);
+# its number is how many of the card's 130 dots, or of the RAM's 260, are drawn in color.  The first model's files have
+# the names the README had before the others were drawn.
+MODELS = {
+    "": dict(
+        head="The model is made of 24,576 small specialists - “experts”.",
+        sub=("For each word it writes, it asks only 10 of them. PolyStrata keeps the busy ones",
+             "on your graphics card and the rest in RAM - so it runs on a normal PC."),
+        at_work=(10, "10 at work for one word"),
+        gpu=("Small but very fast: 12-24 GB",
+             ["Runs the core of the model", "for every word, and keeps the", "~4,000 experts used most"],
+             "the most-used experts", 130),
+        ram=("Big: 32-64 GB of memory",
+             ["Holds all 24,576 experts. When a", "word needs one the card doesn't", "have, the CPU does it - at once"],
+             "all 24,576 experts", 18),
+        ssd=("Holds a 29 GB lookup table",
+             ["The model looks up a few", "small rows of it per word -", "no need to keep it in RAM"],
+             "a few rows per word", (1, 4)),
+        guess=("A small, fast helper inside the model guesses the next words. The big model checks all the "
+               "guesses in one go",
+               "and keeps the ones it agrees with. The big model decides every word - it just arrives 1.6-1.8x sooner."),
+        rows=("Helper guesses", "Big model checks"),
+    ),
+    "glm": dict(
+        head="The model is made of 12,096 small specialists - “experts”.",
+        sub=("Each word needs only 8 of the 288 in a layer. PolyStrata keeps the busy ones",
+             "on your graphics card and the rest in RAM - so one PC runs it, not a server."),
+        at_work=(8, "8 of a layer's 288 at work"),
+        gpu=("It has run on a 32 GB card",
+             ["Runs the core of the model", "for every word, and keeps the", "~2,470 experts used most"],
+             "the most-used experts", 130),
+        ram=("Big: 96 GB of memory or more",
+             ["Holds the other ~9,600 experts.", "When a word needs one of", "them, the CPU does it - at once"],
+             "the experts the card lacks", 18),
+        ssd=("The model's file: 79-114 GB",
+             ["PolyStrata uses the file where", "it is: no second copy. A start", "takes seconds once it is in RAM"],
+             "read once, at the first start", (0, 1, 2, 3, 4, 5)),
+        guess=("A block of the model made for guessing proposes the next words. The model checks all the "
+               "guesses in one go",
+               "and keeps the ones it agrees with. The model decides every word - it just arrives 1.1-1.2x sooner."),
+        rows=("Block guesses", "Model checks"),
+    ),
+    "qwen36": dict(
+        head="The model is made of 10,240 small specialists - “experts”.",
+        sub=("Each word needs only 8 of the 256 in a layer. PolyStrata keeps the busy ones",
+             "on your graphics card and the rest in RAM - so it runs on a normal PC."),
+        at_work=(8, "8 of a layer's 256 at work"),
+        gpu=("8 GB or more; 24 GB holds all",
+             ["Runs the core of the model for", "every word, and keeps the busy", "experts: ~2,000 on an 8 GB card"],
+             "the experts an answer keeps using", 130),
+        ram=("32 GB of memory",
+             ["Holds the experts the card", "lacks. When a word needs one,", "the CPU does it - at once"],
+             "the experts the card lacks", 18),
+        ssd=("The model's file: 13-23 GB",
+             ["PolyStrata uses the file where", "it is: no second copy, and no", "lookup table to build"],
+             "read once, at the first start", (0, 1, 2, 3, 4, 5)),
+        guess=("The model's own draft block, which is in its file, guesses the next words. The model checks all "
+               "the guesses in one go",
+               "and keeps the ones it agrees with. The model decides every word - it just arrives 1.2-1.5x sooner."),
+        rows=("Block guesses", "Model checks"),
+    ),
+    "ornith": dict(
+        head="The model is made of 10,240 small specialists - “experts”.",
+        sub=("Each word needs only 8 of the 256 in a layer. PolyStrata keeps the busy ones",
+             "on your graphics card and the rest in RAM - so it runs on a normal PC."),
+        at_work=(8, "8 of a layer's 256 at work"),
+        gpu=("8 GB or more; 24 GB holds all",
+             ["Runs the core of the model for", "every word, and keeps the busy", "experts: ~2,500 on an 8 GB card"],
+             "the experts an answer keeps using", 130),
+        ram=("32 GB of memory",
+             ["Holds the experts the card", "lacks. When a word needs one,", "the CPU does it - at once"],
+             "the experts the card lacks", 18),
+        ssd=("The model's file: 14-24 GB",
+             ["PolyStrata uses the file where", "it is: no second copy, and no", "lookup table to build"],
+             "read once, at the first start", (0, 1, 2, 3, 4, 5)),
+        guess=("The model's own draft block, which is in its file, guesses the next words. The model checks all "
+               "the guesses in one go",
+               "and keeps the ones it agrees with. The model decides every word - it just arrives 1.1-1.2x sooner."),
+        rows=("Block guesses", "Model checks"),
+    ),
+    "gemma4": dict(
+        head="The model is made of 3,840 small specialists - “experts”.",
+        sub=("Each word needs only 8 of the 128 in a layer. PolyStrata keeps the busy ones",
+             "on your graphics card and the rest in RAM - so it runs on a normal PC."),
+        at_work=(8, "8 of a layer's 128 at work"),
+        gpu=("8 GB or more; 16 GB holds all",
+             ["Runs the core of the model for", "every word, and keeps the busy", "experts: ~640 on an 8 GB card"],
+             "the experts an answer keeps using", 130),
+        ram=("32 GB of memory",
+             ["Holds the experts the card", "lacks. When a word needs one,", "the CPU does it - at once"],
+             "the experts the card lacks", 18),
+        ssd=("The model's file: 11-17 GB",
+             ["PolyStrata uses the file where", "it is: no second copy, and no", "lookup table to build"],
+             "read once, at the first start", (0, 1, 2, 3, 4, 5)),
+        guess=("Google's small draft model for it, a file of 0.5 GB, guesses the next words. The model checks all "
+               "the guesses in one go",
+               "and keeps the ones it agrees with. The model decides every word - it just arrives 1.3-1.6x sooner."),
+        rows=("Draft guesses", "Model checks"),
+    ),
+}
 
 
 def icon(name, x, y, size=28, cls="icon"):
@@ -78,33 +181,26 @@ def arrow(x1, y1, x2, y2, cls="arrow"):
             f'<path d="M{x2} {y2} l-8 -5 v10 z" class="arrowhead"/>')
 
 
-def how_it_works():
+def how_it_works(m):
     W, H = 960, 470
     b = []
-    # the headline strip: one word, 10 experts
+    # the headline strip: one word, a few experts
     b.append(rect(24, 24, W - 48, 92))
     b.append(icon("i-chat", 48, 50, 36))
-    b.append(text(100, 62, "The model is made of 24,576 small specialists - “experts”.", 19, 600))
-    b.append(text(100, 88, "For each word it writes, it asks only 10 of them. PolyStrata keeps the busy ones",
-                  15, 400, "muted"))
-    b.append(text(100, 106, "on your graphics card and the rest in RAM - so it runs on a normal PC.", 15, 400, "muted"))
-    b.append(dots(W - 262, 46, 28, 4, 7.6, 10, seed=3))
-    b.append(text(W - 262, 94, "10 at work for one word", 12, 500, "acc-t"))
+    b.append(text(100, 62, m["head"], 19, 600))
+    b.append(text(100, 88, m["sub"][0], 15, 400, "muted"))
+    b.append(text(100, 106, m["sub"][1], 15, 400, "muted"))
+    b.append(dots(W - 262, 46, 28, 4, 7.6, m["at_work"][0], seed=3))
+    b.append(text(W - 262, 94, m["at_work"][1], 12, 500, "acc-t"))
     # three cards
     cw, ch, cy = 288, 316, 136
     xs = [24, 24 + cw + 24, 24 + 2 * (cw + 24)]
     cards = [
-        ("i-gpu", "Graphics card", "Small but very fast: 12-24 GB", "acc",
-         ["Runs the core of the model", "for every word, and keeps the", "~4,000 experts used most"],
-         "the most-used experts", 5, 26, 26 * 5, "acc"),
-        ("i-memory", "RAM + processor", "Big: 32-64 GB of memory", "info",
-         ["Holds all 24,576 experts. When a", "word needs one the card doesn't", "have, the CPU does it - at once"],
-         "all 24,576 experts", 10, 26, 18, "info"),
-        ("i-disk", "SSD", "Holds a 29 GB lookup table", "warn",
-         ["The model looks up a few", "small rows of it per word -", "no need to keep it in RAM"],
-         "", 0, 0, 0, "warn"),
+        ("i-gpu", "Graphics card", "acc", m["gpu"][0], m["gpu"][1], m["gpu"][2], 5, 26, m["gpu"][3], "acc"),
+        ("i-memory", "RAM + processor", "info", m["ram"][0], m["ram"][1], m["ram"][2], 10, 26, m["ram"][3], "info"),
+        ("i-disk", "SSD", "warn", m["ssd"][0], m["ssd"][1], m["ssd"][2], 0, 0, 0, "warn"),
     ]
-    for (ic, title, sub, tone, lines, dlabel, rows, cols, lit, lit_cls), x in zip(cards, xs):
+    for (ic, title, tone, sub, lines, dlabel, rows, cols, lit, lit_cls), x in zip(cards, xs):
         b.append(rect(x, cy, cw, ch))
         b.append(rect(x + 20, cy + 20, 48, 48, 12, tone + "-tint"))
         b.append(icon(ic, x + 30, cy + 30, 28, "icon"))
@@ -115,30 +211,28 @@ def how_it_works():
         if rows:
             b.append(dots(x + 26, cy + 196, cols, rows, 9.4, lit, lit_cls, seed=len(title)))
             b.append(text(x + 20, cy + 196 + rows * 9.4 + 14, dlabel, 12, 500, "muted"))
-        else:                                       # the SSD: a table of rows, a few being read
+        else:                                       # the SSD: a file's rows, the ones being read in color
             for r in range(6):
                 yy = cy + 190 + r * 17
-                b.append(rect(x + 20, yy, cw - 40, 11, 4, "warn" if r in (1, 4) else "soft"))
-            b.append(text(x + 20, cy + 306, "a few rows per word", 12, 500, "muted"))
+                b.append(rect(x + 20, yy, cw - 40, 11, 4, "warn" if r in m["ssd"][3] else "soft"))
+            b.append(text(x + 20, cy + 306, dlabel, 12, 500, "muted"))
     return svg(W, H, "".join(b), "How PolyStrata splits the model between your graphics card, RAM and SSD")
 
 
-def guess_and_check():
+def guess_and_check(m):
     W, H = 960, 330
     b = [rect(24, 24, W - 48, H - 48)]
     b.append(icon("i-thinking", 48, 48, 30))
     b.append(text(92, 70, "Guess, then check - many words per step", 19, 700))
-    b.append(text(92, 94, "A small, fast helper inside the model guesses the next words. The big model checks all the "
-                          "guesses in one go", 15, 400, "muted"))
-    b.append(text(92, 113, "and keeps the ones it agrees with. The big model decides every word - it just arrives 1.6-1.8x sooner.",
-                  15, 400, "muted"))
+    b.append(text(92, 94, m["guess"][0], 15, 400, "muted"))
+    b.append(text(92, 113, m["guess"][1], 15, 400, "muted"))
     words = ["def", "reverse", "(items", "):"]
     fixed = ", key):"                                  # the model's own word where the guess was wrong
     ok = [True, True, True, False]
-    # row 1: the helper's guesses (dashed chips)
+    # row 1: the guesses (dashed chips)
     y1, y2 = 156, 238
-    b.append(text(48, y1 + 24, "Helper guesses", 14, 600, "muted"))
-    b.append(text(48, y2 + 24, "Big model checks", 14, 600, "muted"))
+    b.append(text(48, y1 + 24, m["rows"][0], 14, 600, "muted"))
+    b.append(text(48, y2 + 24, m["rows"][1], 14, 600, "muted"))
     x = 176
     xs = []
     for i, w in enumerate(words[:4]):
@@ -172,7 +266,9 @@ def guess_and_check():
 
 
 if __name__ == "__main__":
-    (OUT / "how-it-works.svg").write_text(how_it_works(), encoding="utf-8")
-    (OUT / "guess-and-check.svg").write_text(guess_and_check(), encoding="utf-8")
-    for f in ("how-it-works.svg", "guess-and-check.svg"):
-        print(f, (OUT / f).stat().st_size, "bytes")
+    for name, m in MODELS.items():
+        tail = ("-" + name if name else "") + ".svg"
+        (OUT / ("how-it-works" + tail)).write_text(how_it_works(m), encoding="utf-8")
+        (OUT / ("guess-and-check" + tail)).write_text(guess_and_check(m), encoding="utf-8")
+        for f in ("how-it-works" + tail, "guess-and-check" + tail):
+            print(f, (OUT / f).stat().st_size, "bytes")
