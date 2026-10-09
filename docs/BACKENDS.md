@@ -500,7 +500,9 @@ CUDA 13.0, the engine compiled with Visual Studio's 2022 compiler. Setup install
 models: a context of 32,768, the picture encoder on the CPU, and 13 threads for the experts that are not in
 VRAM. The numbers are the benchmark's through the server, as on the first machine, with a browser and the
 desktop on the same card and in the same RAM. They are one pass over the nine sizes with one build of the
-engine, the one with every change in [What was tuned](#what-was-tuned).
+engine, the one with every change in [What was tuned](#what-was-tuned) but the last. That one, the longer
+window, is Gemma 4's alone, and its three sizes were run again with it: the short chat at 68 to 72, 88 and 67
+tokens/s, the answer after the prompt at 51 to 55, 61 to 63 and 53.
 
 The README's test, `--prompt-tokens 24000`, three runs a size. A size's first run is the first after another
 model was in memory, and it starts without a profile of the experts' use. The table has the two runs after it.
@@ -911,6 +913,8 @@ picture in its place, and a prompt without pictures after them.
 | | Ornith there | 49 to 51 | 55 to 58 |
 | A time of the window way that is behind counts for half | Gemma 4 there, the runs that kept to halves | 62 | 68 |
 | The expert profile saved over the old one, and after answers | Gemma 4 there, the run after one that left a profile | 68 | 79 |
+| A repeat fills a window of eight where a guess costs no VRAM | Gemma 4 there, giving a file back with a name changed | 88 | 100 to 107 |
+| | Gemma 4 there, quoting a function and explaining it | 74 to 78 | 83 to 88 |
 
 All but Gemma 4's draft model and GLM's recurrent step, indexer and selection are in the shared runtime or its
 kernels, so every architecture with that kind of layer has them. Gemma 4's row for the routing has the two
@@ -1286,7 +1290,20 @@ of its experts, went from 53 to 74 and from 44 to 59, with its file coming from 
 Filling the cache by what the prompt used was looked at and left: the cache's slots hold 64% of that answer's
 uses at the most, and 47% when they are chosen by the prompt's.
 
-The four were built and measured on Windows only, and GLM 5.3 Flash, whose attention has kernels of its own,
+An answer that copies from its prompt, a file given back with a change or a function quoted, is where the repeat
+drafter is nearly always right, and a window held four tokens: Gemma 4 wrote such a copy at 88 tokens/s, with 3.5
+tokens a window. A longer window is not free for every model. A guess needs the recurrent layers' state as it was
+before it, a copy in VRAM for every guess, 62 MiB each for Qwen3.6. With a window of eight its cache starts with
+1,784 experts where 1,976, and it writes the copy at 111 tokens/s where 90, a short chat at 70 to 74 where 72 to
+76 and an answer after a long prompt at 60 to 62 where 62 to 63. Gemma 4 has no such layers. So a window is
+eight tokens for a model without them and four for the others, and the draft block still guesses three at most,
+each of its guesses being a run of the block: with it free to fill eight, Gemma 4's short chat came 1% to 3%
+slower. Gemma 4 then writes the copy at 100 to 107 tokens/s and the quote at 83 to 88 where 74 to 78, with its
+short chat and its answer after a long prompt where they were. The two were asked with the model's thinking off,
+through the server, after 21,900 tokens that are three source files. With thinking on, the first 600 tokens of
+the same answers are the model's reasoning, which copies nothing, and came no faster with a window of eight.
+
+These five were built and measured on Windows only, and GLM 5.3 Flash, whose attention has kernels of its own,
 was not run with them.
 
 ## Adding a model of an architecture that is there
@@ -1333,8 +1350,8 @@ Setup knows the files in the table above. Another file of one of these architect
   laptop as well. GLM 5.3 Flash was not run on Windows.
 - The changes that came from the laptop were built on Windows only: the staging buffer's size, the waiting of
   the CPU's pool, a window whole or in halves, the reserve and the cache that is sized again, a prompt in one
-  read, the kernels of an answer's attention, and the saving of the profile. The pool sleeps with
-  `std::atomic`'s `wait`, which on Linux needs libstdc++ 11 or newer.
+  read, the kernels of an answer's attention, the saving of the profile, and a window's length by the model.
+  The pool sleeps with `std::atomic`'s `wait`, which on Linux needs libstdc++ 11 or newer.
 - The target of 8 GB of VRAM with 32 GB of RAM was measured on that one laptop. Each model's largest file
   takes its RAM to 28.6 to 31.4 GiB of 31.8 with what else runs there, and the two largest of all then read
   part of a prompt from the disk.
