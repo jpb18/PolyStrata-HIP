@@ -572,10 +572,3 @@ Unsloth und patrickbdevaney. Qwen3.6-35B-A3B ist vom Qwen-Team und Gemma 4 von G
 auf und nutzt Teile von [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Alle Danksagungen:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). PolyStrata ist Open Source unter der [MIT-Lizenz](LICENSE). Ein
 paar Teile und alle Modelle haben eigene Lizenzen ([welche](docs/HOW_IT_WORKS.md#license)).
-
-## Unterstützen
-
-PolyStrata ist kostenlos und Open Source. Der größte Teil davon ist die Arbeit des Autors von
-[Strata](https://github.com/Niko1221/Strata). Wenn es dir nützt, kannst du diese Arbeit unterstützen:
-
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>

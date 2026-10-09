@@ -547,10 +547,3 @@ patrickbdevaney のファイルで動きます。Qwen3.6-35B-A3B は Qwen チー
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) の一部を使っています。すべてのクレジット：
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits)。PolyStrata は [MIT License](LICENSE) のオープンソースです。一部のパーツと
 すべてのモデルには、それぞれ独自のライセンスがあります（[どれか](docs/HOW_IT_WORKS.md#license)）。
-
-## 支援する
-
-PolyStrata は無料のオープンソースです。その大部分は [Strata](https://github.com/Niko1221/Strata) の作者の仕事です。
-役に立ったら、その開発を支援していただけます：
-
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>

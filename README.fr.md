@@ -570,10 +570,3 @@ quantification d'[Unsloth](https://huggingface.co/unsloth). Ornith 1.5 est d'orn
 contributeurs, et utilise des parties de [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). Tous les
 crédits : [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). PolyStrata est open source sous [licence MIT](LICENSE).
 Quelques parties et chaque modèle ont leur propre licence ([lesquelles](docs/HOW_IT_WORKS.md#license)).
-
-## Soutenir
-
-PolyStrata est gratuit et open source. La plus grande partie est le travail de l'auteur de
-[Strata](https://github.com/Niko1221/Strata). S'il vous est utile, vous pouvez soutenir ce travail :
-
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>

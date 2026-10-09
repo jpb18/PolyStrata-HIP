@@ -520,9 +520,3 @@ Niko1221 和各位贡献者的 [Strata](https://github.com/Niko1221/Strata)，�
 [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) 的部分代码。完整致谢：
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits)。PolyStrata 以 [MIT 许可证](LICENSE)开源。少数部分和每个模型
 有各自的许可证（[具体是哪些](docs/HOW_IT_WORKS.md#license)）。
-
-## 支持
-
-PolyStrata 免费且开源，其中大部分是 [Strata](https://github.com/Niko1221/Strata) 作者的成果。如果它对你有用，欢迎支持上游的开发：
-
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="请我喝杯咖啡" height="50"></a></p>
