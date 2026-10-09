@@ -377,7 +377,21 @@ struct Session {
                 kept.inside(i, m, due);
                 marks.clear();
                 for (const auto& d : due) marks.push_back({(int) d.first, d.second});
-                engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size());
+                // A long prompt is one read.  Between its layers the read says how far it is, and a request that
+                // was stopped gives it up there: the conversation is then at its last checkpoint.
+                const std::function<bool(int, int)> turn = [&](int done, int of) {
+                    if (stop.load()) return false;
+                    if (ms_since(shown) >= 500.0) {
+                        on_progress(i + m * done / of, n, ms_since(t0), false);
+                        shown = Clock::now();
+                    }
+                    return true;
+                };
+                if (!engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn)) {
+                    kept.rewind();
+                    r.finish = "cancel";
+                    break;
+                }
             } else {
                 engine.eval(ids.data() + i, (int) m, last);
             }

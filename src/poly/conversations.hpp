@@ -85,26 +85,72 @@ public:
     }
 
     /// For an engine that reads past checkpoints in one go, of n tokens from `at`: the checkpoints due after the
-    /// read's first token, each taken as before() takes one but for its state, which the engine writes when it
-    /// has it.  `out` gets, for each, how many of the read's tokens come before it and where its state_bytes()
-    /// go; null where no state is wanted, and the engine still breaks its work there as if one were.  The bytes
-    /// stay until the next call of this.
+    /// read's first token.  `out` gets, for each, how many of the read's tokens come before it and where its
+    /// state_bytes() go; null where no state is wanted, and the engine still breaks its work there as if one
+    /// were.  The engine writes a state when it has it.  The checkpoints are the conversation's once read() has
+    /// the read's tokens, and not at all when the read is given up (rewind()).
+    ///
+    /// A state is wanted for the checkpoints the conversation would still have, had each been taken in turn as
+    /// before() takes one.  A long prompt has more due than are kept, and a state can be hundreds of MiB.
     void inside(int64_t at, int64_t n, std::vector<std::pair<int64_t, uint8_t*>>& out) {
         out.clear();
         due_.clear();
+        after_.clear();
         if (o_.checkpoints < 1 || o_.every < 1) return;
-        for (int64_t p = (at / o_.every + 1) * o_.every; p < at + n; p += o_.every) {
-            due_.push_back(mark(p));
-            out.emplace_back(p - at, due_.back() ? due_.back()->p.get() : nullptr);
+        for (const Checkpoint& m : cur().marks) after_.push_back(m.pos);
+        const int64_t first = (at / o_.every + 1) * o_.every;
+        for (int64_t p = first; p < at + n; p += o_.every) {
+            after_.push_back(p);
+            while (after_.size() > (size_t) o_.checkpoints) after_.erase(after_.begin() + (std::ptrdiff_t) drop_of(after_));
+        }
+        for (int64_t p = first; p < at + n; p += o_.every) {
+            const bool stays = std::find(after_.begin(), after_.end(), p) != after_.end();
+            due_.push_back({p, stays ? blob(e_.state_bytes()) : nullptr});
+            out.emplace_back(p - at, due_.back().state ? due_.back().state->p.get() : nullptr);
         }
     }
 
-    /// The engine has read these tokens.
-    void read(const int32_t* t, int64_t n) { cur().seq.insert(cur().seq.end(), t, t + n); }
+    /// The engine has read these tokens.  A read that inside() was asked about is done with them, and its
+    /// checkpoints take their places.
+    void read(const int32_t* t, int64_t n) {
+        Slot& s = cur();
+        s.seq.insert(s.seq.end(), t, t + n);
+        if (due_.empty()) return;
+        const auto stays = [&](const Checkpoint& m) {
+            return m.state && std::find(after_.begin(), after_.end(), m.pos) != after_.end();
+        };
+        std::vector<Checkpoint> marks;
+        for (const Checkpoint& m : s.marks)
+            if (stays(m)) marks.push_back(m);
+        for (const Checkpoint& m : due_)
+            if (stays(m)) marks.push_back(m);
+        s.marks = std::move(marks);
+        due_.clear();
+    }
+
+    /// A read was given up part way: what it left in the engine is not the conversation's, and the checkpoints
+    /// inside it are not taken.  The conversation goes back to its last checkpoint, which the engine is left
+    /// at, or is forgotten when it has none.  Returns where the conversation is then.
+    int64_t rewind() {
+        due_.clear();
+        Slot& s = cur();
+        if (s.marks.empty()) {
+            slots_[cur_] = Slot{};
+            e_.reset();
+            return 0;
+        }
+        const int64_t at = s.marks.back().pos;
+        cut(s, at);
+        e_.load_state(s.marks.back().state->p.get(), at);
+        return at;
+    }
     /// The first n tokens of the conversation are the prompt the client sent.
     void prompt_was(int64_t n) { cur().prompt = std::min(n, len(cur())); }
     /// After an engine error: the conversation being read is lost.  The caller resets the engine.
-    void drop() { slots_[cur_] = Slot{}; }
+    void drop() {
+        slots_[cur_] = Slot{};
+        due_.clear();
+    }
 
     /// The parked conversations, the bytes they hold, and how many were pushed out so far.
     size_t parked() const { return held(slots_.size()).count; }
@@ -182,17 +228,23 @@ private:
         if (!b) return nullptr;
         s.marks.push_back({at, b});
         while (s.marks.size() > (size_t) o_.checkpoints) {
-            // The one whose neighbours are closest together goes; the last two stay, the end of this prompt and
-            // of the one before being where a client most often comes back to.
-            size_t drop = 0;
-            int64_t gap = INT64_MAX;
-            for (size_t k = 0; k + 2 < s.marks.size(); ++k) {
-                const int64_t g = s.marks[k + 1].pos - (k ? s.marks[k - 1].pos : 0);
-                if (g < gap) gap = g, drop = k;
-            }
-            s.marks.erase(s.marks.begin() + (std::ptrdiff_t) drop);
+            std::vector<int64_t> pos;
+            for (const Checkpoint& m : s.marks) pos.push_back(m.pos);
+            s.marks.erase(s.marks.begin() + (std::ptrdiff_t) drop_of(pos));
         }
         return b;
+    }
+
+    // Of more checkpoints than are kept, the one that goes: the one whose neighbours are closest together.  The
+    // last two stay, the end of this prompt and of the one before being where a client most often comes back to.
+    static size_t drop_of(const std::vector<int64_t>& pos) {
+        size_t drop = 0;
+        int64_t gap = INT64_MAX;
+        for (size_t k = 0; k + 2 < pos.size(); ++k) {
+            const int64_t g = pos[k + 1] - (k ? pos[k - 1] : 0);
+            if (g < gap) gap = g, drop = k;
+        }
+        return drop;
     }
 
     static void cut(Slot& s, int64_t at) {
@@ -334,7 +386,8 @@ private:
     size_t cur_ = 0;
     uint64_t clock_ = 0;
     size_t evictions_ = 0;
-    std::vector<BlobPtr> due_;   // inside()'s states, held while the engine writes them
+    std::vector<Checkpoint> due_;   // inside()'s checkpoints, until read() makes them the conversation's
+    std::vector<int64_t> after_;    // where the conversation's checkpoints are once that read is done
 };
 
 }  // namespace strata::poly

@@ -64,6 +64,8 @@ struct Fake {
 // Above zero: the prompts are read this many tokens at a time, past the checkpoints inside (inside()), as an
 // engine does that reads several calls together.  Zero: a call at a time, up to the next checkpoint.
 int64_t far = 0;
+// Above zero: one such read in so many is given up part way (rewind()), and the request is made again.
+unsigned quits = 0;
 
 struct Chat {
     Fake e;
@@ -82,6 +84,16 @@ struct Chat {
             const int64_t room = std::min<int64_t>(n - 1 - i, far > 0 ? far : 100);
             const int64_t m = last ? 1 : far > 0 ? room : kept.until_checkpoint(i, room);
             kept.before(i, last);
+            if (far > 0 && !last && quits > 0 && rng() % quits == 0) {
+                // the engine got part of the way, a state among the ones due written or not, and stopped
+                kept.inside(i, m, due);
+                e.eval(ids.data() + i, m / 2);
+                if (!due.empty() && due[0].second && due[0].first <= m / 2) e.save_state(due[0].second);
+                e.h ^= 0x5EEDull;
+                const int64_t back = kept.rewind();
+                check(back <= i && e.at == back && e.holds(kept.seq()), "a read given up leaves the last checkpoint");
+                return ask(ids, reply);
+            }
             if (far > 0 && !last) {
                 kept.inside(i, m, due);
                 int64_t done = 0;
@@ -255,6 +267,31 @@ void any_order() {
 
 }  // namespace
 
+// A long prompt read in one go has more checkpoints due than a conversation keeps.  Only the ones it keeps get a
+// state, and they are the ones that reading up to each checkpoint in turn leaves: where a prompt that goes on
+// from each place is taken up says which are there.
+void long_read() {
+    std::vector<int64_t> left[2];
+    const std::vector<int32_t> a = text(1, 31000);
+    for (int way = 0; way < 2; ++way) {
+        far = way ? 40000 : 0;
+        for (int64_t place = 2048; place < 31000; place += 2048) {
+            Chat c(options(0));
+            c.e.state = 1 << 20;
+            std::vector<int32_t> first = a;
+            check(c.ask(first) == 0, "a first prompt is read from its start");
+            std::vector<int32_t> b(a.begin(), a.begin() + place + 1);
+            b = b + text(3, 5);
+            left[way].push_back(c.ask(b));
+        }
+    }
+    far = 0;
+    check(left[0] == left[1], "a read past its checkpoints keeps the ones a read to each of them keeps");
+    const std::vector<int64_t> six = {0,     0,     0,     8192,  8192,  8192,  8192, 16384,
+                                      16384, 16384, 22528, 22528, 22528, 28672, 30720};
+    check(left[1] == six, "which are five of the fifteen inside, beside the one before the prompt's last token");
+}
+
 int main() {
     for (const int64_t f : {0, 6000, 700}) {   // 700: reads that start and end between checkpoints
         far = f;
@@ -264,6 +301,13 @@ int main() {
         limits();
         any_order();
     }
+    quits = 3;   // with reads given up, the places a prompt is taken up from are others: any order, any options
+    for (const int64_t f : {6000, 700}) {
+        far = f;
+        any_order();
+    }
+    quits = 0;
+    long_read();
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }

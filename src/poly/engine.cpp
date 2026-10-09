@@ -886,7 +886,8 @@ void Engine::shared_scratch() {
 void Engine::alloc() {
     // --dump-layers prints one token's stages
     rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
-    read_rows_ = rows_ < kStageRows ? rows_ : std::max(rows_, std::min(kReadRows, opt_.max_context) / rows_ * rows_);
+    const size_t most = std::min<size_t>(kReadBytes / ((size_t) streams() * n_embd_ * sizeof(float)), opt_.max_context);
+    read_rows_ = rows_ < kStageRows ? rows_ : std::max(rows_, (int) most / rows_ * rows_);
     rec_n_ = recurrent_floats();
     state_n_ = rec_n_ + (draft_ ? (size_t) n_embd_ : 0);
     state_ = (float*) dmalloc((state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0)) * sizeof(float),
@@ -1730,7 +1731,8 @@ void Engine::layer(int il, int n) {
 //
 // A checkpoint inside the read (a mark) is taken a layer at a time: when a layer has run the tokens before it,
 // the layer's state is what save_state() would find there, and it is copied before the next call changes it.
-void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) {
+bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
+                  const std::function<bool(int, int)>* turn) {
     if (n < 1 || n > read_rows_) throw std::logic_error("read takes 1 to max_read() tokens");
     for (const Image& im : images_)
         if (im.at < pos_ + n && im.at + im.n > pos_)
@@ -1750,11 +1752,13 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
     }
     const int n_calls = (int) calls_.size();
     if (n_calls == 1 || !mmq_ || cached_ == total_experts()) {
-        for (const Call& c : calls_) {
-            eval(tokens + c.at, c.m, false);
-            if (c.mark >= 0 && marks[c.mark].state) save_state(marks[c.mark].state);
+        for (int c = 0; c < n_calls; ++c) {
+            const Call& call = calls_[(size_t) c];
+            eval(tokens + call.at, call.m, false);
+            if (call.mark >= 0 && marks[call.mark].state) save_state(marks[call.mark].state);
+            if (turn && c + 1 < n_calls && !(*turn)(c + 1, n_calls)) return false;
         }
-        return;
+        return true;
     }
     if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
@@ -1767,7 +1771,15 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
     float* const r0 = r_;
     const int64_t pos0 = pos_;
     const bool host = n_calls > 2;
-    if (host && !h_res_) h_res_ = (float*) hmalloc((size_t) read_rows_ * r_bytes, "pinned memory");
+    if (host && h_res_rows_ < n) {   // for this read's tokens and some more, so that a longer one seldom asks again
+        if (h_res_) {
+            host_allocs_.erase(std::find(host_allocs_.begin(), host_allocs_.end(), (void*) h_res_));
+            ck(cudaFreeHost(h_res_), "pinned memory");
+            h_res_ = nullptr;
+        }
+        h_res_rows_ = std::min(read_rows_, (n + 4095) / 4096 * 4096);
+        h_res_ = (float*) hmalloc((size_t) h_res_rows_ * r_bytes, "pinned memory");
+    }
     const auto home = [&](int c) { return h_res_ + (size_t) calls_[(size_t) c].at * r_row; };
     const auto half = [&](int c) { return r0 + (size_t) (host ? c % 2 : c) * part; };
     // call c's rows back into its half of r_, behind whatever the stream has there of the half's last call
@@ -1798,7 +1810,17 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
     const int turns = n_layer_ + (draft_ ? 1 : 0);
     shared_ahead_ = true;
     try {
-        for (int il = 0; il < turns; ++il)
+        for (int il = 0; il < turns; ++il) {
+            // Between two turns the caller may give the read up.  The layers so far have the read's tokens in
+            // their state and the others have not: the sequence cannot go on from here, nor from where it was.
+            if (turn && il > 0 && !(*turn)(il, turns)) {
+                if (host) ck(cudaStreamSynchronize(cs(rs_)), "read");
+                ck(cudaStreamSynchronize(cs(st_)), "read");
+                shared_ahead_ = false;
+                r_ = r0;
+                pos_ = pos0;
+                return false;
+            }
             for (int c = 0; c < n_calls; ++c) {
                 const Call& call = calls_[(size_t) c];
                 r_ = half(c);
@@ -1832,6 +1854,7 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
                        "read");
                 fetch(c + 2 < n_calls ? c + 2 : c % 2);
             }
+        }
         if (host) ck(cudaStreamSynchronize(cs(rs_)), "read");
     } catch (...) {
         if (host) cudaStreamSynchronize(cs(rs_));
@@ -1844,6 +1867,7 @@ void Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks) 
     r_ = r0;
     pos_ = pos0 + n;
     stats_.tokens += n;
+    return true;
 }
 
 // The recurrent layers are the only ones a wrong guess would spoil: every other layer's row of a position is

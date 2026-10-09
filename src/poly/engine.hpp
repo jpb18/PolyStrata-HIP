@@ -160,7 +160,12 @@ public:
         uint8_t* state;
     };
     int max_read() const { return read_rows_; }
-    void read(const int32_t* tokens, int n, const Mark* marks = nullptr, int n_marks = 0);
+    /// `turn`, when given, is asked each time the read's tokens are through one more layer (or, where the read
+    /// is its calls one by one, through one more call), with how many of how many that is.  False gives the read
+    /// up: read() returns false, and what the engine holds from pos() on is spoiled, its recurrent state and a
+    /// window layer's rows among it.  The caller goes back to a state saved before (load_state()) or resets.
+    bool read(const int32_t* tokens, int n, const Mark* marks = nullptr, int n_marks = 0,
+              const std::function<bool(int, int)>* turn = nullptr);
 
     /// Whether the architecture reads pictures.
     virtual bool sees() const { return false; }
@@ -376,7 +381,8 @@ protected:
         int at, m, mark;      ///< its first token, how many, and the mark it ends at or -1
     };
     std::vector<Call> calls_;
-    float* h_res_ = nullptr;  ///< read_rows_ tokens' rows, pinned; allocated by the first read that needs it
+    float* h_res_ = nullptr;  ///< h_res_rows_ tokens' rows, pinned: as many as the longest read so far that needed it
+    int h_res_rows_ = 0;
     void* rs_ = nullptr;      ///< the stream of those copies
     void* ev_in_[2] = {};     ///< marks a call's rows in each half of r_
     void* ev_out_[2] = {};    ///< marks the card done with a call in each half
