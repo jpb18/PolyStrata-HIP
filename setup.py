@@ -4810,14 +4810,14 @@ def poly_fits(d, ram, vram_gb, hip) -> bool:
     return not hip and vram_gb >= poly_beside_gb(d) + 2 and ram >= poly_ram_need(d, vram_gb) - 4
 
 
-def poly_verdict(d, ram, vram_gb, hip) -> str:
-    """--check's line for a size of strata-poly's models."""
+def poly_verdict(d, ram, vram_gb, hip, windows=False) -> str:
+    """--check's line for a size of strata-poly's models.  `windows`: its family has run there (FAMILIES)."""
     if hip:
         return "does not run on AMD cards (its engine is a CUDA program)"
     if vram_gb < poly_beside_gb(d) + 2:
         return f"does not fit: it takes about {poly_beside_gb(d)} GB of VRAM before any expert"
     need = poly_ram_need(d, vram_gb)
-    return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN else "") + (
+    return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN and not windows else "") + (
         f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)" if poly_fits(d, ram, vram_gb, hip) else
         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
 
@@ -5622,7 +5622,7 @@ def main() -> int:
         for f, fd in FAMILIES.items():                  # the families with sizes of their own
             for m, d in fd.get("models", {}).items():
                 any_fits = any_fits or poly_fits(d, ram, gpu["vram_gb"], hip)
-                say(f"  {fd['title']} {m}: {poly_verdict(d, ram, gpu['vram_gb'], hip)}")
+                say(f"  {fd['title']} {m}: {poly_verdict(d, ram, gpu['vram_gb'], hip, bool(fd.get('windows')))}")
         if not any_fits:
             # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts). It only
             # reports: --model NAME --yes still installs one anyway.

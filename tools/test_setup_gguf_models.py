@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -95,6 +96,9 @@ class Estimates(unittest.TestCase):
         self.assertIn("read from the SSD", setup.poly_verdict(d, 12, 8.0, False))
         self.assertIn("does not fit", setup.poly_verdict(d, 64, 6.0, False))
         self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True))
+        with mock.patch.object(setup, "WIN", True):     # a family that has run on Windows is not said to be untried
+            self.assertIn("not tried on Windows", setup.poly_verdict(d, 32, 8.0, False))
+            self.assertNotIn("not tried on Windows", setup.poly_verdict(d, 32, 8.0, False, True))
 
 
 class Config(unittest.TestCase):
