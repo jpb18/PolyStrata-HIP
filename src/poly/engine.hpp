@@ -51,7 +51,8 @@ struct Options {
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
-    int window = 4;               ///< the most tokens window() takes: the known one and guesses after it; 1: none
+    int window = 0;               ///< the most tokens window() takes: the known one and guesses after it; 1: none;
+                                  ///< 0: 8 for a model without recurrent layers, 4 for one with them
     bool draft = true;            ///< run the block that guesses ahead, when there is one and window is above 1
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
                                   ///< for an architecture that guesses with a model of its own, that model's file

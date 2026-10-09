@@ -48,6 +48,10 @@ double ms_since(Clock::time_point t) { return std::chrono::duration<double, std:
 // A save is a file of some 40 KB and a rename.
 constexpr double kProfileSaveMs = 10000.0;
 
+// The most tokens of a window whose guesses are the block's: the token the model has and three guesses, each
+// from the one before.  A repeat of the conversation may fill a longer window (Options::window).
+constexpr int kBlockWindow = 4;
+
 struct Sampling {
     float temperature = 0.f;   // 0: the most likely token
     float top_p = 1.f, min_p = 0.f;
@@ -463,7 +467,7 @@ struct Session {
                     const double one = policy.cost_ms(1);
                     double sure = 1.0, tokens = 1.0;
                     int n_d = 0;
-                    for (int32_t from = t; n_d < most - 1; from = d[n_d++]) {
+                    for (int32_t from = t; n_d < std::min(most, kBlockWindow) - 1; from = d[n_d++]) {
                         const double more =
                             std::clamp((policy.cost_ms(n_d + 2) - policy.cost_ms(n_d + 1)) / one, 0.2, 0.8);
                         // asking takes time too: not when a guess the block were sure of would not pay for it
@@ -754,7 +758,8 @@ void usage() {
                  "                         (default: on the node whose memory holds most of the experts)\n"
                  "  --window N             the most tokens that go through the model at once while an answer is\n"
                  "                         written: the one that is known and guesses at the ones after it, which\n"
-                 "                         count when they turn out right (default 4, 1 = no guesses)\n"
+                 "                         count when they turn out right (1 = no guesses; default 4, and 8 for a\n"
+                 "                         model without recurrent layers, where the block still guesses 3)\n"
                  "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
                  "                         (default 3, 0 = never)\n"
                  "  --no-draft             do not run the block that guesses ahead\n"

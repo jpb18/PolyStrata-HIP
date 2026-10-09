@@ -307,7 +307,7 @@ float Engine::shape_f(const char* key) const {
 void Engine::load_shape() {
     const MetaValue* nextn = meta_in(*gg_, "nextn_predict_layers");
     n_layer_ = shape_i("block_count") - (nextn ? (int) nextn->u : 0);
-    if (opt_.draft && opt_.window > 1) {
+    if (opt_.draft && opt_.window != 1) {
         const std::string probe = blk(n_layer_, "nextn.eh_proj.weight");
         if (nextn && nextn->u == 1 && gg_->find(probe)) block_ = gg_.get();
         else if (dg_ && dg_->find(probe)) block_ = dg_.get();
@@ -768,20 +768,21 @@ void Engine::load(const Options& o) {
     if (opt_.stage_ahead < 0) throw std::runtime_error("the batch size to stage ahead from cannot be negative");
     if (opt_.expert_swaps < 0 || opt_.expert_swaps > 64)
         throw std::runtime_error("0 to 64 experts can be on their way into the cache at a time");
-    if (opt_.window < 1 || opt_.window > 8) throw std::runtime_error("a window is 1 to 8 tokens");
-    opt_.window = std::min(opt_.window, opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context));
+    if (opt_.window < 0 || opt_.window > 8)
+        throw std::runtime_error("a window is 1 to 8 tokens, or 0 for the model's own");
+    if (opt_.dump || std::min(opt_.prompt_batch, opt_.max_context) == 1) opt_.window = 1;
     gg_ = std::make_unique<Shards>(opt_.model);
-    if (!opt_.draft_model.empty() && opt_.draft && opt_.window > 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
+    if (!opt_.draft_model.empty() && opt_.draft && opt_.window != 1) dg_ = std::make_unique<Shards>(opt_.draft_model);
     load_geometry();
     if (block_ != dg_.get()) dg_.reset();
 
     cudaStream_t st = nullptr;
     ck(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking), "cudaStreamCreate");
     st_ = st;
-    for (int r = 0; r < opt_.window; ++r) {
+    for (void*& row : ev_row_) {
         cudaEvent_t ev = nullptr;
         ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
-        ev_row_[r] = ev;
+        row = ev;
     }
     ev_ = ev_row_[0];
     blas_ = blas_create(st_);
@@ -818,6 +819,11 @@ void Engine::load(const Options& o) {
         }
     }
 
+    // A guess needs the recurrent layers' state as it was before it, which is a copy in VRAM for every guess of a
+    // window: 62 MiB each for Qwen3.6, out of what its experts would have.  A model without such layers pays
+    // nothing for a longer window, and a repeat of the conversation can fill one.  The layers are counted by now.
+    if (opt_.window == 0) opt_.window = recurrent_floats() == 0 ? 8 : 4;
+    opt_.window = std::min({opt_.window, opt_.prompt_batch, opt_.max_context});
     alloc();
     if (!opt_.profile.empty()) read_profile(opt_.profile, (int) layers_.size(), n_expert_, prior_);
     fill_expert_cache();
