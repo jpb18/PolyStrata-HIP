@@ -391,6 +391,15 @@ class Main(unittest.TestCase):
         self.assertIn("has not been tried on Windows", out)
         self.assertEqual(self.built, [])
 
+    def test_windows_is_not_asked_for_a_family_that_ran_there(self):
+        for family in ("qwen36", "ornith", "gemma4"):
+            with self.subTest(family):
+                self.built = []
+                code, out, cfg = self.main(win=True, family=family, ram=32.0, vram=8.0)
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("Windows", out)
+                self.assertEqual(len(self.built), 1)
+
     def test_cuda_12_stops(self):
         code, out, cfg = self.main(["--cuda", "12"])
         self.assertNotEqual(code, 0)

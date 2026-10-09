@@ -282,12 +282,13 @@ FAMILIES = {
     # "mmproj": the repository's image encoder, downloaded beside the model's file when images are wanted;
     # "vision_vram_gb" is what it holds on the GPU once it has warmed up at 1,024 image tokens (measured there too).
     # A family's first size is the one setup takes on a PC with the RAM for it, the second the one it takes with
-    # less, and the third is by name (poly_default()).
+    # less, and the third is by name (poly_default()).  "windows": installed by setup and run there, on one PC.
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen; quantized by Unsloth",
-               "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB of RAM beside an 8 GB card; "
-                        "a smaller and a larger size too",
+               "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a 17 GB file, ~21 GB of RAM "
+                        "beside an 8 GB card; a smaller and a larger size too",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
                "tag": "qwen36-", "name": "qwen3.6-35b-a3b", "engine": "poly", "vision": True, "experimental": True,
+               "windows": True,
                "row_bytes": 26624, "mmproj_hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "mmproj": "mmproj-F16.gguf",
                "vision_gb": 0.9, "vision_vram_gb": 1.6,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
@@ -312,7 +313,7 @@ FAMILIES = {
                         "a smaller and a larger size too",
                "hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf",
                "shards": 1, "tag": "ornith-", "name": "ornith-1.5-35b-a3b", "engine": "poly", "vision": True,
-               "experimental": True, "row_bytes": 26624,
+               "experimental": True, "windows": True, "row_bytes": 26624,
                "mmproj_hf": hf("mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF"), "mmproj": "mmproj.gguf", "vision_gb": 0.9,
                "vision_vram_gb": 1.6,
                "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the file",
@@ -340,6 +341,7 @@ FAMILIES = {
                         "larger size too",
                "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "shards": 1,
                "tag": "gemma4-", "name": "gemma-4-26b-a4b", "engine": "poly", "vision": True, "experimental": True,
+               "windows": True,
                "row_bytes": 28672, "mmproj_hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "mmproj": "mmproj-F16.gguf",
                "vision_gb": 1.2, "vision_vram_gb": 2.4, "vision_most": 1024,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
@@ -3888,9 +3890,9 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         fail(f"{title}'s engine is built for RTX 20 cards and newer: there is none for Pascal / Volta cards or "
              "--cuda 12",
              "use an RTX 20 card or newer, without --cuda 12")
-    if WIN:
-        confirm_risk(f"{title}'s engine has been compiled and run on Linux only: on Windows the compile may fail",
-                     bool(a.family), a.yes, f"{title} has not been tried on Windows",
+    if WIN and not fam.get("windows"):
+        confirm_risk(f"{title} has been run on Linux only: its engine compiles on Windows, the model was not tried "
+                     "there", bool(a.family), a.yes, f"{title} has not been tried on Windows",
                      f"use Linux, or --family {family} --yes to try it here")
     if multi:
         warn(f"{title} runs on one GPU: {gpu_name(gpu)} alone")

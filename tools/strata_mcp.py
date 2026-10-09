@@ -87,8 +87,9 @@ FALLBACK_FAMILIES = {
                                                "32 GB), 64-128 GB of RAM", "tag": "glm-", "engine": "poly",
             "vision": False, "experimental": True},
     # a family with sizes of its own ("models"): two of these have a size of one name
-    "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on the strata-poly engine: Linux, one NVIDIA card; a 17 GB file, ~21 GB "
-                                                     "of RAM beside an 8 GB card; a smaller and a larger size too",
+    "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a "
+                                                     "17 GB file, ~21 GB of RAM beside an 8 GB card; a smaller and a "
+                                                     "larger size too",
                "tag": "qwen36-", "engine": "poly", "vision": True, "experimental": True,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6},
@@ -1014,7 +1015,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "experimental), part of the experts read from the SSD, glm = GLM 5.3 "
                                        "Flash (another model: Linux, one NVIDIA card, 64-128 GB of RAM, a 79 or "
                                        "114 GB download, no images), qwen36 = Qwen3.6-35B-A3B, ornith = Ornith "
-                                       "1.5, gemma4 = Gemma 4 26B-A4B (GLM's engine: Linux, one NVIDIA card, a "
+                                       "1.5, gemma4 = Gemma 4 26B-A4B (GLM's engine: one NVIDIA card, a "
                                        "13-17 GB download, 18-22 GB of RAM beside an 8 GB card by setup's "
                                        "estimate; images with vision)"},
              "model": {"type": "string", "enum": list(dict.fromkeys(

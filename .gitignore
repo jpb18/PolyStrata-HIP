@@ -51,6 +51,7 @@ build-vision-cuda12.bat
 /engine-cuda12/
 /engine-poly/
 /build-strata-poly.bat
+/build-vision-poly.bat
 /engine-glm/
 /build-strata-glm.bat
 /build-release*/
