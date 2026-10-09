@@ -885,7 +885,10 @@ void Engine::alloc() {
         std::iota(ramp.begin(), ramp.end(), 0);
         ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
 
-        stage_bytes_ = std::max((size_t) opt_.stage_mib << 20, one_expert);
+        // One layer's experts pass through it at a time, so it never holds more than a layer has.  A model of
+        // small experts has a few hundred MiB a layer, and the rest of the default would be VRAM that the
+        // expert cache of a small card does without.
+        stage_bytes_ = std::max(std::min((size_t) opt_.stage_mib << 20, (size_t) n_expert_ * one_expert), one_expert);
         chunk_bytes_ = std::max(kChunkBytes, one_expert);
         stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256 + kTail, "the expert staging buffer");
         for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");

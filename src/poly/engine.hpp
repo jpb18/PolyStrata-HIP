@@ -40,7 +40,8 @@ struct Options {
     // that the expert cache, and so decoding, does without.
     int prompt_batch = 1024;      ///< prompt tokens one eval() takes; the scratch is about 1.4 MiB of VRAM a token
     int stage_mib = 2048;         ///< the buffer the experts that are not cached pass through: by default about
-                                  ///< what a layer of Q2_K experts leaves out of the cache
+                                  ///< what a layer of Q2_K experts leaves out of the cache, and never more than
+                                  ///< a layer's experts take
     int stage_ahead = 256;        ///< from this many tokens, a call routes to most of a layer's experts, and the
                                   ///< ones that are not cached start their copy before the layer has routed; in a
                                   ///< read of several calls every call does; 0: never
