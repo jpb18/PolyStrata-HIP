@@ -29,6 +29,17 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#undef far   // a word of this file's
+#endif
+
 #ifndef STRATA_VERSION
 #define STRATA_VERSION "dev"
 #endif
@@ -796,7 +807,20 @@ void usage() {
 
 }  // namespace
 
+// Windows holds the threads of a process it takes for background work to the efficiency cores (power throttling):
+// on a laptop with both kinds an answer after a long prompt came at 39 tokens/s where 58.  serve/winjob.py takes the
+// engines the server starts out of it; this does the same for an engine anything else starts.
+void no_power_throttling() {
+#ifdef _WIN32
+    for (const ULONG speed_and_timer : {0x1ul | 0x4ul, 0x1ul}) {   // Windows 10 knows the first bit only
+        PROCESS_POWER_THROTTLING_STATE off{PROCESS_POWER_THROTTLING_CURRENT_VERSION, speed_and_timer, 0};
+        if (SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &off, sizeof(off))) return;
+    }
+#endif
+}
+
 int main(int argc, char** argv) {
+    no_power_throttling();
     Options o;
     CacheFlags cache;
     Sampling s;
