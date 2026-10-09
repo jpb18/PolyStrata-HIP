@@ -143,13 +143,15 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 /// Causal attention for the tokens from position `pos`: token t attends the rows 0 to pos + t, or with `window`
 /// only the last `window` of them.  q: n_head * dim a token.  kcache and vcache: fp16, kv_heads * dim a row; the
 /// heads read a row's keys and values in turn, n_head / kv_heads heads each.  With `ring`, the sequence's row p
-/// is cache row p % ring.  out: n_head * dim a token.  It takes `chunk` tokens at a time, and score is scratch
-/// of chunk * n_head floats for each row a token can attend: pos + rows, or `window` if that is less.  A token
-/// comes out the same whatever tokens the call has beside it.
+/// is cache row p % ring.  out: n_head * dim a token.  It takes `chunk` tokens a launch, which read the caches
+/// once between them, and score is scratch of chunk * n_head floats for each row a launch's tokens attend
+/// between them: pos + rows, or window - 1 + chunk if that is less.  A token comes out the same whatever tokens
+/// the call has beside it.  Queries and keys are read four values at a time: dim is a multiple of 4, q lies at
+/// a multiple of 16 bytes and kcache of 8, or it throws std::invalid_argument.
 /// With `whole` the call's tokens see each other: each attends up to the call's last row, so a token can attend
 /// window - 1 + rows of them.
 /// With `at`, the tokens start at the position the card holds there; the launches are sized for `room` rows,
-/// which must be no fewer than the last token attends, and score has room for them.
+/// which must be no fewer than a launch's tokens attend between them, and score has room for them.
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
             int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0);

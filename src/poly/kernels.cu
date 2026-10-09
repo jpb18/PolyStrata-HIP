@@ -18,8 +18,11 @@ namespace {
 constexpr int WARP = 32;
 constexpr int HC = 4;   // hyper-connection streams; the model's hc_mult, checked at load
 constexpr int KEY_BLOCK = 16;   // cache rows one block of dsa_keys_kernel copies
-constexpr int VALUE_DIMS = 32, VALUE_SHARES = 8;   // attn_value_kernel: a block's value dimensions, a sum's shares
-constexpr int SCORE_WARPS = 8;                     // attn_score_kernel: a block's warps, a row and a group each
+// attn_score_kernel: a block's warps, a row and a group each; the values of a key a thread reads at a step; the
+// queries a key's values are kept for
+constexpr int SCORE_WARPS = 8, SCORE_VALUES = 4, SCORE_QUERIES = 4;
+// attn_value_kernel: a block's value dimensions, a sum's shares, a block's queries
+constexpr int VALUE_DIMS = 32, VALUE_SHARES = 32, VALUE_QUERIES = 8;
 constexpr int KDA_TERMS = 16, KDA_COLUMNS = 16;   // kda_state_kernel: a thread's values, a block's columns
 
 __device__ __forceinline__ float warp_sum(float x) {
@@ -704,37 +707,93 @@ __device__ __forceinline__ int attn_rows(long long p, int window, long long last
     return int((last < 0 ? p : last) - *lo) + 1;
 }
 
-// score[head][i] = scale * (q[head] . the key of the head's group in the i-th row the token attends).  A warp
-// has a row and one of the row's groups of heads: its threads read the key side by side, 32 values a step, so
-// that a step reads one place of the cache.  A thread sums every 32nd product with a head's query, and the 32
-// sums are added in pairs.
-__global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
-                                  float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, float scale, int window, int ring, long long last,
-                                  const long long* __restrict__ at) {
-    const int tok = first + blockIdx.y, lane = threadIdx.x % WARP;
-    const int unit = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;   // a row and a group
-    const int key = unit / kv_heads, g = unit % kv_heads, per = n_head / kv_heads;
-    long long lo;
-    if (key >= attn_rows((at ? *at : pos) + tok, window, last, &lo)) return;
-    const long long row = ring > 0 ? (lo + key) % ring : lo + key;
-    const half* k = kcache + (size_t(row) * kv_heads + g) * dim;
-    for (int h = g * per; h < (g + 1) * per; ++h) {
-        const float* qh = q + (size_t(tok) * n_head + h) * dim;
-        float acc = 0.0f;
-        for (int d = lane; d < dim; d += WARP) acc += qh[d] * __half2float(k[d]);
-        for (int off = WARP / 2; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
-        if (lane == 0) score[(size_t(blockIdx.y) * n_head + h) * n_keys + key] = acc * scale;
+// The rows the `tokens` tokens from position p attend between them: how many, and the first of them.  A launch's
+// scores lie in that order, so that its tokens read a row of the caches once between them.
+__device__ __forceinline__ int attn_span(long long p, int tokens, int window, long long last, long long* lo) {
+    long long lo_last;
+    const int n = attn_rows(p + tokens - 1, window, last, &lo_last);
+    attn_rows(p, window, last, lo);
+    return int(lo_last - *lo) + n;
+}
+
+// The scores of the key k with N queries that lie one after the other from q, for the warp of attn_score_kernel.
+// score: where the first of them has its score of the key's row; the others lie n_keys floats apart.
+template <int N>
+__device__ __forceinline__ void attn_scores(const float* __restrict__ q, const half* __restrict__ k,
+                                            float* __restrict__ score, int n_keys, int dim, float scale) {
+    static_assert(SCORE_VALUES == 4, "a step is four halves of the key in one read and a float4 of a query");
+    const int lane = threadIdx.x % WARP;
+    const float* qi[N];
+    float acc[N];
+#pragma unroll
+    for (int i = 0; i < N; ++i) {
+        qi[i] = q + size_t(i) * dim;
+        acc[i] = 0.0f;
+    }
+    for (int d = SCORE_VALUES * lane; d < dim; d += SCORE_VALUES * WARP) {
+        const unsigned long long bits = *reinterpret_cast<const unsigned long long*>(k + d);
+        float x[SCORE_VALUES];
+#pragma unroll
+        for (int j = 0; j < SCORE_VALUES; ++j)
+            x[j] = __half2float(__ushort_as_half((unsigned short) (bits >> 16 * j)));
+#pragma unroll
+        for (int i = 0; i < N; ++i) {
+            const float4 y = *reinterpret_cast<const float4*>(qi[i] + d);
+            acc[i] += y.x * x[0];
+            acc[i] += y.y * x[1];
+            acc[i] += y.z * x[2];
+            acc[i] += y.w * x[3];
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < N; ++i) {
+        for (int off = WARP / 2; off > 0; off >>= 1) acc[i] += __shfl_down_sync(0xffffffffu, acc[i], off);
+        if (lane == 0) score[size_t(i) * n_keys] = acc[i] * scale;
     }
 }
 
-// Softmax in place over a head's scores of the rows its token attends.  One block per head and token.
-__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int window, long long last,
-                                    const long long* __restrict__ at) {
-    __shared__ float part[8];
+// attn_scores() for n queries: N at a time, then what is left by halves of N.
+template <int N>
+__device__ __forceinline__ void attn_scores_by(int n, const float* __restrict__ q, const half* __restrict__ k,
+                                               float* __restrict__ score, int n_keys, int dim, float scale) {
+    for (; n >= N; n -= N, q += size_t(N) * dim, score += size_t(N) * n_keys)
+        attn_scores<N>(q, k, score, n_keys, dim, scale);
+    if constexpr (N > 1) attn_scores_by<N / 2>(n, q, k, score, n_keys, dim, scale);
+}
+
+// score[token][head][i] = scale * (q[token][head] . the key of the head's group in the i-th row of the launch's
+// span).  A warp has a row and one of the row's groups of heads.  Its threads read the key side by side,
+// SCORE_VALUES values each a step, so that a step reads one place of the cache, and the launch's tokens read it
+// once between them: the cache of a long context is what the kernel waits for.  A thread sums its products with
+// a query, for up to SCORE_QUERIES heads of a token at a time, and a query's 32 sums are added in pairs.  A
+// token gets scores for the rows of the span it does not attend as well, which the softmax leaves out.
+__global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
+                                  float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
+                                  long long pos, int first, int tokens, float scale, int window, int ring,
+                                  long long last, const long long* __restrict__ at) {
+    const int unit = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;   // a row and a group
+    const int key = unit / kv_heads, g = unit % kv_heads, per = n_head / kv_heads;
     long long lo;
-    const int n = attn_rows((at ? *at : pos) + first + blockIdx.y, window, last, &lo);
-    float* row = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
+    if (key >= attn_span((at ? *at : pos) + first, tokens, window, last, &lo)) return;
+    const long long row = ring > 0 ? (lo + key) % ring : lo + key;
+    const half* k = kcache + (size_t(row) * kv_heads + g) * dim;
+    q += (size_t(first) * n_head + g * per) * dim;   // the group's heads of the launch's first token
+    score += size_t(g) * per * n_keys + key;         // and their scores of the row
+    for (int t = 0; t < tokens; ++t, q += size_t(n_head) * dim, score += size_t(n_head) * n_keys)
+        attn_scores_by<SCORE_QUERIES>(per, q, k, score, n_keys, dim, scale);
+}
+
+// Softmax in place over a head's scores of the rows its token attends; the other rows of the launch's span get
+// zero, which adds nothing to the token's values.  One block per head and token.
+__global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int first, int tokens, int window,
+                                    long long last, const long long* __restrict__ at) {
+    __shared__ float part[8];
+    const long long p = (at ? *at : pos) + first;
+    long long lo, lo0;
+    const int span = attn_span(p, tokens, window, last, &lo0);
+    const int n = attn_rows(p + blockIdx.y, window, last, &lo), own = int(lo - lo0);
+    float* all = score + (size_t(blockIdx.y) * gridDim.x + blockIdx.x) * n_keys;
+    float* row = all + own;   // the token's rows of the span
     float mx = -INFINITY;
     for (int j = threadIdx.x; j < n; j += blockDim.x) mx = fmaxf(mx, row[j]);
     mx = block_max(mx, part);
@@ -745,39 +804,82 @@ __global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int
     }
     const float inv = 1.0f / block_sum(sum, part);
     for (int j = threadIdx.x; j < n; j += blockDim.x) row[j] *= inv;
+    for (int j = threadIdx.x; j < own; j += blockDim.x) all[j] = 0.0f;
+    for (int j = own + n + threadIdx.x; j < span; j += blockDim.x) all[j] = 0.0f;
 }
 
-// out[head][d] = sum over the rows of score[head][row] * the value of the head's group in that row.  A block has
-// a head of its token and VALUE_DIMS value dimensions, `per` blocks a head.  A thread has one of the dimensions and
-// one of VALUE_SHARES shares of the rows, every VALUE_SHARES-th row from its own: a long context's sum would
-// otherwise be one thread's walk over every row.  The shares are added in their order.
+// A thread's sums of attn_value_kernel for N queries: over its share of the span's rows from `row` of the cache
+// on, of a row's value with each query's weight there.  w: the weights of the lane's query; the warp's first N
+// lanes have the N queries between them.
+template <int N>
+__device__ __forceinline__ void attn_values(const float* __restrict__ w, const half* __restrict__ v, size_t width,
+                                            long long row, int ring, int span, float* sums) {
+    float acc[N];
+#pragma unroll
+    for (int i = 0; i < N; ++i) acc[i] = 0.0f;
+    v += size_t(row) * width;
+    for (int j = threadIdx.x / VALUE_DIMS; j < span; j += VALUE_SHARES) {
+        const float x = __half2float(*v), weight = w[j];
+#pragma unroll
+        for (int i = 0; i < N; ++i) acc[i] += __shfl_sync(0xffffffffu, weight, i) * x;
+        v += VALUE_SHARES * width;
+        row += VALUE_SHARES;
+        if (ring > 0 && row >= ring) row -= ring, v -= size_t(ring) * width;
+    }
+#pragma unroll
+    for (int i = 0; i < N; ++i) sums[i] = acc[i];
+}
+
+// attn_values() for n queries, with N if no smaller power of two holds them.
+template <int N>
+__device__ __forceinline__ void attn_values_for(int n, const float* __restrict__ w, const half* __restrict__ v,
+                                                size_t width, long long row, int ring, int span, float* sums) {
+    if constexpr (N > 1)
+        if (n <= N / 2) return attn_values_for<N / 2>(n, w, v, width, row, ring, span, sums);
+    attn_values<N>(w, v, width, row, ring, span, sums);
+}
+
+// out[token][head][d] = sum over the rows of score[token][head][row] * the value of the head's group in that
+// row.  A block has a group of heads, VALUE_DIMS value dimensions (blockIdx.x) and up to VALUE_QUERIES of the
+// group's queries (blockIdx.y): the group's heads of the launch's first token, then of its second, and so on.
+// A thread has one of the dimensions and one of VALUE_SHARES shares of the span's rows, every VALUE_SHARES-th
+// row from its own, so that many reads of the cache are on their way at a time.  It reads a row's value once
+// for the block's queries; their weights of the row come in one read as well, a lane a query, and the warp
+// passes them around.  A token's shares are counted from its own first row and added in their order, so that it
+// comes out the same whatever tokens the launch has beside it.
 __global__ void attn_value_kernel(const float* __restrict__ score, const half* __restrict__ vcache,
                                   float* __restrict__ out, int n_keys, int dim, int n_head, int kv_heads,
-                                  long long pos, int first, int per, int window, int ring, long long last,
+                                  long long pos, int first, int tokens, int window, int ring, long long last,
                                   const long long* __restrict__ at) {
-    __shared__ float share[VALUE_SHARES][VALUE_DIMS];
-    const int tok = first + blockIdx.y, h = blockIdx.x / per;
-    const int dl = threadIdx.x % VALUE_DIMS, s = threadIdx.x / VALUE_DIMS;
-    const int d = (blockIdx.x % per) * VALUE_DIMS + dl;
-    float acc = 0.0f;
-    if (d < dim) {
-        long long lo;
-        const int n = attn_rows((at ? *at : pos) + tok, window, last, &lo);
-        const float* p = score + (size_t(blockIdx.y) * n_head + h) * n_keys;
-        const half* v = vcache + size_t(h / (n_head / kv_heads)) * dim + d;
-        const size_t width = size_t(kv_heads) * dim;
-        long long row = ring > 0 ? (lo + s) % ring : lo + s;
-        for (int j = s; j < n; j += VALUE_SHARES) {
-            acc += p[j] * __half2float(v[size_t(row) * width]);
-            row += VALUE_SHARES;
-            if (ring > 0 && row >= ring) row -= ring;
-        }
+    static_assert(VALUE_DIMS == WARP && VALUE_QUERIES <= WARP, "a warp is a share and reads a query's weight a lane");
+    __shared__ float share[VALUE_QUERIES][VALUE_SHARES][VALUE_DIMS];
+    const int per = n_head / kv_heads, dims = (dim + VALUE_DIMS - 1) / VALUE_DIMS;
+    const int g = blockIdx.x / dims, q0 = blockIdx.y * VALUE_QUERIES;
+    const int live = min(VALUE_QUERIES, tokens * per - q0);   // the block's queries
+    const int lane = threadIdx.x % VALUE_DIMS, s = threadIdx.x / VALUE_DIMS;
+    const int d = (blockIdx.x % dims) * VALUE_DIMS + lane;
+    const long long p = (at ? *at : pos) + first;
+    long long lo;
+    const int span = attn_span(p, tokens, window, last, &lo);
+    // the lane's query, and for a lane past the head's last value a value to read all the same
+    const int mine = q0 + min(lane % VALUE_QUERIES, live - 1);
+    float sums[VALUE_QUERIES];
+    attn_values_for<VALUE_QUERIES>(live, score + (size_t(mine / per) * n_head + g * per + mine % per) * n_keys,
+                                  vcache + size_t(g) * dim + min(d, dim - 1), size_t(kv_heads) * dim,
+                                  ring > 0 ? (lo + s) % ring : lo + s, ring, span, sums);
+    for (int i = 0; i < live; ++i) {
+        long long own;   // the first row of the query's token: the thread's rows are this share of the token's
+        attn_rows(p + (q0 + i) / per, window, last, &own);
+        share[i][(s + VALUE_SHARES - int((own - lo) % VALUE_SHARES)) % VALUE_SHARES][lane] = sums[i];
     }
-    share[s][dl] = acc;
     __syncthreads();
     if (s != 0 || d >= dim) return;
-    for (int k = 1; k < VALUE_SHARES; ++k) acc += share[k][dl];
-    out[(size_t(tok) * n_head + h) * dim + d] = acc;
+    for (int i = 0; i < live; ++i) {
+        float sum = share[i][0][lane];
+        for (int k = 1; k < VALUE_SHARES; ++k) sum += share[i][k][lane];
+        const int query = q0 + i;
+        out[((size_t(first) + query / per) * n_head + g * per + query % per) * dim + d] = sum;
+    }
 }
 
 // A chunk's queries and its results lie in two orders: the engine's (token, head) and the one a product per
@@ -1234,24 +1336,24 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window,
             int ring, bool whole, const long long* at, int room) {
     if (at && (whole || room < 1)) throw std::invalid_argument("attend: a position on the card needs its room");
+    if (dim % SCORE_VALUES || uintptr_t(q) % (SCORE_VALUES * sizeof(float)) || uintptr_t(kcache) % (SCORE_VALUES * 2))
+        throw std::invalid_argument("attend: queries and keys are read four values at a time");
     const long long last = whole ? pos + rows - 1 : -1;
-    // the rows the token at position p attends, which are the most among the tokens after it too
-    const auto most = [&](long long p) {
-        return int((whole ? last : p) - (window > 0 && p >= window ? p - window + 1 : 0)) + 1;
-    };
-    const int n_keys = at ? room : most(whole ? pos : pos + rows - 1);
-    const int per = grid(dim, VALUE_DIMS);
+    const int per = n_head / kv_heads;
     for (int first = 0; first < rows; first += chunk) {
         const int c = std::min(chunk, rows - first);
-        const int keys = at ? room : most(whole ? pos + first : pos + first + c - 1);
-        attn_score_kernel<<<dim3(grid(keys * kv_heads, SCORE_WARPS), c), SCORE_WARPS * WARP, 0, cs(stream)>>>(
-            q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale, window,
+        // the launch's span: from the first row its first token attends to the last its last token does
+        const long long p = pos + first, lo = window > 0 && p >= window ? p - window + 1 : 0;
+        const int keys = at ? room : int((whole ? last : p + c - 1) - lo) + 1;
+        attn_score_kernel<<<grid(size_t(keys) * kv_heads, SCORE_WARPS), SCORE_WARPS * WARP, 0, cs(stream)>>>(
+            q, (const half*) kcache, score, keys, dim, n_head, kv_heads, (long long) pos, first, c, scale, window,
             ring, last, at);
-        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window,
+        attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, keys, (long long) pos, first, c, window,
                                                                     last, at);
-        attn_value_kernel<<<dim3(n_head * per, c), VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
-            score, (const half*) vcache, out, n_keys, dim, n_head, kv_heads, (long long) pos, first, per, window,
-            ring, last, at);
+        attn_value_kernel<<<dim3(kv_heads * grid(dim, VALUE_DIMS), grid(c * per, VALUE_QUERIES)),
+                            VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
+            score, (const half*) vcache, out, keys, dim, n_head, kv_heads, (long long) pos, first, c, window, ring,
+            last, at);
     }
 }
 

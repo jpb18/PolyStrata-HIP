@@ -436,7 +436,7 @@ void Gemma4::attn(Block& B, int64_t pos, int n) {
                      att_, B.dim, n_head_, B.n_kv, 1.f, st_, window, ring, sees_all);
     else
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, B.dim, n_head_, B.n_kv, 1.f, st_, window, ring,
-               sees_all, at, !at ? 0 : B.swa ? std::min(window_, opt_.max_context) : room(n));
+               sees_all, at, !at ? 0 : B.swa ? std::min(window_ + n - 1, opt_.max_context) : room(n));
     lin(B.wo, att_, ao_, n);
 }
 
