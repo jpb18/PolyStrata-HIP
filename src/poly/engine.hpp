@@ -52,7 +52,7 @@ struct Options {
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     int window = 0;               ///< the most tokens window() takes: the known one and guesses after it; 1: none;
-                                  ///< 0: 8 for a model without recurrent layers, 4 for one with them
+                                  ///< 0: 8, or 4 where every guess keeps a copy of the recurrent state
     bool draft = true;            ///< run the block that guesses ahead, when there is one and window is above 1
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
                                   ///< for an architecture that guesses with a model of its own, that model's file
@@ -250,6 +250,9 @@ protected:
     virtual void draft_step(int32_t token, int i);
     /// The floats of every recurrent layer's state together.  They are state_'s first.
     virtual size_t recurrent_floats() const = 0;
+    /// Whether the recurrent layers leave their state after any tokens of a call, and not only after its first
+    /// ones.  A window then takes more tokens than it has places for their states (snap_tokens()).
+    virtual bool snaps_spread() const { return false; }
     /// The layers' places in state_, and the attention's caches: a row a position.
     virtual void alloc_caches() = 0;
     /// The scratch of the architecture's own kernels, a fbuf() each.  Called twice: the first time only counts.
@@ -299,6 +302,8 @@ protected:
     /// token then works in the place of another row of a window (run()).  An architecture adds its own buffers
     /// that a layer's head leaves for the layer's tail.
     virtual void shift_rows(ptrdiff_t by);
+    /// The tokens of a window of t that leave the recurrent state as it is after them, a bit a token.
+    unsigned snap_tokens(int t) const;
     /// The other names of a tensor or a metadata key in the files of this architecture, or null.
     virtual const Names* tensor_alias(const char* name) const { (void) name; return nullptr; }
     virtual const Names* meta_alias(const char* key) const { (void) key; return nullptr; }
@@ -419,8 +424,11 @@ protected:
     int32_t win_tok_[8] = {};           ///< the window's tokens, for keep()
     int64_t ahead_pos_ = -1;            ///< draft() has left the block's row of this position as its token leaves it,
     int32_t ahead_tok_ = 0;             ///< which is this one
-    float* snap_ = nullptr;      ///< window(): the recurrent state after each token but the last, rec_n_ apart
-    int n_snap_ = 0;             ///< how many of those the eval under way leaves
+    float* snap_ = nullptr;      ///< window(): the recurrent state after tokens of it (snap_tokens()), rec_n_ apart
+    int snap_places_ = 0;        ///< how many states it holds
+    float* snap_at_ = nullptr;   ///< where the call under way leaves the first of its states
+    unsigned snap_bits_ = 0;     ///< the tokens of the call under way that leave their state, a bit a token
+    bool windowed_ = false;      ///< the call under way is a window's
     int win_ = 0;                ///< the tokens of the window that keep() has not settled yet
     // A window with experts on the CPU goes through the layers whole, or in two halves one behind the other
     // (run()).  Which takes less time depends on the card, on the CPU and on how many of the experts the cache

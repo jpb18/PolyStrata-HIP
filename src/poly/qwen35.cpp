@@ -209,10 +209,10 @@ void Qwen35::gdn(Block& B, int n) {
     lin(B.wz, xn_, z_, n, xq_);
     lin(B.alpha, xn_, alpha_, n, xq_);
     lin(B.beta, xn_, beta_, n, xq_);
-    conv4_silu(proj_, B.past, fp(B.conv), qkv_, conv_dim_, n, st_, n_snap_ > 0 ? snap_ + (B.past - state_) : nullptr,
-               rec_n_, n_snap_);
+    conv4_silu(proj_, B.past, fp(B.conv), qkv_, conv_dim_, n, st_,
+               snap_bits_ ? snap_at_ + (B.past - state_) : nullptr, rec_n_, snap_bits_);
     gdn_step(qkv_, alpha_, beta_, fp(B.dt), fp(B.a), B.s, z_, fp(B.o_norm), gated_, s_dim_, v_heads_, k_heads_, n,
-             rms_eps_, st_, n_snap_ > 0 ? snap_ + (B.s - state_) : nullptr, rec_n_, n_snap_);
+             rms_eps_, st_, snap_bits_ ? snap_at_ + (B.s - state_) : nullptr, rec_n_, snap_bits_);
     lin(B.wo, gated_, ao_, n);
 }
 

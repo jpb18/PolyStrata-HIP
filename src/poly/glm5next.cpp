@@ -9,6 +9,7 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -357,13 +358,15 @@ void Glm5Next::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_
     }
 }
 
+// Its kernels take a count where the delta net's take a bit a token: they leave the state after a call's first
+// tokens.  A window of this model has a place for each of its tokens (snaps_spread()), so the bits are those.
 void Glm5Next::kda(Block& B, int n) {
     const size_t d = (size_t) n * d_inner_;
     lin(B.wq, xn_, proj_, n, xq_);
     lin(B.wk, xn_, proj_ + d, n, xq_);
     lin(B.wv, xn_, proj_ + 2 * d, n, xq_);
     kda_conv(proj_, B.conv, fp(B.conv_q), fp(B.conv_k), fp(B.conv_v), qkv_, d_inner_, n, st_,
-             n_snap_ > 0 ? snap_ + (B.conv - state_) : nullptr, rec_n_, n_snap_);
+             snap_bits_ ? snap_at_ + (B.conv - state_) : nullptr, rec_n_, std::popcount(snap_bits_));
 
     lin(B.f_a, xn_, fa_, n, xq_);
     lin(B.f_b, fa_, g1_, n);
@@ -372,7 +375,7 @@ void Glm5Next::kda(Block& B, int n) {
     lin(B.g_a, xn_, ga_, n, xq_);
     lin(B.g_b, ga_, g2_, n);
     kda_step(qkv_, g1_, fp(B.a), beta_, B.s, g2_, fp(B.o_norm), gated_, kda_dim_, n_head_, n, kda_lb_, rms_eps_,
-             st_, n_snap_ > 0 ? snap_ + (B.s - state_) : nullptr, rec_n_, n_snap_);
+             st_, snap_bits_ ? snap_at_ + (B.s - state_) : nullptr, rec_n_, std::popcount(snap_bits_));
     lin(B.wo, gated_, ao_, n);
 }
 

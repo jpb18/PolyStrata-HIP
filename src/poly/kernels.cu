@@ -982,11 +982,17 @@ __global__ void mul_sigmoid_kernel(float* __restrict__ acc, const float* __restr
     acc[size_t(blockIdx.y) * n + i] *= sigmoid(g[size_t(blockIdx.y) * g_stride + (one_gate ? 0 : i)]);
 }
 
+// Where a token leaves the recurrent state as it is after it: `snaps` has a bit for each of a call's tokens that
+// does, and their states lie in the tokens' order, `stride` floats apart.  Null for a token that leaves none.
+__device__ __forceinline__ float* snap_of(float* snap, size_t stride, unsigned snaps, int row) {
+    return row < 32 && (snaps >> row & 1u) ? snap + size_t(__popc(snaps & ((1u << row) - 1u))) * stride : nullptr;
+}
+
 // Three past inputs per channel, then the new one.  A thread is a channel and walks the tokens.  The state as it
-// is after each of the first n_snap tokens goes to snap, a state `stride` floats after the other.
+// is after a token of `snaps` goes to snap (snap_of()).
 __global__ void conv4_silu_kernel(const float* __restrict__ x, float* __restrict__ state,
                                   const float* __restrict__ w, float* __restrict__ out, int channels, int rows,
-                                  float* __restrict__ snap, size_t stride, int n_snap) {
+                                  float* __restrict__ snap, size_t stride, unsigned snaps) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= channels) return;
     const float* wc = w + 4 * size_t(c);
@@ -1000,8 +1006,8 @@ __global__ void conv4_silu_kernel(const float* __restrict__ x, float* __restrict
         s1 = s2;
         s2 = v;
         out[at] = y * sigmoid(y);
-        if (row < n_snap) {
-            float* m = snap + size_t(row) * stride + size_t(c) * 3;
+        if (float* m = snap_of(snap, stride, snaps, row)) {
+            m += size_t(c) * 3;
             m[0] = s0;
             m[1] = s1;
             m[2] = s2;
@@ -1049,7 +1055,7 @@ __global__ void gdn_gates_kernel(float* __restrict__ alpha, float* __restrict__ 
 __global__ void gdn_state_kernel(const float* __restrict__ qkv, const float* __restrict__ decay,
                                  const float* __restrict__ share, float* __restrict__ s, float* __restrict__ out,
                                  int dim, int n_head, int k_heads, int rows, float* __restrict__ snap, size_t stride,
-                                 int n_snap) {
+                                 unsigned snaps) {
     const int per_head = dim / int(blockDim.x / WARP);   // blocks a head
     const int h = blockIdx.x / per_head, hk = h % k_heads;
     const int j = (blockIdx.x % per_head) * int(blockDim.x / WARP) + int(threadIdx.x / WARP);
@@ -1069,7 +1075,8 @@ __global__ void gdn_state_kernel(const float* __restrict__ qkv, const float* __r
         sk = warp_sum(sk);
         const float d = (v - sk) * share[size_t(row) * n_head + h];
         float o = 0.0f;
-        float* m = row < n_snap ? snap + size_t(row) * stride + mine : nullptr;
+        float* m = snap_of(snap, stride, snaps, row);
+        if (m) m += mine;
         for (int i = lane; i < dim; i += WARP) {
             const float n = col[i] * dc + kn[i] * d;
             col[i] = n;
@@ -1434,21 +1441,21 @@ void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool
 }
 
 void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
-                float* snap, size_t stride, int n_snap) {
+                float* snap, size_t stride, unsigned snaps) {
     conv4_silu_kernel<<<grid(channels, 256), 256, 0, cs(stream)>>>(x, state, w, out, channels, rows, snap, stride,
-                                                                  snap ? n_snap : 0);
+                                                                  snap ? snaps : 0u);
 }
 
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s, const float* z,
               const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows, float norm_eps, void* stream,
-              float* snap, size_t stride, int n_snap) {
+              float* snap, size_t stride, unsigned snaps) {
     if (dim % WARP != 0 || dim > 256) throw std::invalid_argument("gdn_step: a head of 32 to 256 values, in 32s");
     const size_t row_n = (2 * size_t(k_heads) + n_head) * dim;
     const int gates = rows * n_head, columns = std::min(dim, 1024 / WARP);   // a block's columns: a warp each
     gdn_norm_kernel<<<rows * k_heads, dim, 0, cs(stream)>>>(qkv, dim, k_heads, row_n, norm_eps);
     gdn_gates_kernel<<<grid(gates, 256), 256, 0, cs(stream)>>>(alpha, beta, dt, a, n_head, gates);
     gdn_state_kernel<<<n_head * ((dim + columns - 1) / columns), columns * WARP, 0, cs(stream)>>>(
-        qkv, alpha, beta, s, out, dim, n_head, k_heads, rows, snap, stride, snap ? n_snap : 0);
+        qkv, alpha, beta, s, out, dim, n_head, k_heads, rows, snap, stride, snap ? snaps : 0u);
     gdn_out_kernel<<<rows * n_head, dim, 0, cs(stream)>>>(out, z, o_norm, dim, norm_eps);
 }
 

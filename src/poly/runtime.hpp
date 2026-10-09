@@ -51,6 +51,11 @@ constexpr int kWayFirst = 3;
 constexpr int kWayAgain = 32;
 constexpr double kWayWeight = 0.125, kWayBehind = 0.5;
 
+// window(): the recurrent states a window leaves when its layers can leave them after any of its tokens
+// (Engine::snaps_spread()), 62 MiB each for Qwen3.6.  A window of four has one after each token but the last,
+// so a longer one takes no more VRAM than that, and keep() puts up to two right tokens through the layers again.
+constexpr int kSnapPlaces = 3;
+
 using Clock = std::chrono::steady_clock;
 
 inline double ms_since(Clock::time_point t) {

@@ -180,9 +180,11 @@ void likeliest(const float* logits, int n, Likeliest* out, void* stream);
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream);
 /// A causal convolution of four taps over each of `channels` channels, and its SiLU.  x and out: `channels` values
 /// a token.  state: 3 past inputs a channel, oldest first, advanced here by `rows` tokens.  w: (4, channels).
-/// snap, stride and n_snap as in kda_conv.
+/// With snap, the state as it is after some of the call's tokens is also written there, for a window of guessed
+/// tokens to go back to (gdn_step too): `snaps` has a bit for each token that leaves it, and the states lie in
+/// the tokens' order, `stride` floats apart.
 void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
-                float* snap = nullptr, size_t stride = 0, int n_snap = 0);
+                float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
 /// The delta-rule step of every value head and its gated output, token after token: ggml's gated_delta_net op
 /// with one decay a head.  qkv: a token's conv outputs, the k_heads key heads' q, their k, then the n_head value
 /// heads' v, dim values each; value head h reads key head h % k_heads.  alpha and beta: n_head a token, as their
@@ -191,6 +193,6 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
 /// out = rms_norm(o) * o_norm * silu(z), n_head * dim values a token.  qkv, alpha and beta are overwritten.
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s,
               const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
-              float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
+              float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
 
 }  // namespace strata::poly

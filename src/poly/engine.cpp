@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -819,10 +820,12 @@ void Engine::load(const Options& o) {
         }
     }
 
-    // A guess needs the recurrent layers' state as it was before it, which is a copy in VRAM for every guess of a
-    // window: 62 MiB each for Qwen3.6, out of what its experts would have.  A model without such layers pays
-    // nothing for a longer window, and a repeat of the conversation can fill one.  The layers are counted by now.
-    if (opt_.window == 0) opt_.window = recurrent_floats() == 0 ? 8 : 4;
+    // A guess needs the recurrent layers' state as it was before it.  Where that is a copy in VRAM for every
+    // guess of a window, a window is four tokens: the copies come out of what the experts would have.  A model
+    // without such layers pays nothing for a longer one, and one whose layers leave the state after a few of a
+    // window's tokens (snaps_spread()) no more than for four.  A repeat of the conversation can fill a window
+    // of eight.  The layers are counted by now.
+    if (opt_.window == 0) opt_.window = recurrent_floats() == 0 || snaps_spread() ? 8 : 4;
     opt_.window = std::min({opt_.window, opt_.prompt_batch, opt_.max_context});
     alloc();
     if (!opt_.profile.empty()) read_profile(opt_.profile, (int) layers_.size(), n_expert_, prior_);
@@ -904,9 +907,10 @@ void Engine::alloc() {
         guess_ = (Likeliest*) dmalloc(sizeof(Likeliest), "scratch");
         h_guess_ = (Likeliest*) hmalloc(sizeof(Likeliest), "pinned memory");
     }
-    // window(): the state after each of its tokens but the last, for keep(), and every token's logits
-    if (opt_.window > 1)
-        snap_ = (float*) dmalloc(size_t(opt_.window - 1) * rec_n_ * sizeof(float), "the recurrent state");
+    // window(): the state after tokens of it, for keep(), and every token's logits
+    snap_places_ = snaps_spread() ? std::min(opt_.window - 1, kSnapPlaces) : opt_.window - 1;
+    if (snap_places_ > 0)
+        snap_ = (float*) dmalloc(size_t(snap_places_) * rec_n_ * sizeof(float), "the recurrent state");
     wlogits_ = (float*) dmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "scratch");
     h_wlogits_ = (float*) hmalloc(size_t(opt_.window) * n_vocab_ * sizeof(float), "pinned memory");
     alloc_caches();
@@ -1537,7 +1541,7 @@ void Engine::run(const int32_t* tokens, int n) {
     // What a launch needs of the position it reads at at_; an attention over the rows so far is recorded again
     // when the rows outgrow what it was sized for (head_key()).  A prompt's few tokens are not a window: they
     // leave no snapshots of the recurrent state, so their launches are others.
-    bool replay = opt_.graphs && n <= opt_.window && n_snap_ == n - 1 && !opt_.dump;
+    bool replay = opt_.graphs && n <= opt_.window && (windowed_ || n == 1) && !opt_.dump;
     for (int t = 0; t < n && replay; ++t) replay = !image_at(pos_ + t);
     const auto replayed = [&](std::vector<void*>& made, size_t key, auto&& work) {
         if (made.size() <= key) made.resize(key + 1, nullptr);
@@ -1554,9 +1558,9 @@ void Engine::run(const int32_t* tokens, int n) {
     }
     // A layer's launches around its routed experts.  up(): to its router's copy, with the shared expert behind it.
     // tail(): what the layer does with the experts' sum.  `rec` numbers the recording of m tokens' launches: a
-    // call's tokens together are [0, window) by their number, and a part of a window comes after those, by its
-    // first row, its tokens and whether the window's last token is among them.
-    const size_t wn = (size_t) opt_.window, recs = wn + 2 * wn * wn;
+    // call's tokens together are [0, window) by their number, and a half of a window comes after those, by the
+    // window's tokens and which half it is.  Which tokens leave their state is the window's, so its halves' too.
+    const size_t wn = (size_t) opt_.window, recs = 3 * wn;
     const auto up = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
@@ -1588,23 +1592,24 @@ void Engine::run(const int32_t* tokens, int n) {
     //
     // A half's launches are the ones its tokens have in a call of their own, at their rows of the buffers
     // (shift_rows()), so each token comes out as it would alone.
-    if (n > 1 && n_snap_ == n - 1 && cached_ < total_experts() && halves_) {
+    if (n > 1 && windowed_ && cached_ < total_experts() && halves_) {
         const int first[3] = {0, (n + 1) / 2, n};   // half k is the tokens [first[k], first[k + 1])
+        const unsigned bits = snap_bits_;           // the window's tokens that leave the recurrent state
         int at = 0;
-        // The buffers at half k's rows.  Each of its tokens leaves the recurrent state after it, but the
-        // window's last one.  Returns the half's tokens.
+        // The buffers at half k's rows, and its share of the window's states.  Returns the half's tokens.
         const auto half = [&](int k) {
             shift_rows(first[k] - at);
             at = first[k];
             const int m = first[k + 1] - at;
-            n_snap_ = first[k + 1] < n ? m : m - 1;
+            snap_bits_ = bits >> at & ((1u << m) - 1u);
+            snap_at_ = snap_ + size_t(std::popcount(bits & ((1u << at) - 1u))) * rec_n_;
             ev_ = ev_row_[k];
             return m;
         };
         // Half k on from layer il, whose experts it has (-1: from its start), to the next router's copy.
         const auto go_on = [&](int k, int il, bool add) {
             const int m = half(k);
-            const size_t rec = wn + 2 * ((size_t) first[k] * wn + (size_t) (m - 1)) + (first[k + 1] < n ? 1 : 0);
+            const size_t rec = wn + 2 * (size_t) (n - 1) + (size_t) k;
             if (il >= 0) {
                 if (add) moe_add(m);
                 tail(il, m, rec);
@@ -1618,7 +1623,8 @@ void Engine::run(const int32_t* tokens, int n) {
             shift_rows(-at);
             at = 0;
             ev_ = ev_row_[0];
-            n_snap_ = n - 1;
+            snap_bits_ = bits;
+            snap_at_ = snap_;
         };
         struct {
             int k = -1, il = -1;
@@ -1676,7 +1682,6 @@ void Engine::shift_rows(ptrdiff_t by) {
     h_x_ += by * e;
     h_cpu_ += by * e;
     at_ += by * 2;
-    if (snap_) snap_ += by * (ptrdiff_t) rec_n_;
     pos_ += by;
 }
 
@@ -1879,9 +1884,20 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     return true;
 }
 
+// The tokens of a window of t that leave the recurrent state as it is after them: each but the last when there
+// is a place for each, else as many as there are places, the first token among them and the others spread over
+// the window.
+unsigned Engine::snap_tokens(int t) const {
+    const int most = t - 1;
+    if (most <= snap_places_) return (1u << most) - 1u;
+    unsigned bits = 0;
+    for (int i = 0; i < snap_places_; ++i) bits |= 1u << (i * most / snap_places_);
+    return bits;
+}
+
 // The recurrent layers are the only ones a wrong guess would spoil: every other layer's row of a position is
-// written again when the position gets its real token.  So they leave the state as it was after each token but
-// the last (snap_), and keep() puts back the one after the last token that was right.
+// written again when the position gets its real token.  So they leave the state as it was after tokens of the
+// window (snap_, snap_tokens()), and keep() puts back the one after the last token that was right.
 void Engine::window(const int32_t* tokens, int t) {
     if (t < 1 || t > opt_.window) throw std::logic_error("a window takes 1 to max_window() tokens");
     // the two ways are a choice only with experts on the CPU; a call that records launches says nothing of them
@@ -1889,15 +1905,19 @@ void Engine::window(const int32_t* tokens, int t) {
     const bool recorded = std::exchange(recorded_, false);
     if (timed) halves_ = pick_way(t);
     const Clock::time_point t0 = Clock::now();
-    n_snap_ = t - 1;
+    windowed_ = true;
+    snap_bits_ = snap_tokens(t);
+    snap_at_ = snap_;
     try {
         run(tokens, t);
     } catch (...) {
-        n_snap_ = 0;
+        windowed_ = false;
+        snap_bits_ = 0;
         recorded_ = recorded_ || recorded;
         throw;
     }
-    n_snap_ = 0;
+    windowed_ = false;
+    snap_bits_ = 0;
     float* h = draft_ ? hn_ + n_embd_ : xn_;
     output_rows(0, t, h);
     lin(output_, h, wlogits_, t);
@@ -1934,10 +1954,26 @@ void Engine::took_way(int t, double ms) {
 
 void Engine::keep(int n) {
     if (n < 1 || n > win_) throw std::logic_error("keep takes 1 to the window's tokens");
-    if (n < win_)
-        ck(cudaMemcpyAsync(state_, snap_ + size_t(n - 1) * rec_n_, rec_n_ * sizeof(float), cudaMemcpyDeviceToDevice,
-                           cs(st_)),
+    if (n < win_) {
+        // The state after the last right token, when that token left it.  Else the one of the last token before
+        // it that did, and the right tokens after that one go through the layers again: they come out as they
+        // did, and the state with them.
+        const unsigned left = snap_tokens(win_) & ((1u << n) - 1u);   // the right tokens that left their state
+        const int from = (int) std::bit_width(left);                  // the tokens the state at hand is after
+        ck(cudaMemcpyAsync(state_, snap_ + size_t(std::popcount(left) - 1) * rec_n_, rec_n_ * sizeof(float),
+                           cudaMemcpyDeviceToDevice, cs(st_)),
            "keep");
+        if (from < n) {
+            pos_ += from;
+            try {
+                run(win_tok_ + from, n - from);
+            } catch (...) {
+                pos_ -= from;
+                throw;
+            }
+            pos_ -= from;
+        }
+    }
     if (draft_) draft_rows(win_tok_, ahead_pos_ == pos_ && win_tok_[0] == ahead_tok_ ? 1 : 0, n);
     pos_ += n;
     stats_.tokens += n;
