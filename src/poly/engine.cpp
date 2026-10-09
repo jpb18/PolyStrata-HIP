@@ -1917,7 +1917,9 @@ bool Engine::pick_way(int t) {
 
 void Engine::took_way(int t, double ms) {
     Way& w = way_[halves_ ? 1 : 0][t];
-    w.ms = w.n < kWayFirst ? (w.ms * w.n + ms) / (w.n + 1) : w.ms + kWayWeight * (ms - w.ms);
+    const Way& other = way_[halves_ ? 0 : 1][t];
+    const double weight = other.n >= kWayFirst && w.ms > other.ms ? kWayBehind : kWayWeight;
+    w.ms = w.n < kWayFirst ? (w.ms * w.n + ms) / (w.n + 1) : w.ms + weight * (ms - w.ms);
     ++w.n;
 }
 

@@ -45,9 +45,11 @@ constexpr float kSwapMin = 2.f;
 constexpr int kSwapHalf = 128;
 // Engine::pick_way(): each way of a window is timed this many times before the faster one is taken, the other
 // gets every kWayAgain-th window of that size from then on, and a time counts kWayWeight against the ones before.
+// A time of the way behind counts kWayBehind, since it has one where the other has kWayAgain: what a way takes
+// moves, most in an answer's first windows, while the cache comes to hold the answer's experts.
 constexpr int kWayFirst = 3;
 constexpr int kWayAgain = 32;
-constexpr double kWayWeight = 0.125;
+constexpr double kWayWeight = 0.125, kWayBehind = 0.5;
 
 using Clock = std::chrono::steady_clock;
 
