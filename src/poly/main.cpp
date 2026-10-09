@@ -7,6 +7,7 @@
 // STOP and QUIT in, and RESUME, PP, T, DONE and ERR out.
 #include "conversations.hpp"
 #include "engine.hpp"
+#include "guesses.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
@@ -49,6 +50,7 @@ namespace {
 using strata::poly::CacheOptions;
 using strata::poly::Conversations;
 using strata::poly::Engine;
+using strata::poly::Guesses;
 using strata::poly::Options;
 using Clock = std::chrono::steady_clock;
 
@@ -306,41 +308,10 @@ struct Session {
     // of it, what followed there is the guess.  The policy learns from the windows so far, their hits and their
     // time, which of the two pays.  It and the repeats are the other engine's (strata/spec).
     int most;                             // the tokens of a window at most; 1: no guesses
-    double ask_ms = 0.0;                  // what one guess of the block takes, as measured
     bool look;                            // guess from repeats
     strata::spec::SuffixDrafter repeats;
     strata::spec::DraftPolicy policy;
-    // Whether asking the block pays at all.  A guess costs a run of the block before it is known to be worth a
-    // window, and a window costs more the less its layers' matrices like several tokens at once, so with some
-    // models, or with most experts on the CPU, an answer is written faster without the block.  The tokens a
-    // millisecond of the rounds that asked it and of the rounds that did not are compared, and the side that is
-    // behind still gets a round now and then, so that it stays measured; its few rounds each count for more, so
-    // that both sides remember about as long a stretch of the answer.  How often depends on what the round
-    // costs.  The block behind is asked every 8th round: that costs little, and a stretch of text it guesses
-    // badly ends.  A round without the block costs the most where the block is far ahead: every 96th when it is
-    // more than a tenth ahead, else every 24th.  The block's first rounds are not counted: its windows are short
-    // until the policy has seen some.
-    struct Gate {
-        double tokens[2] = {}, ms[2] = {};   // [asked]: sums that forget
-        int seen[2] = {};
-        long long rounds = 0;
-        bool pays = true;
-
-        bool ask() {
-            ++rounds;
-            if (seen[1] < 16) return true;
-            if (seen[0] < 4) return false;
-            const double with = tokens[1] * ms[0], without = tokens[0] * ms[1];   // the two rates, over one divisor
-            pays = with >= without;
-            return rounds % (!pays ? 8 : with > 1.1 * without ? 96 : 24) == 0 ? !pays : pays;
-        }
-        void saw(bool asked, int n, double round_ms) {
-            if (++seen[asked] <= 8 && asked) return;
-            const double keep = asked == pays ? 0.97 : 0.7;
-            tokens[asked] = tokens[asked] * keep + n;
-            ms[asked] = ms[asked] * keep + round_ms;
-        }
-    } gate;
+    Guesses guesses;                      // whether the block is asked in a round, and for how many (guesses.hpp)
 
     Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
         : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
@@ -465,37 +436,21 @@ struct Session {
                 const int k = std::min(offered, widest - 1);
                 // A repeat that fills the window, from a match of a length that has been right nine times in ten,
                 // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
-                // block guesses, each guess from the one before.  A guess joins the window while the window is then
-                // expected to write more tokens a millisecond.  The chance that the guesses up to it are all right
-                // is the product of the block's own.  What one more token costs is what the windows so far have
-                // measured, held to 0.2 to 0.8 of a token alone: one slow window must not end the guessing.
+                // block guesses, each guess from the one before, while a guess more pays (Guesses).
                 const bool blocks = engine.drafts() && room && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
-                const bool ask = blocks && gate.ask();
-                // a round that recorded launches took many rounds' time: it is not counted, and the policy gets no
-                // time for it, which it leaves out of what a window costs
-                const auto count = [&](int n) {
-                    const double ms = ms_since(round);
-                    const bool recorded = engine.took_record();
-                    if (blocks && !recorded) gate.saw(ask, n, ms);
-                    return recorded ? 0.0 : ms;
+                const bool ask = guesses.begin(blocks, policy);
+                // the round's time, as the policy counts it: a window of `in` tokens wrote n of them
+                const auto count = [&](int in, int n) {
+                    return guesses.end(in, n, ms_since(round), engine.took_record());
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
                 if (ask) {
-                    const double one = policy.cost_ms(1);
-                    double sure = 1.0, tokens = 1.0;
                     int n_d = 0;
-                    for (int32_t from = t; n_d < std::min(most, kBlockWindow) - 1; from = d[n_d++]) {
-                        const double more =
-                            std::clamp((policy.cost_ms(n_d + 2) - policy.cost_ms(n_d + 1)) / one, 0.2, 0.8);
-                        // asking takes time too: not when a guess the block were sure of would not pay for it
-                        if (sure * policy.cost_ms(n_d + 1) <= tokens * (more * one + ask_ms)) break;
+                    for (int32_t from = t; n_d < std::min(most, kBlockWindow) - 1 && guesses.wants(n_d); from = d[n_d++]) {
                         float p = 0.f;
                         const Clock::time_point asked_at = Clock::now();
                         d[n_d] = engine.draft(from, n_d, &p);
-                        ask_ms = ask_ms > 0.0 ? 0.9 * ask_ms + 0.1 * ms_since(asked_at) : ms_since(asked_at);
-                        sure *= p;
-                        if (sure * policy.cost_ms(n_d + 1) <= tokens * more * one) break;
-                        tokens += sure;
+                        if (!guesses.takes(n_d, p, ms_since(asked_at))) break;
                     }
                     use = policy.choose(1 + n_d, k, match);
                 }
@@ -503,7 +458,7 @@ struct Session {
                     engine.eval(&t, 1, true);
                     kept.read(&t, 1);
                     t = pick(engine.logits());
-                    policy.observe(false, 1, 0, 0, count(1));
+                    policy.observe(false, 1, 0, 0, count(1, 1));
                     continue;
                 }
                 w[0] = t;
@@ -519,7 +474,7 @@ struct Session {
                 kept.read(w, right + 1);
                 r.guessed += use.t - 1;
                 r.guessed_right += right + (more ? 0 : 1);
-                policy.observe(use.lookup, use.t, right, match, count(right + 1));
+                policy.observe(use.lookup, use.t, right, match, count(use.t, right + 1));
                 if (!more) break;
             }
         }

@@ -1199,6 +1199,12 @@ longer each: UD-Q2_K_XL then wrote at 332 to 342 tokens/s in four runs, where th
 251 in three of four and at 310 in the fourth. GLM writes as it did: a 400-token answer came at 60 to 66
 tokens/s before and at 60 to 67 after.
 
+Both are measured again now (`src/poly/guesses.hpp`). A time older than 32 rounds is not believed: until its
+length is run again a token more counts as one the policy has not seen, and asking as free. One slow round
+among fresh ones moves a time by a tenth. A process of Qwen3.6 held to 8 GB that was held still eight times
+for 0.3 s from its first answer's 40th token had 68 guesses offered in that answer of 400 tokens and 22 in the
+next; with the change it had 283 and 321. That was one run each, on Linux.
+
 The last two changes are from [the laptop](#on-a-laptop-with-8-gb-of-vram). The staging buffer was 2 GiB for
 every model, about what a layer of GLM's leaves out of the cache. A layer of Gemma 4 UD-Q3_K_M has 328 MiB of
 experts in all and one of Qwen3.6 UD-Q3_K_M 341, so the rest of the buffer was never written, and it is
@@ -1407,9 +1413,7 @@ Setup knows the files in the table above. Another file of one of these architect
 - On the laptop an answer on another subject than the one before starts with fewer of its experts in VRAM
   than it ends with: the cache makes that up over the answer's first windows. That was not worked on.
 - Writing on the laptop still moves with what else it does. On a day with its owner at work on it, runs of
-  two short prompts wrote at 40 to 84 tokens/s, and in three answers of eighty the guessing stopped after a few
-  dozen tokens and did not come back in that answer: 44 to 53 tokens/s where 72. The cause was looked for and
-  not found.
+  two short prompts wrote at 40 to 84 tokens/s.
 - Setup installed the three new models from files that were already on the disk, on both machines. Of the new
   files its own download fetched Gemma 4's draft model (0.46 GB, through a mirror) and found the pinned
   SHA-256; the three addresses of the model files were asked for their headers only, and each states the
