@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -83,6 +84,64 @@ class BuildTools(unittest.TestCase):
         self.assertEqual(len(commands), 2)
         self.assertIn("Microsoft.VisualStudio.2022.BuildTools", commands[0])
         self.assertIn("Nvidia.CUDA", commands[1])
+
+
+class VisualStudio(unittest.TestCase):
+    """CUDA 13 takes the compilers of Visual Studio 2019 and 2022.  A newer Visual Studio can have the 2022 one
+    in it, and is then called for that one."""
+
+    def vs(self, t, own, v143=None):
+        build = Path(t) / "VC" / "Auxiliary" / "Build"
+        build.mkdir(parents=True)
+        (build / "vcvars64.bat").write_text("")
+        (build / "Microsoft.VCToolsVersion.default.txt").write_text(own + "\n")
+        if v143:
+            (build / "Microsoft.VCToolsVersion.v143.default.txt").write_text(v143 + "\n")
+        return build / "vcvars64.bat"
+
+    def test_the_toolset_asked_for(self):
+        with tempfile.TemporaryDirectory() as t:
+            for name, own, v143, want in (("2026", "14.51.36231", "14.44.35207", " -vcvars_ver=14.44.35207"),
+                                          ("2026-alone", "14.51.36231", None, ""),
+                                          ("2022", "14.44.35207", "14.44.35207", ""),
+                                          ("2019", "14.29.30133", None, "")):
+                with self.subTest(name):
+                    self.assertEqual(setup.vcvars_toolset(self.vs(Path(t) / name, own, v143)), want)
+        self.assertEqual(setup.vcvars_toolset(Path("no") / "vcvars64.bat"), "")
+
+    def found(self, t, installs):
+        """find_vcvars() with vswhere answering from `installs`: {version range or "": installation path}."""
+        vswhere = Path(t) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+        vswhere.parent.mkdir(parents=True, exist_ok=True)
+        vswhere.write_text("")
+
+        def out(cmd, **_):
+            return installs.get(cmd[cmd.index("-version") + 1] if "-version" in cmd else "", "")
+
+        with mock.patch.dict(setup.os.environ, {"ProgramFiles(x86)": str(t)}), mock.patch.object(setup, "out", out):
+            return setup.find_vcvars()
+
+    def test_2022_before_a_newer_one(self):
+        with tempfile.TemporaryDirectory() as t:
+            old, new = self.vs(Path(t) / "2022", "14.44.35207", "14.44.35207"), \
+                self.vs(Path(t) / "2026", "14.51.36231", "14.44.35207")
+            both = {"[16.0,18.0)": str(Path(t) / "2022"), "": str(Path(t) / "2026")}
+            self.assertEqual(self.found(t, both), old)
+            self.assertEqual(self.found(t, {"": str(Path(t) / "2026")}), new)
+
+    def test_a_newer_one_without_the_2022_compiler_is_none(self):
+        with tempfile.TemporaryDirectory() as t:
+            self.vs(Path(t) / "2026", "14.51.36231")
+            self.assertIsNone(self.found(t, {"": str(Path(t) / "2026")}))
+            self.assertIsNone(self.found(t, {}))
+
+    def test_the_build_script_calls_it_with_the_toolset(self):
+        with tempfile.TemporaryDirectory() as t:
+            vcvars = self.vs(Path(t) / "2026", "14.51.36231", "14.44.35207")
+            with mock.patch.object(setup, "WIN", True), mock.patch.object(setup, "ROOT", Path(t)), \
+                    mock.patch.object(setup, "find_tool", lambda name: name), mock.patch.object(setup, "run"):
+                setup.cmake_build(Path(t), Path(t) / "b", "strata-poly", [], vcvars, "build.bat")
+            self.assertIn(f'call "{vcvars}" -vcvars_ver=14.44.35207 >nul', (Path(t) / "build.bat").read_text())
 
 
 if __name__ == "__main__":

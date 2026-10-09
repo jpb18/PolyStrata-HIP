@@ -1174,12 +1174,36 @@ def find_vcvars():
     vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
     if not vswhere.exists():
         return None
+    def newest(*versions):
+        p = out([str(vswhere), "-latest", "-products", "*", *versions, "-requires",
+                 "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]).strip()
+        v = Path(p) / "VC/Auxiliary/Build/vcvars64.bat" if p else None
+        return v if v and v.exists() else None
+
     # CUDA 13 accepts Visual Studio 2019 and 2022 only: a newer one (2026 = version 18) installed next to them
-    # must not be picked ("unsupported Microsoft Visual Studio version"); with only a newer one there is none
-    p = out([str(vswhere), "-latest", "-products", "*", "-version", "[16.0,18.0)", "-requires",
-             "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]).strip()
-    v = Path(p) / "VC/Auxiliary/Build/vcvars64.bat" if p else None
-    return v if v and v.exists() else None
+    # must not be picked ("unsupported Microsoft Visual Studio version").  A newer one alone will do when it has
+    # the 2022 compiler in it (the v143 toolset), which vcvars_toolset() asks it for.
+    v = newest("-version", "[16.0,18.0)")
+    if v is None:
+        v = newest()
+        if v is not None and not vcvars_toolset(v):
+            return None
+    return v
+
+
+def vcvars_toolset(vcvars) -> str:
+    """What vcvars64.bat of a Visual Studio newer than 2022 is called with to set up its 2022 compiler
+    (" -vcvars_ver=14.44.35207"); "" for 2019 and 2022, whose own compiler is the one, and for a newer one that
+    was installed without that toolset."""
+    def version(name):
+        try:
+            return (Path(vcvars).parent / name).read_text().strip()
+        except OSError:
+            return ""
+
+    own, v143 = version("Microsoft.VCToolsVersion.default.txt"), version("Microsoft.VCToolsVersion.v143.default.txt")
+    m = re.match(r"14\.(\d+)\.", own)
+    return f" -vcvars_ver={v143}" if m and int(m.group(1)) >= 50 and re.fullmatch(r"14\.[34]\d\.\d+", v143) else ""
 
 
 def find_tool(name):
@@ -2404,7 +2428,8 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     if WIN:
         bat = ROOT / bat_name
         q = lambda c: " ".join(f'"{x}"' if " " in str(x) else str(x) for x in c)  # noqa: E731
-        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
+        bat.write_text(f'@echo off\r\ncall "{vcvars}"{vcvars_toolset(vcvars)} >nul\r\n'
+                       f'{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
                        f'echo   (the build stopped - trying it once more)\r\n{q(build)} || exit /b 1\r\n',
                        encoding="utf-8")
         run(["cmd", "/c", str(bat)])
