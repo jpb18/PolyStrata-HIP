@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <numeric>
 #include <stdexcept>
 #include <thread>
@@ -991,8 +992,10 @@ void Engine::save_profile() const {
             std::fprintf(f, "%d %d %lld\n", (int) (i / (size_t) n_expert_), (int) (i % (size_t) n_expert_),
                          (long long) n);
     }
-    if (std::fclose(f) != 0 || std::rename(tmp.c_str(), opt_.profile.c_str()) != 0)
-        throw std::runtime_error("cannot write " + opt_.profile);
+    const bool written = std::fclose(f) == 0;
+    std::error_code ec;
+    if (written) std::filesystem::rename(tmp, opt_.profile, ec);   // std::rename replaces no file on Windows
+    if (!written || ec) throw std::runtime_error("cannot write " + opt_.profile);
 }
 
 void Engine::reset() {

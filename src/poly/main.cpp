@@ -43,6 +43,11 @@ using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
+// serve() saves the experts' use after its first answer and then after an answer when the last save is this long
+// ago, and not only when it is told to quit: a server that is ended on Windows takes its engine with it at once.
+// A save is a file of some 40 KB and a rename.
+constexpr double kProfileSaveMs = 10000.0;
+
 struct Sampling {
     float temperature = 0.f;   // 0: the most likely token
     float top_p = 1.f, min_p = 0.f;
@@ -558,6 +563,8 @@ int serve(Session& ss) {
 
     static Lines lines;   // its thread may still be in a read when this function returns
     Pictures pictures;    // the engine reads the last request's until the next one's are set
+    // the experts' use (--expert-profile): as if it was last saved long ago, so that the first answer saves it
+    Clock::time_point saved = Clock::now() - std::chrono::milliseconds((long long) kProfileSaveMs);
     for (;;) {
         const std::string line = lines.pop();
         if (line == "QUIT") break;
@@ -674,6 +681,14 @@ int serve(Session& ss) {
                     r.prompt_ms, r.decode_ms, r.finish, (long long) r.guessed_right, (long long) r.guessed,
                     (long long) r.resume, hits, hits + misses, (long long) r.read);
         std::fflush(stdout);
+        if (ms_since(saved) >= kProfileSaveMs) {
+            try {
+                engine.save_profile();
+            } catch (const std::exception& e) {   // the next start's cache is the worse for it, this run is not
+                std::fprintf(stderr, "strata-poly: %s\n", e.what());
+            }
+            saved = Clock::now();
+        }
     }
     std::fprintf(stderr, "strata-poly: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
                          "parked in %zu MiB, %zu pushed out; %lld MiB of VRAM free at the end\n",
@@ -732,7 +747,8 @@ void usage() {
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default: a sixteenth of the\n"
                  "                         card, 512 to 1024)\n"
-                 "  --expert-profile FILE  expert use counts: read to choose the cached experts, updated on exit\n"
+                 "  --expert-profile FILE  expert use counts: read to choose the cached experts, written back on\n"
+                 "                         exit and by --serve after an answer, every 10 s at most\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
                  "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"
                  "                         (default: on the node whose memory holds most of the experts)\n"

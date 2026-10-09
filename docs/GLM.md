@@ -103,7 +103,8 @@ On the test machine, with the file already on the disk, this took about five min
 
 Setup writes the run config `strata-glm-3.0bit.json` and `run-glm-3.0bit.sh` into the PolyStrata folder, the engine into
 `engine-poly/`, and the tokenizer and the expert profile into the data folder. The profile starts as the counts in
-`data/expert-profile-glm.txt`, which come from the test runs here, and the engine updates it every time it stops.
+`data/expert-profile-glm.txt`, which come from the test runs here, and the engine updates it after an answer, every
+10 seconds at most, and when it stops.
 
 A 64K or 128K context starts and answers, with an expert cache 0.8 or 2.6 GiB smaller. No long prompt has been read
 at those sizes.
@@ -231,7 +232,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--max-context N` | 8192 | tokens a conversation can hold |
 | `--threads N` | all usable | CPU threads for the experts that are not in VRAM |
 | `--vram-reserve-mib N` | a sixteenth of the card, 512 to 1024 | VRAM left free beside the expert cache |
-| `--expert-profile FILE` | | expert use counts, read at the start and written back at the end |
+| `--expert-profile FILE` | | expert use counts, read at the start and written back after an answer, every 10 seconds at most, and at the end |
 | `--no-gpu-experts` | | keep every routed expert on the CPU |
 | `--any-node` | | on a PC with several NUMA nodes, let the CPU threads run on any of them |
 | `--no-graphs` | | launch a token's kernels one by one, not as the CUDA graph a layer that is recorded at the first token |
