@@ -63,6 +63,10 @@ constexpr double kProfileSaveMs = 10000.0;
 // from the one before.  A repeat of the conversation may fill a longer window (Options::window).
 constexpr int kBlockWindow = 4;
 
+// A window longer than that is for a copy: a repeat of the conversation whose match is this many tokens or more.
+// A repeat of a few tokens is in any text, and what followed it there is seldom what follows here for long.
+constexpr int kCopyMatch = 8;
+
 struct Sampling {
     float temperature = 0.f;   // 0: the most likely token
     float top_p = 1.f, min_p = 0.f;
@@ -455,15 +459,17 @@ struct Session {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
                 const bool room = engine.pos() + most <= engine.max_context();
-                const int k = look && room ? repeats.propose(most - 1, w + 1) : 0;
+                const int offered = look && room ? repeats.propose(most - 1, w + 1) : 0;
                 const int match = repeats.last_match();
+                const int widest = match >= kCopyMatch ? most : std::min(most, kBlockWindow);   // this round's window
+                const int k = std::min(offered, widest - 1);
                 // A repeat that fills the window, from a match of a length that has been right nine times in ten,
                 // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
                 // block guesses, each guess from the one before.  A guess joins the window while the window is then
                 // expected to write more tokens a millisecond.  The chance that the guesses up to it are all right
                 // is the product of the block's own.  What one more token costs is what the windows so far have
                 // measured, held to 0.2 to 0.8 of a token alone: one slow window must not end the guessing.
-                const bool blocks = engine.drafts() && room && !(k == most - 1 && policy.lookup_rate(match) >= 0.9);
+                const bool blocks = engine.drafts() && room && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
                 const bool ask = blocks && gate.ask();
                 // a round that recorded launches took many rounds' time: it is not counted, and the policy gets no
                 // time for it, which it leaves out of what a window costs
