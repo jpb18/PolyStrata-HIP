@@ -258,18 +258,27 @@ class Tokenizer:
     PIECE_CACHE_MAX = 200_000    # pre-tokenizer pieces remembered (an agent resends its whole history every turn)
 
     def _encode_raw(self, text: str) -> list[int]:
-        """_encode_plain for a vocabulary of UTF-8 pieces (see GEMMA4_PATTERN)."""
+        """_encode_plain for a vocabulary of UTF-8 pieces (see GEMMA4_PATTERN).  A piece here is a line, and a
+        conversation that is sent again is mostly lines seen before: their ids are looked up, as below."""
         out: list[int] = []
+        cache = self.__dict__.setdefault("_piece_ids", {})
         for piece in self._re.findall(text.replace(" ", SPACE)):
-            if piece[0] == "\n" and piece in self.ids:
-                out.append(self.ids[piece])
-                continue
-            for tok in self._bpe(piece):
-                i = self.ids.get(tok)
-                if i is not None:
-                    out.append(i)
+            got = cache.get(piece)
+            if got is None:
+                if piece[0] == "\n" and piece in self.ids:
+                    got = [self.ids[piece]]
                 else:
-                    out.extend(self.ids[b] for b in ("<0x%02X>" % x for x in tok.encode("utf-8")) if b in self.ids)
+                    got = []
+                    for tok in self._bpe(piece):
+                        i = self.ids.get(tok)
+                        if i is not None:
+                            got.append(i)
+                        else:
+                            got.extend(self.ids[b] for b in ("<0x%02X>" % x for x in tok.encode("utf-8"))
+                                       if b in self.ids)
+                if len(cache) < self.PIECE_CACHE_MAX:
+                    cache[piece] = got
+            out.extend(got)
         return out
 
     def _encode_plain(self, text: str) -> list[int]:

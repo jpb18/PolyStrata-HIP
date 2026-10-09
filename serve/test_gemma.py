@@ -41,6 +41,20 @@ class Tokenizer(unittest.TestCase):
         self.assertEqual([TOKENS[i] for i in self.tok.encode("bc")], ["<0x62>", "<0x63>"])
         self.assertEqual(self.tok.decode(self.tok.encode("bc")), "bc")
 
+    def test_lines_seen_before_give_the_same_ids(self):
+        text = "ab ab c\n\naé bc\nab ab c\nabc\n" * 20
+        off = ST.Tokenizer(TOKENS, MERGES, TYPES, pre="gemma4")
+        off.PIECE_CACHE_MAX = 0
+        want = off.encode(text)
+        self.assertEqual(self.tok.encode(text), want)      # the lines are remembered here,
+        self.assertEqual(self.tok.encode(text), want)      # and looked up here
+        self.assertGreater(len(self.tok._piece_ids), 0)
+        self.assertEqual(self.tok.decode(want), text)
+        small = ST.Tokenizer(TOKENS, MERGES, TYPES, pre="gemma4")
+        small.PIECE_CACHE_MAX = 2
+        self.assertEqual(small.encode(text), want)
+        self.assertLessEqual(len(small._piece_ids), 2)
+
     def test_control_tokens_only_when_asked(self):
         self.assertEqual(self.tok.encode("<|turn>a", parse_special=True), [self.id["<|turn>"], self.id["a"]])
         self.assertNotIn(self.id["<|turn>"], self.tok.encode("<|turn>a"))
