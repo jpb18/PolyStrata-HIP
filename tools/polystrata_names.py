@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKIP = ("src/", "include/", "tests/", "cmake/", "third_party/", "bench/", "sycl/src/", "sycl/tools/", "tools/vision/",
         "docs/paper/", "docs/COMMUNITY_BENCHMARKS.md", "tools/polystrata_names.py")
-KINDS = (".md", ".py", ".html", ".js", ".css", ".bat", ".sh")
+KINDS = (".md", ".py", ".html", ".js", ".css", ".bat", ".sh", ".yml", ".yaml")
 NAMES = ("Dockerfile",)
 KEEP = "|".join((
     r"\[Strata\]\(https://github\.com/Niko1221/Strata", # a Markdown link to it
