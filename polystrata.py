@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -123,9 +124,9 @@ class Watch(threading.Thread):
                 "gpu_util_mean": of("gpu_util", mean), "cpu_util_mean": of("cpu", mean)}
 
 
-def long_prompt(tokens: int) -> str:
+def long_prompt(tokens: int, part: float = 1.0) -> str:
     text = "\n\n".join((ROOT / p).read_text(encoding="utf-8") for p in DOC if (ROOT / p).exists())
-    text = (text * (1 + tokens * 4 // max(len(text), 1)))[:tokens * 4]     # about four characters a token
+    text = (text * (1 + tokens * 4 // max(len(text), 1)))[:int(tokens * 4 * part)]   # about four characters a token
     return "Here is part of a manual:\n\n" + text + "\n\nIn three sentences, what does this software do?"
 
 
@@ -169,7 +170,16 @@ def benchmark(a) -> int:
             if entry["context"] and n + a.max_tokens + 512 > entry["context"]:
                 print(f"(skipped the {n}-token prompt: the context is {entry['context']})")
                 continue
-            runs.append(run_once(srv, f"long-{n}", long_prompt(n), a.max_tokens))
+            # Four characters a token is a guess, and a text with tables comes to more: 24000 is 31,600 tokens
+            # for one model and more than the 32,768 of the context for another.  A prompt that is refused is cut.
+            for part in (1.0, 0.95, 0.9, 0.85):
+                try:
+                    runs.append(run_once(srv, f"long-{n}", long_prompt(n, part), a.max_tokens))
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code != 400 or part == 0.85:
+                        raise
+                    print(f"(the {n}-token prompt does not fit the context: trying {part - 0.05:.0%} of it)")
     finally:
         srv.close()
     report = {"model": entry["id"], "backend": entry["backend"], "quantization": entry["quantization"],
