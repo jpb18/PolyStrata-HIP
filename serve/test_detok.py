@@ -46,15 +46,8 @@ class OldDetokenizer:
 class Detok(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        import json
         import strata_tokenizer as ST
-        t = find_tokenizer()
-        vocab = json.loads((t / "vocab.json").read_text(encoding="utf-8"))
-        toks = [None] * len(vocab)
-        for s, i in vocab.items():
-            toks[i] = s
-        cls.tok = ST.Tokenizer(toks, (t / "merges.txt").read_text(encoding="utf-8").split("\n"),
-                               json.loads((t / "token_type.json").read_text()))
+        cls.tok = ST.Tokenizer.from_dir(find_tokenizer())   # as the server reads it: a pack of any of the models
 
     def same_stream(self, ids):
         """The same text as the old re-decode, never behind it (the old one held complete characters too while
@@ -114,14 +107,8 @@ def real_tokenizer():
         if t is None:
             _REAL.append(None)
         else:
-            import json
             import strata_tokenizer as ST
-            vocab = json.loads((t / "vocab.json").read_text(encoding="utf-8"))
-            toks = [None] * len(vocab)
-            for s, i in vocab.items():
-                toks[i] = s
-            _REAL.append(ST.Tokenizer(toks, (t / "merges.txt").read_text(encoding="utf-8").split("\n"),
-                                      json.loads((t / "token_type.json").read_text())))
+            _REAL.append(ST.Tokenizer.from_dir(t))
     return _REAL[0]
 
 
