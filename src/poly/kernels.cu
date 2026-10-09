@@ -19,6 +19,7 @@ constexpr int WARP = 32;
 constexpr int HC = 4;   // hyper-connection streams; the model's hc_mult, checked at load
 constexpr int KEY_BLOCK = 16;   // cache rows one block of dsa_keys_kernel copies
 constexpr int VALUE_DIMS = 32, VALUE_SHARES = 8;   // attn_value_kernel: a block's value dimensions, a sum's shares
+constexpr int SCORE_WARPS = 8;                     // attn_score_kernel: a block's warps, a row and a group each
 constexpr int KDA_TERMS = 16, KDA_COLUMNS = 16;   // kda_state_kernel: a thread's values, a block's columns
 
 __device__ __forceinline__ float warp_sum(float x) {
@@ -703,22 +704,28 @@ __device__ __forceinline__ int attn_rows(long long p, int window, long long last
     return int((last < 0 ? p : last) - *lo) + 1;
 }
 
-// score[head][i] = scale * (q[head] . the key of the head's group in the i-th row the token attends).  A block
-// has the token first + blockIdx.y and blockDim.x / n_head rows; a thread is a row and a head.
+// score[head][i] = scale * (q[head] . the key of the head's group in the i-th row the token attends).  A warp
+// has a row and one of the row's groups of heads: its threads read the key side by side, 32 values a step, so
+// that a step reads one place of the cache.  A thread sums every 32nd product with a head's query, and the 32
+// sums are added in pairs.
 __global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
                                   float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
                                   long long pos, int first, float scale, int window, int ring, long long last,
                                   const long long* __restrict__ at) {
-    const int tok = first + blockIdx.y;
-    const int key = blockIdx.x * (blockDim.x / n_head) + threadIdx.x / n_head, h = threadIdx.x % n_head;
+    const int tok = first + blockIdx.y, lane = threadIdx.x % WARP;
+    const int unit = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;   // a row and a group
+    const int key = unit / kv_heads, g = unit % kv_heads, per = n_head / kv_heads;
     long long lo;
     if (key >= attn_rows((at ? *at : pos) + tok, window, last, &lo)) return;
     const long long row = ring > 0 ? (lo + key) % ring : lo + key;
-    const float* qh = q + (size_t(tok) * n_head + h) * dim;
-    const half* k = kcache + (size_t(row) * kv_heads + h / (n_head / kv_heads)) * dim;
-    float acc = 0.0f;
-    for (int d = 0; d < dim; ++d) acc += qh[d] * __half2float(k[d]);
-    score[(size_t(blockIdx.y) * n_head + h) * n_keys + key] = acc * scale;
+    const half* k = kcache + (size_t(row) * kv_heads + g) * dim;
+    for (int h = g * per; h < (g + 1) * per; ++h) {
+        const float* qh = q + (size_t(tok) * n_head + h) * dim;
+        float acc = 0.0f;
+        for (int d = lane; d < dim; d += WARP) acc += qh[d] * __half2float(k[d]);
+        for (int off = WARP / 2; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
+        if (lane == 0) score[(size_t(blockIdx.y) * n_head + h) * n_keys + key] = acc * scale;
+    }
 }
 
 // Softmax in place over a head's scores of the rows its token attends.  One block per head and token.
@@ -1232,12 +1239,12 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
     const auto most = [&](long long p) {
         return int((whole ? last : p) - (window > 0 && p >= window ? p - window + 1 : 0)) + 1;
     };
-    const int n_keys = at ? room : most(whole ? pos : pos + rows - 1), key_block = std::max(1, 256 / n_head);
+    const int n_keys = at ? room : most(whole ? pos : pos + rows - 1);
     const int per = grid(dim, VALUE_DIMS);
     for (int first = 0; first < rows; first += chunk) {
         const int c = std::min(chunk, rows - first);
         const int keys = at ? room : most(whole ? pos + first : pos + first + c - 1);
-        attn_score_kernel<<<dim3(grid(keys, key_block), c), key_block * n_head, 0, cs(stream)>>>(
+        attn_score_kernel<<<dim3(grid(keys * kv_heads, SCORE_WARPS), c), SCORE_WARPS * WARP, 0, cs(stream)>>>(
             q, (const half*) kcache, score, n_keys, dim, n_head, kv_heads, (long long) pos, first, scale, window,
             ring, last, at);
         attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, (long long) pos, first, window,
