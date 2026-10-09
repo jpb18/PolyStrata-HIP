@@ -11,9 +11,11 @@
 
 #include "cpu_experts.hpp"
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>

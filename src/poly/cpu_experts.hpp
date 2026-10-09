@@ -6,10 +6,8 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,16 +32,15 @@ private:
         std::atomic<int> next{0}, left{0};
     };
     void loop();
-    static void drain(Batch& b);
+    static bool drain(Batch& b);
 
     std::vector<std::thread> th_;
     // every idle worker reads cur_ in a loop; users_ is written, so it has a cache line of its own
     alignas(64) std::atomic<Batch*> cur_{nullptr};
     alignas(64) std::atomic<int> users_{0};      ///< workers that may hold a Batch pointer
     std::atomic<int> sleepers_{0};
+    std::atomic<uint32_t> posted_{0};            ///< counts the batches: what a sleeping worker waits on
     std::atomic<bool> quit_{false};
-    std::mutex m_;
-    std::condition_variable cv_;
 };
 
 /// One routed expert of a token: its three matrices in the GGUF, its router weight, and which of the call's tokens

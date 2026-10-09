@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
+#include <mutex>
 #include <numeric>
 
 namespace strata::poly {
@@ -30,44 +31,61 @@ Workers::Workers(int threads) {
 
 Workers::~Workers() {
     quit_.store(true);
-    { std::lock_guard<std::mutex> l(m_); }
-    cv_.notify_all();
+    posted_.fetch_add(1);
+    posted_.notify_all();
     for (auto& t : th_) t.join();
 }
 
-void Workers::drain(Batch& b) {
-    for (;;) {
+// Whether it ran a task.  next is read before it is counted up, so it stops near n however often a worker comes
+// back to a batch whose tasks are taken.
+bool Workers::drain(Batch& b) {
+    bool ran = false;
+    while (b.next.load(std::memory_order_relaxed) < b.n) {
         const int i = b.next.fetch_add(1, std::memory_order_relaxed);
-        if (i >= b.n) return;
+        if (i >= b.n) break;
         (*b.fn)(i);
         b.left.fetch_sub(1, std::memory_order_release);
+        ran = true;
     }
+    return ran;
 }
 
-// A worker with nothing to do only reads cur_: a write there by each of them, every turn of the loop, kept run()
-// from ever seeing users_ at zero for long.  When there is a batch, the worker counts itself in users_ and reads
-// cur_ again before it uses it, so run() can tell when nobody holds its Batch any more.
+// A worker with nothing to do only reads posted_: a write by each of them, every turn of the loop, kept run() from
+// ever seeing users_ at zero for long.  When a batch has been posted since the worker last looked, it counts itself
+// in users_ and reads cur_ again before it uses it, so run() can tell when nobody holds its Batch any more.
+//
+// A batch stays posted after its last task is taken, until run() takes it down, and run() cannot while it has no
+// CPU.  That happens with more threads than the system runs: a laptop that parks cores under load makes that of
+// any count.  So a worker that found no task in what is posted leaves it alone: it pauses, then sleeps, until
+// posted_ moves.  Going round the finished batch instead, the workers kept run() off the CPU for the rest of
+// their time slices, every batch.
 void Workers::loop() {
     int idle = 0;
+    uint32_t seen = posted_.load() - 1;   // the count at which this worker last found nothing to do
     while (!quit_.load(std::memory_order_relaxed)) {
-        Batch* b = cur_.load(std::memory_order_acquire);
-        if (b) {
-            users_.fetch_add(1);
-            b = cur_.load();
-            if (b) drain(*b);
-            users_.fetch_sub(1);
-        }
-        if (b) {
-            idle = 0;
-            continue;
+        const uint32_t now = posted_.load(std::memory_order_acquire);
+        if (now != seen) {
+            // cur_ is set before posted_ counts: the batch of `now` is there, or a later one, or it is done
+            bool ran = false;
+            if (cur_.load(std::memory_order_acquire)) {
+                users_.fetch_add(1);
+                Batch* b = cur_.load();
+                if (b) ran = drain(*b);
+                users_.fetch_sub(1);
+            }
+            if (ran) {
+                idle = 0;
+                continue;
+            }
+            seen = now;
         }
         if (++idle < kSpinsBeforeSleep) {
             _mm_pause();
             continue;
         }
-        std::unique_lock<std::mutex> l(m_);
+        // run() counts posted_ up before it reads sleepers_, and wait() returns at once when posted_ has moved
         sleepers_.fetch_add(1);
-        cv_.wait(l, [this] { return cur_.load() != nullptr || quit_.load(); });
+        if (!quit_.load()) posted_.wait(seen);
         sleepers_.fetch_sub(1);
         idle = 0;
     }
@@ -81,10 +99,8 @@ void Workers::run(int n, const std::function<void(int)>& fn) {
     b.n = n;
     b.left.store(n);
     cur_.store(&b);
-    if (sleepers_.load() > 0) {
-        { std::lock_guard<std::mutex> l(m_); }
-        cv_.notify_all();
-    }
+    posted_.fetch_add(1);
+    if (sleepers_.load() > 0) posted_.notify_all();
     drain(b);
     cur_.store(nullptr);   // every task is taken: a worker that comes now has nothing to find
     while (b.left.load(std::memory_order_acquire) != 0) _mm_pause();
