@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "title": {
+      "model": "polystrata-hip/qwen3.5-35b-a3b",
+      "variant": "none"
+    }
+  },
+  "providers": {
+    "polystrata-hip": {
+      "name": "PolyStrata (HIP, this PC)",
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:8090/v1"
+      },
+      "models": {
+        "qwen3.5-35b-a3b": {
+          "modelID": "qwen3.5-35b-a3b-q3_k_m-hip",
+          "name": "PolyStrata / Qwen3.5-35B-A3B Q3_K_M (RX 9060 XT)",
+          "limit": {
+            "context": 49152,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "none",
+              "settings": {
+                "reasoningEffort": "none"
+              }
+            },
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
