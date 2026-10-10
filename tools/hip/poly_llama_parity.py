@@ -145,6 +145,9 @@ def main() -> int:
     ap.add_argument("--only", help="run only the prompts whose name contains this")
     ap.add_argument("--json", help="write the results here")
     ap.add_argument("--refs", help="llama.cpp's answers: read from this file when it exists, else written to it")
+    ap.add_argument("--ids-only", action="store_true",
+                    help="compare the tokens only: with windows of guessed tokens (strata-poly's default) the "
+                         "probabilities --top-probs prints are not the ones each token was picked from")
     a = ap.parse_args()
 
     proc = None
@@ -190,6 +193,12 @@ def main() -> int:
         c = compare(ref, got)
         c.update(name=name, prompt_tokens=len(ids))
         results.append(c)
+        if a.ids_only:   # the engine's side of a near tie is not known here: the reference's must be one
+            c["max_diff"] = 0.0
+            if "parted_at" in c:
+                r2 = c["llama_top2"]
+                c["near_tie"] = len(r2) > 1 and r2[0][1] - r2[1][1] <= 0.1
+                c["engine_top2"] = "(not compared)"
         ok = (c["same"] == c["of"] or c.get("near_tie", False)) and c["max_diff"] <= a.max_diff
         good = good and ok
         line = f"{name:9s} {len(ids):6d} tokens: {c['same']}/{c['of']} same, max diff {c['max_diff']:.3f}"
