@@ -24,6 +24,9 @@
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#if defined(STRATA_USE_HIP)
+#include <atomic>
+#endif
 #include <unordered_map>
 
 #ifdef __linux__
@@ -289,6 +292,12 @@ void hop(void* dst, const void* src, size_t bytes, Kind kind, void* stream, cons
 Engine::Engine() = default;
 
 Engine::~Engine() {
+#if defined(STRATA_USE_HIP)
+    if (card_check_)
+        std::fprintf(stderr, "strata-poly: routing on the card against the host's: %lld routings, %lld picks not the "
+                             "host's, %lld weights not bit for bit (largest difference %.3g)\n",
+                     card_checked_, card_ids_differ_, card_w_bits_, card_w_diff_);
+#endif
     map_quit_.store(true);
     if (mapper_.joinable()) mapper_.join();
     if (follower_.joinable()) {
@@ -707,6 +716,9 @@ void Engine::resize_cache(int mib) {
     }
     opt_.vram_reserve_mib = mib < 0 ? asked_reserve_mib_ : mib;
     fill_expert_cache();
+#if defined(STRATA_USE_HIP)
+    upload_slots();
+#endif
     start_swaps();
 }
 
@@ -782,6 +794,9 @@ void Engine::follow(int written) {
             if (arrived == cudaErrorNotReady) continue;
             ck(arrived, "expert upload");
             layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
+#if defined(STRATA_USE_HIP)
+            slot_changed(s.il, s.e);
+#endif
             coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
             s.at.store(Swap::kFree);
             ++stats_.swapped_experts;
@@ -856,6 +871,9 @@ void Engine::follow(int written) {
         s->e = in.e;
         s->slot = given;
         given = nullptr;
+#if defined(STRATA_USE_HIP)
+        slot_changed(out.il, out.e);
+#endif
         staged_il_ = -1;
         coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
         s->at.store(Swap::kAsked);
@@ -938,6 +956,9 @@ void Engine::load(const Options& o) {
     alloc();
     if (!opt_.profile.empty()) read_profile(opt_.profile, (int) layers_.size(), n_expert_, prior_);
     fill_expert_cache();
+#if defined(STRATA_USE_HIP)
+    upload_slots();
+#endif
     const int threads = opt_.threads > 0 ? opt_.threads : usable_cpus();
     std::vector<std::pair<const uint8_t*, size_t>> spans;   // the routed experts in the mapped files
     for (const Layer& L : layers_) {
@@ -1097,6 +1118,9 @@ void Engine::alloc() {
         rs_ = rs;
     }
     use_.assign(layers_.size() * n_expert_, 0);
+#if defined(STRATA_USE_HIP)
+    card_route_setup();
+#endif
 }
 
 void Engine::save_profile() const {
@@ -1235,6 +1259,26 @@ void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n,
 void Engine::moe_router(const Layer& L, int n) {
     const size_t rows = (size_t) n;
     router_scores(L, n);
+#if defined(STRATA_USE_HIP)
+    if (card_pipe_ && L.card) {   // the layer goes on with card_launch()
+        const size_t il = (size_t) (&L - layers_.data());
+        if (card_check_) copy_words(rl_, h_rlc_ + il * n_expert_, (size_t) n_expert_, st_);
+        CardRoute out;
+        out.ids = h_ids_ + il * kSlots;
+        out.w = h_w_ + il * kSlots;
+        out.cached = h_cached_ + il * kSlots;
+        out.x = xn_;
+        out.x_host = h_xl_ + il * n_embd_;
+        out.n_x = n_embd_;
+        out.need = dneed_ + il;
+        out.ready = h_ready_ + il;
+        out.seq = dseq_;
+        route_topk_softmax(rl_, n_expert_, n_used_, card_route_floor(), dslot_ + il * n_expert_, 2 * L.gu_bytes,
+                           dgu_, ddn_, dw_, out, st_);
+        ck(cudaGetLastError(), "router");
+        return;
+    }
+#endif
     POLY_COPY(h_rl_, rl_, rows * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "router");
     POLY_COPY(h_x_, xn_, rows * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "router");
 }
@@ -1353,6 +1397,207 @@ void Engine::moe_add(int n) {
     POLY_COPY(cpu_, h_cpu_, (size_t) n * n_embd_ * sizeof(float), cudaMemcpyHostToDevice, st_, "host experts");
     axpy(cpu_, 1.f, fo_, n * n_embd_, true, st_);
 }
+
+#if defined(STRATA_USE_HIP)
+// STRATA_POLY_CARD_ROUTE=1: a token on its own is routed on the card.  In moe() the host waits, every MoE layer,
+// for the router's scores (some 60 us on an RX 9060 XT under Windows, hip_poly_probe), routes, and then launches
+// the layer's cached experts and the rest of it, which the card waits for: 3.6 ms of a token's 15.7 when the
+// waits were left out (a measurement whose answers were wrong, AMD_PORT_PHASE2.md).  Here run() hands the card the
+// whole token at once.  A layer's routing is a kernel behind its router (moe_router()), which writes the picked
+// experts' slots into the launches' arguments on the card, and its cached experts follow (card_launch()).  An
+// expert outside VRAM is launched as a slot without a matrix (zeros, weight 0), so the launches are the same
+// whatever the routing, and a layer that picked one waits on the card for the host's sum of those (wait_add()).
+// The host goes through the layers as the card routes them (card_host()), and computes those experts.
+//
+// A cached expert's products are moe()'s, and they are added in moe()'s order.  The routing's exp() is the card's,
+// which may differ from the host's in the last bit of a weight (STRATA_POLY_CARD_ROUTE_CHECK=1 counts it); the
+// host takes the picks from the card, so the CPU's experts and the counts are the card's routing's.
+//
+// Measured on an RX 9060 XT under Windows (AMD_PORT_PHASE2.md), decode of Qwen3.5-35B-A3B: 59.0 -> 75.4 tok/s at a
+// 2K prompt and one token a call, 47.9 -> 57.5 at 31K, 60.4 -> 71.1 with windows of guessed tokens; the answers
+// as near llama.cpp's as before (tools/hip/poly_llama_parity.py).  So it is on there, and STRATA_POLY_CARD_ROUTE=0
+// turns it off.  Elsewhere it was not measured: STRATA_POLY_CARD_ROUTE=1 turns it on.
+void Engine::card_route_setup() {
+    const char* v = std::getenv("STRATA_POLY_CARD_ROUTE");
+#if defined(_WIN32)
+    const bool asked = !(v != nullptr && v[0] == '0');
+#else
+    const bool asked = v != nullptr && v[0] == '1';
+#endif
+    if (!asked || card_route_floor() <= 0.f || !opt_.gpu_experts || n_moe_ == 0 ||
+        n_expert_ > 1024 || n_used_ > kSlots || rows_ < kSlots || kSumRows < kSlots)
+        return;
+    const size_t nl = layers_.size();
+    dslot_ = (const uint8_t**) dmalloc(nl * (size_t) n_expert_ * sizeof(void*), "the routing on the card");
+    ck(cudaMemset(dslot_, 0, nl * (size_t) n_expert_ * sizeof(void*)), "the routing on the card");
+    dgu_ = dmalloc(sizeof(kernels::MmvqSlots), "the routing on the card");
+    ddn_ = dmalloc(sizeof(kernels::MmvqSlots), "the routing on the card");
+    dw_ = (float*) dmalloc(kSlots * sizeof(float), "the routing on the card");
+    dneed_ = (int*) dmalloc(nl * sizeof(int), "the routing on the card");
+    dseq_ = (uint32_t*) dmalloc(sizeof(uint32_t), "the routing on the card");
+    ck(cudaMemset(dseq_, 0, sizeof(uint32_t)), "the routing on the card");
+    // what both sides read and write while the other runs: coherent pinned memory, which the card reads and
+    // writes where it lies
+    const auto coherent = [&](size_t bytes) {
+        void* p = nullptr;
+        ck(hipHostMalloc(&p, std::max<size_t>(bytes, 64), hipHostMallocCoherent | hipHostMallocMapped),
+           "pinned memory");
+        std::memset(p, 0, std::max<size_t>(bytes, 64));
+        host_allocs_.push_back(p);   // cudaFreeHost() is hipHostFree()
+        return p;
+    };
+    h_ids_ = (int32_t*) coherent(nl * kSlots * sizeof(int32_t));
+    h_w_ = (float*) coherent(nl * kSlots * sizeof(float));
+    h_cached_ = (uint8_t*) coherent(nl * kSlots);
+    h_xl_ = (float*) coherent(nl * (size_t) n_embd_ * sizeof(float));
+    h_cpul_ = (float*) coherent(nl * (size_t) n_embd_ * sizeof(float));
+    h_rlc_ = (float*) coherent(nl * (size_t) n_expert_ * sizeof(float));
+    h_ready_ = (uint32_t*) coherent(nl * sizeof(uint32_t));
+    h_go_ = (uint32_t*) coherent(nl * sizeof(uint32_t));
+    h_failed_ = (uint32_t*) coherent(sizeof(uint32_t));
+    int dev = 0, khz = 0;
+    ck(cudaGetDevice(&dev), "the routing on the card");
+    ck(hipDeviceGetAttribute(&khz, hipDeviceAttributeWallClockRate, dev), "the routing on the card");
+    wait_ticks_ = (long long) std::max(khz, 1) * 1000;
+    // what the launches read besides the slots: a token's rows of the scratch, the same for every layer
+    const size_t ff = (size_t) n_ff_exp_, q8_row = kernels::native_q8_1_bytes(n_ff_exp_);
+    kernels::MmvqSlots gu{}, dn{};
+    for (int j = 0; j < kSlots; ++j) {
+        gu.x[j] = xq_;
+        gu.y[j] = g_ + (size_t) j * 2 * ff;
+        dn.x[j] = (const uint8_t*) q8_ + (size_t) j * q8_row;
+        dn.y[j] = d_ + (size_t) j * n_embd_;
+    }
+    ck(cudaMemcpy(dgu_, &gu, sizeof gu, cudaMemcpyHostToDevice), "the routing on the card");
+    ck(cudaMemcpy(ddn_, &dn, sizeof dn, cudaMemcpyHostToDevice), "the routing on the card");
+    // a layer can be routed on the card when both its products have a kernel that reads them from there: tried
+    // once a format and shape, with slots of no matrix (they write zeros).  The token goes to the card whole, so
+    // that is every MoE layer of the model or none.
+    std::vector<std::pair<uint64_t, bool>> tried;
+    const auto works = [&](uint32_t type, int n_in, int n_out, void* slots) {
+        const uint64_t key = (uint64_t) type << 40 | (uint64_t) n_in << 20 | (uint64_t) n_out;
+        for (const auto& t : tried)
+            if (t.first == key) return t.second;
+        const bool ok = kernels::native_mmvq_slots_dev((int) type, (const kernels::MmvqSlots*) slots, kSlots, n_in,
+                                                       n_out, st_);
+        ck(cudaStreamSynchronize(cs(st_)), "the routing on the card");
+        tried.emplace_back(key, ok);
+        return ok;
+    };
+    int on = 0, moe = 0;
+    for (int il = 0; il < n_layer_; ++il) {
+        Layer& L = layers_[(size_t) il];
+        L.card = L.moe && works(L.gu_type, n_embd_, 2 * n_ff_exp_, dgu_) && works(L.d_type, n_ff_exp_, n_embd_, ddn_);
+        on += L.card;
+        moe += L.moe;
+    }
+    card_route_ = on > 0 && on == moe;
+    const char* c = std::getenv("STRATA_POLY_CARD_ROUTE_CHECK");
+    card_check_ = card_route_ && c != nullptr && c[0] == '1';
+    std::fprintf(stderr, "strata-poly: STRATA_POLY_CARD_ROUTE: %s (%d of %d MoE layers have the kernels)%s\n",
+                 card_route_ ? "a token on its own is routed on the card" : "off", on, moe,
+                 card_check_ ? ", checked against the host's routing" : "");
+}
+
+// The card's table after the host's has changed as a whole (the cache filled, or emptied and filled again).
+void Engine::upload_slots() {
+    if (!dslot_) return;
+    std::vector<const uint8_t*> t(layers_.size() * (size_t) n_expert_, nullptr);
+    for (size_t il = 0; il < layers_.size(); ++il)
+        for (size_t e = 0; e < layers_[il].slot.size(); ++e) t[il * (size_t) n_expert_ + e] = layers_[il].slot[e];
+    ck(cudaStreamSynchronize(cs(st_)), "the routing on the card");
+    ck(cudaMemcpy(dslot_, t.data(), t.size() * sizeof(void*), cudaMemcpyHostToDevice), "the routing on the card");
+}
+
+// One slot changed (follow(), where nothing queued reads the cache): the card's table follows on the stream.
+void Engine::slot_changed(int il, int e) {
+    if (!dslot_) return;
+    set_slot(dslot_, (size_t) il * n_expert_ + (size_t) e, layers_[(size_t) il].slot[(size_t) e], st_);
+    ck(cudaGetLastError(), "the routing on the card");
+}
+
+// A layer's routed experts for a token that moe_router() routed on the card: the cached ones, and the wait for
+// the host's sum of the others when there are any.  Nothing here waits.
+void Engine::card_launch(Layer& L, int il) {
+    kernels::native_mmvq_slots_dev((int) L.gu_type, (const kernels::MmvqSlots*) dgu_, n_used_, n_embd_,
+                                   2 * n_ff_exp_, st_);
+    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, n_used_, st_);
+    else swiglu_clamp_rows(g_, h_, n_ff_exp_, n_used_, clamp_exp_[(size_t) il], st_);
+    kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, n_used_, st_);
+    kernels::native_mmvq_slots_dev((int) L.d_type, (const kernels::MmvqSlots*) ddn_, n_used_, n_ff_exp_, n_embd_,
+                                   st_);
+    ScaledRows sum{};
+    for (int k = 0; k < n_used_; ++k) {
+        sum.x[k] = d_ + (size_t) k * n_embd_;
+        sum.acc[k] = fo_;
+    }
+    add_scaled_dev(sum, dw_, n_used_, n_embd_, st_);
+    wait_add(dneed_ + il, h_go_ + il, dseq_, h_cpul_ + (size_t) il * n_embd_, fo_, n_embd_, wait_ticks_, h_failed_,
+             st_);
+    ck(cudaGetLastError(), "routed experts");
+}
+
+// The host's share of a token run() handed the card whole: its MoE layers in turn, each once the card has routed
+// it.  The counts, and the experts outside VRAM, whose sum the card waits for.
+void Engine::card_host() {
+    (void) cudaStreamQuery(cs(st_));   // hands the launches to the card: the runtime may hold them until asked
+    (void) cudaGetLastError();
+    const Clock::time_point start = Clock::now();
+    for (int il = 0; il < n_layer_; ++il) {
+        Layer& L = layers_[(size_t) il];
+        if (!L.moe) continue;
+        const Clock::time_point t0 = Clock::now();
+        for (int spin = 0; *(volatile uint32_t*) (h_ready_ + il) != seq_; ++spin) {
+            if (*(volatile uint32_t*) h_failed_)
+                throw std::runtime_error("the card waited more than a second for the CPU's experts");
+            if (spin > 64) std::this_thread::yield();
+            if ((spin & 1023) == 0 && ms_since(start) > 30000.0)
+                throw std::runtime_error("the card did not route a token in 30 s");
+        }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        stats_.route_wait_ms += ms_since(t0);
+        const int32_t* ids = h_ids_ + (size_t) il * kSlots;
+        const float* w = h_w_ + (size_t) il * kSlots;
+        const uint8_t* cached = h_cached_ + (size_t) il * kSlots;
+        if (card_check_) {   // the host's routing of the same scores
+            int hid[kMaxUsed];
+            float hw[kMaxUsed];
+            route(il, h_rlc_ + (size_t) il * n_expert_, hid, hw, route_tmp_.data());
+            ++card_checked_;
+            for (int k = 0; k < n_used_; ++k) {
+                card_ids_differ_ += hid[k] != ids[k];
+                card_w_diff_ = std::max(card_w_diff_, (double) std::fabs(hw[k] - w[k]));
+                card_w_bits_ += hw[k] != w[k];
+            }
+        }
+        CpuExpert host[kMaxUsed];
+        int n_host = 0;
+        for (int k = 0; k < n_used_; ++k) {
+            const size_t e = (size_t) ids[k];
+            ++use_[(size_t) il * n_expert_ + e];
+            if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
+            if (!cached[k])
+                host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride,
+                                  L.exp_down + e * L.d_bytes, w[k], 0};
+        }
+        stats_.gpu_experts += n_used_ - n_host;
+        stats_.cpu_experts += n_host;
+        if (g_profile.on) {
+            ++g_profile.layers;
+            g_profile.all_cached += n_host == 0;
+        }
+        if (n_host > 0) {
+            const Clock::time_point t1 = Clock::now();
+            cpu_experts(*workers_, host, n_host, 1, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
+                        h_xl_ + (size_t) il * n_embd_, clamp_exp_[(size_t) il], gelu_, h_cpul_ + (size_t) il * n_embd_,
+                        nullptr);
+            stats_.cpu_ms += ms_since(t1);
+        }
+        std::atomic_thread_fence(std::memory_order_release);
+        *(volatile uint32_t*) (h_go_ + il) = seq_;
+    }
+}
+#endif
 
 // m experts from the mapped file into the staging buffer: gate and up of each back to back from the start, the
 // downs after them.  The two pinned buffers take turns, so the workers fill one while the other uploads.
@@ -1776,6 +2021,16 @@ void Engine::run(const int32_t* tokens, int n) {
         g_profile.start(st_);
     }
 #endif
+#if defined(STRATA_USE_HIP)
+    // A token on its own goes to the card whole (card_launch(), card_host()); not while the profile waits for the
+    // card after each part, or the dump reads its values: the card would wait for the host that waits for it.
+    card_pipe_ = card_route_ && n == 1 && !prof && !opt_.dump;
+    if (card_pipe_) set_word(dseq_, ++seq_, st_);
+    struct Off {
+        bool& on;
+        ~Off() { on = false; }
+    } off{card_pipe_};
+#endif
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
         up(il, n, (size_t) n - 1);
@@ -1783,6 +2038,10 @@ void Engine::run(const int32_t* tokens, int n) {
         if (prof) g_profile.mark(st_, 0, il);
 #endif
         if (!L.moe) continue;
+#if defined(STRATA_USE_HIP)
+        if (card_pipe_) card_launch(L, il);
+        else
+#endif
         if (mmq_ && n >= kStageRows) moe_rows(L, il, n);
         else if (moe(L, il, n)) moe_add(n);
 #if defined(STRATA_USE_HIP)
@@ -1793,6 +2052,9 @@ void Engine::run(const int32_t* tokens, int n) {
         if (prof) g_profile.mark(st_, 2, il);
 #endif
     }
+#if defined(STRATA_USE_HIP)
+    if (card_pipe_) card_host();
+#endif
 }
 
 void Engine::shift_rows(ptrdiff_t by) {

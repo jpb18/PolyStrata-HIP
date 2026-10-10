@@ -90,6 +90,7 @@ struct Layer {
     size_t slot_bytes = 0;             ///< from a slot of the layer to the one behind it: whole blocks of both types
     std::vector<int32_t> ahead;        ///< experts a full prompt batch stages before it routes
     int trade = -1;                    ///< layers with the same number can take each other's slots: same size
+    bool card = false;                 ///< HIP: a token on its own is routed on the card (Engine::card_moe())
     // What a call of a few tokens hands the card, recorded (Engine::run()): by the call's tokens, and the head
     // also by Engine::head_key()
     std::vector<void*> heads;          ///< up to the router
@@ -272,6 +273,11 @@ protected:
     virtual void route(int il, const float* logits, int* ids, float* w, float* tmp) const = 0;
     /// The shared expert, into fo_.  It runs on the GPU while the host routes.
     virtual void moe_shared(const Layer& L, int il, int n) = 0;
+#if defined(STRATA_USE_HIP)
+    /// For a model whose route() is kernels::route_topk_softmax()'s (a softmax, the likeliest, their weights over
+    /// their sum): the floor under that sum, which lets a token be routed on the card (card_moe()).  0: it is not.
+    virtual float card_route_floor() const { return 0.f; }
+#endif
     /// The scores of a layer's router for n tokens, into rl_.  The engine's own: the router's matrix times the
     /// experts' input (xn_).
     virtual void router_scores(const Layer& L, int n);
@@ -453,6 +459,37 @@ protected:
 
     // pinned host buffers
     float *h_r_ = nullptr, *h_rl_ = nullptr, *h_x_ = nullptr, *h_cpu_ = nullptr, *h_logits_ = nullptr;
+
+#if defined(STRATA_USE_HIP)
+    // A token on its own routed on the card (STRATA_POLY_CARD_ROUTE, card_route_setup()).  run() hands the card
+    // the whole token: each MoE layer's routing is a kernel behind its router, the cached experts follow at once,
+    // and a layer that picked an expert outside VRAM waits on the card for the host's sum of it (wait_add()).  The
+    // host goes through the layers behind the card (card_host()).
+    bool card_route_ = false;                ///< every MoE layer of the model can be routed on the card
+    bool card_pipe_ = false;                 ///< run() is handing a token to the card that way
+    const uint8_t** dslot_ = nullptr;        ///< per (layer, expert): Layer::slot, on the card
+    void *dgu_ = nullptr, *ddn_ = nullptr;   ///< a token's gate|up and down launches (kernels::MmvqSlots), on the card
+    float* dw_ = nullptr;                    ///< their weights (0 for an expert on the CPU)
+    int* dneed_ = nullptr;                   ///< per layer: a pick is outside VRAM
+    uint32_t* dseq_ = nullptr;               ///< the number of the token under way, on the card ...
+    uint32_t seq_ = 0;                       ///< ... and on the host
+    long long wait_ticks_ = 0;               ///< how long wait_add() waits for the host: 1 s of wall_clock64()
+    // pinned, coherent, per layer: the routing, the experts' input, the CPU's sum, and the two sides' words
+    int32_t* h_ids_ = nullptr;
+    float* h_w_ = nullptr;
+    uint8_t* h_cached_ = nullptr;
+    float *h_xl_ = nullptr, *h_cpul_ = nullptr, *h_rlc_ = nullptr;
+    uint32_t *h_ready_ = nullptr, *h_go_ = nullptr, *h_failed_ = nullptr;
+    // STRATA_POLY_CARD_ROUTE_CHECK=1: each routing on the card is done again by route() on the host, and compared
+    bool card_check_ = false;
+    long long card_checked_ = 0, card_ids_differ_ = 0, card_w_bits_ = 0;
+    double card_w_diff_ = 0;
+    void card_route_setup();
+    void upload_slots();
+    void slot_changed(int il, int e);
+    void card_launch(Layer& L, int il);
+    void card_host();
+#endif
 
     // A prompt batch's MoE (moe_rows).  A row is a token and one of the experts it routes to.
     std::unique_ptr<Mmq> mmq_;   ///< null when the card has no MMQ tile for the experts' types

@@ -34,6 +34,9 @@ protected:
     void layer_tail(Layer& L, int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
     void route(int il, const float* logits, int* ids, float* w, float* tmp) const override;
+#if defined(STRATA_USE_HIP)
+    float card_route_floor() const override;
+#endif
     void moe_shared(const Layer& L, int il, int n) override;
     void block_attend(int64_t pos, int n) override;
     void block_rows(int64_t pos, int n) override;

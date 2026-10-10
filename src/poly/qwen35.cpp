@@ -352,6 +352,11 @@ void Qwen35::route(int, const float* logits, int* ids, float* w, float* probs) c
     for (int k = 0; k < n_used_; ++k) w[k] /= denom;
 }
 
+#if defined(STRATA_USE_HIP)
+// route() above is kernels::route_topk_softmax()'s routing (Engine::card_moe()).
+float Qwen35::card_route_floor() const { return kMinWeightSum; }
+#endif
+
 // The shared expert, times the sigmoid of its own gate.  It runs on the GPU while the host routes.
 void Qwen35::moe_shared(const Layer& L, int il, int n) {
     lin(L.sh_gate, xn_, g_, n, xq_);
