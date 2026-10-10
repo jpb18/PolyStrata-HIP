@@ -258,9 +258,10 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 
 - Other files of the model. The engine reads the layouts of four converters (neurall's llama.cpp fork,
   patrickbdevaney's, antirez's and Unsloth's), a model in several files, and the weight types llama.cpp's kernels
-  have. Only the two sizes above have been run: setup offers no other.
+  have. Only the three sizes above have been run: setup offers no other.
 - Release builds of `strata-poly`: setup compiles it.
-- Windows. Nothing has been compiled there, and setup asks before it tries.
+- GLM on Windows. The engine compiles there and runs the three smaller models of this engine, but GLM has not
+  been run on Windows: no PC with the RAM for it was at hand. Setup asks before it installs it there.
 - AMD and Intel cards, and more than one card.
 - Pictures. The model's image input is not read.
 - Several requests decoded together (`"parallel"`). Requests wait their turn.
