@@ -1,0 +1,30 @@
+[
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0743,
+  "name": "short",
+  "prompt_tokens": 22
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.033,
+  "name": "code",
+  "prompt_tokens": 870
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0784,
+  "name": "doc-2.5k",
+  "prompt_tokens": 3069
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.1409,
+  "name": "doc-8k",
+  "prompt_tokens": 11481
+ }
+]
