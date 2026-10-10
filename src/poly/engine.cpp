@@ -598,10 +598,35 @@ void Engine::fill_expert_cache() {
 
     n_trade_ = (int) sizes.size();
     // sized again (resize_cache()), it is no larger than load() made it
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    size_t arena = std::min({all, free_b - reserve, full_bytes_ > 0 ? full_bytes_ : all});
+#else
     const size_t arena = std::min({all, free_b - reserve, full_bytes_ > 0 ? full_bytes_ : all});
+#endif
     if (arena == 0) return;
     exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
     ck(cudaMemset(exp_, 0, arena + 256), "the expert cache");   // the slots' tails stay zero (kTail)
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    // Windows gives a process less of the card once the process holds most of it: on an RX 9060 XT (16,304 MiB)
+    // its budget was 15,416 MiB up to some 10 GiB taken and 13,937 MiB from there on (hip_poly_probe vram).  The
+    // free VRAM the cache was sized by (within that budget, src/core/device.cu) was the larger figure, so once the
+    // cache was there nothing was left of the reserve; mind_vram() then gave the cache up and filled it again
+    // before every request, 4 s each.  The cache is made smaller by what the reserve lacks with the cache in
+    // place, until the reserve is there: the budget stays the lower one while the cache holds that much.
+    for (int round = 0; round < 3; ++round) {
+        size_t now_free = 0, now_total = 0;
+        ck(cudaMemGetInfo(&now_free, &now_total), "cudaMemGetInfo");
+        if (now_free + (size_t(32) << 20) >= reserve) break;
+        const size_t lack = reserve - now_free;
+        dev_allocs_.erase(std::find(dev_allocs_.begin(), dev_allocs_.end(), (void*) exp_));
+        ck(cudaFree(exp_), "the expert cache");
+        exp_ = nullptr;
+        if (lack >= arena) return;
+        arena -= lack;
+        exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
+        ck(cudaMemset(exp_, 0, arena + 256), "the expert cache");
+    }
+#endif
     // Which experts is by value; where they go is by layer, a layer's side by side in the experts' order.
     std::vector<Cand> taken;
     size_t room = arena;

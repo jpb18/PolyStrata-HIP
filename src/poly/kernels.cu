@@ -1149,12 +1149,23 @@ void* blas_create(void* stream) {
         cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, a, CUDA_R_16F, n, n * n, a + n * n,
                                    CUDA_R_16F, n, n * n, &zero, (float*) (a + 2 * n * n), CUDA_R_32F, n, n * n, 1,
                                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+#if defined(STRATA_USE_HIP)
+    // hipBLAS took 6.4 s over a process's first float product on an RX 9060 XT under Windows (poly_kernel_bench),
+    // which a prompt batch's float projections (gemm_f32) felt in the first prompt; a small one here takes it.
+    const float* f = (const float*) p;
+    const cublasStatus_t warm_f =
+        cublasSgemm(h, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, f, n, f, n, &zero, (float*) (a + 2 * n * n), n);
+#endif
     cudaStreamSynchronize(cs(stream));
     cudaFree(p);
 #if defined(STRATA_USE_HIP) && defined(_WIN32)
     if (warm == CUBLAS_STATUS_SUCCESS) blas_ck(warm, "the first product of halves");   // its stale error, if any
+    if (warm_f == CUBLAS_STATUS_SUCCESS) blas_ck(warm_f, "the first float product");
 #else
     (void) warm;
+#if defined(STRATA_USE_HIP)
+    (void) warm_f;
+#endif
 #endif
     return h;
 }

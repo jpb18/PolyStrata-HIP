@@ -49,7 +49,39 @@ double median(std::vector<double> v) {
 
 }  // namespace
 
-int main() {
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+// hip_poly_probe vram: VRAM taken 512 MiB at a time, and after each step what the HIP runtime says is free and what
+// the engine counts free within Windows' budget for the process (cudaMemGetInfo, src/core/device.cu): the gap is
+// what the budget withholds, and whether it moves as the process takes more.
+int vram_steps() {
+    std::vector<void*> got;
+    for (int step = 0; step < 40; ++step) {
+        size_t raw_free = 0, total = 0, free_b = 0, total_b = 0;
+        hipMemGetInfo(&raw_free, &total);
+        cudaMemGetInfo(&free_b, &total_b);
+        std::printf("taken %6zu MiB: HIP free %6zu MiB, free within the budget %6zu MiB, withheld %6zu MiB\n",
+                    got.size() * 512, raw_free >> 20, free_b >> 20, (raw_free - free_b) >> 20);
+        void* p = nullptr;
+        if (cudaMalloc(&p, size_t(512) << 20) != cudaSuccess) {
+            (void) cudaGetLastError();
+            std::printf("no more VRAM\n");
+            break;
+        }
+        cudaMemset(p, 1, size_t(512) << 20);
+        cudaDeviceSynchronize();
+        got.push_back(p);
+    }
+    for (void* p : got) cudaFree(p);
+    return 0;
+}
+#endif
+
+int main(int argc, char** argv) {
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    if (argc > 1 && std::strcmp(argv[1], "vram") == 0) return vram_steps();
+#else
+    (void) argc, (void) argv;
+#endif
     bool good = true;
     int dev = 0;
     cudaDeviceProp prop{};

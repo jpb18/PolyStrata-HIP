@@ -1615,7 +1615,7 @@ if(_strata_poly)
     add_executable(poly_kernel_bench src/poly/kernel_bench.cu src/poly/kernels.cu)
     target_include_directories(poly_kernel_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
                                                       ${_strata_gpu_include_directories})
-    target_link_libraries(poly_kernel_bench PRIVATE strata_kernels ${_strata_gpu_blas_target}
+    target_link_libraries(poly_kernel_bench PRIVATE strata_poly_mmq strata_kernels ${_strata_gpu_blas_target}
                                                     ${_strata_gpu_runtime_target})
   endif()
 endif()

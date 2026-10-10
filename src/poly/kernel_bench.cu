@@ -8,6 +8,7 @@
 // the bytes of the weights read a second.  The values are random: the times, not the results, are the point.
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/poly/kernels.hpp"
+#include "mmq.hpp"
 
 #include <cuda_runtime.h>
 
@@ -96,6 +97,47 @@ int main(int argc, char** argv) {
     void* xq = dev_random(strata::kernels::native_q8_1_bytes(8192) * 8, false);
     strata::kernels::native_quantize_q8_1(x, xq, 8192, 1, st);
 
+    {   // a process's first call of each library path a prompt batch takes, and the second: what the first costs once
+        const auto once = [&](const char* what, const std::function<void()>& f) {
+            Clock::time_point t0 = Clock::now();
+            f();
+            cudaStreamSynchronize(g_st);
+            const double first = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            t0 = Clock::now();
+            f();
+            cudaStreamSynchronize(g_st);
+            const double second = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            std::printf("  first call %-46s %9.1f ms, then %7.2f ms\n", what, first, second);
+        };
+        std::printf("a process's first calls\n");
+        void* blas = poly::blas_create(st);
+        float* w = (float*) dev_random((size_t) E * 256 * 4, true);
+        float* xs = (float*) dev_random((size_t) E * 1024 * 4, true);
+        float* ys = (float*) dev_random((size_t) 256 * 1024 * 4, true);
+        once("hipBLAS SGEMM 2048 x 256, 1024 rows", [&] { poly::gemm_f32(blas, w, xs, ys, E, 256, 256, 1024); });
+        poly::Mmq mmq;
+        void* xq8 = dev_random(poly::Mmq::q8_bytes(1024, 4096), false);
+        const struct {
+            int type, block_elems, block_bytes;
+            const char* name;
+        } mm[] = {{8, 32, 34, "MMQ Q8_0 2048 -> 8192, 1024 rows"}, {18, 256, 98, "MMQ IQ3_XXS 2048 -> 1024"},
+                  {23, 256, 136, "MMQ IQ4_XS 512 -> 2048"}, {14, 256, 210, "MMQ Q6_K 2048 -> 2048"}};
+        for (const auto& m : mm) {
+            const int n_in = m.type == 23 ? 512 : 2048, n_out = m.type == 8 ? 8192 : m.type == 23 ? 2048 :
+                                                                   m.type == 14 ? 2048 : 1024;
+            const size_t wb = (size_t) n_out * (n_in / m.block_elems) * m.block_bytes;
+            void* wq = dev_random(wb + 4096, false);
+            tame_scales(wq, wb, m.block_bytes, m.type == 14 ? 208 : 0);
+            float* out = (float*) dev_random((size_t) n_out * 1024 * 4, true);
+            once(m.name, [&] {
+                poly::Mmq::quantize(xs, nullptr, xq8, m.type, n_in, n_in, 1024, st);
+                mmq.mul(wq, m.type, n_out, n_in, 0, 1, xq8, nullptr, nullptr, 1024, 1024, out, n_out, st);
+            });
+            cudaFree(wq);
+            cudaFree(out);
+        }
+        poly::blas_destroy(blas);
+    }
     std::printf("one token of Qwen3.5/3.6-35B-A3B, %d launches each\n", g_reps);
     line("quantize 2048 floats to q8_1", time_us([&] { kernels::native_quantize_q8_1(x, xq, E, 1, st); }));
     float* nw = (float*) dev_random(E * 4, true);
