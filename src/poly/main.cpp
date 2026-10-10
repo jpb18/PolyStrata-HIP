@@ -293,6 +293,11 @@ private:
 struct CacheFlags {
     CacheOptions o;
     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
+    // --turn-token: a checkpoint in front of the prompt's last turn, which starts with this token (-1: none).  A chat
+    // template may write the turn the model answered differently once it is history: Qwen3.5's leaves the thinking
+    // block out.  The next request then parts from the conversation inside that turn, and without a checkpoint at
+    // its start it went back to the last checkpoint of --prompt-cache-every (up to 2,047 tokens read again).
+    int32_t turn_token = -1;
 };
 
 struct Session {
@@ -359,15 +364,20 @@ struct Session {
         const bool text = pictures.at.empty();
         std::vector<std::pair<int64_t, uint8_t*>> due;
         std::vector<Engine::Mark> marks;
+        int64_t turn = -1;   // where the last turn starts, when it gets a checkpoint (CacheFlags::turn_token)
+        if (flags.turn_token >= 0 && text && flags.o.checkpoints > 0)
+            for (int64_t j = n - 2; j > r.resume && turn < 0; --j)
+                if (ids[(size_t) j] == flags.turn_token) turn = j;
         for (int64_t i = r.resume; i < n;) {
             if (stop.load()) {
                 r.finish = "cancel";
                 break;
             }
             const bool last = i == n - 1;
-            const int64_t room = std::min<int64_t>(n - 1 - i, text ? engine.max_read() : engine.max_rows());
+            int64_t room = std::min<int64_t>(n - 1 - i, text ? engine.max_read() : engine.max_rows());
+            if (i < turn) room = std::min(room, turn - i);
             const int64_t m = last ? 1 : text ? room : engine.whole(i, kept.until_checkpoint(i, room));
-            kept.before(i, last);
+            kept.before(i, last || i == turn);
             if (text && !last) {
                 kept.inside(i, m, due);
                 marks.clear();
@@ -752,6 +762,9 @@ void usage() {
                  "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
                  "                         (default 2048, 0 = none)\n"
+                 "  --turn-token ID        also one in front of the prompt's last turn, which starts with token ID\n"
+                 "                         (Qwen3.5: <|im_start|>), so the next turn of a chat is not read again\n"
+                 "                         from the last of those (default: none)\n"
                  "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
                  "                         without being read again (default 0 = off)\n"
                  "  --conversation-cache-slots N        parked conversations at most (default 4)\n"
@@ -817,6 +830,7 @@ int main(int argc, char** argv) {
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
+        else if (a == "--turn-token") cache.turn_token = (int32_t) std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
         else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
