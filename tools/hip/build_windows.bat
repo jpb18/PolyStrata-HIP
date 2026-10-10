@@ -90,7 +90,7 @@ if "%POLY%"=="ON" (
     cmake --build "%BUILD_DIR%" || exit /b 1
   ) else (
     cmake --build "%BUILD_DIR%" --target strata-poly poly_expert_parity poly_workers_test poly_guesses_test ^
-      hip_poly_probe strata-device glm_conversations_test conversation_cache_test conversation_split_failure_test ^
+      hip_poly_probe poly_kernel_bench strata-device glm_conversations_test conversation_cache_test conversation_split_failure_test ^
       conversation_memory_test conversation_file_test conversation_snapshot_test conversation_validation_test ^
       || exit /b 1
   )

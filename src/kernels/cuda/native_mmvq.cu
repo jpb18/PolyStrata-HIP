@@ -1425,9 +1425,47 @@ __global__ void native_mmvq_slots_kernel(MmvqSlots slots, int n_in, int n_out) {
     }
 }
 
+#if defined(__HIPCC__)
+// HIP: rows of so few blocks that their threads fit half a warp (an expert's down projection of 512 inputs in
+// IQ4_XS is 2 blocks, 16 threads), as strata-poly's routed experts have them.  The kernel above gives such a row
+// two rows to a block of 128 threads, of which 16 work: on an RX 9060 XT eight IQ4_XS downs of 512 -> 2048 took
+// 92 us, 46 GB/s (poly_kernel_bench).  Here every half of every warp is a row, eight rows a block.  The sums are
+// the kernel above's: a row's threads hold the same terms in the same lanes, the general kernel adds only zeros
+// from its other threads (once its sum starts from them, as `+ 0.0f` here reproduces), and its xor tree over 32
+// lanes is the tree over 16 lanes after its first step, so a row comes out with the same bits.
+template<typename F>
+__launch_bounds__(WARPS * WARP, 4)
+__global__ void native_mmvq_slots_half_kernel(MmvqSlots slots, int n_in, int n_out) {
+    const auto* w = static_cast<const typename F::Block*>(slots.w[blockIdx.y]);
+    const auto* x = static_cast<const Q81Block*>(slots.x[blockIdx.y]);
+    float* y = slots.y[blockIdx.y];
+    const int lane = int(threadIdx.x) % 16;
+    const int row = 2 * (WARPS * int(blockIdx.x) + int(threadIdx.y)) + int(threadIdx.x) / 16;
+    const int blocks_per_row = n_in / F::DIV;
+    const int kbx = lane / F::T;
+    float tmp = 0.0f;
+    if (row < n_out && kbx < blocks_per_row) {
+        const int kqs = F::kqs(lane);
+        tmp += F::apply(F::load(w + std::size_t(row) * blocks_per_row + kbx, kqs), x + kbx * F::KBY, kqs);
+    }
+    tmp += 0.0f;
+#pragma unroll
+    for (int offset = 8; offset > 0; offset >>= 1) tmp += __shfl_xor_sync(0xffffffff, tmp, offset, WARP);
+    if (lane == 0 && row < n_out) y[row] = tmp;
+}
+#endif
+
 template<typename F>
 void launch_slots(const MmvqSlots& slots, int count, int n_in, int n_out, cudaStream_t s) {
     const dim3 threads(WARP, WARPS);
+#if defined(__HIPCC__)
+    if ((n_in / F::DIV) * F::T <= 16) {
+        const unsigned rows_a_block = 2 * WARPS;
+        const dim3 blocks(unsigned((std::size_t(n_out) + rows_a_block - 1) / rows_a_block), unsigned(count));
+        native_mmvq_slots_half_kernel<F><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+        return;
+    }
+#endif
     if (n_in / F::DIV < F::BPI) {
         constexpr int ROWS = 2;
         const dim3 blocks(unsigned((std::size_t(n_out) + ROWS - 1) / ROWS), unsigned(count));

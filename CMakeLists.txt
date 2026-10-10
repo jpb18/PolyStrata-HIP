@@ -1611,6 +1611,12 @@ if(_strata_poly)
     # what the engine's way of driving the card costs on this PC, without a model: hip_poly_probe
     add_executable(hip_poly_probe src/poly/hip_probe.cu)
     target_link_libraries(hip_poly_probe PRIVATE strata_core ${_strata_gpu_runtime_target})
+    # each kernel of a Qwen3.5/3.6-35B-A3B token at that model's shapes, on random data: poly_kernel_bench
+    add_executable(poly_kernel_bench src/poly/kernel_bench.cu src/poly/kernels.cu)
+    target_include_directories(poly_kernel_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                                      ${_strata_gpu_include_directories})
+    target_link_libraries(poly_kernel_bench PRIVATE strata_kernels ${_strata_gpu_blas_target}
+                                                    ${_strata_gpu_runtime_target})
   endif()
 endif()
 

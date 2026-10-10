@@ -30,6 +30,9 @@
 #include <sched.h>
 #include <unistd.h>
 #endif
+#if defined(STRATA_USE_HIP)
+#include <cstdlib>
+#endif
 
 namespace strata::poly {
 namespace {
@@ -202,6 +205,78 @@ struct Engine::Swap {
     uint8_t* pinned = nullptr;
     cudaEvent_t done = nullptr;    // marks its upload
 };
+
+#if defined(STRATA_USE_HIP)
+// STRATA_POLY_PROFILE=1, a diagnostic of the HIP build (AMD_PORT_IMPLEMENTATION.md): the card is waited for after
+// each part of a one-token call (a layer up to its router and its shared expert, the routed experts with their
+// routing and the CPU's share, the rest of the layer, the logits), and the host time of each part is added up by
+// layer and printed when the engine ends.  It makes the engine slower, and it says where a token's time goes.
+struct Profile {
+    bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_PROFILE");
+        return v != nullptr && v[0] == '1';
+    }();
+    std::vector<double> ms[4];   // [part][layer]: head, experts, tail, and the logits in layer 0 of the last
+    long long tokens = 0;
+    Clock::time_point t;
+    void start(void* st) {
+        cudaStreamSynchronize(cs(st));
+        t = Clock::now();
+    }
+    void mark(void* st, int part, int il) {
+        ck(cudaStreamSynchronize(cs(st)), "profile");
+        const Clock::time_point now = Clock::now();
+        if (ms[part].size() <= (size_t) il) ms[part].resize((size_t) il + 1, 0.0);
+        ms[part][(size_t) il] += std::chrono::duration<double, std::milli>(now - t).count();
+        t = now;
+    }
+    ~Profile() {
+        if (!on || tokens == 0) return;
+        const char* name[4] = {"up to the router, shared expert", "routed experts (routing, CPU, cached)",
+                               "after the experts", "output and logits"};
+        std::fprintf(stderr, "strata-poly profile: %lld one-token calls, ms a token by part\n", tokens);
+        for (int p = 0; p < 4; ++p) {
+            double all = 0;
+            for (double v : ms[p]) all += v;
+            std::fprintf(stderr, "  %-40s %7.3f", name[p], all / (double) tokens);
+            if (p < 3) {
+                std::fprintf(stderr, "   by layer:");
+                for (double v : ms[p]) std::fprintf(stderr, " %.3f", v / (double) tokens);
+            }
+            std::fprintf(stderr, "\n");
+        }
+    }
+};
+Profile g_profile;
+
+// A copy between pinned host memory and VRAM on the stream of a token's work.  On HIP under Windows a
+// cudaMemcpyAsync between two kernels of a stream waits about 100 microseconds for the copy engine, measured on an
+// RX 9060 XT (poly_kernel_bench): a kernel and a 1 KiB copy out took 100 us where the same with the copy made by a
+// kernel took 3 to 4; 0.95 MiB of logits 211 against 90, 8 MiB 734 against 653.  A token has several such copies
+// a layer, so the stream's copies are made by a kernel that reads or writes the pinned memory where it lies
+// (copy_words).  STRATA_POLY_COPY_KERNELS=0 gives them back to the copy engine.  The copies on the streams beside
+// it (the staging ahead, a read's rows, the cache's uploads) keep the copy engine: they run beside the kernels.
+bool copy_kernels() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_COPY_KERNELS");
+        return !(v != nullptr && v[0] == '0');
+    }();
+    return on;
+}
+
+template <class Kind>
+void hop(void* dst, const void* src, size_t bytes, Kind kind, void* stream, const char* what) {
+    if (copy_kernels() && bytes % 4 == 0 && ((uintptr_t) dst | (uintptr_t) src) % 4 == 0) {
+        copy_words(src, dst, bytes / 4, stream);
+        ck(cudaGetLastError(), what);
+        return;
+    }
+    ck(cudaMemcpyAsync(dst, src, bytes, kind, cs(stream)), what);
+}
+#define POLY_COPY(dst, src, bytes, kind, stream, what) hop(dst, src, bytes, kind, stream, what)
+#else
+#define POLY_COPY(dst, src, bytes, kind, stream, what) ck(cudaMemcpyAsync(dst, src, bytes, kind, cs(stream)), what)
+#endif
 
 Engine::Engine() = default;
 
@@ -1127,8 +1202,8 @@ void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n,
 void Engine::moe_router(const Layer& L, int n) {
     const size_t rows = (size_t) n;
     router_scores(L, n);
-    ck(cudaMemcpyAsync(h_rl_, rl_, rows * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
-    ck(cudaMemcpyAsync(h_x_, xn_, rows * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)), "router");
+    POLY_COPY(h_rl_, rl_, rows * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "router");
+    POLY_COPY(h_x_, xn_, rows * n_embd_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "router");
 }
 
 // The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.  True
@@ -1236,8 +1311,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
 
 // The CPU's experts of n tokens into the routed experts' sum.
 void Engine::moe_add(int n) {
-    ck(cudaMemcpyAsync(cpu_, h_cpu_, (size_t) n * n_embd_ * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
-       "host experts");
+    POLY_COPY(cpu_, h_cpu_, (size_t) n * n_embd_ * sizeof(float), cudaMemcpyHostToDevice, st_, "host experts");
     axpy(cpu_, 1.f, fo_, n * n_embd_, true, st_);
 }
 
@@ -1277,8 +1351,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
     router_scores(L, n);
-    ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
-       "router");
+    POLY_COPY(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "router");
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
 
     moe_shared(L, il, n);
@@ -1400,10 +1473,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         }
         b[n_chan] = at;
     }
-    ck(cudaMemcpyAsync(tab_, h_tab_,
-                       (3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row) * sizeof(int32_t),
-                       cudaMemcpyHostToDevice, cs(st_)),
-       "expert rows");
+    POLY_COPY(tab_, h_tab_, (3 * cap + 3 * (size_t) n_expert_ + 3 + kClasses * cb_row) * sizeof(int32_t),
+              cudaMemcpyHostToDevice, st_, "expert rows");
 
     const int rc = bounds[n_cached];   // the rows of the cached experts
     stats_.batch_cached += rc;
@@ -1533,7 +1604,7 @@ void Engine::run(const int32_t* tokens, int n) {
             for (size_t i = 0; i < e_row; ++i) r[i] *= scale;
         for (int h = 1; h < streams(); ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
     }
-    ck(cudaMemcpyAsync(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
+    POLY_COPY(r_, h_r_, (size_t) n * r_row * sizeof(float), cudaMemcpyHostToDevice, st_, "embed");
 
     // A token alone, or a window of guessed ones, hands the card the same launches every time, some thirty a
     // layer up to the router, and they cost this thread more than the card.  They are recorded once, a graph a
@@ -1553,8 +1624,7 @@ void Engine::run(const int32_t* tokens, int n) {
             h_at_[2 * t] = pos_ + t;
             h_at_[2 * t + 1] = turn(pos_ + t);
         }
-        ck(cudaMemcpyAsync(at_, h_at_, (size_t) n * 2 * sizeof(long long), cudaMemcpyHostToDevice, cs(st_)),
-           "position");
+        POLY_COPY(at_, h_at_, (size_t) n * 2 * sizeof(long long), cudaMemcpyHostToDevice, st_, "position");
     }
     // A layer's launches around its routed experts.  up(): to its router's copy, with the shared expert behind it.
     // tail(): what the layer does with the experts' sum.  `rec` numbers the recording of m tokens' launches: a
@@ -1660,13 +1730,29 @@ void Engine::run(const int32_t* tokens, int n) {
         back();
         return;
     }
+#if defined(STRATA_USE_HIP)
+    const bool prof = g_profile.on && n == 1;
+    if (prof) {
+        ++g_profile.tokens;
+        g_profile.start(st_);
+    }
+#endif
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
         up(il, n, (size_t) n - 1);
+#if defined(STRATA_USE_HIP)
+        if (prof) g_profile.mark(st_, 0, il);
+#endif
         if (!L.moe) continue;
         if (mmq_ && n >= kStageRows) moe_rows(L, il, n);
         else if (moe(L, il, n)) moe_add(n);
+#if defined(STRATA_USE_HIP)
+        if (prof) g_profile.mark(st_, 1, il);
+#endif
         tail(il, n, (size_t) n - 1);
+#if defined(STRATA_USE_HIP)
+        if (prof) g_profile.mark(st_, 2, il);
+#endif
     }
 }
 
@@ -1698,9 +1784,7 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
             if (!want_logits) return;
             lin(output_, h + (size_t) (m - 1) * n_embd_, logits_, 1);
             finish_logits(logits_, 1);
-            ck(cudaMemcpyAsync(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost,
-                               cs(st_)),
-               "logits");
+            POLY_COPY(h_logits_, logits_, (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "logits");
         };
         if (replay) {
             if (!tail_) tail_ = record(tail);
@@ -1709,6 +1793,9 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
             tail();
         }
         if (want_logits) ck(cudaStreamSynchronize(cs(st_)), "eval");
+#if defined(STRATA_USE_HIP)
+        if (g_profile.on && n == 1 && !windowed_) g_profile.mark(st_, 3, 0);
+#endif
     }
     // behind the logits: the caller has them while the card does this
     if (draft_) draft_rows(tokens, ahead_pos_ == pos_ && tokens[0] == ahead_tok_ ? 1 : 0, n);
@@ -1813,7 +1900,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             for (int h = 1; h < streams(); ++h) std::memcpy(r + (size_t) h * e_row, r, e_row * sizeof(float));
         }
         if (host) continue;
-        ck(cudaMemcpyAsync(half(c), h_r_, (size_t) call.m * r_bytes, cudaMemcpyHostToDevice, cs(st_)), "embed");
+        POLY_COPY(half(c), h_r_, (size_t) call.m * r_bytes, cudaMemcpyHostToDevice, st_, "embed");
         ck(cudaStreamSynchronize(cs(st_)), "embed");   // h_r_ is filled again
     }
     if (host) {
@@ -1922,8 +2009,7 @@ void Engine::window(const int32_t* tokens, int t) {
     output_rows(0, t, h);
     lin(output_, h, wlogits_, t);
     finish_logits(wlogits_, t);
-    ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
-       "logits");
+    POLY_COPY(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, st_, "logits");
     ck(cudaStreamSynchronize(cs(st_)), "window");
     if (timed && !recorded_) took_way(t, ms_since(t0));
     recorded_ = recorded_ || recorded;
@@ -1989,7 +2075,7 @@ void Engine::keep(int n) {
 float* Engine::draft_input(const int32_t* tokens, int64_t row, const float* h, int n) {
     const size_t e = (size_t) n_embd_, rows = (size_t) n;
     for (int t = 0; t < n; ++t) input(tokens[t], row + t, h_r_ + (size_t) t * e);
-    ck(cudaMemcpyAsync(cur_, h_r_, rows * e * sizeof(float), cudaMemcpyHostToDevice, cs(st_)), "embed");
+    POLY_COPY(cur_, h_r_, rows * e * sizeof(float), cudaMemcpyHostToDevice, st_, "embed");
     rms_norm(cur_, fp(d_enorm_), r_, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
     rms_norm(h, fp(d_hnorm_), r_ + e, n_embd_, n, rms_eps_, st_, 2 * n_embd_);
     float* x = r_ + 2 * rows * e;
@@ -2042,7 +2128,7 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
     // The guess and its probability are found on the card.  On the host a vocabulary's softmax takes up to 2 ms
     // where the block is unsure, four times what the block takes.
     likeliest(logits_, n_vocab_, guess_, st_);
-    ck(cudaMemcpyAsync(h_guess_, guess_, sizeof(Likeliest), cudaMemcpyDeviceToHost, cs(st_)), "draft");
+    POLY_COPY(h_guess_, guess_, sizeof(Likeliest), cudaMemcpyDeviceToHost, st_, "draft");
     ck(cudaStreamSynchronize(cs(st_)), "draft");
     if (i == 0) {
         ahead_pos_ = pos_;

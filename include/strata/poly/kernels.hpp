@@ -195,4 +195,13 @@ void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const floa
               const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
               float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
 
+#if defined(STRATA_USE_HIP)
+/// n words of 4 bytes from src to dst, bit for bit, by a kernel.  Either side may be pinned host memory
+/// (cudaMallocHost), which the card reads and writes where it lies.  On HIP under Windows a small cudaMemcpyAsync
+/// between two kernels costs some 100 microseconds (the copy engine's turn; poly_kernel_bench), and this costs what
+/// a small kernel does.  What it writes into host memory is the host's to read once an event recorded after it
+/// has completed.  Both pointers are 4-byte aligned.
+void copy_words(const void* src, void* dst, size_t n, void* stream);
+#endif
+
 }  // namespace strata::poly

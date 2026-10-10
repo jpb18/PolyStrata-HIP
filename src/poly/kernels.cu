@@ -1191,6 +1191,21 @@ void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, in
             "a batch's projections");
 }
 
+#if defined(STRATA_USE_HIP)
+namespace {
+__global__ void copy_words_kernel(const uint32_t* __restrict__ src, uint32_t* __restrict__ dst, size_t n) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
+        dst[i] = src[i];
+}
+}  // namespace
+
+void copy_words(const void* src, void* dst, size_t n, void* stream) {
+    if (n == 0) return;
+    copy_words_kernel<<<std::min(grid(n, 256), 1024), 256, 0, cs(stream)>>>((const uint32_t*) src, (uint32_t*) dst,
+                                                                             n);
+}
+#endif
+
 void bf16_to_f32(const uint16_t* w, float* out, size_t n, void* stream) {
     bf16_to_f32_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(w, out, n);
 }
