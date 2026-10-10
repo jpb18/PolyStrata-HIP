@@ -539,7 +539,25 @@ What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT 
   cache sized by the first figure was emptied and filled again before every request (4 s each). On Windows HIP
   the cache is made smaller until the reserve is there with the cache in place.
 - hipBLAS took 6.4 s over a process's first float product; the engine does a small one when it starts.
+- Every MoE layer of a token the host waited for the router's scores before it could launch the rest of the layer:
+  3.6 ms of a 15.7 ms token (measured by leaving the waits out, which gave wrong answers). On Windows a token on its
+  own is routed on the card: the routing is a kernel, the cached experts follow it at once, the whole token goes
+  to the card, and a layer that picked an expert outside VRAM waits on the card for the host's sum of it. Decode
+  went from 59.0 to 75.4 tok/s at a 2K prompt, 47.9 to 57.5 at 31K (one token a call), 60.4 to 71.1 with windows
+  of guessed tokens. The picks are the host's (10,240 routings compared), the weights within 1.2e-7.
+  `STRATA_POLY_CARD_ROUTE=0` gives the host's routing back, `=1` turns it on elsewhere (not measured there), and
+  `STRATA_POLY_CARD_ROUTE_CHECK=1` compares each routing with the host's.
 - `STRATA_POLY_PROFILE=1` prints where a one-token call's time goes, layer by layer.
+
+`--turn-token ID` (every backend, off by default) puts a conversation checkpoint in front of a prompt's last turn.
+Qwen3.5's chat template writes the turn the model answered without its thinking block once it is history, so
+without it each new turn of a chat read the conversation again from the last checkpoint of `--prompt-cache-every`
+(up to 2,047 tokens). With `--turn-token 248045` (`<|im_start|>`) a 40-turn chat of 14,049 tokens read only each
+turn's new tokens, at 0.7 s to the first token throughout. `tools/hip/poly_api_check.py` checks the server's API as
+chat apps and coding agents use it (streaming, tools, Anthropic's route, cancelling, long sessions);
+`tools/hip/opencode-polystrata-hip.json` is an OpenCode / OpenChamber provider for the server on port 8090, with
+the title agent on the variant without thinking (OpenCode asks for a title with the chat's model, and Qwen3.5
+thought for up to 9,345 tokens over it).
 
 Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four
 prompts of 22 to 11,481 tokens, with and without graphs, guesses and copy kernels, and with every expert on the CPU;
