@@ -78,7 +78,7 @@ RTX 3090 (24 GB) sollte etwa 100-140 Tokens pro Sekunde schreiben. Lange Chats u
 
 ### GLM 5.3 Flash
 
-Gemessen für PolyStrata auf einer Workstation, mit einem Prompt von 28K Tokens.
+Gemessen für PolyStrata auf einer Workstation, mit einem kurzen Chat und einem Prompt von 28K Tokens.
 
 <table>
 <tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th></tr>
@@ -99,9 +99,9 @@ schreibt es langsamer. Was gemessen wurde und wie: [docs/GLM.md](docs/GLM.md#wha
 
 ### Qwen3.6-35B-A3B
 
-Von PolyStrata auf zwei PCs gemessen, mit einem Prompt von 30,000 bis 32,000 Tokens: links ein Laptop mit einer
-8-GB-Karte, auf dem der Prozessor die Experten rechnet, für die die Karte keinen Platz hat, rechts eine Workstation,
-deren Karte das ganze Modell hält.
+Von PolyStrata auf zwei PCs gemessen, mit einem kurzen Chat und einem Prompt von 30,000 bis 32,000 Tokens: links ein
+Laptop mit einer 8-GB-Karte, auf dem der Prozessor die Experten rechnet, für die die Karte keinen Platz hat, rechts
+eine Workstation, deren Karte das ganze Modell hält.
 
 <table>
 <tr><th>NVIDIA: RTX 4070 Laptop (8 GB), Core i7-14700HX, 32 GB RAM</th><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th></tr>

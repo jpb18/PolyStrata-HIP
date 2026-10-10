@@ -74,7 +74,7 @@ about 100-140 tokens per second. Long chats and other cards: [speed of each size
 
 ### GLM 5.3 Flash
 
-Measured for PolyStrata on one workstation, with a 28K-token prompt.
+Measured for PolyStrata on one workstation, with a short chat and a 28K-token prompt.
 
 <table>
 <tr><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th></tr>
@@ -95,9 +95,9 @@ What was measured and how: [docs/GLM.md](docs/GLM.md#what-it-was-measured-on).
 
 ### Qwen3.6-35B-A3B
 
-Measured for PolyStrata on two PCs, with a prompt of 30,000 to 32,000 tokens: on the left a laptop whose card has 8
-GB, where the processor runs the experts the card has no room for, and on the right a workstation whose card holds the
-whole model.
+Measured for PolyStrata on two PCs, with a short chat and a prompt of 30,000 to 32,000 tokens: on the left a laptop
+whose card has 8 GB, where the processor runs the experts the card has no room for, and on the right a workstation
+whose card holds the whole model.
 
 <table>
 <tr><th>NVIDIA: RTX 4070 Laptop (8 GB), Core i7-14700HX, 32 GB RAM</th><th>NVIDIA: RTX 5090 (32 GB), Xeon Platinum 8470Q (25 vCPU), 120 GB RAM</th></tr>

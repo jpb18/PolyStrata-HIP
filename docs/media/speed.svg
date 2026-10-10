@@ -10,7 +10,7 @@ text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Aria
 </style>
 <rect width="960" height="300" rx="14" fill="#101828"/>
 <text x="32" y="46" class="h">Tokens per second while writing an answer</text>
-<text x="32" y="68" class="s">after a prompt of 30,000 tokens, the first size of each model</text>
+<text x="32" y="68" class="s">in a short chat, the first size of each model</text>
 
 <text x="32" y="110" class="p">Laptop: RTX 4070 Laptop (8 GB), 32 GB RAM</text>
 <text x="32" y="150" class="m">Qwen3.6-35B-A3B</text>
