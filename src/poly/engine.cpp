@@ -218,6 +218,7 @@ struct Profile {
     }();
     std::vector<double> ms[4];   // [part][layer]: head, experts, tail, and the logits in layer 0 of the last
     long long tokens = 0;
+    long long layers = 0, all_cached = 0;   // a one-token call's MoE layers, and those with no expert on the CPU
     Clock::time_point t;
     void start(void* st) {
         cudaStreamSynchronize(cs(st));
@@ -245,6 +246,8 @@ struct Profile {
             }
             std::fprintf(stderr, "\n");
         }
+        std::fprintf(stderr, "  MoE layers with every expert in VRAM: %lld of %lld (%.1f%%)\n", all_cached, layers,
+                     100.0 * (double) all_cached / (double) std::max(layers, 1LL));
     }
 };
 Profile g_profile;
@@ -1276,6 +1279,12 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         }
         stats_.gpu_experts += n_cached;
         stats_.cpu_experts += n_host;
+#if defined(STRATA_USE_HIP)
+        if (g_profile.on && n == 1) {
+            ++g_profile.layers;
+            g_profile.all_cached += n_host == 0;
+        }
+#endif
         // The launches cost this thread more than they cost the card, so each one less counts.  The cached experts
         // go kSlots at a time, a launch a stage for all of them: gate and up, the activation, its quantization,
         // down.  Then one launch adds up to kSumRows of them into their tokens' rows, in the order they came.  A

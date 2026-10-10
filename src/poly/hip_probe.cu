@@ -42,6 +42,23 @@ __global__ void spin(float* p, int iters) {
     p[threadIdx.x] = x;
 }
 
+// the router's copy as a kernel: n words to pinned memory, then (flag) a number the host waits for
+__global__ void copy_out(const float* src, float* dst, int n, unsigned* flag, unsigned seq) {
+    for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = src[i] + float(seq);
+    if (!flag) return;
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        __threadfence_system();
+        *(volatile unsigned*) flag = seq;
+    }
+}
+
+__global__ void set_flag(unsigned* flag, unsigned seq) {
+    __threadfence_system();
+    *(volatile unsigned*) flag = seq;
+}
+
 double median(std::vector<double> v) {
     std::sort(v.begin(), v.end());
     return v[v.size() / 2];
@@ -77,6 +94,7 @@ int vram_steps() {
 #endif
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);   // a step that hangs leaves the ones before it on the screen
 #if defined(STRATA_USE_HIP) && defined(_WIN32)
     if (argc > 1 && std::strcmp(argv[1], "vram") == 0) return vram_steps();
 #else
@@ -145,6 +163,92 @@ int main(int argc, char** argv) {
         std::printf("round trip (launch + 1 KiB D2H + event wait): median %.1f us, min %.1f, max %.1f\n", median(t),
                     *std::min_element(t.begin(), t.end()), *std::max_element(t.begin(), t.end()));
     }
+
+#if defined(STRATA_USE_HIP)
+    // 3b. the same trip other ways, as a decode's layer has it: the kernel that makes the scores, their copy out
+    // (9 KiB: the scores and the experts' input), the host's wait, and the next launch, which the card waits for.
+    // 0: memcpy + event wait (the engine before the port); 1: a copy kernel + event wait (the engine now on
+    // Windows); 2: 1 with the event polled; 3: the copy kernel also writes a number to coherent pinned memory after
+    // the data, and the host polls that; 4: 3 with one hipStreamQuery after the launches, which hands them to the
+    // card (the runtime may hold launches back until something waits); 5: 4 with the data to ordinary pinned memory
+    // and the number by a kernel of its own behind the copy's.  A poll gives up after 1 s (the trip counts as timed
+    // out, and the stream is waited for).  The data is checked each time.
+    {
+        constexpr int words = 2304, kWays = 6;
+        unsigned* hflag = nullptr;
+        float* hc = nullptr;
+        bool can = ok(hipHostMalloc((void**) &hflag, 64, hipHostMallocCoherent | hipHostMallocMapped),
+                      "coherent pinned memory") &&
+                   ok(hipHostMalloc((void**) &hc, words * sizeof(float), hipHostMallocCoherent | hipHostMallocMapped),
+                      "coherent pinned memory");
+        float* hn = nullptr;
+        can = can && ok(cudaMallocHost(&hn, words * sizeof(float)), "pinned memory");
+        if (can) {
+            std::vector<float> ramp(words);
+            for (int i = 0; i < words; ++i) ramp[i] = float(i);
+            cudaMemcpy(d + 4096, ramp.data(), words * sizeof(float), cudaMemcpyHostToDevice);
+            *hflag = 0;
+            const char* names[kWays] = {"memcpy + event wait", "copy kernel + event wait", "copy kernel + event polled",
+                                        "copy kernel + flag polled", "same, launches handed over",
+                                        "same, flag kernel"};
+            unsigned seq = 0;
+            for (int way = 0; way < kWays; ++way) {
+                std::vector<double> t;
+                int bad = 0, late = 0;
+                float* dst = way == 3 || way == 4 ? hc : hn;
+                for (int i = 0; i < 2100 && late < 3; ++i) {
+                    ++seq;
+                    const Clock::time_point t0 = Clock::now();
+                    tiny<<<1, 32, 0, st>>>(d);
+                    if (way == 0) {
+                        copy_out<<<1, 256, 0, st>>>(d + 4096, d + 8192, words, nullptr, seq);
+                        cudaMemcpyAsync(dst, d + 8192, words * sizeof(float), cudaMemcpyDeviceToHost, st);
+                    } else {
+                        copy_out<<<1, 256, 0, st>>>(d + 4096, dst, words, way == 3 || way == 4 ? hflag : nullptr,
+                                                    seq);
+                        if (way == 5) set_flag<<<1, 1, 0, st>>>(hflag, seq);
+                    }
+                    if (way < 3) cudaEventRecord(ev, st);
+                    if (way < 2) {
+                        cudaEventSynchronize(ev);
+                    } else if (way == 2) {
+                        while (cudaEventQuery(ev) == cudaErrorNotReady) {
+                        }
+                    } else {
+                        if (way >= 4) (void) cudaStreamQuery(st);
+                        while (*(volatile unsigned*) hflag != seq) {
+                            if (us_since(t0) > 1e6) {
+                                ++late;
+                                cudaStreamSynchronize(st);
+                                break;
+                            }
+                        }
+                    }
+                    (void) cudaGetLastError();   // a query's NotReady
+                    if (dst[words - 1] != float(words - 1) + float(seq) || dst[7] != 7.0f + float(seq)) ++bad;
+                    tiny<<<1, 32, 0, st>>>(d);   // the experts' launch the card waits for
+                    if (i >= 100) t.push_back(us_since(t0));
+                }
+                cudaStreamSynchronize(st);
+                good = ok(cudaGetLastError(), names[way]) && good;
+                if (late > 0) {
+                    std::printf("layer trip, %-27s: the host's poll timed out (%d times): the card had not run it\n",
+                                names[way], late);
+                    continue;
+                }
+                std::printf("layer trip, %-27s: median %.1f us, min %.1f, max %.1f; stale data %d of %zu\n",
+                            names[way], median(t), *std::min_element(t.begin(), t.end()),
+                            *std::max_element(t.begin(), t.end()), bad, t.size() + 100);
+                good = good && bad == 0;
+            }
+        } else {
+            good = false;
+        }
+        if (hn) cudaFreeHost(hn);
+        if (hc) hipHostFree(hc);
+        if (hflag) hipHostFree(hflag);
+    }
+#endif
 
     // 4. 35 small launches a layer: one after the other, and recorded once and replayed
     {
