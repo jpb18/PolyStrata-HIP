@@ -111,9 +111,9 @@ whole model.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 325-326 tokens/s | 5,220-5,360 tokens/s |
-| **UD-Q2_K_XL** | 345-359 tokens/s | 5,120-5,140 tokens/s |
-| **UD-Q4_K_M** | 328-332 tokens/s | 5,220-5,250 tokens/s |
+| **UD-Q3_K_M** | 332-334 tokens/s | 5,520-5,580 tokens/s |
+| **UD-Q2_K_XL** | 368-369 tokens/s | 5,540-5,580 tokens/s |
+| **UD-Q4_K_M** | 333-337 tokens/s | 5,630-5,660 tokens/s |
 
 </td></tr>
 </table>
@@ -141,9 +141,9 @@ Measured the same way, on the same two PCs.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 265 tokens/s | 5,200 tokens/s |
-| **APEX-I-MINI** | 265-279 tokens/s | 5,090-5,110 tokens/s |
-| **APEX-I-QUALITY** | 263-265 tokens/s | 5,050-5,150 tokens/s |
+| **APEX-I-COMPACT** | 267-272 tokens/s | 5,700-5,890 tokens/s |
+| **APEX-I-MINI** | 265-279 tokens/s | 5,450-5,510 tokens/s |
+| **APEX-I-QUALITY** | 263-265 tokens/s | 5,600-5,610 tokens/s |
 
 </td></tr>
 </table>
@@ -169,9 +169,9 @@ Measured the same way, on the same two PCs.
 
 | Size | Writes answers | Reads your prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 273-274 tokens/s | 5,580-5,620 tokens/s |
-| **UD-Q2_K_XL** | 273-274 tokens/s | 5,520-5,530 tokens/s |
-| **UD-Q4_K_M** | 270-272 tokens/s | 5,650-5,680 tokens/s |
+| **UD-Q3_K_M** | 306 tokens/s | 7,170-7,210 tokens/s |
+| **UD-Q2_K_XL** | 315 tokens/s | 6,920 tokens/s |
+| **UD-Q4_K_M** | 301 tokens/s | 7,120-7,210 tokens/s |
 
 </td></tr>
 </table>

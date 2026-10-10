@@ -299,6 +299,11 @@ table, as the others do, and guesses with its draft model. GLM's second run read
 60, 55 and 55. GLM's longest prompt starts like the one before it, so its first 2,048 tokens are not read
 again: the 9.7 s are for 7,398.
 
+The build of 2026-10-10, the first with the laptop's changes on Linux, wrote after the three prompts at 335,
+302 and 271 tokens/s with Qwen3.6, 270, 244 and 223 with Ornith and 304, 287 and 272 with Gemma 4, and read the
+two long ones, then 2,743 to 2,847 and 10,609 to 10,988 tokens, at 4,606 to 4,953 and 5,454 to 5,946. GLM wrote
+at 59, 56 and 62 and read at 555 and 769.
+
 The table has each new model's first size. The other sizes by the same benchmark, one run each, every expert
 in VRAM:
 
@@ -446,27 +451,37 @@ the draft block, which the other two files carry.
 
 | Model | Card | Prompt, tokens | First token, s | Reads, tokens/s | Writes a short chat | Writes after the prompt | Experts from VRAM |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.6-35B-A3B UD-Q3_K_M | whole model on it | 30,126 | 5.8 to 5.9 | 5,218 to 5,357 | 325 to 326 | 98 to 99 | 100% |
-| | held to 8 GB | | 7.8 to 7.9 | 3,878 to 3,905 | 156 to 164 | 48 to 50 | 42% |
-| Qwen3.6-35B-A3B UD-Q2_K_XL | whole model on it | 30,126 | 6.0 | 5,121 to 5,139 | 345 to 359 | 99 to 100 | 100% |
-| | held to 8 GB | | 7.9 | 3,876 to 3,901 | 157 | 56 to 57 | 61% |
-| Qwen3.6-35B-A3B UD-Q4_K_M | whole model on it | 30,126 | 5.9 | 5,216 to 5,248 | 328 to 332 | 93 to 94 | 100% |
-| | held to 8 GB | | 8.0 to 8.1 | 3,755 to 3,795 | 163 to 164 | 52 | 34% |
-| Ornith 1.5 APEX-I-Compact | whole model on it | 30,126 | 5.9 to 6.0 | 5,197 to 5,201 | 265 | 77 | 100% |
-| | held to 8 GB | | 8.0 to 8.1 | 3,778 to 3,814 | 153 to 165 | 52 | 48% to 49% |
-| Ornith 1.5 APEX-I-Mini | whole model on it | 30,126 | 6.0 to 6.1 | 5,087 to 5,114 | 265 to 279 | 78 to 79 | 100% |
-| | held to 8 GB | | 8.2 | 3,720 to 3,726 | 136 to 159 | 48 to 49 | 57% to 59% |
-| Ornith 1.5 APEX-I-Quality | whole model on it | 30,126 | 6.0 to 6.1 | 5,052 to 5,151 | 263 to 265 | 82 to 84 | 100% |
-| | held to 8 GB | | 8.5 to 8.6 | 3,573 to 3,579 | 147 to 150 | 46 to 50 | 34% to 35% |
-| Gemma 4 26B-A4B UD-Q3_K_M | whole model on it | 31,211 | 5.7 to 5.8 | 5,582 to 5,625 | 273 to 274 | 99 to 100 | 100% |
-| | held to 8 GB | | 6.8 to 6.9 | 4,626 to 4,689 | 131 to 145 | 45 to 49 | 26% to 28% |
-| Gemma 4 26B-A4B UD-Q2_K_XL | whole model on it | 31,211 | 5.8 | 5,516 to 5,530 | 273 to 274 | 103 to 104 | 100% |
-| | held to 8 GB | | 7.0 | 4,594 to 4,642 | 154 to 156 | 51 to 53 | 48% to 49% |
-| Gemma 4 26B-A4B UD-Q4_K_M | whole model on it | 31,211 | 5.7 | 5,652 to 5,683 | 270 to 272 | 93 to 95 | 100% |
-| | held to 8 GB | | 7.3 | 4,376 to 4,396 | 137 | 53 to 54 | 16% |
-| GLM 5.3 Flash 3.0bit | 32 GB | 28,354 | 36.2 to 36.3 | 784 to 785 | 57 to 59 | 49 to 51 | 49% to 52% |
-| GLM 5.3 Flash UD-IQ2_XXS | 32 GB | 28,354 | 27.8 | 1,023 | 40 to 44 | 37 to 39 | 49% to 52% |
+| Qwen3.6-35B-A3B UD-Q3_K_M | whole model on it | 30,126 and 31,369 | 5.7 to 5.8 | 5,523 to 5,580 | 332 to 334 | 186 to 189 | 100% |
+| | held to 8 GB | | 7.4 to 7.5 | 4,248 to 4,291 | 162 to 167 | 117 to 122 | 62% to 63% |
+| Qwen3.6-35B-A3B UD-Q2_K_XL | whole model on it | 30,126 and 31,369 | 5.7 | 5,535 to 5,584 | 368 to 369 | 190 to 196 | 100% |
+| | held to 8 GB | | 7.9 | 3,876 to 3,901 | 178 to 196 | 134 to 140 | 81% |
+| Qwen3.6-35B-A3B UD-Q4_K_M | whole model on it | 30,126 and 31,369 | 5.6 | 5,633 to 5,656 | 333 to 337 | 182 to 183 | 100% |
+| | held to 8 GB | | 7.0 | 4,522 to 4,525 | 175 to 189 | 125 | 51% to 54% |
+| Ornith 1.5 APEX-I-Compact | whole model on it | 30,126 and 31,369 | 5.4 to 5.6 | 5,697 to 5,893 | 267 to 272 | 145 to 149 | 100% |
+| | held to 8 GB | | 7.4 to 7.7 | 4,135 to 4,281 | 160 to 161 | 107 | 64% |
+| Ornith 1.5 APEX-I-Mini | whole model on it | 30,126 and 31,369 | 5.8 | 5,448 to 5,506 | 265 to 279 | 143 to 144 | 100% |
+| | held to 8 GB | | 8.2 | 3,720 to 3,726 | 136 to 159 | 111 to 115 | 78% to 80% |
+| Ornith 1.5 APEX-I-Quality | whole model on it | 30,126 and 31,369 | 5.7 | 5,602 to 5,609 | 263 to 265 | 139 to 144 | 100% |
+| | held to 8 GB | | 7.2 to 7.4 | 4,284 to 4,366 | 147 to 150 | 102 to 106 | 49% |
+| Gemma 4 26B-A4B UD-Q3_K_M | whole model on it | 31,211 and 31,186 | 4.4 | 7,168 to 7,210 | 306 | 198 to 200 | 100% |
+| | held to 8 GB | | 5.2 | 6,068 to 6,114 | 173 to 181 | 111 to 114 | 63% |
+| Gemma 4 26B-A4B UD-Q2_K_XL | whole model on it | 31,211 and 31,186 | 4.6 | 6,920 to 6,924 | 315 | 208 to 209 | 100% |
+| | held to 8 GB | | 5.7 | 5,567 to 5,608 | 187 to 190 | 130 to 136 | 79% to 80% |
+| Gemma 4 26B-A4B UD-Q4_K_M | whole model on it | 31,211 and 31,186 | 4.4 | 7,116 to 7,207 | 301 | 199 to 203 | 100% |
+| | held to 8 GB | | 5.2 | 6,084 to 6,161 | 180 to 181 | 117 to 119 | 48% |
+| GLM 5.3 Flash 3.0bit | 32 GB | 28,354 and 29,156 | 36.2 to 36.3 | 784 to 785 | 58 to 59 | 54 to 57 | 49% to 50% |
+| GLM 5.3 Flash UD-IQ2_XXS | 32 GB | 28,354 and 29,156 | 27.8 | 1,027 to 1,029 | 40 to 44 | 37 to 39 | 49% to 52% |
 | GLM 5.3 Flash REAP50-Q3_K_M | 32 GB | 28,354 | 22.7 | 1,252 | 56 to 62 | 50 to 51 | 57% to 64% |
+
+Each figure is the better of two passes on this machine, and a row's two prompt lengths are theirs: the prompt's
+text is this repository's documents, which changed between them. The first pass, of 2026-10-07, is what the next
+paragraphs are about. The second, of 2026-10-10, is of the build with the laptop's changes in
+[What was tuned](#what-was-tuned) and that day's two fixes, the first build with them on Linux. With the whole
+model on the card it wrote after the long prompt at 139 to 209 tokens/s where the first pass wrote at 77 to 104,
+and Gemma 4 read the prompt at 6,920 to 7,210 where 5,516 to 5,683. It was behind in these: the short chat of
+Ornith's APEX-I-Mini and APEX-I-Quality, 243 to 256 where 263 to 279, some of the figures held to 8 GB of those
+two and of Qwen3.6 UD-Q2_K_XL, and GLM's UD-IQ2_XXS, which wrote at 38 to 40 and 34 to 36 where 40 to 44 and 37
+to 39. GLM's REAP50-Q3_K_M is the first pass's.
 
 The nine sizes of the three new models were measured together, a family at a time with its three files in the
 file cache, after the last change in [What was tuned](#what-was-tuned), which is to what a guess costs. Their
@@ -634,8 +649,7 @@ read, an answer's attention after a long prompt, the profile, the longer window 
 the engine out of Windows' power throttling. Before them the first sizes wrote a short chat at 45 to 54
 tokens/s here and after the long prompt at 21 to 32, and read it at 870 to 1,610.
 
-Not run on this laptop: GLM 5.3 Flash, for which it has not the RAM, and a build on Linux of the changes that
-were made on it.
+Not run on this laptop: GLM 5.3 Flash, for which it has not the RAM.
 
 ## How each backend was checked
 
@@ -654,7 +668,9 @@ token ids compared and the probabilities of the reference's five likeliest token
 | Gemma 4 26B-A4B UD-Q2_K_XL | 64, 53, 22, 50, 33 | 0.09 |
 | Gemma 4 26B-A4B UD-Q4_K_M | 64, 26, 52, 25, 64 | 0.15 |
 
-The first three rows are the sizes setup takes first, UD-Q3_K_M and APEX-I-Compact. The six below them were
+The first three rows are the sizes setup takes first, UD-Q3_K_M and APEX-I-Compact. With the build of
+2026-10-10 they were 64, 64, 40, 29 and 64 within 0.12, 60 of 60, 7, 56, 2 and 64 within 0.29, and five times
+64 within 0.09. The six below them were
 compared once, with the current build, each against llama.cpp on its own file. Wherever one leaves llama.cpp's
 tokens, the two likeliest tokens at that step are within 0.1 of each other in the engine or in llama.cpp. Their
 states after a read and after the same calls one by one are equal byte for byte, held to 8 GB after 7,700
@@ -1402,11 +1418,12 @@ Setup knows the files in the table above. Another file of one of these architect
 
 - One NVIDIA card. Built and run on one Linux machine, and the three new models' nine sizes on one Windows
   laptop as well. GLM 5.3 Flash was not run on Windows.
-- The changes that came from the laptop were built on Windows only: the staging buffer's size, the waiting of
-  the CPU's pool, a window whole or in halves, the reserve and the cache that is sized again, a prompt in one
-  read, the kernels of an answer's attention, the saving of the profile, a window's length by the model, the
-  states a long window leaves, and the engine's leaving of the power throttling, which is Windows' alone.
-  The pool sleeps with `std::atomic`'s `wait`, which on Linux needs libstdc++ 11 or newer.
+- The changes that came from the laptop were built on Windows first, and on Linux on 2026-10-10 (gcc 11.4,
+  CUDA 12.8), where the first sizes were checked against llama.cpp and with and without guesses again, and the
+  benchmark of [A prompt of 30,000 tokens](#a-prompt-of-30000-tokens) was run. GLM 5.3 Flash, which only that
+  machine has the RAM for, stopped in the middle of an answer with them until the pool of the CPU's threads was
+  fixed that day. The engine's leaving of the power throttling is Windows' alone. The pool sleeps with
+  `std::atomic`'s `wait`, which on Linux needs libstdc++ 11 or newer.
 - The target of 8 GB of VRAM with 32 GB of RAM was measured on that one laptop. Each model's largest file
   takes its RAM to 28.6 to 31.4 GiB of 31.8 with what else runs there, and the two largest of all then read
   part of a prompt from the disk.

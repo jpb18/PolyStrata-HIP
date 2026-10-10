@@ -115,9 +115,9 @@ deren Karte das ganze Modell hält.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 325-326 Tokens/s | 5,220-5,360 Tokens/s |
-| **UD-Q2_K_XL** | 345-359 Tokens/s | 5,120-5,140 Tokens/s |
-| **UD-Q4_K_M** | 328-332 Tokens/s | 5,220-5,250 Tokens/s |
+| **UD-Q3_K_M** | 332-334 Tokens/s | 5,520-5,580 Tokens/s |
+| **UD-Q2_K_XL** | 368-369 Tokens/s | 5,540-5,580 Tokens/s |
+| **UD-Q4_K_M** | 333-337 Tokens/s | 5,630-5,660 Tokens/s |
 
 </td></tr>
 </table>
@@ -146,9 +146,9 @@ Genauso gemessen, auf denselben zwei PCs.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **APEX-I-COMPACT** | 265 Tokens/s | 5,200 Tokens/s |
-| **APEX-I-MINI** | 265-279 Tokens/s | 5,090-5,110 Tokens/s |
-| **APEX-I-QUALITY** | 263-265 Tokens/s | 5,050-5,150 Tokens/s |
+| **APEX-I-COMPACT** | 267-272 Tokens/s | 5,700-5,890 Tokens/s |
+| **APEX-I-MINI** | 265-279 Tokens/s | 5,450-5,510 Tokens/s |
+| **APEX-I-QUALITY** | 263-265 Tokens/s | 5,600-5,610 Tokens/s |
 
 </td></tr>
 </table>
@@ -175,9 +175,9 @@ Genauso gemessen, auf denselben zwei PCs.
 
 | Größe | Schreibt Antworten | Liest deinen Prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 273-274 Tokens/s | 5,580-5,620 Tokens/s |
-| **UD-Q2_K_XL** | 273-274 Tokens/s | 5,520-5,530 Tokens/s |
-| **UD-Q4_K_M** | 270-272 Tokens/s | 5,650-5,680 Tokens/s |
+| **UD-Q3_K_M** | 306 Tokens/s | 7,170-7,210 Tokens/s |
+| **UD-Q2_K_XL** | 315 Tokens/s | 6,920 Tokens/s |
+| **UD-Q4_K_M** | 301 Tokens/s | 7,120-7,210 Tokens/s |
 
 </td></tr>
 </table>
