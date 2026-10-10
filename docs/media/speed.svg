@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="Writing speed in tokens per second. Laptop with an 8 GB card: Qwen3.6-35B-A3B 73 to 75, Gemma 4 26B-A4B 70 to 71, Ornith 1.5 70. Workstation with a 32 GB card: Qwen3.6-35B-A3B 332 to 334, Gemma 4 26B-A4B 306, Ornith 1.5 267 to 272, GLM 5.3 Flash 57 to 59."><title>Writing speed of the four added models, tokens per second</title>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.h{font-size:21px;font-weight:700;fill:#f2f4f7}
+.s{font-size:13px;fill:#98a2b3}
+.p{font-size:14px;font-weight:600;fill:#d0d5dd}
+.m{font-size:14px;fill:#e4e7ec}
+.v{font-size:14px;font-weight:700;fill:#f2f4f7}
+.t{fill:#1d2939}
+</style>
+<rect width="960" height="300" rx="14" fill="#101828"/>
+<text x="32" y="46" class="h">Tokens per second while writing an answer</text>
+<text x="32" y="68" class="s">after a prompt of 30,000 tokens, the first size of each model</text>
+
+<text x="32" y="110" class="p">Laptop: RTX 4070 Laptop (8 GB), 32 GB RAM</text>
+<text x="32" y="150" class="m">Qwen3.6-35B-A3B</text>
+<rect x="176" y="136" width="240" height="18" rx="4" class="t"/><rect x="176" y="136" width="175" height="18" rx="4" fill="#7c9cff"/>
+<text x="424" y="150" class="v">73-75</text>
+<text x="32" y="184" class="m">Gemma 4 26B-A4B</text>
+<rect x="176" y="170" width="240" height="18" rx="4" class="t"/><rect x="176" y="170" width="168" height="18" rx="4" fill="#5ad1a4"/>
+<text x="424" y="184" class="v">70-71</text>
+<text x="32" y="218" class="m">Ornith 1.5</text>
+<rect x="176" y="204" width="240" height="18" rx="4" class="t"/><rect x="176" y="204" width="168" height="18" rx="4" fill="#f5b25c"/>
+<text x="424" y="218" class="v">70</text>
+<text x="32" y="252" class="s">The card holds part of the experts, the CPU computes the rest.</text>
+
+<text x="512" y="110" class="p">Workstation: RTX 5090 (32 GB)</text>
+<text x="512" y="150" class="m">Qwen3.6-35B-A3B</text>
+<rect x="656" y="136" width="216" height="18" rx="4" class="t"/><rect x="656" y="136" width="199" height="18" rx="4" fill="#7c9cff"/>
+<text x="880" y="150" class="v">332-334</text>
+<text x="512" y="184" class="m">Gemma 4 26B-A4B</text>
+<rect x="656" y="170" width="216" height="18" rx="4" class="t"/><rect x="656" y="170" width="184" height="18" rx="4" fill="#5ad1a4"/>
+<text x="880" y="184" class="v">306</text>
+<text x="512" y="218" class="m">Ornith 1.5</text>
+<rect x="656" y="204" width="216" height="18" rx="4" class="t"/><rect x="656" y="204" width="160" height="18" rx="4" fill="#f5b25c"/>
+<text x="880" y="218" class="v">267-272</text>
+<text x="512" y="252" class="m">GLM 5.3 Flash</text>
+<rect x="656" y="238" width="216" height="18" rx="4" class="t"/><rect x="656" y="238" width="34" height="18" rx="4" fill="#e88bd0"/>
+<text x="880" y="252" class="v">57-59</text>
+<text x="512" y="282" class="s">GLM 5.3 Flash is a 79 to 114 GB file. Most of it stays in RAM.</text>
+</svg>

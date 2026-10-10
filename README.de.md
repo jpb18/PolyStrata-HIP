@@ -5,6 +5,8 @@
 <p align="center"><b>Große KI-Modelle auf deinem eigenen PC</b><br>
 Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5 und Gemma 4 · kostenlos und Open Source</p>
 
+<p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens pro Sekunde beim Schreiben einer Antwort: 73 bis 75 mit Qwen3.6-35B-A3B auf einem Laptop mit 8-GB-Karte, 332 bis 334 auf einer RTX 5090"></p>
+
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Ein Voxel-Pagodengarten, den das Modell in PolyStrata geschrieben hat, läuft im Browser"></a><br>
 <sub>Ein Voxel-Pagodengarten aus einem einzigen Prompt, auf einer RTX 5070 mit <a href="https://github.com/Niko1221/Strata">Strata</a> (Qwen3.8-Flash-Next IQ3_S, 128K Kontext) ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">ganzes Video (49 s)</a></sub></p>
