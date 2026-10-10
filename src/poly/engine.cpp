@@ -256,10 +256,15 @@ Profile g_profile;
 // a layer, so the stream's copies are made by a kernel that reads or writes the pinned memory where it lies
 // (copy_words).  STRATA_POLY_COPY_KERNELS=0 gives them back to the copy engine.  The copies on the streams beside
 // it (the staging ahead, a read's rows, the cache's uploads) keep the copy engine: they run beside the kernels.
+// On Linux the copy engine's turn was not measured, so there it is the other way round: STRATA_POLY_COPY_KERNELS=1.
 bool copy_kernels() {
     static const bool on = [] {
         const char* v = std::getenv("STRATA_POLY_COPY_KERNELS");
+#if defined(_WIN32)
         return !(v != nullptr && v[0] == '0');
+#else
+        return v != nullptr && v[0] == '1';
+#endif
     }();
     return on;
 }

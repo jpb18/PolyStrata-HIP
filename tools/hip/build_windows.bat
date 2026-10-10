@@ -76,7 +76,11 @@ where cmake >nul 2>nul || (
 rem ---- 3. configure + build (STRATA_PORTABLE: the CPU kernels for an AVX2 baseline, as in the NVIDIA zip)
 set "GGML="
 if defined STRATA_GGML_DIR set "GGML=-DSTRATA_GGML_DIR=%STRATA_GGML_DIR:\=/%"
-if not exist "%BUILD_DIR%\build.ninja" (
+rem a poly build is configured every time, so that "tests" (STRATA_BUILD_TESTS) reaches a build folder there already is
+set "CONFIGURE=0"
+if not exist "%BUILD_DIR%\build.ninja" set "CONFIGURE=1"
+if "%POLY%"=="ON" set "CONFIGURE=1"
+if "%CONFIGURE%"=="1" (
   cmake -G Ninja -S "%SRC%" -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=Release ^
     -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=%TESTS% -DSTRATA_PREFILL_MMQ=ON ^
     -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON "-DCMAKE_HIP_ARCHITECTURES=%STRATA_HIP_ARCHS%" ^
