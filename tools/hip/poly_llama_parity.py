@@ -27,6 +27,9 @@ import tempfile
 import time
 import urllib.request
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _rocm_env import engine_env  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -93,7 +96,7 @@ def engine_run(exe: str, model: str, ids: list[int], n: int, extra: list[str], c
     cmd = [exe, "--model", model, "--max-context", str(ctx), "--tokens", "@" + f.name,
            "--max-new", str(n), "--top-probs", "40", *extra]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=engine_env(exe))
     finally:
         pathlib.Path(f.name).unlink(missing_ok=True)
     if p.returncode != 0:

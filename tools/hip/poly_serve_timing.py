@@ -20,6 +20,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _rocm_env import engine_env  # noqa: E402
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -34,7 +37,8 @@ def main() -> int:
     refs = json.loads(pathlib.Path(a.refs).read_text())
     cmd = [a.engine, "--model", a.model, "--max-context", str(a.ctx), "--serve",
            *shlex.split(a.engine_args, posix=False)]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr, text=True, bufsize=1)
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr, text=True, bufsize=1,
+                         env=engine_env(a.engine))
     t0 = time.time()
     for line in p.stdout:
         if line.startswith("READY"):
