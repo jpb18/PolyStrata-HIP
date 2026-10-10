@@ -5029,9 +5029,12 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         say("  Context length = how much text the model can see at once (your chat, files, tool output).")
         say("  Longer takes VRAM from the expert cache:")
         row = fam.get("row_bytes", GLM_ROW_BYTES)
+        # writing after a prompt that fills the context, tokens/s, on the 8 GB laptop (docs/BACKENDS.md)
+        laptop = {32768: "52-58", 65536: "42-46", 131072: "28-30"} if fam.get("ran_on_gb") == 8 else {}
         for i, c in enumerate(POLY_CONTEXTS, 1):
-            note = "   (recommended: the one it was measured with)" if c == 32768 else \
-                f"   ({(c - 32768) * row / 1e9:.1f} GB more VRAM; started, no long prompt run)" if c > 32768 else ""
+            on8 = f"; 8 GB card: {laptop[c]} tokens/s after a full prompt" if c in laptop else ""
+            note = f"   (recommended{on8})" if c == 32768 else \
+                f"   ({(c - 32768) * row / 1e9:.1f} GB more VRAM{on8 or '; no long prompt run'})" if c > 32768 else ""
             say(f"  {i}) {c // 1024}K tokens{note}")
         ctx = POLY_CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(POLY_CONTEXTS) + 1)],
                                    str(POLY_CONTEXTS.index(32768) + 1), a.yes)) - 1]
