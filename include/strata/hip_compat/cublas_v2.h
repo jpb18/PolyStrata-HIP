@@ -57,4 +57,12 @@ inline rocblas_status cublasGemmEx(rocblas_handle h, rocblas_operation trans_a,
 #define cublasSetStream hipblasSetStream
 #define cublasSetWorkspace hipblasSetWorkspace
 #define cublasStatus_t hipblasStatus_t
+// strata-poly (STRATA_POLY_HIP): its prompt batch's float projections and attention.  hipBLAS 1.0 and newer take
+// the same arguments in the same order as cuBLAS (strides as 64-bit integers, hipDataType and hipblasComputeType_t
+// in the Ex form); CMake refuses STRATA_POLY_HIP with the older hipBLAS above.  AMD has no separate tensor-op
+// algorithm: the library picks its matrix-core kernels by itself, so the request maps to its default.
+#define CUBLAS_GEMM_DEFAULT_TENSOR_OP HIPBLAS_GEMM_DEFAULT
+#define cublasSgemm hipblasSgemm
+#define cublasSgemmStridedBatched hipblasSgemmStridedBatched
+#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
 #endif

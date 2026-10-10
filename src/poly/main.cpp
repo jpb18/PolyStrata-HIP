@@ -718,7 +718,7 @@ int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures,
 
 void usage() {
     std::fprintf(stderr,
-                 "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,... [--max-new N])\n"
+                 "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,...|@FILE [--max-new N])\n"
                  "  --max-context N        tokens the attention caches hold (default 8192)\n"
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default: a sixteenth of the\n"
@@ -833,7 +833,25 @@ int main(int argc, char** argv) {
         else if (a == "--min-p") s.min_p = std::strtof(val(), nullptr);
         else if (a == "--seed") s.seed = std::strtoull(val(), nullptr, 10);
         else if (a == "--tokens" || a == "--eos-ids") {
-            if (!parse_ids(val(), a == "--tokens" ? ids : eos)) {
+            // --tokens @FILE: the ids from a file, for a prompt longer than a command line takes (Windows: 32,767
+            // characters, some 4,000 tokens)
+            const char* v = val();
+            std::string from_file;
+            if (a == "--tokens" && v[0] == '@') {
+                std::FILE* f = std::fopen(v + 1, "rb");
+                if (!f) {
+                    std::fprintf(stderr, "strata-poly: cannot read %s\n", v + 1);
+                    return 2;
+                }
+                char buf[1 << 16];
+                for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) from_file.append(buf, got);
+                std::fclose(f);
+                while (!from_file.empty() && (from_file.back() == '\n' || from_file.back() == '\r' ||
+                                              from_file.back() == ' '))
+                    from_file.pop_back();
+                v = from_file.c_str();
+            }
+            if (!parse_ids(v, a == "--tokens" ? ids : eos)) {
                 std::fprintf(stderr, "strata-poly: %s takes token ids separated by commas\n", a.c_str());
                 return 2;
             }

@@ -3,6 +3,9 @@ rem PolyStrata's HIP (AMD) engine for Windows, and the ready-made zip setup.py d
 rem
 rem   tools\hip\build_windows.bat              build strata.exe + strata-device.exe and package dist\strata-windows-x64-hip.zip
 rem   tools\hip\build_windows.bat tests        also build the HIP unit tests (ctest in build-hip-win; they need an AMD GPU)
+rem   tools\hip\build_windows.bat poly         EXPERIMENTAL: strata-poly.exe (Qwen3.5/3.6 MoE ... from their GGUF) for AMD
+rem                                           (STRATA_POLY_HIP, AMD_PORT_IMPLEMENTATION.md) in build-hip-poly-win, its
+rem                                           tests and the HIP runtime DLLs beside it; no zip.  "poly tests": every test
 rem
 rem Needs: Visual Studio 2022 (or 2019) Build Tools with the C++ workload (the linker, the CRT and the Windows SDK),
 rem Python 3.10+ and git.  No admin rights and no AMD GPU: ROCm comes from AMD's TheRock Python wheels (the same
@@ -22,10 +25,14 @@ if not defined STRATA_HIP_ARCHS set "STRATA_HIP_ARCHS=gfx1100;gfx1101;gfx1102;gf
 if not defined STRATA_ROCM_VERSION set "STRATA_ROCM_VERSION=10.2.0a20260930"
 if not defined STRATA_ROCM_INDEX set "STRATA_ROCM_INDEX=https://nightly.repo.amd.com/rocm/whl-next/"
 if not defined ROCM_VENV set "ROCM_VENV=%SRC%\.rocm-win"
+set "POLY=OFF"
+if /i "%~1"=="poly" set "POLY=ON"
+if "%POLY%"=="ON" if not defined BUILD_DIR set "BUILD_DIR=%SRC%\build-hip-poly-win"
 if not defined BUILD_DIR set "BUILD_DIR=%SRC%\build-hip-win"
 if not defined DIST_DIR set "DIST_DIR=%SRC%\dist"
 set "TESTS=OFF"
 if /i "%~1"=="tests" set "TESTS=ON"
+if /i "%~2"=="tests" set "TESTS=ON"
 
 rem ---- 1. ROCm (TheRock wheels: the compiler, the HIP runtime, hipBLAS/hipBLASLt/rocBLAS, a device package per arch)
 set "PY="
@@ -60,6 +67,11 @@ set "HIP_PLATFORM=amd"
 set "HIP_PATH=%ROCM%"
 set "ROCM_PATH=%ROCM%"
 set "PATH=%ROCM%\bin;%ROCM%\lib\llvm\bin;%PATH%"
+rem CMake and Ninja: the PC's own when it has them, else the venv's (pip, a few MB)
+where cmake >nul 2>nul || (
+  if not exist "%ROCM_VENV%\Scripts\cmake.exe" "%ROCM_VENV%\Scripts\python.exe" -m pip install --disable-pip-version-check -q cmake ninja || exit /b 1
+  set "PATH=!PATH!;%ROCM_VENV%\Scripts"
+)
 
 rem ---- 3. configure + build (STRATA_PORTABLE: the CPU kernels for an AVX2 baseline, as in the NVIDIA zip)
 set "GGML="
@@ -71,7 +83,24 @@ if not exist "%BUILD_DIR%\build.ninja" (
     "-DCMAKE_C_COMPILER=%ROCM_F%/lib/llvm/bin/clang.exe" "-DCMAKE_CXX_COMPILER=%ROCM_F%/lib/llvm/bin/clang++.exe" ^
     "-DCMAKE_HIP_COMPILER=%ROCM_F%/lib/llvm/bin/clang++.exe" "-DCMAKE_HIP_COMPILER_ROCM_ROOT=%ROCM_F%" ^
     "-DCMAKE_PREFIX_PATH=%ROCM_F%" "-DCMAKE_HIP_FLAGS=--rocm-path=%ROCM_F% --rocm-device-lib-path=%BITCODE%" ^
-    %GGML% || exit /b 1
+    -DSTRATA_POLY_HIP=%POLY% -DSTRATA_BUILD_CONVERSATION_TESTS=%POLY% %GGML% || exit /b 1
+)
+if "%POLY%"=="ON" (
+  if "%TESTS%"=="ON" (
+    cmake --build "%BUILD_DIR%" || exit /b 1
+  ) else (
+    cmake --build "%BUILD_DIR%" --target strata-poly poly_expert_parity poly_workers_test poly_guesses_test ^
+      hip_poly_probe strata-device glm_conversations_test conversation_cache_test conversation_split_failure_test ^
+      conversation_memory_test conversation_file_test conversation_snapshot_test conversation_validation_test ^
+      || exit /b 1
+  )
+  rem Windows looks in the program's folder before System32, where the AMD driver may keep another amdhip64_7.dll
+  rem (#468 #461): the SDK's runtime goes beside the programs; the rest of ROCm is found through the PATH.
+  copy /y "%ROCM%\bin\amdhip64_7.dll" "%BUILD_DIR%\" >nul || exit /b 1
+  copy /y "%ROCM%\bin\amd_comgr*.dll" "%BUILD_DIR%\" >nul || exit /b 1
+  echo.
+  echo Done: %BUILD_DIR%\strata-poly.exe  ^(tools\hip\poly_windows.bat runs it with ROCm on the PATH^)
+  exit /b 0
 )
 if "%TESTS%"=="ON" (
   cmake --build "%BUILD_DIR%" || exit /b 1

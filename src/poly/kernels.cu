@@ -1102,15 +1102,36 @@ __global__ void gdn_out_kernel(float* __restrict__ out, const float* __restrict_
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
 inline int grid(size_t n, int block) { return int((n + block - 1) / block); }
 
+// #247/#325 (Windows HIP, seen on gfx1201): hipBLAS can return success with the right FP16/BF16 product and still
+// leave hipErrorInvalidValue as the thread's last error, which the next launch check (Mmq's) would take for its own
+// failure.  So on Windows HIP a product's own success clears that one value, and any other error is thrown, as
+// src/prefill/gemm.cu does for `strata`.  So that this cannot hide a real hipErrorInvalidValue from a launch before
+// the product, the last error is looked at before every product too (blas_before).  Elsewhere both are nothing.
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+void blas_before(const char* what) {
+    const hipError_t e = hipGetLastError();
+    if (e != hipSuccess) throw std::runtime_error(std::string(what) + ": a launch before it failed: " + hipGetErrorString(e));
+}
+#define STRATA_BLAS_BEFORE(what) blas_before(what)
+#else
+#define STRATA_BLAS_BEFORE(what) ((void) 0)
+#endif
+
 void blas_ck(cublasStatus_t s, const char* what) {
     if (s != CUBLAS_STATUS_SUCCESS)
         throw std::runtime_error(std::string(what) + ": cuBLAS status " + std::to_string((int) s));
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    const hipError_t sticky = hipGetLastError();
+    if (sticky != hipSuccess && sticky != hipErrorInvalidValue)
+        throw std::runtime_error(std::string(what) + ": " + hipGetErrorString(sticky));
+#endif
 }
 
 }  // namespace
 
 void* blas_create(void* stream) {
     cublasHandle_t h = nullptr;
+    STRATA_BLAS_BEFORE("cublasCreate");
     blas_ck(cublasCreate(&h), "cublasCreate");
     if (const cublasStatus_t s = cublasSetStream(h, cs(stream)); s != CUBLAS_STATUS_SUCCESS) {
         cublasDestroy(h);
@@ -1124,11 +1145,17 @@ void* blas_create(void* stream) {
     cudaMemsetAsync(p, 0, n * n * (2 * sizeof(half) + sizeof(float)), cs(stream));
     const float one = 1.0f, zero = 0.0f;
     const half* a = (const half*) p;
-    cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, a, CUDA_R_16F, n, n * n, a + n * n,
-                               CUDA_R_16F, n, n * n, &zero, (float*) (a + 2 * n * n), CUDA_R_32F, n, n * n, 1,
-                               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    const cublasStatus_t warm =
+        cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, a, CUDA_R_16F, n, n * n, a + n * n,
+                                   CUDA_R_16F, n, n * n, &zero, (float*) (a + 2 * n * n), CUDA_R_32F, n, n * n, 1,
+                                   CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     cudaStreamSynchronize(cs(stream));
     cudaFree(p);
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    if (warm == CUBLAS_STATUS_SUCCESS) blas_ck(warm, "the first product of halves");   // its stale error, if any
+#else
+    (void) warm;
+#endif
     return h;
 }
 
@@ -1152,10 +1179,12 @@ void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, in
     const float one = 1.0f, zero = 0.0f;
     const int groups = n_out / rows_per_x;
     if (groups == 1) {
+        STRATA_BLAS_BEFORE("a batch's projection");
         blas_ck(cublasSgemm(h, CUBLAS_OP_T, CUBLAS_OP_N, n_out, rows, n_in, &one, w, n_in, x, n_in, &zero, y, n_out),
                 "a batch's projection");
         return;
     }
+    STRATA_BLAS_BEFORE("a batch's projections");
     blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, rows_per_x, rows, n_in, &one, w, n_in,
                                       (long long) rows_per_x * n_in, x, groups * n_in, n_in, &zero, y, n_out,
                                       rows_per_x, groups),
@@ -1242,6 +1271,7 @@ void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t
             (const half*) cache, sel, sel_stride, top_rows, kpool, (long long) pos, first, dense_rows, keys, rank,
             n_keys);
         // score[head][key] = scale * (q[head] . keys[key]).  cuBLAS reads a buffer of rows as the transpose.
+        STRATA_BLAS_BEFORE("attention scores");
         blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_T, CUBLAS_OP_N, n_keys, n_head, rank, &scale, keys, rank,
                                           key_n, q + size_t(first) * head, rank, head, &zero, score, n_keys,
                                           score_n, c),
@@ -1249,6 +1279,7 @@ void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t
         dsa_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, n_keys, top_rows, kpool, (long long) pos,
                                                                    first, dense_rows);
         // out[head] = sum over the keys of score[head][key] * keys[key]
+        STRATA_BLAS_BEFORE("attention values");
         blas_ck(cublasSgemmStridedBatched(h, CUBLAS_OP_N, CUBLAS_OP_N, rank, n_head, n_keys, &one, keys, rank, key_n,
                                           score, n_keys, score_n, &zero, out + size_t(first) * head, rank, head, c),
                 "attention values");
@@ -1290,6 +1321,7 @@ void idx_score_batch(void* blas, const float* q, const float* w, const float* ca
     const float* keys = cache + (size_t(kpool) * 3 - 1) * dim;
     for (int first = 0; first < rows; first += chunk) {
         const int c = std::min(chunk, rows - first);
+        STRATA_BLAS_BEFORE("indexer scores");
         blas_ck(cublasSgemm((cublasHandle_t) blas, CUBLAS_OP_T, CUBLAS_OP_N, n_pool, c * n_head, dim, &one, keys,
                             kpool * 3 * dim, q + size_t(first) * n_head * dim, dim, &zero, work, n_pool),
                 "indexer scores");
@@ -1403,6 +1435,7 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
             m = (int) std::min<long long>(std::min(block, n_keys - k0), ring > 0 ? ring - row : n_keys);
             // A product a group: its heads' queries of every token of the chunk against the group's keys.  cuBLAS
             // reads the cache's rows as the transpose, and the groups' keys lie `dim` apart in a row.
+            STRATA_BLAS_BEFORE("attention scores");
             blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, m, (int) cols, dim, &scale,
                                                (const half*) kcache + size_t(row) * width, CUDA_R_16F, width, dim, qg,
                                                CUDA_R_16F, dim, cols * dim, &zero, score, CUDA_R_32F, m, cols * m,
@@ -1413,6 +1446,7 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                                                                          shrink, k0 == 0);
             if (k0 > 0)
                 attn_scale_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(og, shrink, dim, false);
+            STRATA_BLAS_BEFORE("attention values");
             blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, m, &one,
                                                (const half*) vcache + size_t(row) * width, CUDA_R_16F, width, dim,
                                                weight, CUDA_R_16F, m, cols * m, k0 > 0 ? &one : &zero, og, CUDA_R_32F,

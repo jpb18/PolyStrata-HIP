@@ -70,6 +70,12 @@ if(STRATA_HIP_GFX906)
 endif()
 option(STRATA_ENABLE_HIP "Build the HIP targets for wave32 AMD GPUs (gfx1100, gfx1201; gfx1012/gfx1030 unvalidated)" OFF)
 option(STRATA_PREFILL_MMQ "Build the optional GGML MMQ prefill path for HIP" OFF)
+# EXPERIMENTAL, opt-in: strata-poly (Qwen3.5/3.6 MoE, Ornith, Gemma 4, GLM from their GGUF) with the HIP backend
+# above, for the same wave32 AMD cards (AMD_PORT_IMPLEMENTATION.md).  Off: strata-poly is a CUDA program, as before.
+option(STRATA_POLY_HIP "EXPERIMENTAL: also build strata-poly with the HIP backend (wave32 AMD GPUs)" OFF)
+if(STRATA_POLY_HIP AND NOT STRATA_ENABLE_HIP)
+  message(FATAL_ERROR "STRATA_POLY_HIP requires STRATA_ENABLE_HIP=ON")
+endif()
 # CUDA: MMQ prompt kernels for Q4_K / Q5_K / Q5_1 (Unsloth's UD-Q4_K_XL experts).  Off by default: the engine loads
 # every kernel when it starts (CUDA_MODULE_LOADING=EAGER), so these took ~5 MB of VRAM - 1-3 expert slots - from every
 # model, and the UD-Q4_K_XL prompt is SSD-bound with or without them (docs/UNSLOTH_Q4.md)
@@ -1531,7 +1537,31 @@ endif()
 #
 # A second engine beside `strata`.  It shares the quantized matvec kernels and the GGUF reader, and takes the
 # CPU experts' dot products from ggml-cpu.
+#
+# With STRATA_POLY_HIP the same sources are built for the HIP backend (STRATA_ENABLE_HIP): the .cu files are HIP
+# (cmake/hip_backend.cmake), the engine's own take the CUDA->HIP shim like `strata`'s, and llama.cpp's MMQ sources
+# take ggml's own HIP header (GGML_USE_HIP), as strata_mmq does on HIP.
+set(_strata_poly "")
 if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
+  set(_strata_poly CUDA)
+elseif(STRATA_POLY_HIP)
+  if(NOT STRATA_NATIVE_EXPERTS)
+    message(FATAL_ERROR "STRATA_POLY_HIP requires STRATA_NATIVE_EXPERTS=ON (ggml-cpu for the CPU experts)")
+  endif()
+  if(hipblas_VERSION VERSION_LESS "1.0")
+    message(FATAL_ERROR "STRATA_POLY_HIP needs hipBLAS 1.0 or newer (found ${hipblas_VERSION}): the shim maps "
+                        "strata-poly's strided and Ex products to hipBLAS's own")
+  endif()
+  set(_strata_poly HIP)
+  if(STRATA_GGML_DIR)
+    set(_strata_gg "${STRATA_GGML_DIR}/ggml")
+  else()
+    set(_strata_gg "${strata_llamacpp_SOURCE_DIR}/ggml")
+  endif()
+  set(_strata_mmq "${_strata_gg}/src/ggml-cuda")
+  message(STATUS "Strata: strata-poly with HIP (EXPERIMENTAL), arch ${STRATA_HIP_ARCHS}")
+endif()
+if(_strata_poly)
   # The prompt path's quantized products: llama.cpp's MMQ kernels (ggml-cuda, MIT) for the types the model's
   # GGUFs keep their matrices in (the list in src/poly/mmq.cu), from the checkout strata_mmq is compiled from and
   # with the same host symbols.  A library of its own, so that what `strata` multiplies with MMQ stays as it is.
@@ -1540,15 +1570,24 @@ if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NO
              iq4_xs)
     list(APPEND _strata_poly_mmq_instances ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
   endforeach()
+  if(_strata_poly STREQUAL "HIP")
+    set_source_files_properties(${_strata_mmq}/quantize.cu ${_strata_poly_mmq_instances} PROPERTIES LANGUAGE HIP)
+  endif()
   add_library(strata_poly_mmq STATIC src/poly/mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu
               ${_strata_poly_mmq_instances})
   target_include_directories(strata_poly_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
                                                     ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
-  if(MSVC)
-    target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+  if(_strata_poly STREQUAL "CUDA")
+    target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+    if(MSVC)
+      target_compile_options(strata_poly_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+    endif()
+    target_link_libraries(strata_poly_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
+  else()
+    # no shim here: ggml's vendors/hip.h names the HIP runtime for these sources, as for strata_mmq
+    target_compile_definitions(strata_poly_mmq PRIVATE GGML_USE_HIP=1)
+    target_link_libraries(strata_poly_mmq PUBLIC ggml-base hip::host roc::hipblas)
   endif()
-  target_link_libraries(strata_poly_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
 
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
                             src/poly/gemma4.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
@@ -1568,6 +1607,11 @@ if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NO
   target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include)
   target_link_libraries(poly_workers_test PRIVATE ggml-cpu ggml-base Threads::Threads)
   add_test(NAME poly_workers_test COMMAND poly_workers_test)
+  if(_strata_poly STREQUAL "HIP")
+    # what the engine's way of driving the card costs on this PC, without a model: hip_poly_probe
+    add_executable(hip_poly_probe src/poly/hip_probe.cu)
+    target_link_libraries(hip_poly_probe PRIVATE strata_core ${_strata_gpu_runtime_target})
+  endif()
 endif()
 
 if(STRATA_BUILD_TESTS)

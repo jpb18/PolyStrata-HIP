@@ -59,6 +59,7 @@
 #define cudaGraphExecDestroy hipGraphExecDestroy
 #define cudaGraphExec_t hipGraphExec_t
 #define cudaGraphGetNodes hipGraphGetNodes
+#define cudaGraphInstantiateWithFlags hipGraphInstantiateWithFlags
 #define cudaGraphLaunch hipGraphLaunch
 #define cudaGraphUpload hipGraphUpload
 #define cudaGraph_t hipGraph_t
