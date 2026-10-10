@@ -319,15 +319,21 @@ python tools\hip\poly_llama_parity.py --engine build-hip-poly-win\strata-poly.ex
 python tools\hip\poly_serve_timing.py --engine build-hip-poly-win\strata-poly.exe --model C:\Users\user\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --refs refs.json --repeat 2 --max-new 128 --engine-args="--threads 6"
 ```
 
-O servidor e o `polystrata.py` precisam dos pacotes de `requirements.txt`; usei o `.venv` de `C:\strata`, que tem
-os mesmos.
-
-Servidor, web app e benchmark:
+O servidor e o `polystrata.py` precisam dos pacotes de `requirements.txt` (`jinja2` e outros), que o Python do
+sistema não tem: o `polystrata.py` arranca o servidor com o mesmo Python com que é chamado. Uma vez, na raiz do
+repositório (é o que o setup faz; `.venv` está no `.gitignore`):
 
 ```bat
-python tools\hip\poly_config.py --model C:\Users\user\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --name qwen3.5-35b-a3b-q3_k_m-hip --context 49152 --threads 6
-python polystrata.py --model qwen3.5-35b-a3b-q3_k_m-hip
-python polystrata.py benchmark --model qwen3.5-35b-a3b-q3_k_m-hip --prompt-tokens 2000,8000,24000,34000 --json bench.json
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+Servidor, web app e benchmark, sempre com o Python do `.venv`:
+
+```bat
+.venv\Scripts\python tools\hip\poly_config.py --model C:\Users\user\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --name qwen3.5-35b-a3b-q3_k_m-hip --context 49152 --threads 6
+.venv\Scripts\python polystrata.py --model qwen3.5-35b-a3b-q3_k_m-hip
+.venv\Scripts\python polystrata.py benchmark --model qwen3.5-35b-a3b-q3_k_m-hip --prompt-tokens 2000,8000,24000,34000 --json bench.json
 ```
 
 Onde vai o tempo de um token:
