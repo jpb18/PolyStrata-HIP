@@ -1,0 +1,54 @@
+[
+ {
+  "label": "poly-sweep",
+  "engine": "poly",
+  "exe": "build-hip-poly-win\\strata-poly.exe",
+  "args": "--expert-profile C:\\Users\\user\\models\\qwen35-pack\\expert-profile.txt --threads 6",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 37.72,
+  "memory": {
+   "vram_dedicated_mib": 12985,
+   "vram_shared_mib": 1624,
+   "ram_private_mib": 11633,
+   "ram_ws_mib": 17592
+  },
+  "rows": [
+   {
+    "ttft_s": 12.265,
+    "wall_s": 14.982,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 12262.7,
+    "decode_ms": 2718.1,
+    "finish": "length",
+    "guessed_right": 0,
+    "guessed": 8,
+    "vram_expert_hits": 0.944,
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 670.0,
+    "decode_tok_s": 47.09
+   },
+   {
+    "ttft_s": 23.353,
+    "wall_s": 26.1,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 23329.6,
+    "decode_ms": 2748.3,
+    "finish": "length",
+    "guessed_right": 0,
+    "guessed": 4,
+    "vram_expert_hits": 0.978,
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 1341.5,
+    "decode_tok_s": 46.57
+   }
+  ],
+  "time": "2026-10-10 21:17:03"
+ }
+]

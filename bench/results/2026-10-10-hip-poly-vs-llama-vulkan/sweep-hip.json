@@ -1,0 +1,186 @@
+[
+ {
+  "label": "hip-ncmoe8",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.unsloth\\llama.cpp\\build\\bin\\Release\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 8",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.67,
+  "memory": {
+   "vram_dedicated_mib": 13663,
+   "vram_shared_mib": 1200,
+   "ram_private_mib": 14735,
+   "ram_ws_mib": 16379
+  },
+  "rows": [
+   {
+    "ttft_s": 19.591,
+    "wall_s": 27.612,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 19576.385,
+    "decode_ms": 8022.312,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 419.7,
+    "decode_tok_s": 15.96
+   },
+   {
+    "ttft_s": 46.158,
+    "wall_s": 58.401,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 46005.277,
+    "decode_ms": 12240.11,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 680.3,
+    "decode_tok_s": 10.46
+   }
+  ],
+  "time": "2026-10-10 21:22:06"
+ },
+ {
+  "label": "hip-ncmoe8-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.unsloth\\llama.cpp\\build\\bin\\Release\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 8 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.84,
+  "memory": {
+   "vram_dedicated_mib": 13281,
+   "vram_shared_mib": 1960,
+   "ram_private_mib": 16071,
+   "ram_ws_mib": 16726
+  },
+  "rows": [
+   {
+    "ttft_s": 35.68,
+    "wall_s": 46.22,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 35664.576,
+    "decode_ms": 10131.601,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 230.4,
+    "decode_tok_s": 12.63
+   },
+   {
+    "ttft_s": 100.045,
+    "wall_s": 113.087,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 99747.761,
+    "decode_ms": 13034.497,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 313.8,
+    "decode_tok_s": 9.82
+   }
+  ],
+  "time": "2026-10-10 21:25:00"
+ },
+ {
+  "label": "hip-ncmoe10-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.unsloth\\llama.cpp\\build\\bin\\Release\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 10 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.09,
+  "memory": {
+   "vram_dedicated_mib": 13444,
+   "vram_shared_mib": 1308,
+   "ram_private_mib": 15520,
+   "ram_ws_mib": 16684
+  },
+  "rows": [
+   {
+    "ttft_s": 12.939,
+    "wall_s": 28.01,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 12933.565,
+    "decode_ms": 15071.044,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 635.2,
+    "decode_tok_s": 8.49
+   },
+   {
+    "ttft_s": 30.791,
+    "wall_s": 43.881,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 30634.754,
+    "decode_ms": 13083.561,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 1021.6,
+    "decode_tok_s": 9.78
+   }
+  ],
+  "time": "2026-10-10 21:26:25"
+ },
+ {
+  "label": "hip-ncmoe12-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.unsloth\\llama.cpp\\build\\bin\\Release\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 12 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 8.84,
+  "memory": {
+   "vram_dedicated_mib": 13103,
+   "vram_shared_mib": 1012,
+   "ram_private_mib": 14876,
+   "ram_ws_mib": 17049
+  },
+  "rows": [
+   {
+    "ttft_s": 36.947,
+    "wall_s": 45.549,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 36943.214,
+    "decode_ms": 8600.71,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 222.4,
+    "decode_tok_s": 14.88
+   },
+   {
+    "ttft_s": 116.858,
+    "wall_s": 126.268,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 116730.085,
+    "decode_ms": 9408.119,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 268.1,
+    "decode_tok_s": 13.61
+   }
+  ],
+  "time": "2026-10-10 21:29:30"
+ }
+]

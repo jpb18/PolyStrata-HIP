@@ -1,0 +1,370 @@
+[
+ {
+  "label": "vk-ncmoe4",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 4",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 14.11,
+  "memory": {
+   "vram_dedicated_mib": 12443,
+   "vram_shared_mib": 3112,
+   "ram_private_mib": 16714,
+   "ram_ws_mib": 18421
+  },
+  "rows": [
+   {
+    "ttft_s": 22.027,
+    "wall_s": 28.757,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 22013.623,
+    "decode_ms": 6726.506,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 373.2,
+    "decode_tok_s": 19.03
+   },
+   {
+    "ttft_s": 55.184,
+    "wall_s": 66.363,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 55015.146,
+    "decode_ms": 11174.15,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 568.9,
+    "decode_tok_s": 11.46
+   }
+  ],
+  "time": "2026-10-10 20:50:48"
+ },
+ {
+  "label": "vk-ncmoe6",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 6",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.84,
+  "memory": {
+   "vram_dedicated_mib": 12746,
+   "vram_shared_mib": 2142,
+   "ram_private_mib": 16001,
+   "ram_ws_mib": 18004
+  },
+  "rows": [
+   {
+    "ttft_s": 13.679,
+    "wall_s": 20.622,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 13674.224,
+    "decode_ms": 6941.609,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 600.8,
+    "decode_tok_s": 18.44
+   },
+   {
+    "ttft_s": 55.488,
+    "wall_s": 66.872,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 55264.8,
+    "decode_ms": 11381.869,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 566.3,
+    "decode_tok_s": 11.25
+   }
+  ],
+  "time": "2026-10-10 20:52:31"
+ },
+ {
+  "label": "vk-ncmoe8",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 8",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 9.83,
+  "memory": {
+   "vram_dedicated_mib": 13052,
+   "vram_shared_mib": 1170,
+   "ram_private_mib": 15334,
+   "ram_ws_mib": 17031
+  },
+  "rows": [
+   {
+    "ttft_s": 13.128,
+    "wall_s": 17.799,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 13124.976,
+    "decode_ms": 4668.31,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 626.0,
+    "decode_tok_s": 27.42
+   },
+   {
+    "ttft_s": 55.247,
+    "wall_s": 64.513,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 55028.433,
+    "decode_ms": 9262.526,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 568.7,
+    "decode_tok_s": 13.82
+   }
+  ],
+  "time": "2026-10-10 20:54:09"
+ },
+ {
+  "label": "vk-ncmoe10",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 10",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.09,
+  "memory": {
+   "vram_dedicated_mib": 12384,
+   "vram_shared_mib": 1170,
+   "ram_private_mib": 14667,
+   "ram_ws_mib": 16644
+  },
+  "rows": [
+   {
+    "ttft_s": 15.528,
+    "wall_s": 21.353,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 15522.167,
+    "decode_ms": 5825.898,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 529.3,
+    "decode_tok_s": 21.97
+   },
+   {
+    "ttft_s": 61.738,
+    "wall_s": 71.898,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 61518.545,
+    "decode_ms": 10155.314,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 508.7,
+    "decode_tok_s": 12.6
+   }
+  ],
+  "time": "2026-10-10 20:55:57"
+ },
+ {
+  "label": "vk-ncmoe6-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 6 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 12.09,
+  "memory": {
+   "vram_dedicated_mib": 13094,
+   "vram_shared_mib": 2334,
+   "ram_private_mib": 17799,
+   "ram_ws_mib": 17855
+  },
+  "rows": [
+   {
+    "ttft_s": 46.041,
+    "wall_s": 52.417,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 46034.861,
+    "decode_ms": 6372.639,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 178.5,
+    "decode_tok_s": 20.09
+   },
+   {
+    "ttft_s": 46.93,
+    "wall_s": 57.956,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 46748.09,
+    "decode_ms": 11019.332,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 669.5,
+    "decode_tok_s": 11.62
+   }
+  ],
+  "time": "2026-10-10 20:58:04"
+ },
+ {
+  "label": "vk-ncmoe8-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 8 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.36,
+  "memory": {
+   "vram_dedicated_mib": 13400,
+   "vram_shared_mib": 1362,
+   "ram_private_mib": 17132,
+   "ram_ws_mib": 17299
+  },
+  "rows": [
+   {
+    "ttft_s": 9.358,
+    "wall_s": 13.772,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 9352.943,
+    "decode_ms": 4413.661,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 878.4,
+    "decode_tok_s": 29.0
+   },
+   {
+    "ttft_s": 44.846,
+    "wall_s": 54.415,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 44698.583,
+    "decode_ms": 9564.855,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 700.2,
+    "decode_tok_s": 13.38
+   }
+  ],
+  "time": "2026-10-10 20:59:28"
+ },
+ {
+  "label": "vk-ncmoe9-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 9 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 10.21,
+  "memory": {
+   "vram_dedicated_mib": 13065,
+   "vram_shared_mib": 1362,
+   "ram_private_mib": 16797,
+   "ram_ws_mib": 17172
+  },
+  "rows": [
+   {
+    "ttft_s": 12.878,
+    "wall_s": 18.162,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 12871.246,
+    "decode_ms": 5282.432,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 638.3,
+    "decode_tok_s": 24.23
+   },
+   {
+    "ttft_s": 42.629,
+    "wall_s": 52.452,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 42491.119,
+    "decode_ms": 9815.457,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 736.5,
+    "decode_tok_s": 13.04
+   }
+  ],
+  "time": "2026-10-10 21:19:01"
+ },
+ {
+  "label": "vk-ncmoe10-ub2048",
+  "engine": "llama",
+  "exe": "C:\\Users\\user\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.55.0\\llama-server.exe",
+  "args": "-ngl 99 -t 6 -fa on --n-cpu-moe 10 -ub 2048 -b 2048",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 9.84,
+  "memory": {
+   "vram_dedicated_mib": 12734,
+   "vram_shared_mib": 1362,
+   "ram_private_mib": 16467,
+   "ram_ws_mib": 17298
+  },
+  "rows": [
+   {
+    "ttft_s": 9.899,
+    "wall_s": 15.384,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 9893.778,
+    "decode_ms": 5482.936,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 830.4,
+    "decode_tok_s": 23.35
+   },
+   {
+    "ttft_s": 44.764,
+    "wall_s": 54.961,
+    "produced": 128,
+    "prompt_tokens": 31296,
+    "read_tokens": 31296,
+    "prompt_ms": 44620.999,
+    "decode_ms": 10193.449,
+    "finish": "limit",
+    "phase": "cold",
+    "prompt": "A-31k",
+    "prefill_tok_s": 701.4,
+    "decode_tok_s": 12.56
+   }
+  ],
+  "time": "2026-10-10 21:20:26"
+ }
+]
