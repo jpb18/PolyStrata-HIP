@@ -133,6 +133,12 @@ struct MmvqSlots {
     float* y[8];
 };
 bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
+#if defined(STRATA_USE_HIP)
+// native_mmvq_slots() with the slots in device memory, written there by a kernel before it on the stream
+// (strata-poly's routing on the card).  A slot whose w is null gives zeros.  False, with nothing launched: the
+// format or shape has no such kernel.
+bool native_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream);
+#endif
 
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
 // dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13,

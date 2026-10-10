@@ -1,6 +1,9 @@
 // src/poly/kernels.cu - see the header.  The reference for every formula is llama.cpp's graph of the model and the
 // ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
 #include "strata/poly/kernels.hpp"
+#if defined(STRATA_USE_HIP)
+#include "strata/kernels/native_mmvq.hpp"
+#endif
 
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -1214,6 +1217,147 @@ void copy_words(const void* src, void* dst, size_t n, void* stream) {
     if (n == 0) return;
     copy_words_kernel<<<std::min(grid(n, 256), 1024), 256, 0, cs(stream)>>>((const uint32_t*) src, (uint32_t*) dst,
                                                                              n);
+}
+
+namespace {
+__global__ void add_scaled_dev_kernel(ScaledRows rows, const float* __restrict__ w, int count, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    for (int k = 0; k < count; ++k) rows.acc[k][i] = rows.acc[k][i] + rows.x[k][i] * w[k];
+}
+
+// The likelier of two (probability, expert): the lower number among equals, as the host's scan finds it.
+__device__ __forceinline__ void likelier(float& p, int& e, float q, int f) {
+    if (q > p || (q == p && f < e)) p = q, e = f;
+}
+
+constexpr int kRouteThreads = 256;
+
+__global__ void __launch_bounds__(kRouteThreads) route_topk_softmax_kernel(
+    const float* __restrict__ scores, int n_expert, int n_used, float min_sum, const uint8_t* const* __restrict__ table,
+    size_t down_off, kernels::MmvqSlots* gu, kernels::MmvqSlots* dn, float* w_dev, CardRoute out) {
+    __shared__ float prob[1024];
+    __shared__ uint8_t taken[1024];
+    __shared__ float wp[kRouteThreads / 32];
+    __shared__ int we[kRouteThreads / 32];
+    __shared__ float mx_s;
+    __shared__ int pick[8];
+    __shared__ float pw[8];
+    const int tid = threadIdx.x, lane = tid % 32, warp = tid / 32;
+    for (int i = tid; i < out.n_x; i += kRouteThreads) out.x_host[i] = out.x[i];   // the experts' input, for the CPU
+    float mx = -INFINITY;
+    for (int e = tid; e < n_expert; e += kRouteThreads) mx = fmaxf(mx, scores[e]);
+    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffff, mx, o, 32));
+    if (lane == 0) wp[warp] = mx;
+    __syncthreads();
+    if (tid == 0) {
+        float m = wp[0];
+        for (int w = 1; w < kRouteThreads / 32; ++w) m = fmaxf(m, wp[w]);
+        mx_s = m;
+    }
+    __syncthreads();
+    for (int e = tid; e < n_expert; e += kRouteThreads) prob[e] = expf(scores[e] - mx_s), taken[e] = 0;
+    __syncthreads();
+    for (int k = 0; k < n_used; ++k) {
+        float p = -2.f;
+        int best = n_expert;
+        for (int e = tid; e < n_expert; e += kRouteThreads)
+            if (!taken[e]) likelier(p, best, prob[e], e);
+        for (int o = 16; o > 0; o >>= 1) {
+            const float q = __shfl_xor_sync(0xffffffff, p, o, 32);
+            const int f = __shfl_xor_sync(0xffffffff, best, o, 32);
+            likelier(p, best, q, f);
+        }
+        if (lane == 0) wp[warp] = p, we[warp] = best;
+        __syncthreads();
+        if (tid == 0) {
+            for (int w = 1; w < kRouteThreads / 32; ++w) likelier(p, best, wp[w], we[w]);
+            pick[k] = best;
+            pw[k] = p;
+            taken[best] = 1;
+        }
+        __syncthreads();
+    }
+    if (tid != 0) return;
+    // the host's sum: in the experts' order, in double
+    double all = 0.0;
+    for (int e = 0; e < n_expert; ++e) all += (double) prob[e];
+    const float inv = (float) (1.0 / all);
+    float sum = 0.f;
+    for (int k = 0; k < n_used; ++k) sum += pw[k] = pw[k] * inv;
+    const float denom = fmaxf(sum, min_sum);
+    int need = 0;
+    for (int k = 0; k < 8; ++k) {
+        const int e = k < n_used ? pick[k] : 0;
+        const uint8_t* s = k < n_used ? table[e] : nullptr;
+        const float w = k < n_used ? pw[k] / denom : 0.f;
+        gu->w[k] = s;
+        dn->w[k] = s ? s + down_off : nullptr;
+        w_dev[k] = s ? w : 0.f;
+        if (k < n_used) out.ids[k] = e, out.w[k] = w, out.cached[k] = s != nullptr, need |= s == nullptr;
+    }
+    *out.need = need;
+    if (out.ready) {   // after everything above, for the host that polls it
+        __threadfence_system();
+        *(volatile uint32_t*) out.ready = *out.seq;
+        __threadfence_system();
+    }
+}
+
+// The CPU's experts of a layer into fo: when the routing picked one (need), once the host says their sum is in
+// `cpu` (go == seq).  A wait longer than `ticks` of wall_clock64() gives up and sets *failed.
+__global__ void wait_add_kernel(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo,
+                                int n, long long ticks, uint32_t* failed) {
+    if (!*need) return;
+    __shared__ int ok;
+    if (threadIdx.x == 0) {
+        const uint32_t want = *seq;
+        const long long t0 = wall_clock64();
+        ok = 1;
+        while (__hip_atomic_load(go, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != want) {
+            if (wall_clock64() - t0 > ticks) {
+                ok = 0;
+                *(volatile uint32_t*) failed = 1;
+                __threadfence_system();
+                break;
+            }
+            __builtin_amdgcn_s_sleep(2);
+        }
+    }
+    __syncthreads();
+    if (!ok) return;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) fo[i] = fo[i] + cpu[i];
+}
+
+__global__ void set_word_kernel(uint32_t* p, uint32_t v) { *p = v; }
+
+__global__ void set_slot_kernel(const uint8_t** table, size_t i, const uint8_t* slot) { table[i] = slot; }
+}  // namespace
+
+void add_scaled_dev(const ScaledRows& rows, const float* w, int count, int n, void* stream) {
+    if (count < 1 || count > 32) throw std::invalid_argument("add_scaled_dev: 1 to 32 vectors");
+    add_scaled_dev_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(rows, w, count, n);
+}
+
+void route_topk_softmax(const float* scores, int n_expert, int n_used, float min_sum, const uint8_t* const* table,
+                        size_t down_off, void* gate_up, void* down, float* w_dev, const CardRoute& out,
+                        void* stream) {
+    if (n_expert < 1 || n_expert > 1024 || n_used < 1 || n_used > 8 || n_used > n_expert)
+        throw std::invalid_argument("route_topk_softmax: 1 to 1024 experts, 1 to 8 of them used");
+    route_topk_softmax_kernel<<<1, kRouteThreads, 0, cs(stream)>>>(
+        scores, n_expert, n_used, min_sum, table, down_off, (kernels::MmvqSlots*) gate_up, (kernels::MmvqSlots*) down,
+        w_dev, out);
+}
+
+void wait_add(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, int n,
+              long long ticks, uint32_t* failed, void* stream) {
+    wait_add_kernel<<<1, 256, 0, cs(stream)>>>(need, go, seq, cpu, fo, n, ticks, failed);
+}
+
+void set_word(uint32_t* p, uint32_t v, void* stream) { set_word_kernel<<<1, 1, 0, cs(stream)>>>(p, v); }
+
+void set_slot(const uint8_t** table, size_t i, const uint8_t* slot, void* stream) {
+    set_slot_kernel<<<1, 1, 0, cs(stream)>>>(table, i, slot);
 }
 #endif
 

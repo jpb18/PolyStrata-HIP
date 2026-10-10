@@ -2772,6 +2772,39 @@ void iq_mmvq_slots(int t, const MmvqSlots& slots, int count, int n_in, int n_out
     check("iq_mmvq_slots");
 }
 
+#if defined(__HIPCC__)
+namespace {
+// mmvq_slots_kernel with the slots read from device memory; a slot without a matrix writes zeros.
+template<int TY>
+__global__ void __launch_bounds__(128) mmvq_slots_dev_kernel(const MmvqSlots* slots, size_t row_bytes, int n_in,
+                                                             int n_out) {
+    const int row = blockIdx.x * 4 + threadIdx.y;
+    if (row >= n_out) return;
+    const int lane = threadIdx.x;
+    const uint8_t* w = (const uint8_t*) slots->w[blockIdx.y];
+    if (!w) {
+        if (lane == 0) slots->y[blockIdx.y][row] = 0.0f;
+        return;
+    }
+    const float s = row_dot<TY>(w + (size_t) row * row_bytes, (const block_q8_1*) slots->x[blockIdx.y],
+                                n_in / Fmt<TY>::qk, lane);
+    if (lane == 0) slots->y[blockIdx.y][row] = s;
+}
+}  // namespace
+
+void iq_mmvq_slots_dev(int t, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream) {
+    const size_t rb = iq_row_bytes(t, n_in);
+    const dim3 grid((unsigned) ((n_out + 3) / 4), (unsigned) count), block(32, 4);
+    switch (t) {
+#define STRATA_MMVQ(T) case T: mmvq_slots_dev_kernel<T><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out); break;
+        STRATA_MMVQ_FMTS(STRATA_MMVQ)
+#undef STRATA_MMVQ
+        default: std::fprintf(stderr, "iq_mmvq_slots_dev: type %d is not supported\n", t); std::exit(1);
+    }
+    check("iq_mmvq_slots_dev");
+}
+#endif
+
 void iq_dequant_f16(int t, const void* src, int64_t n, uint16_t* dst, void* stream) {
     if (n % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_f16: bad arguments\n"); std::exit(1); }
     dequant_flat_kernel<__half><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, (__half*) dst);

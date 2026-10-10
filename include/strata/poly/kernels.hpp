@@ -202,6 +202,41 @@ void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const floa
 /// a small kernel does.  What it writes into host memory is the host's to read once an event recorded after it
 /// has completed.  Both pointers are 4-byte aligned.
 void copy_words(const void* src, void* dst, size_t n, void* stream);
+
+/// add_scaled() with the weights read from device memory, w[k] for vector k.
+void add_scaled_dev(const ScaledRows& rows, const float* w, int count, int n, void* stream);
+
+/// Where route_topk_softmax() leaves a token's routing for the host (pinned, coherent memory) besides the card.
+struct CardRoute {
+    int32_t* ids = nullptr;         ///< the picked experts
+    float* w = nullptr;             ///< their weights
+    uint8_t* cached = nullptr;      ///< whether each is in VRAM
+    const float* x = nullptr;       ///< the experts' input on the card, n_x values ...
+    float* x_host = nullptr;        ///< ... copied here, for the CPU's experts
+    int n_x = 0;
+    int* need = nullptr;            ///< on the card: 1 when a pick is not cached (wait_add() waits for the host)
+    uint32_t* ready = nullptr;      ///< set to *seq once all of the above is written (null: not set)
+    const uint32_t* seq = nullptr;  ///< on the card: the number of the token under way
+};
+
+/// A token's routing on the card, as Qwen35::route() does it on the host: the softmax of n_expert scores, the
+/// n_used likeliest (the lower number first among equals), their probabilities over the sum of them (at least
+/// min_sum).  table holds the layer's experts' slots in VRAM (null: not cached).  For pick k: gate_up->w[k] and
+/// down->w[k] (at down_off into the slot) get the slot or null, w_dev[k] its weight (0 if not cached); `out` gets
+/// the rest.  One block; n_expert at most 1024, n_used at most 8.
+void route_topk_softmax(const float* scores, int n_expert, int n_used, float min_sum, const uint8_t* const* table,
+                        size_t down_off, void* gate_up, void* down, float* w_dev, const CardRoute& out, void* stream);
+
+/// When *need: waits for *go == *seq (the host's word that its experts' sum is in cpu), then fo += cpu (n values).
+/// A wait of more than `ticks` (wall_clock64()) sets *failed and adds nothing.
+void wait_add(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, int n,
+              long long ticks, uint32_t* failed, void* stream);
+
+/// *p = v, in stream order.
+void set_word(uint32_t* p, uint32_t v, void* stream);
+
+/// table[i] = slot, in stream order (the expert cache's table on the card follows the host's).
+void set_slot(const uint8_t** table, size_t i, const uint8_t* slot, void* stream);
 #endif
 
 }  // namespace strata::poly

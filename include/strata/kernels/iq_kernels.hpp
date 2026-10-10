@@ -29,6 +29,10 @@ struct MmvqSlots;   // native_mmvq.hpp
 /// iq_mmvq for `count` matrices of one type and shape in one launch, each with one column of its own: what
 /// iq_mmvq(..., ncols = 1) gives for each.  native_mmvq_slots() is the entry point.
 void iq_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
+#if defined(STRATA_USE_HIP)
+/// iq_mmvq_slots() with the slots in device memory (native_mmvq_slots_dev()); a null w gives zeros.
+void iq_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream);
+#endif
 
 /// Dequantize `n` contiguous values (n a multiple of 256) to fp16 / fp32.
 void iq_dequant_f16(int ggml_type, const void* src, int64_t n, uint16_t* dst, void* stream);

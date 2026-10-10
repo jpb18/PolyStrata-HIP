@@ -1433,18 +1433,19 @@ __global__ void native_mmvq_slots_kernel(MmvqSlots slots, int n_in, int n_out) {
 // the kernel above's: a row's threads hold the same terms in the same lanes, the general kernel adds only zeros
 // from its other threads (once its sum starts from them, as `+ 0.0f` here reproduces), and its xor tree over 32
 // lanes is the tree over 16 lanes after its first step, so a row comes out with the same bits.
+//
+// One kernel body for the slots given by value (native_mmvq_slots()) and read from device memory
+// (native_mmvq_slots_dev()); a slot without a matrix writes zeros.
 template<typename F>
-__launch_bounds__(WARPS * WARP, 4)
-__global__ void native_mmvq_slots_half_kernel(MmvqSlots slots, int n_in, int n_out) {
-    const auto* w = static_cast<const typename F::Block*>(slots.w[blockIdx.y]);
-    const auto* x = static_cast<const Q81Block*>(slots.x[blockIdx.y]);
-    float* y = slots.y[blockIdx.y];
+__device__ __forceinline__ void slots_half_rows(const void* wv, const void* xv, float* y, int n_in, int n_out) {
+    const auto* w = static_cast<const typename F::Block*>(wv);
+    const auto* x = static_cast<const Q81Block*>(xv);
     const int lane = int(threadIdx.x) % 16;
     const int row = 2 * (WARPS * int(blockIdx.x) + int(threadIdx.y)) + int(threadIdx.x) / 16;
     const int blocks_per_row = n_in / F::DIV;
     const int kbx = lane / F::T;
     float tmp = 0.0f;
-    if (row < n_out && kbx < blocks_per_row) {
+    if (w && row < n_out && kbx < blocks_per_row) {
         const int kqs = F::kqs(lane);
         tmp += F::apply(F::load(w + std::size_t(row) * blocks_per_row + kbx, kqs), x + kbx * F::KBY, kqs);
     }
@@ -1452,6 +1453,28 @@ __global__ void native_mmvq_slots_half_kernel(MmvqSlots slots, int n_in, int n_o
 #pragma unroll
     for (int offset = 8; offset > 0; offset >>= 1) tmp += __shfl_xor_sync(0xffffffff, tmp, offset, WARP);
     if (lane == 0 && row < n_out) y[row] = tmp;
+}
+
+template<typename F>
+__launch_bounds__(WARPS * WARP, 4)
+__global__ void native_mmvq_slots_half_kernel(MmvqSlots slots, int n_in, int n_out) {
+    slots_half_rows<F>(slots.w[blockIdx.y], slots.x[blockIdx.y], slots.y[blockIdx.y], n_in, n_out);
+}
+
+template<typename F>
+__launch_bounds__(WARPS * WARP, 4)
+__global__ void native_mmvq_slots_half_dev_kernel(const MmvqSlots* slots, int n_in, int n_out) {
+    slots_half_rows<F>(slots->w[blockIdx.y], slots->x[blockIdx.y], slots->y[blockIdx.y], n_in, n_out);
+}
+
+// The kernel above for slots in device memory, where it is the one launch_slots() would pick.
+template<typename F>
+bool launch_slots_dev(const MmvqSlots* slots, int count, int n_in, int n_out, cudaStream_t s) {
+    if ((n_in / F::DIV) * F::T > 16) return false;
+    const unsigned rows_a_block = 2 * WARPS;
+    const dim3 blocks(unsigned((std::size_t(n_out) + rows_a_block - 1) / rows_a_block), unsigned(count));
+    native_mmvq_slots_half_dev_kernel<F><<<blocks, dim3(WARP, WARPS), 0, s>>>(slots, n_in, n_out);
+    return true;
 }
 #endif
 
@@ -2710,6 +2733,34 @@ bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_i
     return true;
 #endif
 }
+
+#if defined(__HIPCC__) && !defined(STRATA_HIP_GFX906)
+bool native_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream) {
+    const bool iq = ggml_type == 7 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 || ggml_type == 21 ||
+                    ggml_type == 22 || ggml_type == 29;
+    if (!slots || !stream || n_out <= 0 || n_in <= 0 || count < 1 || count > MAX_NCOLS) return false;
+    if (iq) {
+        if (n_in % (ggml_type == 7 ? 32 : 256) != 0) return false;
+        iq_mmvq_slots_dev(ggml_type, slots, count, n_in, n_out, stream);
+        return true;
+    }
+    const auto s = static_cast<cudaStream_t>(stream);
+    bool done = false;
+    switch (ggml_type) {   // the k-quants whose rows fit half a warp: the shapes of a small expert's down
+    case 10: done = n_in % 256 == 0 && launch_slots_dev<Q2KTraits>(slots, count, n_in, n_out, s); break;
+    case 11: done = n_in % 256 == 0 && launch_slots_dev<Q3KTraits>(slots, count, n_in, n_out, s); break;
+    case 12: done = n_in % 256 == 0 && launch_slots_dev<Q4KTraits>(slots, count, n_in, n_out, s); break;
+    case 13: done = n_in % 256 == 0 && launch_slots_dev<Q5KTraits>(slots, count, n_in, n_out, s); break;
+    case 14: done = n_in % 256 == 0 && launch_slots_dev<Q6KTraits>(slots, count, n_in, n_out, s); break;
+    case 23: done = n_in % 256 == 0 && launch_slots_dev<IQ4XSTraits>(slots, count, n_in, n_out, s); break;
+    default: return false;
+    }
+    if (done) launch_check();
+    return done;
+}
+#elif defined(__HIPCC__)
+bool native_mmvq_slots_dev(int, const MmvqSlots*, int, int, int, void*) { return false; }
+#endif
 
 #if !defined(__HIPCC__)
 std::size_t native_q8_1_il_bytes(int n_in, int ncols) {
