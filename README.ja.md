@@ -5,7 +5,7 @@
 <p align="center"><b>大きな AI モデルを、手元の PC で動かす</b><br>
 Qwen3.8-Flash-Next、GLM 5.3 Flash、Qwen3.6、Ornith 1.5、Gemma 4 · 無料のオープンソース</p>
 
-<p align="center"><img src="docs/media/speed.svg" width="820" alt="回答を書く速さ（トークン/秒）：8 GB のノート PC で Qwen3.6-35B-A3B は 73〜75、RTX 5090 で 332〜334"></p>
+<p align="center"><img src="docs/media/speed.svg" width="820" alt="回答を書く速さ（トークン/秒）：8 GB のノート PC で Qwen3.6-35B-A3B は 71、RTX 5090 で 332〜334"></p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="PolyStrata のモデルが書いたボクセルの五重塔の庭。ブラウザで動いている様子"></a><br>
 <sub>ボクセルの五重塔の庭。1 回のプロンプトで作成し、RTX 5070 上の <a href="https://github.com/Niko1221/Strata">Strata</a>（Qwen3.8-Flash-Next IQ3_S、128K コンテキスト）で実行 ·
@@ -104,7 +104,7 @@ PolyStrata が 2 台の PC で、短いチャットと 3 万〜3.2 万トーク�
 
 | サイズ | 回答の書き出し | プロンプトの読み込み |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 73-75 tokens/s | 1,390 tokens/s |
+| **UD-Q3_K_M** | 71 tokens/s | 1,390 tokens/s |
 | **UD-Q2_K_XL** | 91 tokens/s | 1,320 tokens/s |
 | **UD-Q4_K_M** | 58-61 tokens/s | 1,100-1,350 tokens/s |
 

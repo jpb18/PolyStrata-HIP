@@ -5,7 +5,7 @@
 <p align="center"><b>Rode modelos de IA grandes no seu próprio PC</b><br>
 Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5 e Gemma 4 · gratuito e de código aberto</p>
 
-<p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens por segundo ao escrever uma resposta: 73 a 75 com o Qwen3.6-35B-A3B em um notebook com placa de 8 GB, 332 a 334 em uma RTX 5090"></p>
+<p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens por segundo ao escrever uma resposta: 71 com o Qwen3.6-35B-A3B em um notebook com placa de 8 GB, 332 a 334 em uma RTX 5090"></p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="Um jardim com pagode em voxels que o modelo do PolyStrata escreveu, rodando no navegador"></a><br>
 <sub>Um jardim com pagode em voxels, feito com um único prompt numa RTX 5070 com o <a href="https://github.com/Niko1221/Strata">Strata</a> (Qwen3.8-Flash-Next IQ3_S, contexto de 128K) ·
@@ -107,7 +107,7 @@ de trabalho cuja placa guarda o modelo inteiro.
 
 | Tamanho | Escreve respostas | Lê seu prompt |
 | --- | ---: | ---: |
-| **UD-Q3_K_M** | 73-75 tokens/s | 1,390 tokens/s |
+| **UD-Q3_K_M** | 71 tokens/s | 1,390 tokens/s |
 | **UD-Q2_K_XL** | 91 tokens/s | 1,320 tokens/s |
 | **UD-Q4_K_M** | 58-61 tokens/s | 1,100-1,350 tokens/s |
 
