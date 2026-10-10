@@ -13,6 +13,12 @@ two correct implementations part at a near tie (the two within 0.1 of each other
 The prompts are a short chat, a question about code, and two of this repository's documents cut to about 2,500 and
 8,000 tokens, so that a prompt batch (1,024 tokens) and the reading of several calls (read()) are both crossed.
 Exit 0 when every prompt either matches all its tokens or parts at a near tie and stays within --max-diff; else 1.
+
+--long adds a fifth prompt, docs/DETAILS.md cut to about 30,000 tokens (give --ctx 40960 with it).  Besides the
+largest difference the report gives the mean and the 95th percentile over the steps compared, and the step the
+largest was at.  --against-refs FILE compares two references instead of the engine with one: llama.cpp in two
+settings (all experts on the CPU, most on the GPU; HIP and Vulkan) read the same ids, and how far those two are apart
+is what a difference of the engine's can be held against.
 """
 from __future__ import annotations
 
@@ -58,9 +64,11 @@ def doc_text(name: str, chars: int) -> str:
     return (ROOT / "docs" / name).read_text(encoding="utf-8")[:chars]
 
 
-def prompts() -> list[tuple[str, str]]:
+def prompts(long: bool = False) -> list[tuple[str, str]]:
     code = (ROOT / "src" / "poly" / "cpu_experts.hpp").read_text(encoding="utf-8")
-    return [
+    more = [("doc-30k", "List the five most important measurements in this document, one line each.\n\n"
+             + doc_text("DETAILS.md", 120000))] if long else []
+    return more + [
         ("short", "What is the capital of Portugal? Answer in one sentence."),
         ("code", "Explain in a few sentences what this header declares:\n\n" + code),
         ("doc-2.5k", "Summarize the following document in five bullet points.\n\n" + doc_text("BACKENDS.md", 10000)),
@@ -116,14 +124,23 @@ def two(top: dict) -> list[tuple[int, float]]:
 
 
 def compare(ref: list[dict], got: list[dict]) -> dict:
-    same, worst = 0, 0.0
+    """Steps are compared up to and with the first where the tokens part: after it the two read different text."""
+    same, diffs = 0, []
     for r, g in zip(ref, got):
-        for tid, p in r["top"].items():
-            worst = max(worst, abs(p - g["top"].get(tid, 0.0)))
+        diffs.append(max((abs(p - g["top"].get(tid, 0.0)) for tid, p in r["top"].items()), default=0.0))
         if r["id"] != g["id"]:
             break
         same += 1
-    out = {"same": same, "of": min(len(ref), len(got)), "max_diff": round(worst, 4)}
+    worst = max(diffs, default=0.0)
+    srt = sorted(diffs)
+    out = {"same": same, "of": min(len(ref), len(got)), "max_diff": round(worst, 4),
+           "mean_diff": round(sum(diffs) / max(len(diffs), 1), 4),
+           "p95_diff": round(srt[min(len(srt) - 1, int(0.95 * len(srt)))], 4) if srt else 0.0,
+           "worst_step": diffs.index(worst) if diffs else None}
+    if diffs:   # the worst step's two likeliest tokens on each side
+        k = out["worst_step"]
+        out["worst_llama_top2"] = two(ref[k]["top"])
+        out["worst_engine_top2"] = two(got[k]["top"])
     if same < out["of"]:
         r2, g2 = two(ref[same]["top"]), two(got[same]["top"])
         out["parted_at"] = same
@@ -136,7 +153,10 @@ def compare(ref: list[dict], got: list[dict]) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engine", required=True, help="strata-poly(.exe)")
+    ap.add_argument("--engine", help="strata-poly(.exe)")
+    ap.add_argument("--against-refs", help="compare the reference with this second one (same prompts) instead of "
+                                           "with the engine")
+    ap.add_argument("--long", action="store_true", help="add a prompt of about 30,000 tokens")
     ap.add_argument("--model", required=True)
     ap.add_argument("--llama-server", help="llama-server(.exe) to start for the reference")
     ap.add_argument("--llama-url", help="a running llama-server with the same model")
@@ -152,6 +172,8 @@ def main() -> int:
                     help="compare the tokens only: with windows of guessed tokens (strata-poly's default) the "
                          "probabilities --top-probs prints are not the ones each token was picked from")
     a = ap.parse_args()
+    if not a.engine and not a.against_refs:
+        ap.error("--engine or --against-refs is needed")
 
     proc = None
     url = a.llama_url
@@ -174,7 +196,7 @@ def main() -> int:
     if refs is None:
         try:
             wait_up(url, proc, 600)
-            work = [(n, t) for n, t in prompts() if not a.only or a.only in n]
+            work = [(n, t) for n, t in prompts(a.long) if not a.only or a.only in n]
             refs = []
             for name, text in work:
                 ids = ids_of(url, text)
@@ -191,20 +213,32 @@ def main() -> int:
             pathlib.Path(a.refs).write_text(json.dumps([{"name": n, "ids": i, "ref": r} for n, i, r in refs]),
                                             encoding="utf-8")
     good = True
+    other = {}
+    if a.against_refs:
+        other = {r["name"]: [{"id": s["id"], "top": {int(k): v for k, v in s["top"].items()}} for s in r["ref"]]
+                 for r in json.loads(pathlib.Path(a.against_refs).read_text())}
     for name, ids, ref in refs:
-        got, stats = engine_run(a.engine, a.model, ids, a.tokens, shlex.split(a.engine_args, posix=False), a.ctx)
+        if a.against_refs:
+            if name not in other:
+                print(f"skip {name}: not in {a.against_refs}", flush=True)
+                continue
+            got, stats = other[name], ""
+        else:
+            got, stats = engine_run(a.engine, a.model, ids, a.tokens, shlex.split(a.engine_args, posix=False),
+                                    a.ctx)
         c = compare(ref, got)
         c.update(name=name, prompt_tokens=len(ids))
         results.append(c)
         if a.ids_only:   # the engine's side of a near tie is not known here: the reference's must be one
-            c["max_diff"] = 0.0
+            c["max_diff"] = c["mean_diff"] = c["p95_diff"] = 0.0
             if "parted_at" in c:
                 r2 = c["llama_top2"]
                 c["near_tie"] = len(r2) > 1 and r2[0][1] - r2[1][1] <= 0.1
                 c["engine_top2"] = "(not compared)"
         ok = (c["same"] == c["of"] or c.get("near_tie", False)) and c["max_diff"] <= a.max_diff
         good = good and ok
-        line = f"{name:9s} {len(ids):6d} tokens: {c['same']}/{c['of']} same, max diff {c['max_diff']:.3f}"
+        line = (f"{name:9s} {len(ids):6d} tokens: {c['same']}/{c['of']} same, max diff {c['max_diff']:.3f} "
+                f"(step {c['worst_step']}), mean {c['mean_diff']:.4f}, p95 {c['p95_diff']:.3f}")
         if "parted_at" in c:
             line += (f", parts at {c['parted_at']}: llama {c['llama_top2']} engine {c['engine_top2']}"
                      f"{' (near tie)' if c['near_tie'] else ' (NOT a near tie)'}")
