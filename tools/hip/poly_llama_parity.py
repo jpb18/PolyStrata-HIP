@@ -157,7 +157,7 @@ def main() -> int:
     ap.add_argument("--against-refs", help="compare the reference with this second one (same prompts) instead of "
                                            "with the engine")
     ap.add_argument("--long", action="store_true", help="add a prompt of about 30,000 tokens")
-    ap.add_argument("--model", required=True)
+    ap.add_argument("--model", help="the GGUF (not needed with --against-refs)")
     ap.add_argument("--llama-server", help="llama-server(.exe) to start for the reference")
     ap.add_argument("--llama-url", help="a running llama-server with the same model")
     ap.add_argument("--llama-args", default="--cpu-moe -ngl 99", help="extra llama-server arguments")
@@ -174,6 +174,8 @@ def main() -> int:
     a = ap.parse_args()
     if not a.engine and not a.against_refs:
         ap.error("--engine or --against-refs is needed")
+    if not a.against_refs and not a.model:
+        ap.error("--model is needed")
 
     proc = None
     url = a.llama_url
