@@ -5,7 +5,7 @@ Referência técnica: [AMD_PORT_FEASIBILITY.md](AMD_PORT_FEASIBILITY.md).
 
 **Onde foi testado:** este PC, que é o hardware de destino. RX 9060 XT 16 GB (gfx1200, driver Adrenalin
 32.0.31041.1004), Ryzen 5 5600X (6 núcleos / 12 threads), 31,9 GB de RAM, Windows 11 Pro. ROCm 10.2.0a20260930
-(wheels nightly TheRock, a mesma versão do motor HIP que já usas em `C:\Strata`). O PC estava em uso normal:
+(wheels nightly TheRock, a mesma versão do motor HIP que já usas em `C:\strata`). O PC estava em uso normal:
 Firefox, ChatGPT e outros programas ocupavam ~13 GB de RAM e parte da VRAM.
 
 **Modelo testado:** `unsloth/Qwen3.5-35B-A3B-GGUF`, ficheiro `Qwen3.5-35B-A3B-Q3_K_M.gguf` (16 356 375 168 bytes,
@@ -289,11 +289,11 @@ Na raiz do repositório (PowerShell ou cmd). O primeiro build instala o ROCm em 
 
 ```bat
 set STRATA_HIP_ARCHS=gfx1200
-set STRATA_GGML_DIR=C:\Strata\third_party\llama.cpp
+set STRATA_GGML_DIR=C:\strata\third_party\llama.cpp
 tools\hip\build_windows.bat poly
 ```
 
-`STRATA_GGML_DIR` é opcional: sem ele o CMake descarrega o llama.cpp na revisão fixada. A cópia em `C:\Strata` é
+`STRATA_GGML_DIR` é opcional: sem ele o CMake descarrega o llama.cpp na revisão fixada. A cópia em `C:\strata` é
 essa revisão (3cf0325).
 
 Testes sem modelo:
@@ -319,7 +319,7 @@ python tools\hip\poly_llama_parity.py --engine build-hip-poly-win\strata-poly.ex
 python tools\hip\poly_serve_timing.py --engine build-hip-poly-win\strata-poly.exe --model C:\Users\user\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --refs refs.json --repeat 2 --max-new 128 --engine-args="--threads 6"
 ```
 
-O servidor e o `polystrata.py` precisam dos pacotes de `requirements.txt`; usei o `.venv` de `C:\Strata`, que tem
+O servidor e o `polystrata.py` precisam dos pacotes de `requirements.txt`; usei o `.venv` de `C:\strata`, que tem
 os mesmos.
 
 Servidor, web app e benchmark:
