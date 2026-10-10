@@ -5,7 +5,7 @@ does not install strata-poly for AMD cards yet; this writes what it would.
     python tools/hip/poly_config.py --model C:/models/Qwen3.5-35B-A3B-Q3_K_M.gguf [--context 49152] [--threads 6]
 
 It writes the model's tokenizer folder from the GGUF when there is none (tools/strata_tokenizer.py, with llama.cpp's
-gguf-py: --gguf-py, else third_party/llama.cpp/gguf-py or C:/Strata/third_party/llama.cpp/gguf-py), and
+gguf-py: --gguf-py, else third_party/llama.cpp/gguf-py), and
 strata-<name>.json in the repository's folder, with the engine from build-hip-poly-win and the ROCm SDK's libraries
 (.rocm-win) on its PATH.  Then:
 
@@ -50,8 +50,7 @@ def main() -> int:
     data = pathlib.Path(a.data) if a.data else gguf.parent / (name + "-pack")
     tok = data / "tokenizer"
     if not (tok / "vocab.json").exists():
-        candidates = [a.gguf_py, ROOT / "third_party" / "llama.cpp" / "gguf-py",
-                      pathlib.Path("C:/Strata/third_party/llama.cpp/gguf-py")]
+        candidates = [a.gguf_py, ROOT / "third_party" / "llama.cpp" / "gguf-py"]
         gp = next((pathlib.Path(c) for c in candidates if c and (pathlib.Path(c) / "gguf").is_dir()), None)
         if gp is None:
             raise SystemExit("no gguf-py for the tokenizer: give --gguf-py <llama.cpp>/gguf-py")

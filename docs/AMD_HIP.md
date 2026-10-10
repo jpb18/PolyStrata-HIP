@@ -9,6 +9,10 @@ install steps for users are in [INSTALL.md](INSTALL.md#amd-cards). gfx906 (Insti
 opt-in build, see [gfx906](#gfx906-instinct-mi50--mi60-radeon-vii-wave64-built-from-source). The Ryzen AI Max "Strix Halo" APU (gfx1151, RDNA3.5, unified memory) is built from source on Linux: see [STRIX_HALO.md](STRIX_HALO.md). Other AMD architectures and mixed
 AMD/NVIDIA execution in one run are not supported.
 
+This page is about `strata`, the engine of Qwen3.8-Flash-Next. The second engine, `strata-poly` (Qwen3.5/3.6-35B-A3B,
+Ornith 1.5, Gemma 4, GLM 5.3 Flash from their GGUF), is a CUDA program that setup installs for NVIDIA cards only; an
+experimental HIP build of it is in [strata-poly on AMD](#strata-poly-on-amd-experimental-built-from-source).
+
 The backend maps the CUDA-shaped runtime and BLAS calls to HIP/hipBLAS, uses
 RDNA2/RDNA3/RDNA4's signed integer dot instruction for quantized kernels, and supplies
 wave32 shuffle/packed-byte operations. CUDA-only QSA matrix instructions have
@@ -504,6 +508,43 @@ For comparison on the same machine: llama.cpp (3cf0325, ROCm) on the same Coder 
 **Not done:** setup.py detection and an automatic build, Windows, images (`--vision`), MI60 and Radeon VII (the
 same gfx906 ISA; not run), a single-card run, the tensor-split experiment (the halves of every layer on two cards;
 it works but is not part of this build).
+
+## strata-poly on AMD (experimental, built from source)
+
+`-DSTRATA_POLY_HIP=ON` beside `-DSTRATA_ENABLE_HIP=ON` builds `strata-poly` for the same wave32 cards: its sources
+through the same CUDA->HIP shim, llama.cpp's MMQ kernels with ggml's own HIP header. It is off by default, setup
+does not install it, and the CUDA build of `strata-poly` is unchanged. On Windows:
+
+```bat
+set STRATA_HIP_ARCHS=gfx1200
+tools\hip\build_windows.bat poly
+tools\hip\poly_windows.bat probe
+tools\hip\poly_windows.bat parity C:\models\Qwen3.5-35B-A3B-Q3_K_M.gguf
+python tools\hip\poly_config.py --model C:\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --context 49152 --threads 6
+```
+
+The last writes a run config, so `polystrata.py --model <name>`, its benchmark and the server take the model.
+What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT (gfx1200, 16 GB), Ryzen 5 5600X,
+32 GB of RAM, Windows 11, ROCm 10.2.0a20260930 from TheRock, with the two programs the build adds (`hip_poly_probe`,
+`poly_kernel_bench`):
+
+- A `cudaMemcpyAsync` between two kernels of a stream cost about 100 microseconds there, the same copy made by a
+  kernel 3 to 4. A token's copies on its stream (the router's scores out, the CPU experts' sum in, embeddings,
+  logits) are made by a kernel (`copy_words`), on Windows by default; `STRATA_POLY_COPY_KERNELS=0` turns it off,
+  `=1` on elsewhere, where the cost was not measured.
+- Eight IQ4_XS expert downs of 512 -> 2048 in one launch took 92 us: rows of two blocks kept 16 of a block's 128
+  threads busy. On HIP such rows take half a warp each, with the same sums in the same order (20 of 20 formats
+  and shapes give the bits of one launch per matrix): 16 us.
+- Windows' budget for the process was 15,416 MiB until it held about 10 GiB, and 13,937 MiB from there; the expert
+  cache sized by the first figure was emptied and filled again before every request (4 s each). On Windows HIP
+  the cache is made smaller until the reserve is there with the cache in place.
+- hipBLAS took 6.4 s over a process's first float product; the engine does a small one when it starts.
+- `STRATA_POLY_PROFILE=1` prints where a one-token call's time goes, layer by layer.
+
+Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four
+prompts of 22 to 11,481 tokens, with and without graphs, guesses and copy kernels, and with every expert on the CPU;
+through the server a prompt of 44,419 tokens at a context of 49,152. The figures and what was not checked are in
+[AMD_PORT_IMPLEMENTATION.md](../AMD_PORT_IMPLEMENTATION.md).
 
 ## Tuning table
 
