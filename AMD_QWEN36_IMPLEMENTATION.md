@@ -51,8 +51,10 @@ Dados: `bench/results/2026-10-11-hip-qwen36/`.
   dentro da dispersão; o primeiro pedido melhora; o working set do processo baixa de 18,5 para 10,6 GB. A paridade
   com as referências da fase 2 continua a dar 64/64. ctest: as mesmas 3 falhas conhecidas.
 - **Integração:**
-  - `START-POLY-HIP.bat` com menu de modelo; Qwen3.6 na porta 8091, Qwen3.5 continua na 8090;
-  - fornecedor OpenCode separado para o Qwen3.6, sem alterar a configuração global nem os modelos que já estavam;
+  - `START-POLY-HIP.bat` com menu de modelo; **os dois modelos na mesma porta (8090)**: um pedido que nomeia o
+    outro modelo troca o servidor para ele (`switch_on_request`, secção 8.4);
+  - um só fornecedor OpenCode com os 8 perfis dos dois modelos, sem alterar a configuração global nem os modelos
+    que já estavam;
   - API 15/15 verificações;
   - OpenCode (o do OpenChamber): agente com ferramenta, continuação de sessão e títulos em ~2 s sem raciocínio;
   - o `preserve_thinking` do template do Qwen3.6 chega ao modelo, e com ele cada turno lê só o que é novo.
@@ -158,7 +160,10 @@ Commits sobre `3f0e79aa` (fim da fase 3):
 | `tools/hip/poly_profile.py` | `--list`, `--base`, porta herdada | vários modelos configurados | ferramenta |
 | `START-POLY-HIP.bat` | menu de modelo | escolhe entre os modelos configurados; `START-POLY-HIP.bat qwen3.6 128k`; velocidades do modelo escolhido no menu de contexto | Windows |
 | `tools/hip/gguf_head.py` | novo | lê os metadados e a tabela de tensores de um GGUF local ou por URL (pedidos parciais), sem os dados | ferramenta |
-| `tools/hip/opencode-polystrata-hip.json` | fornecedor `polystrata-hip-qwen36` | os 4 perfis do Qwen3.6 na porta 8091; o do Qwen3.5 (8090) igual | ferramenta |
+| `tools/hip/opencode-polystrata-hip.json` | fornecedor `polystrata-hip` | os 4 perfis do Qwen3.5 e os 4 do Qwen3.6 na porta 8090, e o modelo `current` (o carregado, sem troca) para o agente `title` | ferramenta |
+| `serve/server.py` | `Service.switch_for()` | `"switch_on_request": true` na configuração: um pedido que nomeia outro modelo instalado carrega-o primeiro | não: comum, opt-in |
+| `serve/test_models.py` | dois testes novos | a troca por pedido, direta e pela API | — |
+| `tools/hip/poly_config.py` | `switch_on_request` | escrito por omissão (`--no-switch-on-request` tira-o) | ferramenta |
 
 **Não foi preciso alterar** `src/poly/qwen35.cpp` / `qwen35.hpp`: a classe já lia a forma do ficheiro, o bloco MTP
 (`block_attend`, `block_rows`, `check_draft_block`) e os tensores F32/BF16. O carregamento, a atenção, a delta net,
@@ -393,17 +398,23 @@ O Qwen3.6 tem **11 camadas de atenção**, contando a do bloco MTP: 22 KiB de KV
 
 ### 8.1 Configuração
 
-- `tools/hip/opencode-polystrata-hip.json`:
-  - fornecedor novo `polystrata-hip-qwen36` (`http://127.0.0.1:8091/v1`) com os 4 perfis do Qwen3.6 (48K, 128K,
-    262K, 262K stream) e as variantes `none`/`low`/`medium`;
-  - o fornecedor do Qwen3.5 (`polystrata-hip`, porta 8090) e o agente `title` ficaram iguais.
-- **Porque portas diferentes:** o servidor responde com o modelo que tem carregado, seja qual for o nome do pedido.
-  Na mesma porta, escolher "Qwen3.6" com o Qwen3.5 a correr daria uma resposta do Qwen3.5 sem aviso. Assim, o
-  modelo que não está a correr dá um erro de ligação claro. Os dois não cabem juntos na VRAM.
+- `tools/hip/opencode-polystrata-hip.json`: **um só fornecedor**, `polystrata-hip` (`http://127.0.0.1:8090/v1`),
+  com:
+  - os 4 perfis do Qwen3.5 e os 4 do Qwen3.6 (48K, 128K, 262K, 262K stream), cada um com as variantes
+    `none`/`low`/`medium`;
+  - o modelo `current` (`modelID` `polystrata`): um nome que nenhum modelo instalado tem, respondido por quem
+    estiver carregado, para o agente `title` (variante `none`).
+- **Uma só porta para os dois modelos:** o servidor só tem um modelo na memória de cada vez (os dois não cabem
+  juntos na VRAM). Sem mais nada, responderia com o carregado seja qual for o nome do pedido, ou seja, uma resposta
+  do Qwen3.5 a quem escolheu o Qwen3.6, sem aviso. Por isso as configurações do PolyStrata HIP têm
+  `"switch_on_request": true` (secção 8.4). A primeira versão desta fase usava portas diferentes (8091 para o
+  Qwen3.6); passou a uma só porta para simplificar a configuração do OpenCode.
+- O agente `title` não pode nomear um dos modelos: numa sessão do outro, cada título trocava o modelo (~40 s) e
+  voltava. Daí o modelo `current`.
 - Para os testes, o ficheiro foi copiado para `opencode.json` na raiz do repositório (configuração de projeto,
   excluída do git). A configuração global do OpenCode não foi alterada, e nenhum modelo foi removido.
 
-### 8.2 API (`tools/hip/poly_api_check.py`, servidor Qwen3.6 48K na porta 8091)
+### 8.2 API (`tools/hip/poly_api_check.py`, servidor Qwen3.6 48K; medido quando ainda estava na porta 8091)
 
 **15 de 15**:
 - modelos; system prompt;
@@ -436,6 +447,33 @@ o mecanismo.
   `"variant": "none"`) bloqueou o OpenCode antes de qualquer pedido; ficou a configuração que funciona.
 - **Não testado:** a interface gráfica do OpenChamber (usei o executável do OpenCode que ela traz, com a mesma
   configuração) e sessões de agente reais com dezenas de turnos e ferramentas.
+
+### 8.4 Os dois modelos na mesma porta (`switch_on_request`)
+
+Com `"switch_on_request": true` na configuração do servidor (que o `poly_config.py` passa a escrever), um pedido
+(`/v1/chat/completions`, `/v1/messages`, `/v1/responses`) cujo `model` é exatamente o nome de outro modelo instalado
+(`GET /api/models`) carrega esse modelo antes de responder, como `POST /api/models/load`:
+- qualquer outro nome (o do modelo carregado, um alias, um nome desconhecido ou parcial) é respondido pelo modelo
+  carregado, como antes;
+- um pedido enquanto outro corre recebe 409 (`model_busy`);
+- um modelo que não arranca dá 503, com o anterior carregado de novo.
+
+Medido no servidor real (Qwen3.5 48K a arrancar, porta 8090):
+
+| Pedido com `model` | Respondido por | Tempo |
+| --- | --- | ---: |
+| `qwen3.5-35b-a3b-q3_k_m-hip` | Qwen3.5 | 6,7 s |
+| `polystrata` (o do título) | Qwen3.5 (sem troca) | 0,2 s |
+| `qwen3.6-35b-a3b-ud-q4_k_m-hip` | Qwen3.6, depois de trocar | 54,4 s |
+| `polystrata`, `default` | Qwen3.6 (sem troca) | 0,4 s |
+| `qwen3.5-35b-a3b-q3_k_m-hip` | Qwen3.5, depois de trocar | 50,7 s |
+
+- **Tempo de troca:** ~40–55 s. Os dois ficheiros não cabem juntos na cache de ficheiros, por isso o modelo que
+  entra é lido do disco.
+- **`START-POLY-HIP.bat qwen3.6`** com o servidor do Qwen3.5 a correr troca-o (41 s), em vez de recusar.
+- **OpenCode** (configuração nova, o Qwen3.6 carregado, uma sessão pedida ao perfil do Qwen3.5): uma só troca, o
+  título (562 tokens, 3,3 s) sem troca, a resposta certa ao fim de 71 s no total.
+- **Testes:** `serve/test_models.py` (direto e pela API) e `serve/test_server.py` (276) passam.
 
 ## 9. Problemas encontrados e resolvidos, e testes de regressão
 
@@ -521,7 +559,8 @@ melhoram.
 
 **O mais simples:** `START-POLY-HIP.bat` (duplo clique). Com os dois modelos configurados mostra primeiro um menu
 de modelo (Qwen3.5 / Qwen3.6) e depois o de contexto (48K, 128K, 262K, 262K com streaming); as últimas escolhas
-ficam como omissão. O Qwen3.6 escuta em `http://127.0.0.1:8091/`, o Qwen3.5 continua em `:8090`. Sem menus:
+ficam como omissão. Os dois modelos usam `http://127.0.0.1:8090/`; com o servidor já a correr, o script pede-lhe a
+troca de modelo. Sem menus:
 
 ```bat
 START-POLY-HIP.bat qwen3.6 48k
@@ -545,7 +584,7 @@ data do `build-hip-poly-win\strata-poly.exe` mudou.
 ### Configurar (uma vez; já feito neste PC)
 
 ```bat
-.venv\Scripts\python tools\hip\poly_config.py --model C:\Users\user\models\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --name qwen3.6-35b-a3b-ud-q4_k_m-hip --context 49152 --threads 6 --data C:\Users\user\models\qwen36-pack --port 8091
+.venv\Scripts\python tools\hip\poly_config.py --model C:\Users\user\models\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --name qwen3.6-35b-a3b-ud-q4_k_m-hip --context 49152 --threads 6 --data C:\Users\user\models\qwen36-pack
 .venv\Scripts\python tools\hip\poly_profile.py 128k --base qwen3.6
 .venv\Scripts\python tools\hip\poly_profile.py --list
 ```
@@ -557,7 +596,7 @@ especialistas.
 ### Servidor e chat
 
 ```bat
-.venv\Scripts\python serve\server.py --engine strata --config strata-qwen3.6-35b-a3b-ud-q4_k_m-hip.json --port 8091
+.venv\Scripts\python serve\server.py --engine strata --config strata-qwen3.6-35b-a3b-ud-q4_k_m-hip.json --port 8090
 .venv\Scripts\python polystrata.py --model qwen3.6-35b-a3b-ud-q4_k_m-hip
 ```
 
@@ -566,10 +605,11 @@ histórico com `"chat_template_kwargs": {"preserve_thinking": true}`.
 
 ### OpenCode / OpenChamber
 
-Copiar `tools\hip\opencode-polystrata-hip.json` para `opencode.json` na raiz do projeto que se abre (ou juntar os
-fornecedores `polystrata-hip` e `polystrata-hip-qwen36` à configuração global) e escolher "PolyStrata Qwen3.6
-(HIP, this PC)". O modelo cujo servidor não está a correr dá um erro de ligação (porta diferente), não uma resposta
-do outro.
+Copiar `tools\hip\opencode-polystrata-hip.json` para `opencode.json` na raiz do projeto que se abre (ou juntar o
+fornecedor `polystrata-hip` e o agente `title` à configuração global). No fornecedor "PolyStrata (HIP, this PC)"
+escolhe-se o modelo e o contexto ("Qwen3.6-35B-A3B UD-Q4_K_M 48K", "Qwen3.5-35B-A3B Q3_K_M 128K", ...). Se o
+servidor tiver outro carregado, o primeiro pedido troca-o (~40–55 s) e os seguintes são normais. Não usar dois
+modelos ao mesmo tempo (por exemplo, duas sessões com modelos diferentes): cada pedido trocaria o modelo.
 
 ### O motor diretamente
 

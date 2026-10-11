@@ -607,8 +607,11 @@ Notes at 5, 50 and 95% were found up to 261,000 tokens, with the KV in VRAM and 
 prompt path's MMQ (llama.cpp's WMMA kernels keep a block's scale times its sub-block's scale as one fp16) was 2-3
 times further from fp64 than a token alone. The largest probability difference to llama.cpp on two documents was
 0.145-0.158, against 0.072-0.099 with `STRATA_POLY_MMQ=0` (opt-in: prompts read about 8 times slower).
-`START-POLY-HIP.bat` asks which model when more than one is set up; Qwen3.6 serves on port 8091 and has its own
-OpenCode provider. A request can keep earlier turns' reasoning with
+`START-POLY-HIP.bat` asks which model when more than one is set up, and both share port 8090: with
+`"switch_on_request": true` in the run config (`poly_config.py` writes it), a request whose `model` is another
+installed model's exact name switches the server to it first (40 to 55 s here), and any other name is answered by
+the loaded model. `tools/hip/opencode-polystrata-hip.json` is one provider with every profile of both models, and
+a `current` model for the title agent that never switches. A request can keep earlier turns' reasoning with
 `"chat_template_kwargs": {"preserve_thinking": true}`.
 
 Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four

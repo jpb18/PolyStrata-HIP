@@ -101,7 +101,7 @@ def main() -> int:
            "--context", str(ctx)]
     threads = arg(base[1]["args"], "--threads") if base else None
     cmd += ["--threads", threads or str(cores())]
-    if base and base[1].get("port"):   # a model's profiles share its port (Qwen3.5 8090, Qwen3.6 8091 here)
+    if base and base[1].get("port"):   # a model's profiles share its port
         cmd += ["--port", str(base[1]["port"])]
     # every profile shares the base config's tokenizer folder and expert profile
     if base and base[1].get("tokenizer"):

@@ -33,6 +33,9 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=0, help="CPU threads for the experts outside VRAM (0: the "
                     "engine's own count, every logical CPU; on a 6-core CPU 6 was faster than 12 here)")
     ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--no-switch-on-request", action="store_true",
+                    help="leave out switch_on_request (by default a request that names another model set up here "
+                         "switches the server to it, so that every model shares the port)")
     ap.add_argument("--build", default=str(ROOT / "build-hip-poly-win"))
     ap.add_argument("--rocm-venv", default=str(ROOT / ".rocm-win"))
     ap.add_argument("--data", help="where the tokenizer folder and the expert profile go (default: beside the GGUF)")
@@ -88,6 +91,8 @@ def main() -> int:
     cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(tok), "model_name": name,
            "display_name": f"{gguf.stem} (HIP, experimental)", "log": str(ROOT / f"strata-{name}.log"),
            "lib_dirs": lib_dirs, "backend": "hip", "port": a.port}
+    if not a.no_switch_on_request:
+        cfg["switch_on_request"] = True
     out = ROOT / f"strata-{name}.json"
     out.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     print(f"written: {out}\nmodel name: {name}")

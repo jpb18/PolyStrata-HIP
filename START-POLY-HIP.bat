@@ -176,10 +176,14 @@ if not errorlevel 1 (
   set "RUNNING="
   for /f "usebackq delims=" %%M in (`curl -s -m 5 "%URL%/v1/models" ^| "%PY%" -c "import json,sys;print(json.load(sys.stdin)['data'][0]['id'])"`) do set "RUNNING=%%M"
   if /i not "!RUNNING!"=="!NAME!" (
-    echo.
-    echo  Ja esta a correr outro servidor em %URL%/ com "!RUNNING!".
-    echo  Fecha a janela dele e volta a abrir este script para arrancar "!NAME!".
-    goto fail
+    rem the models share the port: the running server loads this one in place of its own
+    echo  O servidor em %URL%/ tem "!RUNNING!": a trocar para "!NAME!" ^(20 a 40 s^) ...
+    curl -s -m 300 -o nul -w "%%{http_code}" -H "Content-Type: application/json" -d "{\"model\": \"!NAME!\"}" "%URL%/api/models/load" > "%TEMP%\polystrata-switch.txt"
+    set /p SWITCHED=<"%TEMP%\polystrata-switch.txt"
+    if not "!SWITCHED!"=="200" (
+      echo  A troca falhou ^(HTTP !SWITCHED!^): ve a janela do servidor. Fecha-a e volta a abrir este script.
+      goto fail
+    )
   )
   echo  O servidor ja esta a correr: %URL%/
   if /i "%MODE%"=="chat" ("%PY%" polystrata.py --model "!NAME!" --port %PORT% & goto end)
