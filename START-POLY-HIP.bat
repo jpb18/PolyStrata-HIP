@@ -115,12 +115,21 @@ if not defined PROFILE (
     if /i "!PREV!"=="262k" set "DEF=3"
     if /i "!PREV!"=="262k-stream" set "DEF=4"
   )
+  rem the speeds measured on an RX 9060 XT (AMD_KV_STREAMING.md, AMD_QWEN36_IMPLEMENTATION.md)
+  set "S1=~68 tok/s numa conversa curta"
+  set "S2=~29 tok/s com 128K preenchidos"
+  set "S3=~17 tok/s com 261K preenchidos"
+  if defined MODEL if not "!MODEL:qwen3.6=!"=="!MODEL!" (
+    set "S1=~65 tok/s numa conversa curta"
+    set "S2=~24 tok/s com 128K preenchidos"
+    set "S3=~14 tok/s com 261K preenchidos"
+  )
   echo.
   echo   PolyStrata no AMD - que tamanho de contexto?
   echo.
-  echo    1  48K          o mais rapido para conversas e codigo           ^(~68 tok/s numa conversa curta^)
-  echo    2  128K         documentos longos, a KV toda na VRAM            ^(~29 tok/s com 128K preenchidos^)
-  echo    3  262K         o maximo do modelo, a KV toda na VRAM           ^(~17 tok/s com 261K preenchidos^)
+  echo    1  48K          o mais rapido para conversas e codigo           ^(!S1!^)
+  echo    2  128K         documentos longos, a KV toda na VRAM            ^(!S2!^)
+  echo    3  262K         o maximo do modelo, a KV toda na VRAM           ^(!S3!^)
   echo    4  262K stream  262K com parte da KV na RAM: so quando outros   ^(rapido ate 48K, muito lento acima^)
   echo                    programas ocupam a VRAM e a opcao 3 nao carrega
   echo.
