@@ -118,6 +118,9 @@ struct Layer {
     // What a call of a few tokens hands the card, recorded (Engine::run()): by the call's tokens, and the head
     // also by Engine::head_key()
     std::vector<void*> heads;          ///< up to the router
+#if defined(STRATA_USE_HIP)
+    std::vector<void*> card_heads;     ///< up to the router, routed on the card (its router's launches are others)
+#endif
     std::vector<void*> shared;         ///< the shared expert
     std::vector<void*> tail;           ///< after the experts
 };
@@ -503,6 +506,7 @@ protected:
     // host goes through the layers behind the card (card_host()).
     bool card_route_ = false;                ///< every MoE layer of the model can be routed on the card
     bool card_pipe_ = false;                 ///< run() is handing a token to the card that way
+    std::atomic<bool> warming_{false};       ///< map_pages() is still reading the experts outside VRAM
     const uint8_t** dslot_ = nullptr;        ///< per (layer, expert): Layer::slot, on the card
     void *dgu_ = nullptr, *ddn_ = nullptr;   ///< a token's gate|up and down launches (kernels::MmvqSlots), on the card
     float* dw_ = nullptr;                    ///< their weights (0 for an expert on the CPU)

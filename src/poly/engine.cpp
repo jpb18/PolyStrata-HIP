@@ -1117,8 +1117,17 @@ void Engine::load(const Options& o) {
     start_swaps();
     reset();
     // nothing is read from the files when every expert is in VRAM
-    if (cached_ < total_experts())
+    if (cached_ < total_experts()) {
+#if defined(STRATA_USE_HIP)
+        warming_.store(true);
+        mapper_ = std::thread([this, spans = std::move(spans)] {
+            map_pages(spans, map_quit_);
+            warming_.store(false);
+        });
+#else
         mapper_ = std::thread([this, spans = std::move(spans)] { map_pages(spans, map_quit_); });
+#endif
+    }
 }
 
 void Engine::load_drafter() {
@@ -1696,13 +1705,14 @@ void Engine::card_host() {
         Layer& L = layers_[(size_t) il];
         if (!L.moe) continue;
         const Clock::time_point t0 = Clock::now();
-        for (int spin = 0; *(volatile uint32_t*) (h_ready_ + il) != seq_; ++spin) {
-            if (*(volatile uint32_t*) h_failed_)
-                throw std::runtime_error("the card waited more than a second for the CPU's experts");
+        bool lost = false;   // the card gave up on a layer before this one: below
+        for (int spin = 0; *(volatile uint32_t*) (h_ready_ + il) != seq_ && !lost; ++spin) {
+            lost = *(volatile uint32_t*) h_failed_ != 0;
             if (spin > 64) std::this_thread::yield();
             if ((spin & 1023) == 0 && ms_since(start) > 30000.0)
                 throw std::runtime_error("the card did not route a token in 30 s");
         }
+        if (lost) break;
         std::atomic_thread_fence(std::memory_order_acquire);
         stats_.route_wait_ms += ms_since(t0);
         const int32_t* ids = h_ids_ + (size_t) il * kSlots;
@@ -1744,6 +1754,17 @@ void Engine::card_host() {
         }
         std::atomic_thread_fence(std::memory_order_release);
         *(volatile uint32_t*) (h_go_ + il) = seq_;
+    }
+    // The card gives up on a layer whose CPU experts take more than a second, and goes on without them: the token
+    // is wrong.  The host sees that only here when it was busy with those experts meanwhile, and it never lets it
+    // pass.  The routing stays on the host from now on, which waits as long as the CPU takes.
+    if (*(volatile uint32_t*) h_failed_) {
+        ck(cudaStreamSynchronize(cs(st_)), "routed experts");
+        *(volatile uint32_t*) h_failed_ = 0;
+        card_route_ = false;
+        std::fprintf(stderr, "strata-poly: STRATA_POLY_CARD_ROUTE: the card waited more than a second for the CPU's "
+                             "experts; the routing is on the host from now on\n");
+        throw std::runtime_error("the card waited more than a second for the CPU's experts");
     }
 }
 #endif
@@ -2068,7 +2089,14 @@ void Engine::run(const int32_t* tokens, int n) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
         before_head(il, m);
-        if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, m); });
+#if defined(STRATA_USE_HIP)
+        // a token routed on the card and one routed on the host end their heads with other launches, and a token
+        // goes one way or the other as the engine runs (warming_, a wait the card gave up)
+        std::vector<void*>& heads = card_pipe_ ? L.card_heads : L.heads;
+#else
+        std::vector<void*>& heads = L.heads;
+#endif
+        if (replay && L.fixed) replayed(heads, head, [&] { layer_head(L, il, m); });
         else layer_head(L, il, m);
         after_head(il, m);
         if (!L.moe || (mmq_ && m >= kStageRows)) return;
@@ -2175,7 +2203,9 @@ void Engine::run(const int32_t* tokens, int n) {
 #if defined(STRATA_USE_HIP)
     // A token on its own goes to the card whole (card_launch(), card_host()); not while the profile waits for the
     // card after each part, or the dump reads its values: the card would wait for the host that waits for it.
-    card_pipe_ = card_route_ && n == 1 && !prof && !opt_.dump;
+    // Nor while map_pages() reads the experts' pages after the load: a CPU expert whose pages come from the disk
+    // can take more than the second the card waits (wait_add()), and the host's routing waits as long as it takes.
+    card_pipe_ = card_route_ && n == 1 && !prof && !opt_.dump && !warming_.load(std::memory_order_relaxed);
     if (card_pipe_) set_word(dseq_, ++seq_, st_);
     struct Off {
         bool& on;
