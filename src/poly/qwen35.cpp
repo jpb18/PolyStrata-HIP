@@ -195,6 +195,10 @@ void Qwen35::before_head(int il, int n) {
         return;
     }
     if (blocks_[(size_t) il].gdn) return;
+    in_head_ = true;
+    // A head whose rows all lie below kv_split_ reads and writes no row of the copy: it waits for nothing (the
+    // waits cost 5 to 12 % of a token's time on an RX 9060 XT under Windows).
+    if (pos_ + n <= kv_split_) return;
     const int64_t need = std::max<int64_t>(pos_ - kv_split_, 0);
     if (pre_layer_ != il || pre_rows_ < need) {
         ck(cudaEventRecord((cudaEvent_t) ev_used_, cs(st_)), "KV ahead");
@@ -202,12 +206,11 @@ void Qwen35::before_head(int il, int n) {
         ++late_;
     }
     ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_ready_, 0), "KV ahead");
-    in_head_ = true;
 }
 
 void Qwen35::after_head(int il, int n) {
     in_head_ = false;
-    if (!pre_k_ || n >= kStageRows) return;
+    if (!pre_k_ || n >= kStageRows || pos_ + n <= kv_split_) return;
     // the next attention layer of this call, or the first of the next call, whose rows from this one are written
     // by the time the main stream is through this head
     int next = -1;

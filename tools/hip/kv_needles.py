@@ -138,6 +138,7 @@ def main() -> int:
     samp = Sampler(p.pid).start()
     print(f"loaded in {load_s:.1f} s; system before: {before}", flush=True)
     rows = []
+    failed = None
     try:
         for length in lengths:
             pr = build(tok, length, text_ids, a.summary > 0)
@@ -147,7 +148,11 @@ def main() -> int:
                 t = time.time()
                 first = None
                 out = []
-                p.stdin.write(f"GEN {a.summary if q == SUMMARY else a.max_new} {','.join(map(str, ids))}\n")
+                # an answer as long as the context leaves room for (the engine refuses more)
+                want = min(a.summary if q == SUMMARY else a.max_new, a.ctx - len(ids))
+                if want < 1:
+                    raise SystemExit(f"a prompt of {len(ids)} tokens leaves no room in a context of {a.ctx}")
+                p.stdin.write(f"GEN {want} {','.join(map(str, ids))}\n")
                 p.stdin.flush()
                 done = None
                 for line in p.stdout:
@@ -178,6 +183,9 @@ def main() -> int:
                       f"TTFT {r['ttft_s']:7.1f} s (read {read:6d}, {r['prompt_tok_s']} tok/s), decode "
                       f"{r['decode_tok_s']} tok/s, page faults {r['page_faults']}: {q[:40]!r} -> {r['answer'][:70]!r}",
                       flush=True)
+    except SystemExit as e:   # what was measured is still written
+        failed = str(e)
+        print(f"FAILED: {failed}", flush=True)
     finally:
         try:
             p.stdin.close()
@@ -190,8 +198,8 @@ def main() -> int:
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps({"engine_args": a.engine_args, "ctx": a.ctx, "load_s": load_s,
                                                     "system_before": before, "system_after": after, "peak": peak,
-                                                    "rows": rows}, indent=1), encoding="utf-8")
-    return 0 if all(len(r["found"]) == len(r["codes"]) for r in rows) else 1
+                                                    "failed": failed, "rows": rows}, indent=1), encoding="utf-8")
+    return 1 if failed else 0 if all(len(r["found"]) == len(r["codes"]) for r in rows) else 1
 
 
 if __name__ == "__main__":
