@@ -417,6 +417,11 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
+    # Qwen3.6's template keeps the reasoning of earlier turns in the history when it is asked to; a template
+    # without the variable ignores it
+    preserve = (req.get("chat_template_kwargs") or {}).get("preserve_thinking")
+    if isinstance(preserve, bool):
+        kwargs["preserve_thinking"] = preserve
     return _answers_in_call_order(_late_system_to_user(messages)), tools, kwargs
 
 

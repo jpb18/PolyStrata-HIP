@@ -1438,6 +1438,19 @@ class ClientShapes(unittest.TestCase):
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
 
+    def test_preserve_thinking_reaches_the_template(self):
+        # Qwen3.6's template keeps earlier turns' reasoning when asked; only a boolean is passed on
+        from serve.frontend import openai_to_messages
+        ask = {"messages": [{"role": "user", "content": "u"}]}
+        for ctk, want in (({"preserve_thinking": True}, True), ({"preserve_thinking": False}, False),
+                          ({"enable_thinking": False, "preserve_thinking": True}, True)):
+            self.assertIs(openai_to_messages({**ask, "chat_template_kwargs": ctk})[2].get("preserve_thinking"), want)
+        for ctk in ({}, {"preserve_thinking": "yes"}):
+            self.assertNotIn("preserve_thinking", openai_to_messages({**ask, "chat_template_kwargs": ctk})[2])
+        self.assertIs(openai_to_messages({**ask, "chat_template_kwargs": {"enable_thinking": False,
+                                                                          "preserve_thinking": True}})[2]
+                      .get("enable_thinking"), False)
+
     def test_tool_answers_keep_their_ids_and_go_in_call_order(self):
         # a template may name a tool's answer by its call's id, and a model reads answers by position
         from serve.frontend import anthropic_to_messages, openai_to_messages
