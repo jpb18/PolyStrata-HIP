@@ -465,6 +465,8 @@ o mecanismo.
 | `poly_expert_parity` no GGUF do Qwen3.6 | todas as matrizes < 0,05 contra FP64 (secção 5.3) |
 | ctest, 103 testes | 91 passam, 9 saltados, 3 falham: os mesmos 3 das fases 2 e 3 (`expert_cache_segmented_test`, `hip_handoff`, `ple_parity`), fora do código alterado (`ctest.txt`) |
 | `serve.test_server` (testes novos e vizinhos) | ok |
+| `tools/test_setup_*.py` (30) | todos passam |
+| `tools/test_polystrata_names.py` | falha por causa do `AMD_KV_STREAMING.md` (fase 3), também no commit anterior às alterações desta fase; o relatório novo não é apontado. Não alterado |
 | Qwen3.5: binário de antes (`3f0e79aa`) contra o novo, 3 corridas alternadas | tabela abaixo |
 | Qwen3.5: paridade com as referências da fase 2 | 64/64 nos 4 prompts, contra A e B |
 | Routing na placa (Qwen3.6) contra o do host | 0 diferenças em 10 240 |
