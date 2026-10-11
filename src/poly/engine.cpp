@@ -1215,6 +1215,12 @@ void Engine::alloc() {
                 Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
         one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
     }
+#if defined(STRATA_USE_HIP)
+    // STRATA_POLY_MMQ=0: a prompt batch without MMQ, its products a few tokens at a time with the kernels of a
+    // token on its own (a check of MMQ's precision; slower)
+    const char* mmq_env = std::getenv("STRATA_POLY_MMQ");
+    if (mmq_env != nullptr && mmq_env[0] == '0') tiles = false;
+#endif
     if (tiles) mmq_ = std::make_unique<Mmq>();
 
     shared_scratch();   // the first pass only counts
