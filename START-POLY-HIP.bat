@@ -1,17 +1,19 @@
 @echo off
 rem strata-poly on an AMD card (HIP, experimental: AMD_PORT_PHASE2.md, AMD_KV_STREAMING.md), started with a double-click.
 rem
-rem   START-POLY-HIP.bat                  a menu: the context (48K, 128K, 262K, 262K with KV streaming), then the
-rem                                       server on this PC only (http://127.0.0.1:8090/) and its page in the browser
+rem   START-POLY-HIP.bat                  a menu: the model, when more than one is set up (Qwen3.5, Qwen3.6), and the
+rem                                       context (48K, 128K, 262K, 262K with KV streaming), then the server on this PC
+rem                                       only (http://127.0.0.1:8090/) and its page in the browser
 rem   START-POLY-HIP.bat 128k             no menu: that profile (48k, 128k, 262k, 262k-stream)
+rem   START-POLY-HIP.bat qwen3.6 [128k]   no model menu: the model set up here whose name has that text in it
 rem   START-POLY-HIP.bat chat [128k]      a chat in this window (the server starts by itself)
 rem   START-POLY-HIP.bat C:\models\X.gguf the first time: sets up this GGUF, then the menu
 rem   START-POLY-HIP.bat check [128k]     says what it would start, and starts nothing
 rem
 rem It builds the engine when build-hip-poly-win\strata-poly.exe is missing (tools\hip\build_windows.bat poly, with
 rem the llama.cpp in third_party\llama.cpp-3cf0325 when there is one), and creates .venv when it is missing. Each
-rem profile has its own run config (tools\hip\poly_profile.py writes it once); the last choice is the menu's default.
-rem Settings: POLY_CONFIG (a strata-<name>.json: skips the menu), POLY_NO_OPEN=1 (no browser).
+rem profile of a model has its own run config (tools\hip\poly_profile.py writes it once); the last choices are the
+rem menus' defaults.  Settings: POLY_CONFIG (a strata-<name>.json: skips the menus), POLY_NO_OPEN=1 (no browser).
 setlocal EnableDelayedExpansion
 title PolyStrata (AMD, HIP)
 cd /d "%~dp0"
@@ -19,11 +21,14 @@ set "PY=.venv\Scripts\python.exe"
 set "MODE=server"
 set "GGUF="
 set "PROFILE="
+set "MODEL="
 for %%A in (%*) do (
-  if /i "%%~A"=="chat" set "MODE=chat"
-  if /i "%%~A"=="check" set "MODE=check"
-  if /i "%%~xA"==".gguf" set "GGUF=%%~fA"
-  for %%P in (48k 128k 262k 262k-stream) do if /i "%%~A"=="%%P" set "PROFILE=%%P"
+  set "KNOWN="
+  if /i "%%~A"=="chat" (set "MODE=chat" & set "KNOWN=1")
+  if /i "%%~A"=="check" (set "MODE=check" & set "KNOWN=1")
+  if /i "%%~xA"==".gguf" (set "GGUF=%%~fA" & set "KNOWN=1")
+  for %%P in (48k 128k 262k 262k-stream) do if /i "%%~A"=="%%P" (set "PROFILE=%%P" & set "KNOWN=1")
+  if not defined KNOWN set "MODEL=%%~A"
 )
 
 rem --- Python, with the server's packages
@@ -70,6 +75,37 @@ if not defined GGUF (
     goto fail
   )
 )
+rem --- the model, when more than one is set up and none was named (the last one chosen is the default)
+set "LASTM=build-hip-poly-win\last-model.txt"
+if not defined GGUF if not defined MODEL (
+  set "N=0"
+  for /f "tokens=1,2 delims=|" %%M in ('call "%PY%" tools\hip\poly_profile.py --list') do (
+    set /a N+=1
+    set "BASE!N!=%%M"
+    set "DISP!N!=%%N"
+  )
+  if !N! GTR 1 (
+    set "DEFM=1"
+    set "KEYS="
+    if exist "%LASTM%" set /p PREVM=<"%LASTM%"
+    for /l %%I in (1,1,!N!) do (
+      set "KEYS=!KEYS!%%I"
+      if /i "!BASE%%I!"=="!PREVM!" set "DEFM=%%I"
+    )
+    echo.
+    echo   PolyStrata no AMD - que modelo?
+    echo.
+    for /l %%I in (1,1,!N!) do echo    %%I  !DISP%%I!
+    echo.
+    if /i "%MODE%"=="check" (
+      set "CHM=!DEFM!"
+    ) else (
+      choice /c !KEYS! /n /t 20 /d !DEFM! /m "  Escolhe 1-!N! (em 20 s fica o !DEFM!): "
+      set "CHM=!errorlevel!"
+    )
+    for %%I in (!CHM!) do set "MODEL=!BASE%%I!"
+  )
+)
 set "LAST=build-hip-poly-win\last-profile.txt"
 if not defined PROFILE (
   set "DEF=1"
@@ -101,12 +137,14 @@ if not defined PROFILE (
 )
 if not defined PROFILE set "PROFILE=48k"
 set "GARG="
+if defined MODEL set "GARG=--base !MODEL!"
 if defined GGUF set "GARG=--gguf "%GGUF%""
 if defined GGUF echo  A configurar %GGUF% ...
 set "POLY_CONFIG="
 for /f "delims=" %%C in ('call "%PY%" tools\hip\poly_profile.py !PROFILE! !GARG!') do set "POLY_CONFIG=%%C"
 if not defined POLY_CONFIG (echo  Nao foi possivel escrever a configuracao do perfil !PROFILE!: ve as mensagens acima. & goto fail)
 if /i not "%MODE%"=="check" >"%LAST%" echo !PROFILE!
+if /i not "%MODE%"=="check" if defined MODEL >"%LASTM%" echo !MODEL!
 
 :have_config
 if not exist "%POLY_CONFIG%" (echo  A configuracao nao existe: %POLY_CONFIG% & goto fail)

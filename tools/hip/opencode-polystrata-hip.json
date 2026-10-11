@@ -127,6 +127,127 @@
           ]
         }
       }
+    },
+    "polystrata-hip-qwen36": {
+      "name": "PolyStrata Qwen3.6 (HIP, this PC)",
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:8091/v1"
+      },
+      "models": {
+        "qwen3.6-35b-a3b": {
+          "modelID": "qwen3.6-35b-a3b-ud-q4_k_m-hip",
+          "name": "PolyStrata / Qwen3.6-35B-A3B UD-Q4_K_M 48K (RX 9060 XT)",
+          "limit": {
+            "context": 49152,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "none",
+              "settings": {
+                "reasoningEffort": "none"
+              }
+            },
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            }
+          ]
+        },
+        "qwen3.6-35b-a3b-128k": {
+          "modelID": "qwen3.6-35b-a3b-ud-q4_k_m-hip-128k",
+          "name": "PolyStrata / Qwen3.6-35B-A3B UD-Q4_K_M 128K (RX 9060 XT)",
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "none",
+              "settings": {
+                "reasoningEffort": "none"
+              }
+            },
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            }
+          ]
+        },
+        "qwen3.6-35b-a3b-262k": {
+          "modelID": "qwen3.6-35b-a3b-ud-q4_k_m-hip-262k",
+          "name": "PolyStrata / Qwen3.6-35B-A3B UD-Q4_K_M 262K (RX 9060 XT)",
+          "limit": {
+            "context": 262144,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "none",
+              "settings": {
+                "reasoningEffort": "none"
+              }
+            },
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            }
+          ]
+        },
+        "qwen3.6-35b-a3b-262k-stream": {
+          "modelID": "qwen3.6-35b-a3b-ud-q4_k_m-hip-262k-stream",
+          "name": "PolyStrata / Qwen3.6-35B-A3B UD-Q4_K_M 262K stream (RX 9060 XT)",
+          "limit": {
+            "context": 262144,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "none",
+              "settings": {
+                "reasoningEffort": "none"
+              }
+            },
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            }
+          ]
+        }
+      }
     }
   }
 }

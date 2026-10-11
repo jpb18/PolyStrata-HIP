@@ -1,12 +1,15 @@
 """The run config of one of START-POLY-HIP.bat's profiles (AMD_KV_STREAMING.md, section 12), written by
 tools/hip/poly_config.py the first time and reused after that.
 
-    python tools/hip/poly_profile.py 128k [--gguf C:/models/X.gguf]
+    python tools/hip/poly_profile.py 128k [--gguf C:/models/X.gguf | --base qwen3.6]
+    python tools/hip/poly_profile.py --list
 
 Profiles: 48k (context 49,152: the fastest for chats), 128k and 262k (the KV cache wholly in VRAM: the fastest for
 long prompts on a 16 GB card), 262k-stream (context 262,144 with positions from 49,152 on in RAM: for a card whose
-VRAM other programs hold).  The model is --gguf, else the one of the run config strata-<name>-hip.json already here;
-the profiles share its tokenizer folder and expert profile.  Prints the run config's file name.
+VRAM other programs hold).  The model is --gguf, else the one of a run config strata-<name>-hip.json already here
+(with several, --base picks the one whose name has that text in it, else the first by name); the profiles share its
+tokenizer folder and expert profile.  Prints the run config's file name.  --list prints the models set up here, a line
+each: name|display name|GGUF.
 """
 from __future__ import annotations
 
@@ -44,23 +47,38 @@ def cores() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("profile", choices=list(PROFILES))
+    ap.add_argument("profile", nargs="?", choices=list(PROFILES))
     ap.add_argument("--gguf", help="the model (default: the one already set up here)")
+    ap.add_argument("--base", help="of the models set up here, the one whose name has this text in it")
+    ap.add_argument("--list", action="store_true", help="print the models set up here and stop")
     a = ap.parse_args()
-    suffix, ctx, extra = PROFILES[a.profile]
 
-    # the model's base config: the one without a profile's suffix
-    base = None
+    # the models' base configs: those without a profile's suffix
+    bases = []
     for f in sorted(ROOT.glob("strata-*-hip*.json")):
         name = f.stem[len("strata-"):]
         if SUFFIX.search(name):
             continue
-        cfg = json.loads(f.read_text(encoding="utf-8"))
+        bases.append((name, json.loads(f.read_text(encoding="utf-8"))))
+    if a.list:
+        for name, cfg in bases:
+            print(f"{name}|{cfg.get('display_name', name)}|{arg(cfg.get('args', []), '--model') or ''}")
+        return 0
+    if not a.profile:
+        ap.error("a profile is needed (or --list)")
+    suffix, ctx, extra = PROFILES[a.profile]
+    base = None
+    for name, cfg in bases:
         model = arg(cfg.get("args", []), "--model")
         if a.gguf and model and pathlib.Path(model).resolve() != pathlib.Path(a.gguf).resolve():
             continue
+        if not a.gguf and a.base and a.base.lower() not in name.lower():
+            continue
         base = (name, cfg)
         break
+    if a.base and not a.gguf and base is None:
+        print(f"no model set up here has {a.base!r} in its name", file=sys.stderr)
+        return 2
     if a.gguf:
         gguf = str(pathlib.Path(a.gguf).resolve())
         base_name = base[0] if base else re.sub(r"[^a-z0-9.]+", "-", pathlib.Path(gguf).stem.lower()).strip("-") + "-hip"
@@ -83,6 +101,8 @@ def main() -> int:
            "--context", str(ctx)]
     threads = arg(base[1]["args"], "--threads") if base else None
     cmd += ["--threads", threads or str(cores())]
+    if base and base[1].get("port"):   # a model's profiles share its port (Qwen3.5 8090, Qwen3.6 8091 here)
+        cmd += ["--port", str(base[1]["port"])]
     # every profile shares the base config's tokenizer folder and expert profile
     if base and base[1].get("tokenizer"):
         cmd += ["--data", str(pathlib.Path(base[1]["tokenizer"]).parent)]
