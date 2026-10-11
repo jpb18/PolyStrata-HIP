@@ -1119,6 +1119,16 @@ void Engine::load(const Options& o) {
     // nothing is read from the files when every expert is in VRAM
     if (cached_ < total_experts()) {
 #if defined(STRATA_USE_HIP)
+        // STRATA_POLY_WARM=1: the load waits for the pages, so that what runs after it is measured as it runs once
+        // they are in (a benchmark, or a check of the routing on the card, which waits for them)
+        const char* warm = std::getenv("STRATA_POLY_WARM");
+        if (warm != nullptr && warm[0] == '1') {
+            const Clock::time_point t0 = Clock::now();
+            map_pages(spans, map_quit_);
+            std::fprintf(stderr, "strata-poly: the pages of the experts outside VRAM read in %.1f s (STRATA_POLY_WARM)\n",
+                         ms_since(t0) / 1000.0);
+            return;
+        }
         warming_.store(true);
         mapper_ = std::thread([this, spans = std::move(spans)] {
             map_pages(spans, map_quit_);
