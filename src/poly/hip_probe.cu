@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -93,13 +94,90 @@ int vram_steps() {
 }
 #endif
 
+// hip_poly_probe kv [GiB]: what reading a KV cache kept in pinned host memory costs (AMD_KV_STREAMING.md).  A
+// kernel that reads every byte of a buffer once, as the decode attention reads every row of the cache: from VRAM,
+// from pinned host memory through its device pointer (zero-copy, over PCIe), and the same bytes moved by the copy
+// engine.  Then how much pinned memory Windows gives in 1 GiB pieces, up to the size asked (default 6).
+__global__ void read_all(const uint4* __restrict__ p, size_t n, unsigned* out) {
+    unsigned acc = 0;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x) {
+        const uint4 v = p[i];
+        acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    }
+    if (acc == 0x12345678u) *out = acc;   // keeps the reads
+}
+
+int kv_steps(double want_gib) {
+    const size_t bytes = size_t(512) << 20;
+    void *dv = nullptr, *hv = nullptr, *hdev = nullptr;
+    unsigned* out = nullptr;
+    if (!ok(cudaMalloc(&dv, bytes), "cudaMalloc") || !ok(cudaMalloc((void**) &out, 64), "cudaMalloc")) return 1;
+    if (!ok(cudaHostAlloc(&hv, bytes, cudaHostAllocMapped), "cudaHostAlloc mapped") ||
+        !ok(cudaHostGetDevicePointer(&hdev, hv, 0), "cudaHostGetDevicePointer"))
+        return 1;
+    std::memset(hv, 1, bytes);
+    cudaMemset(dv, 1, bytes);
+    cudaStream_t st = nullptr;
+    cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking);
+    cudaDeviceSynchronize();
+    auto rate = [&](const char* what, auto&& step) {
+        step();
+        cudaStreamSynchronize(st);
+        std::vector<double> t;
+        for (int i = 0; i < 7; ++i) {
+            const Clock::time_point t0 = Clock::now();
+            step();
+            cudaStreamSynchronize(st);
+            t.push_back(us_since(t0));
+        }
+        const double us = median(t);
+        std::printf("%-46s %8.0f us  %6.1f GB/s\n", what, us, double(bytes) / us / 1e3);
+        return us;
+    };
+    const size_t n = bytes / sizeof(uint4);
+    for (int blocks : {256, 1024, 4096})
+        for (int threads : {256}) {
+            char name[96];
+            std::snprintf(name, sizeof name, "VRAM, kernel read (%d x %d)", blocks, threads);
+            rate(name, [&] { read_all<<<blocks, threads, 0, st>>>((const uint4*) dv, n, out); });
+            std::snprintf(name, sizeof name, "pinned host, kernel read (%d x %d)", blocks, threads);
+            rate(name, [&] { read_all<<<blocks, threads, 0, st>>>((const uint4*) hdev, n, out); });
+        }
+    rate("pinned host -> VRAM, copy engine (512 MiB)", [&] { cudaMemcpyAsync(dv, hv, bytes, cudaMemcpyHostToDevice, st); });
+    for (size_t piece : {size_t(1) << 20, size_t(4) << 20, size_t(32) << 20}) {
+        char name[96];
+        std::snprintf(name, sizeof name, "pinned host -> VRAM, copy engine (%zu KiB pieces)", piece >> 10);
+        rate(name, [&] {
+            for (size_t at = 0; at < bytes; at += piece)
+                cudaMemcpyAsync((char*) dv + at, (const char*) hv + at, piece, cudaMemcpyHostToDevice, st);
+        });
+    }
+    cudaFreeHost(hv);
+    cudaFree(dv);
+    // how much Windows pins
+    std::vector<void*> got;
+    const Clock::time_point t0 = Clock::now();
+    for (int i = 0; i < (int) want_gib; ++i) {
+        void* p = nullptr;
+        if (cudaHostAlloc(&p, size_t(1) << 30, cudaHostAllocMapped) != cudaSuccess) {
+            (void) cudaGetLastError();
+            std::printf("pinned: refused at %d GiB\n", i);
+            break;
+        }
+        std::memset(p, 0, size_t(1) << 30);
+        got.push_back(p);
+    }
+    std::printf("pinned: %zu GiB taken and touched in %.0f ms\n", got.size(), us_since(t0) / 1e3);
+    for (void* p : got) cudaFreeHost(p);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // a step that hangs leaves the ones before it on the screen
 #if defined(STRATA_USE_HIP) && defined(_WIN32)
     if (argc > 1 && std::strcmp(argv[1], "vram") == 0) return vram_steps();
-#else
-    (void) argc, (void) argv;
 #endif
+    if (argc > 1 && std::strcmp(argv[1], "kv") == 0) return kv_steps(argc > 2 ? std::atof(argv[2]) : 6.0);
     bool good = true;
     int dev = 0;
     cudaDeviceProp prop{};
