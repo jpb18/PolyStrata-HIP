@@ -506,6 +506,13 @@ Fallbacks:
 
 ## 12. Instruções de configuração
 
+**O mais simples: `START-POLY-HIP.bat`** (duplo clique). Mostra um menu com os quatro perfis abaixo (48K, 128K,
+262K, 262K com streaming), lembra a última escolha (fica escolhida ao fim de 20 s), escreve a configuração do perfil
+na primeira vez (`tools\hip\poly_profile.py`, com o modelo, o tokenizer e o perfil de especialistas da configuração
+que já existe) e arranca o servidor em `127.0.0.1:8090`. Sem menu: `START-POLY-HIP.bat 128k`; um chat na janela:
+`START-POLY-HIP.bat chat 128k`; ver o que arrancaria: `START-POLY-HIP.bat check 262k`. Se já houver um servidor com
+outro perfil na porta, diz qual é, em vez de abrir o errado.
+
 Compilar como na fase 2:
 
 ```bat
