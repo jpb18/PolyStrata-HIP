@@ -32,13 +32,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _rocm_env import engine_env  # noqa: E402
 
 
-def run(a, extra: str, tag: str, workdir: pathlib.Path) -> dict:
+def run(a, extra: str, tag: str, workdir: pathlib.Path, engine: str | None = None) -> dict:
     out = workdir / f"{tag}.logits"
-    cmd = [a.engine, "--model", a.model, "--max-context", str(a.ctx), "--tokens", "@" + a.prompt,
+    engine = engine or a.engine
+    cmd = [engine, "--model", a.model, "--max-context", str(a.ctx), "--tokens", "@" + a.prompt,
            "--max-new", str(a.max_new), "--window", "1", "--logits-out", str(out),
            *shlex.split(a.args, posix=False), *shlex.split(extra, posix=False)]
     t = time.time()
-    p = subprocess.run(cmd, capture_output=True, text=True, env=engine_env(a.engine))
+    p = subprocess.run(cmd, capture_output=True, text=True, env=engine_env(engine))
     if p.returncode != 0:
         sys.stderr.write(p.stderr[-4000:])
         raise SystemExit(f"{tag}: strata-poly ended with {p.returncode}")
@@ -92,14 +93,18 @@ def main() -> int:
     ap.add_argument("--max-new", type=int, default=32)
     ap.add_argument("--args", default="", help="arguments for every run")
     ap.add_argument("--ref", default="--kv-resident all")
+    ap.add_argument("--ref-engine", help="another build for the reference run (default: --engine): the build before "
+                                         "a change against the build after it")
     ap.add_argument("--test", action="append", required=True)
     ap.add_argument("--json")
     a = ap.parse_args()
     a.engine = str(pathlib.Path(a.engine).resolve())
+    if a.ref_engine:
+        a.ref_engine = str(pathlib.Path(a.ref_engine).resolve())
     n_prompt = len(pathlib.Path(a.prompt).read_text().strip().split(","))
     with tempfile.TemporaryDirectory() as td:
         wd = pathlib.Path(td)
-        ref = run(a, a.ref, "ref", wd)
+        ref = run(a, a.ref, "ref", wd, a.ref_engine)
         n_vocab = len(ref["logits"]) // max(len(ref["ids"]), 1)
         rl = ref["logits"].reshape(-1, n_vocab)
         stab = []
@@ -108,7 +113,7 @@ def main() -> int:
             stab.append({"max_logit": float(row.max()), "entropy": float(-(p * np.log(p + 1e-300)).sum()),
                          "finite": bool(np.isfinite(row).all())})
         print(f"prompt {n_prompt} tokens, context {a.ctx}, {len(ref['ids'])} steps")
-        print(f"ref  [{a.ref}] {ref['wall_s']} s")
+        print(f"ref  [{a.ref}]{' ' + a.ref_engine if a.ref_engine else ''} {ref['wall_s']} s")
         for l in ref["info"]:
             print("     " + l)
         results = []

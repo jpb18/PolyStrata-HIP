@@ -1,0 +1,1 @@
+{"answer": "OSPREY-5521", "found": true, "ttft_s": 134.9, "total_s": 135.5, "usage": {"prompt_tokens": 108264, "completion_tokens": 9, "total_tokens": 108273, "prompt_tokens_details": {"cached_tokens": 0}}}

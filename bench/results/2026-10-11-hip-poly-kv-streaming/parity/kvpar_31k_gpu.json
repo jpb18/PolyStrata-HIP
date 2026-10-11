@@ -1,0 +1,440 @@
+{
+ "prompt_tokens": 31296,
+ "ctx": 65536,
+ "ref": {
+  "args": "--kv-resident all",
+  "ids": [
+   90700,
+   8340,
+   25,
+   271,
+   16,
+   13,
+   220,
+   2972,
+   2014,
+   53983,
+   279,
+   5952,
+   64700,
+   198,
+   262,
+   348,
+   256,
+   5396,
+   25,
+   357,
+   1248,
+   10597,
+   1414,
+   21988,
+   3061,
+   1761,
+   364,
+   5090,
+   23547,
+   68022,
+   318,
+   35474,
+   7096,
+   17,
+   11,
+   36737,
+   7096,
+   18,
+   11,
+   36737,
+   7096,
+   19,
+   11,
+   17925,
+   20,
+   15,
+   14,
+   9481,
+   21,
+   15,
+   11,
+   4831,
+   5946,
+   321,
+   1010,
+   32449,
+   68022,
+   318,
+   5182,
+   55,
+   220,
+   20,
+   15,
+   24
+  ],
+  "info": [
+   "strata-poly: loaded in 17.2 s; 6370 of 10240 routed experts in VRAM (8.1 GiB), 6 CPU threads",
+   "strata-poly: VRAM MiB: dense weights 1910, expert cache 8299, KV 1280 (65536 positions), KV stage 0, recurrent state 62, scratch and the rest 803; 984 free.  Pinned RAM MiB: KV 0 (0 positions), the rest 1071; RAM available 8531 MiB",
+   "prompt 31296 tokens 1389.3 tok/s, generated 64 tokens 50.74 tok/s (length); experts from VRAM 90.9%, CPU experts 0.0 ms/token, router wait 0.6 ms/token, 353 experts swapped into VRAM, 0 of 0 guessed tokens right"
+  ],
+  "wall_s": 45.3,
+  "softmax": [
+   {
+    "max_logit": 26.623945236206055,
+    "entropy": 0.1268604923622535,
+    "finite": true
+   },
+   {
+    "max_logit": 23.9627685546875,
+    "entropy": 0.014129135454312595,
+    "finite": true
+   },
+   {
+    "max_logit": 27.748477935791016,
+    "entropy": 0.00015618745916573786,
+    "finite": true
+   },
+   {
+    "max_logit": 26.12656593322754,
+    "entropy": 0.0005558323147043145,
+    "finite": true
+   },
+   {
+    "max_logit": 27.914155960083008,
+    "entropy": 0.00022944058844305082,
+    "finite": true
+   },
+   {
+    "max_logit": 32.28716278076172,
+    "entropy": 1.5377542182442238e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 28.31494903564453,
+    "entropy": 5.244980588303424e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 27.65180206298828,
+    "entropy": 8.475427784648095e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 30.784399032592773,
+    "entropy": 0.00027073970062979126,
+    "finite": true
+   },
+   {
+    "max_logit": 28.818603515625,
+    "entropy": 0.0002396637816974048,
+    "finite": true
+   },
+   {
+    "max_logit": 30.29894256591797,
+    "entropy": 0.00014175701911212674,
+    "finite": true
+   },
+   {
+    "max_logit": 32.916297912597656,
+    "entropy": 0.00017819330957393825,
+    "finite": true
+   },
+   {
+    "max_logit": 30.44198989868164,
+    "entropy": 0.0020511858080725777,
+    "finite": true
+   },
+   {
+    "max_logit": 28.3262939453125,
+    "entropy": 0.006267011632878583,
+    "finite": true
+   },
+   {
+    "max_logit": 32.34392547607422,
+    "entropy": 2.1793232808843966e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 30.642745971679688,
+    "entropy": 6.6117579846791e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 37.357723236083984,
+    "entropy": 4.184665430716178e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 33.45964050292969,
+    "entropy": 0.07151951709283413,
+    "finite": true
+   },
+   {
+    "max_logit": 32.46540832519531,
+    "entropy": 0.0002510877776274709,
+    "finite": true
+   },
+   {
+    "max_logit": 32.517024993896484,
+    "entropy": 0.0001146142159341638,
+    "finite": true
+   },
+   {
+    "max_logit": 29.512550354003906,
+    "entropy": 0.09480478419622962,
+    "finite": true
+   },
+   {
+    "max_logit": 28.65164566040039,
+    "entropy": 0.5953136956035078,
+    "finite": true
+   },
+   {
+    "max_logit": 31.493545532226562,
+    "entropy": 0.06797147160678124,
+    "finite": true
+   },
+   {
+    "max_logit": 24.580429077148438,
+    "entropy": 0.7869798081476979,
+    "finite": true
+   },
+   {
+    "max_logit": 20.729137420654297,
+    "entropy": 2.0450470338298588,
+    "finite": true
+   },
+   {
+    "max_logit": 21.38525390625,
+    "entropy": 2.2750356938233702,
+    "finite": true
+   },
+   {
+    "max_logit": 25.754976272583008,
+    "entropy": 0.9008043495079879,
+    "finite": true
+   },
+   {
+    "max_logit": 26.230527877807617,
+    "entropy": 0.18235284006591462,
+    "finite": true
+   },
+   {
+    "max_logit": 23.825044631958008,
+    "entropy": 1.537376754858704,
+    "finite": true
+   },
+   {
+    "max_logit": 23.737794876098633,
+    "entropy": 1.2005960928124735,
+    "finite": true
+   },
+   {
+    "max_logit": 26.476436614990234,
+    "entropy": 0.46750270705182845,
+    "finite": true
+   },
+   {
+    "max_logit": 22.485946655273438,
+    "entropy": 2.1956429074318455,
+    "finite": true
+   },
+   {
+    "max_logit": 28.67104721069336,
+    "entropy": 0.0008886009516801072,
+    "finite": true
+   },
+   {
+    "max_logit": 23.549087524414062,
+    "entropy": 0.7518035686319969,
+    "finite": true
+   },
+   {
+    "max_logit": 28.066211700439453,
+    "entropy": 0.09415792922809285,
+    "finite": true
+   },
+   {
+    "max_logit": 24.167980194091797,
+    "entropy": 0.0831623180906343,
+    "finite": true
+   },
+   {
+    "max_logit": 32.065032958984375,
+    "entropy": 9.080905795101077e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 24.926183700561523,
+    "entropy": 0.29014961229297015,
+    "finite": true
+   },
+   {
+    "max_logit": 24.37354278564453,
+    "entropy": 0.24082941377540454,
+    "finite": true
+   },
+   {
+    "max_logit": 21.710397720336914,
+    "entropy": 0.5812955632187263,
+    "finite": true
+   },
+   {
+    "max_logit": 28.582279205322266,
+    "entropy": 0.0015975823220988655,
+    "finite": true
+   },
+   {
+    "max_logit": 24.86407470703125,
+    "entropy": 0.045095156553508466,
+    "finite": true
+   },
+   {
+    "max_logit": 22.611093521118164,
+    "entropy": 0.8522633161157657,
+    "finite": true
+   },
+   {
+    "max_logit": 20.069622039794922,
+    "entropy": 1.4380106444778402,
+    "finite": true
+   },
+   {
+    "max_logit": 20.998342514038086,
+    "entropy": 0.7334007189508176,
+    "finite": true
+   },
+   {
+    "max_logit": 31.0042667388916,
+    "entropy": 0.00016157398959840372,
+    "finite": true
+   },
+   {
+    "max_logit": 26.64353370666504,
+    "entropy": 0.29331913909296425,
+    "finite": true
+   },
+   {
+    "max_logit": 24.745500564575195,
+    "entropy": 0.4938444472754892,
+    "finite": true
+   },
+   {
+    "max_logit": 28.391334533691406,
+    "entropy": 0.0011257496603020833,
+    "finite": true
+   },
+   {
+    "max_logit": 27.115196228027344,
+    "entropy": 0.001825844408049015,
+    "finite": true
+   },
+   {
+    "max_logit": 22.711925506591797,
+    "entropy": 1.3108627863366993,
+    "finite": true
+   },
+   {
+    "max_logit": 21.5611572265625,
+    "entropy": 0.6177386734390075,
+    "finite": true
+   },
+   {
+    "max_logit": 31.820608139038086,
+    "entropy": 0.6776967806490775,
+    "finite": true
+   },
+   {
+    "max_logit": 26.666309356689453,
+    "entropy": 0.3443687875945689,
+    "finite": true
+   },
+   {
+    "max_logit": 20.821247100830078,
+    "entropy": 2.38488494209488,
+    "finite": true
+   },
+   {
+    "max_logit": 20.81081771850586,
+    "entropy": 2.2189921791739327,
+    "finite": true
+   },
+   {
+    "max_logit": 20.13251304626465,
+    "entropy": 2.4614684455059663,
+    "finite": true
+   },
+   {
+    "max_logit": 23.68991470336914,
+    "entropy": 0.7783169823503747,
+    "finite": true
+   },
+   {
+    "max_logit": 20.15226936340332,
+    "entropy": 2.925445149547552,
+    "finite": true
+   },
+   {
+    "max_logit": 28.9132080078125,
+    "entropy": 0.0001392735487140218,
+    "finite": true
+   },
+   {
+    "max_logit": 24.65583038330078,
+    "entropy": 0.053386365643272475,
+    "finite": true
+   },
+   {
+    "max_logit": 25.28343391418457,
+    "entropy": 0.4612876176110104,
+    "finite": true
+   },
+   {
+    "max_logit": 28.295183181762695,
+    "entropy": 0.0019956692187290013,
+    "finite": true
+   },
+   {
+    "max_logit": 28.524429321289062,
+    "entropy": 0.006062409428584096,
+    "finite": true
+   }
+  ]
+ },
+ "tests": [
+  {
+   "args": "--kv-resident 16384",
+   "steps": 64,
+   "same_bits": 0,
+   "first_diff": 26,
+   "near_tie": true,
+   "max_dlogit": 1.9300537109375,
+   "max_dprob": 0.060989348631381335,
+   "mean_dprob": 0.004180481518467668,
+   "max_kl": 0.007830784602945213,
+   "info": [
+    "strata-poly: KV streaming: positions 0 to 16383 of the attention caches in VRAM (0.31 GiB), 16384 to 65535 in pinned RAM (0.94 GiB), a layer's of them copied to VRAM ahead of its attention",
+    "strata-poly: loaded in 16.7 s; 7003 of 10240 routed experts in VRAM (8.9 GiB), 6 CPU threads",
+    "strata-poly: VRAM MiB: dense weights 1910, expert cache 9123, KV 320 (16384 positions), KV stage 138, recurrent state 62, scratch and the rest 803; 982 free.  Pinned RAM MiB: KV 960 (49152 positions), the rest 1071; RAM available 7541 MiB",
+    "prompt 31296 tokens 1331.9 tok/s, generated 64 tokens 30.91 tok/s (length); experts from VRAM 93.5%, CPU experts 0.0 ms/token, router wait 0.7 ms/token, 275 experts swapped into VRAM, 0 of 0 guessed tokens right"
+   ],
+   "wall_s": 46.6,
+   "ids": null
+  },
+  {
+   "args": "",
+   "steps": 64,
+   "same_bits": 10,
+   "first_diff": 26,
+   "near_tie": true,
+   "max_dlogit": 1.8531932830810547,
+   "max_dprob": 0.05748139376485106,
+   "mean_dprob": 0.003759485385992948,
+   "max_kl": 0.006960687649077385,
+   "info": [
+    "strata-poly: loaded in 15.6 s; 6372 of 10240 routed experts in VRAM (8.1 GiB), 6 CPU threads",
+    "strata-poly: VRAM MiB: dense weights 1910, expert cache 8301, KV 1280 (65536 positions), KV stage 0, recurrent state 62, scratch and the rest 803; 996 free.  Pinned RAM MiB: KV 0 (0 positions), the rest 1071; RAM available 9033 MiB",
+    "prompt 31296 tokens 1434.9 tok/s, generated 64 tokens 44.42 tok/s (length); experts from VRAM 90.5%, CPU experts 0.0 ms/token, router wait 0.6 ms/token, 385 experts swapped into VRAM, 0 of 0 guessed tokens right"
+   ],
+   "wall_s": 43.3,
+   "ids": null
+  }
+ ]
+}

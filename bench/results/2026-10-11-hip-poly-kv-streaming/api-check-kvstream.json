@@ -1,0 +1,283 @@
+{
+ "listening": [
+  "127.0.0.1:8091"
+ ],
+ "models": {
+  "ok": true,
+  "models": [
+   "qwen3.5-35b-a3b-q3_k_m-hip-kvstream"
+  ],
+  "seconds": 0.06
+ },
+ "system": {
+  "ok": true,
+  "answer": "Arr, that be a simple math question, matey! 2 plus 2 be 4, just like four gold coins in a chest!",
+  "usage": {
+   "prompt_tokens": 38,
+   "completion_tokens": 31,
+   "total_tokens": 69,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "seconds": 2.41
+ },
+ "stream": {
+  "ok": true,
+  "chunks": 69,
+  "done": true,
+  "finish": "stop",
+  "ttft_s": 0.349642276763916,
+  "usage": {
+   "prompt_tokens": 25,
+   "completion_tokens": 70,
+   "total_tokens": 95,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "text": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20",
+  "seconds": 2.41
+ },
+ "multiturn": {
+  "ok": true,
+  "turns": [
+   {
+    "q": "My name is Jorge and my favourite number",
+    "a": "OK",
+    "usage": {
+     "prompt_tokens": 38,
+     "completion_tokens": 2,
+     "total_tokens": 40,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "ttft_s": 0.45827722549438477
+   },
+   {
+    "q": "What is my name?",
+    "a": "Jorge",
+    "usage": {
+     "prompt_tokens": 54,
+     "completion_tokens": 3,
+     "total_tokens": 57,
+     "prompt_tokens_details": {
+      "cached_tokens": 31
+     }
+    },
+    "ttft_s": 0.21824955940246582
+   },
+   {
+    "q": "What is my favourite number plus one?",
+    "a": "418",
+    "usage": {
+     "prompt_tokens": 74,
+     "completion_tokens": 4,
+     "total_tokens": 78,
+     "prompt_tokens_details": {
+      "cached_tokens": 47
+     }
+    },
+    "ttft_s": 0.2813131809234619
+   }
+  ],
+  "cached_tokens": [
+   0,
+   31,
+   47
+  ],
+  "seconds": 1.06
+ },
+ "tools": {
+  "ok": true,
+  "finish": "tool_calls",
+  "call": {
+   "id": "call_a140ec3cd0414befae0c73d0",
+   "name": "get_weather",
+   "arguments": "{\"city\":\"Lisbon\"}"
+  },
+  "answer": "The weather in Lisbon right now is sunny with a temperature of 23°C.",
+  "usage": {
+   "prompt_tokens": 349,
+   "completion_tokens": 18,
+   "total_tokens": 367,
+   "prompt_tokens_details": {
+    "cached_tokens": 308
+   }
+  },
+  "seconds": 3.18
+ },
+ "tools-stream": {
+  "ok": true,
+  "finish": "tool_calls",
+  "call": {
+   "id": "call_79a329e3a73b48a186d4df60",
+   "name": "get_weather",
+   "arguments": "{\"city\":\"Lisbon\"}"
+  },
+  "answer": "The weather in Lisbon right now is sunny with a temperature of 23°C.",
+  "usage": {
+   "prompt_tokens": 349,
+   "completion_tokens": 18,
+   "total_tokens": 367,
+   "prompt_tokens_details": {
+    "cached_tokens": 308
+   }
+  },
+  "seconds": 0.9
+ },
+ "long": {
+  "ok": true,
+  "completion_tokens": 2413,
+  "finish": "stop",
+  "chars": 11598,
+  "tok_s": 80.2,
+  "seconds": 30.39
+ },
+ "cancel": {
+  "ok": true,
+  "events_before_close": 10,
+  "next_request_s": 0.34,
+  "next": "Hello! How can I help you today?",
+  "seconds": 0.68
+ },
+ "anthropic": {
+  "ok": true,
+  "text": "The capital of France is Paris.",
+  "stream_text": "The capital of France is Paris.",
+  "events": [
+   "content_block_delta",
+   "content_block_start",
+   "content_block_stop",
+   "message_delta",
+   "message_start",
+   "message_stop"
+  ],
+  "usage": {
+   "input_tokens": 30,
+   "output_tokens": 8,
+   "cache_read_input_tokens": 0
+  },
+  "seconds": 0.46
+ },
+ "anthropic-tools": {
+  "ok": true,
+  "tool_use": {
+   "type": "tool_use",
+   "id": "call_0899d42f49cb47f98f92fd1f",
+   "name": "get_weather",
+   "input": {
+    "city": "Porto"
+   }
+  },
+  "answer": "The weather in Porto is currently cloudy with a temperature of 19°C.",
+  "seconds": 1.59
+ },
+ "thinking": {
+  "ok": true,
+  "reasoning_chars": 2156,
+  "answer": "No, **391 is not a prime number**.\n\nIt is a composite number because it can be divided evenly by numbers other than 1 and itself. Specifically:\n\n$$17 \\times 23 ",
+  "usage": {
+   "prompt_tokens": 19,
+   "completion_tokens": 930,
+   "total_tokens": 949,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "seconds": 12.11
+ },
+ "session": {
+  "ok": true,
+  "turns": [
+   {
+    "turn": 1,
+    "prompt_tokens": 326,
+    "cached": 0,
+    "ttft_s": 0.726,
+    "right": true
+   },
+   {
+    "turn": 2,
+    "prompt_tokens": 663,
+    "cached": 319,
+    "ttft_s": 0.733,
+    "right": true
+   },
+   {
+    "turn": 3,
+    "prompt_tokens": 1000,
+    "cached": 656,
+    "ttft_s": 0.751,
+    "right": true
+   },
+   {
+    "turn": 4,
+    "prompt_tokens": 1337,
+    "cached": 993,
+    "ttft_s": 0.744,
+    "right": true
+   },
+   {
+    "turn": 5,
+    "prompt_tokens": 1674,
+    "cached": 1330,
+    "ttft_s": 0.731,
+    "right": true
+   },
+   {
+    "turn": 6,
+    "prompt_tokens": 2011,
+    "cached": 1667,
+    "ttft_s": 0.737,
+    "right": true
+   },
+   {
+    "turn": 7,
+    "prompt_tokens": 2348,
+    "cached": 2004,
+    "ttft_s": 1.137,
+    "right": true
+   },
+   {
+    "turn": 8,
+    "prompt_tokens": 2685,
+    "cached": 2341,
+    "ttft_s": 0.746,
+    "right": true
+   },
+   {
+    "turn": 9,
+    "prompt_tokens": 3022,
+    "cached": 2678,
+    "ttft_s": 0.738,
+    "right": true
+   },
+   {
+    "turn": 10,
+    "prompt_tokens": 3371,
+    "cached": 3015,
+    "ttft_s": 0.751,
+    "right": true
+   },
+   {
+    "turn": 11,
+    "prompt_tokens": 3720,
+    "cached": 3364,
+    "ttft_s": 0.745,
+    "right": true
+   },
+   {
+    "turn": 12,
+    "prompt_tokens": 4069,
+    "cached": 3713,
+    "ttft_s": 0.754,
+    "right": true
+   }
+  ],
+  "recall": "At the start of our talk, section A held 100 crates of item number 9000.",
+  "reuse_every_turn": true,
+  "seconds": 14.9
+ }
+}

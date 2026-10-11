@@ -1,0 +1,13 @@
+VRAM, kernel read (256 x 256)                      1782 us   301.4 GB/s
+pinned host, kernel read (256 x 256)              40706 us    13.2 GB/s
+VRAM, kernel read (1024 x 256)                     1748 us   307.2 GB/s
+pinned host, kernel read (1024 x 256)             40619 us    13.2 GB/s
+VRAM, kernel read (4096 x 256)                     1741 us   308.4 GB/s
+pinned host, kernel read (4096 x 256)             40634 us    13.2 GB/s
+pinned host, kernel read, 8 bytes a thread        40630 us    13.2 GB/s
+pinned host, kernel read, 4 bytes a thread        40638 us    13.2 GB/s
+pinned host -> VRAM, copy engine (512 MiB)        37828 us    14.2 GB/s
+pinned host -> VRAM, copy engine (1024 KiB pieces)    38583 us    13.9 GB/s
+pinned host -> VRAM, copy engine (4096 KiB pieces)    38063 us    14.1 GB/s
+pinned host -> VRAM, copy engine (32768 KiB pieces)    37857 us    14.2 GB/s
+pinned: 7 GiB taken and touched in 1579 ms

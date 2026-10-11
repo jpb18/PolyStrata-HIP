@@ -1,0 +1,325 @@
+{
+ "engine_args": "--threads 6 --expert-profile C:\\Users\\user\\models\\qwen35-pack\\expert-profile.txt",
+ "ctx": 262144,
+ "load_s": 14.797003030776978,
+ "system_before": {
+  "ram_available_mib": 21024,
+  "pagefile_used_mib": 3311
+ },
+ "system_after": {
+  "ram_available_mib": 20615,
+  "pagefile_used_mib": 3076
+ },
+ "peak": {
+  "vram_dedicated_mib": 12896,
+  "vram_shared_mib": 2042,
+  "ram_private_mib": 13220,
+  "ram_ws_mib": 18775
+ },
+ "rows": [
+  {
+   "length": 32768,
+   "prompt_tokens": 32751,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 24.88,
+   "read_tokens": 32751,
+   "prompt_tok_s": 1317.0,
+   "decode_tok_s": 33.05,
+   "page_faults": 2592855,
+   "experts_vram": 0.536
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32753,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 2.65,
+   "read_tokens": 2033,
+   "prompt_tok_s": 768.5,
+   "decode_tok_s": 38.97,
+   "page_faults": 16626,
+   "experts_vram": 0.607
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32750,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 2.66,
+   "read_tokens": 2030,
+   "prompt_tok_s": 764.7,
+   "decode_tok_s": 42.8,
+   "page_faults": 16119,
+   "experts_vram": 0.646
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32768,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 2.7,
+   "read_tokens": 2048,
+   "prompt_tok_s": 760.0,
+   "decode_tok_s": 35.23,
+   "page_faults": 16951,
+   "experts_vram": 0.751
+  },
+  {
+   "length": 65536,
+   "prompt_tokens": 65519,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 62.03,
+   "read_tokens": 65519,
+   "prompt_tok_s": 1056.6,
+   "decode_tok_s": 31.88,
+   "page_faults": 245266,
+   "experts_vram": 0.833
+  },
+  {
+   "length": 65536,
+   "prompt_tokens": 65521,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 3.5,
+   "read_tokens": 2033,
+   "prompt_tok_s": 583.2,
+   "decode_tok_s": 35.41,
+   "page_faults": 16395,
+   "experts_vram": 0.871
+  },
+  {
+   "length": 65536,
+   "prompt_tokens": 65518,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 3.51,
+   "read_tokens": 2030,
+   "prompt_tok_s": 580.8,
+   "decode_tok_s": 36.06,
+   "page_faults": 16209,
+   "experts_vram": 0.872
+  },
+  {
+   "length": 65536,
+   "prompt_tokens": 65536,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 3.53,
+   "read_tokens": 2048,
+   "prompt_tok_s": 582.3,
+   "decode_tok_s": 31.26,
+   "page_faults": 16399,
+   "experts_vram": 0.866
+  },
+  {
+   "length": 131072,
+   "prompt_tokens": 131055,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 177.68,
+   "read_tokens": 131055,
+   "prompt_tok_s": 737.8,
+   "decode_tok_s": 23.32,
+   "page_faults": 197225,
+   "experts_vram": 0.927
+  },
+  {
+   "length": 131072,
+   "prompt_tokens": 131057,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 5.23,
+   "read_tokens": 2033,
+   "prompt_tok_s": 390.9,
+   "decode_tok_s": 23.95,
+   "page_faults": 16332,
+   "experts_vram": 0.941
+  },
+  {
+   "length": 131072,
+   "prompt_tokens": 131054,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 5.22,
+   "read_tokens": 2030,
+   "prompt_tok_s": 390.7,
+   "decode_tok_s": 25.59,
+   "page_faults": 16165,
+   "experts_vram": 0.95
+  },
+  {
+   "length": 131072,
+   "prompt_tokens": 131072,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 5.24,
+   "read_tokens": 2048,
+   "prompt_tok_s": 392.7,
+   "decode_tok_s": 24.36,
+   "page_faults": 16241,
+   "experts_vram": 0.948
+  },
+  {
+   "length": 261000,
+   "prompt_tokens": 260983,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 554.45,
+   "read_tokens": 260983,
+   "prompt_tok_s": 470.8,
+   "decode_tok_s": 12.27,
+   "page_faults": 327079,
+   "experts_vram": 0.951
+  },
+  {
+   "length": 261000,
+   "prompt_tokens": 260985,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 4.09,
+   "read_tokens": 889,
+   "prompt_tok_s": 220.2,
+   "decode_tok_s": 19.13,
+   "page_faults": 17192,
+   "experts_vram": 0.967
+  },
+  {
+   "length": 261000,
+   "prompt_tokens": 260982,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 4.05,
+   "read_tokens": 886,
+   "prompt_tok_s": 221.1,
+   "decode_tok_s": 22.76,
+   "page_faults": 17172,
+   "experts_vram": 0.975
+  },
+  {
+   "length": 261000,
+   "prompt_tokens": 261000,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 4.08,
+   "read_tokens": 904,
+   "prompt_tok_s": 223.9,
+   "decode_tok_s": 15.89,
+   "page_faults": 17178,
+   "experts_vram": 0.965
+  }
+ ]
+}

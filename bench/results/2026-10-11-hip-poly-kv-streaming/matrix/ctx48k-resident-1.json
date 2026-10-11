@@ -1,0 +1,310 @@
+{
+ "engine_args": "--threads 6 --expert-profile C:\\Users\\user\\models\\qwen35-pack\\expert-profile.txt ",
+ "ctx": 49152,
+ "load_s": 18.4969584941864,
+ "system_before": {
+  "ram_available_mib": 21526,
+  "pagefile_used_mib": 3492,
+  "commit_mib": 32835,
+  "commit_limit_mib": 65388
+ },
+ "system_after": {
+  "ram_available_mib": 21028,
+  "pagefile_used_mib": 3351,
+  "commit_mib": 33007,
+  "commit_limit_mib": 65388
+ },
+ "peak": {
+  "vram_dedicated_mib": 12831,
+  "vram_shared_mib": 1946,
+  "ram_private_mib": 11806,
+  "ram_ws_mib": 18377
+ },
+ "rows": [
+  {
+   "length": 8192,
+   "prompt_tokens": 8175,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 5.74,
+   "read_tokens": 8175,
+   "prompt_tok_s": 1424.3,
+   "produced": 8,
+   "decode_tok_s": 62.0,
+   "page_faults": 1451744,
+   "experts_vram": 0.819
+  },
+  {
+   "length": 8192,
+   "prompt_tokens": 8177,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 1.54,
+   "read_tokens": 2033,
+   "prompt_tok_s": 1319.5,
+   "produced": 6,
+   "decode_tok_s": 54.05,
+   "page_faults": 16556,
+   "experts_vram": 0.882
+  },
+  {
+   "length": 8192,
+   "prompt_tokens": 8174,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 1.49,
+   "read_tokens": 2030,
+   "prompt_tok_s": 1365.3,
+   "produced": 7,
+   "decode_tok_s": 54.84,
+   "page_faults": 16337,
+   "experts_vram": 0.9
+  },
+  {
+   "length": 8192,
+   "prompt_tokens": 8192,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 1.53,
+   "read_tokens": 2048,
+   "prompt_tok_s": 1344.0,
+   "produced": 22,
+   "decode_tok_s": 60.4,
+   "page_faults": 17156,
+   "experts_vram": 0.936
+  },
+  {
+   "length": 8192,
+   "prompt_tokens": 8177,
+   "question": "Summarize in detail what the documents above are about.",
+   "codes": [],
+   "found": [],
+   "answer": "```text\nThe provided documents are technical installation and configuration guides for \"PolyStrata,\" a software suite designed to run the Qwen3.8-Flash-Next large language model locally on consumer-grade NVIDIA or AMD graphics cards. The documentation serves as a comprehensive manual for both human users and AI coding assistants, covering the following key areas:\n\n1.  **Installation & Setup**: Detailed instructions for setting up the environment on Windows and Linux, including system checks for GPU compatibility (NVIDIA RTX 20/30/40/50 series or AMD Radeon RX 7000/9000 series",
+   "ttft_s": 1.49,
+   "read_tokens": 2033,
+   "prompt_tok_s": 1367.9,
+   "produced": 128,
+   "decode_tok_s": 67.08,
+   "page_faults": 16251,
+   "experts_vram": 0.94
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32751,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 24.64,
+   "read_tokens": 32751,
+   "prompt_tok_s": 1329.4,
+   "produced": 8,
+   "decode_tok_s": 57.19,
+   "page_faults": 180899,
+   "experts_vram": 0.97
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32753,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 2.09,
+   "read_tokens": 2033,
+   "prompt_tok_s": 975.1,
+   "produced": 6,
+   "decode_tok_s": 52.91,
+   "page_faults": 16147,
+   "experts_vram": 0.974
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32750,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 2.1,
+   "read_tokens": 2030,
+   "prompt_tok_s": 971.0,
+   "produced": 7,
+   "decode_tok_s": 80.21,
+   "page_faults": 16144,
+   "experts_vram": 0.972
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32768,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 2.08,
+   "read_tokens": 2048,
+   "prompt_tok_s": 985.7,
+   "produced": 22,
+   "decode_tok_s": 58.25,
+   "page_faults": 16232,
+   "experts_vram": 0.972
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32753,
+   "question": "Summarize in detail what the documents above are about.",
+   "codes": [],
+   "found": [],
+   "answer": "```text\nThe provided documents are comprehensive technical documentation and installation guides for \"PolyStrata,\" a local AI inference server designed to run the Qwen3.8-Flash-Next model (and several others) on consumer-grade NVIDIA and AMD graphics cards.\n\nKey aspects covered include:\n\n1.  **Installation and Setup**: Detailed instructions for AI agents and users on how to install PolyStrata on Windows and Linux. This includes checking system requirements (GPU VRAM, RAM, CPU, OS), cloning the repository, selecting the appropriate model family (Qwen, Swift, Coder, Unsloth, GLM, etc.)",
+   "ttft_s": 2.08,
+   "read_tokens": 2033,
+   "prompt_tok_s": 978.1,
+   "produced": 128,
+   "decode_tok_s": 54.1,
+   "page_faults": 16756,
+   "experts_vram": 0.975
+  },
+  {
+   "length": 45000,
+   "prompt_tokens": 44983,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 37.19,
+   "read_tokens": 44983,
+   "prompt_tok_s": 1209.7,
+   "produced": 8,
+   "decode_tok_s": 44.11,
+   "page_faults": 203456,
+   "experts_vram": 0.984
+  },
+  {
+   "length": 45000,
+   "prompt_tokens": 44985,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 2.34,
+   "read_tokens": 1977,
+   "prompt_tok_s": 846.3,
+   "produced": 6,
+   "decode_tok_s": 49.07,
+   "page_faults": 16216,
+   "experts_vram": 0.986
+  },
+  {
+   "length": 45000,
+   "prompt_tokens": 44982,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 2.36,
+   "read_tokens": 1974,
+   "prompt_tok_s": 840.8,
+   "produced": 7,
+   "decode_tok_s": 52.63,
+   "page_faults": 16111,
+   "experts_vram": 0.984
+  },
+  {
+   "length": 45000,
+   "prompt_tokens": 45000,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 2.38,
+   "read_tokens": 1992,
+   "prompt_tok_s": 838.4,
+   "produced": 22,
+   "decode_tok_s": 55.47,
+   "page_faults": 16176,
+   "experts_vram": 0.985
+  },
+  {
+   "length": 45000,
+   "prompt_tokens": 44985,
+   "question": "Summarize in detail what the documents above are about.",
+   "codes": [],
+   "found": [],
+   "answer": "```text\nThe provided documents are a comprehensive technical manual and installation guide for \"PolyStrata,\" a local AI inference server designed to run the Qwen3.8-Flash-Next model (and other compatible models like GLM 5.3 Flash, Qwen3.6, Ornith 1.5, and Gemma 4) on consumer-grade NVIDIA and AMD graphics cards.\n\nKey aspects covered in the documents include:\n\n1.  **Installation and Setup**: Detailed instructions for AI agents and users on how to install PolyStrata on Windows and Linux. This includes checking system requirements (GPU VRAM,",
+   "ttft_s": 2.35,
+   "read_tokens": 1977,
+   "prompt_tok_s": 845.6,
+   "produced": 128,
+   "decode_tok_s": 52.47,
+   "page_faults": 16116,
+   "experts_vram": 0.983
+  }
+ ]
+}

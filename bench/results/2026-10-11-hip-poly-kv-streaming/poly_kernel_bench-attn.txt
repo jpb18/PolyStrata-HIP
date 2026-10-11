@@ -1,0 +1,39 @@
+context 8192
+  all in VRAM: decode token                120.1 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      10.6 ms
+  all in VRAM: decode token                107.6 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      10.3 ms
+  keys from RAM only: 1105.8 us, values from RAM only: 1355.2 us
+  all in RAM: decode token                2316.2 us (   16.8 MB from RAM,   7.2 GB/s overall); batch of 1,024      11.4 ms
+    the same bits as all in VRAM: yes
+context 32768
+  all in VRAM: decode token                501.7 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      38.2 ms
+  all in VRAM: decode token                492.8 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      38.0 ms
+  keys from RAM only: 4520.9 us, values from RAM only: 5329.5 us
+  all in RAM: decode token                9219.3 us (   67.1 MB from RAM,   7.3 GB/s overall); batch of 1,024      43.1 ms
+    the same bits as all in VRAM: yes
+context 49152
+  all in VRAM: decode token                740.6 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      56.4 ms
+  all in VRAM: decode token                721.1 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      56.9 ms
+  keys from RAM only: 6592.7 us, values from RAM only: 7983.3 us
+  all in RAM: decode token               13759.7 us (  100.7 MB from RAM,   7.3 GB/s overall); batch of 1,024      64.0 ms
+    the same bits as all in VRAM: yes
+context 65536
+  all in VRAM: decode token                957.3 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024      74.5 ms
+  from 49,152 in RAM: decode token        5339.9 us (   33.6 MB from RAM,   6.3 GB/s overall); batch of 1,024      77.0 ms
+    the same bits as all in VRAM: yes
+  keys from RAM only: 8739.5 us, values from RAM only: 10597.9 us
+  all in RAM: decode token               18487.2 us (  134.2 MB from RAM,   7.3 GB/s overall); batch of 1,024      84.7 ms
+    the same bits as all in VRAM: yes
+context 131072
+  all in VRAM: decode token               2067.5 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024     148.6 ms
+  from 49,152 in RAM: decode token       23656.2 us (  167.8 MB from RAM,   7.1 GB/s overall); batch of 1,024     161.6 ms
+    the same bits as all in VRAM: yes
+  keys from RAM only: 17506.1 us, values from RAM only: 21257.0 us
+  all in RAM: decode token               36596.3 us (  268.4 MB from RAM,   7.3 GB/s overall); batch of 1,024     169.9 ms
+    the same bits as all in VRAM: yes
+context 262144
+  all in VRAM: decode token               4310.1 us (    0.0 MB from RAM,   0.0 GB/s overall); batch of 1,024     297.8 ms
+  from 49,152 in RAM: decode token       60156.2 us (  436.2 MB from RAM,   7.3 GB/s overall); batch of 1,024     329.8 ms
+    the same bits as all in VRAM: yes
+  keys from RAM only: 35296.9 us, values from RAM only: 42496.7 us
+  all in RAM: decode token               73537.2 us (  536.9 MB from RAM,   7.3 GB/s overall); batch of 1,024     338.4 ms
+    the same bits as all in VRAM: yes

@@ -1,0 +1,250 @@
+{
+ "prompt_tokens": 8235,
+ "ctx": 16384,
+ "ref": {
+  "args": "--kv-resident all",
+  "ids": [
+   90700,
+   8340,
+   25,
+   271,
+   16,
+   13,
+   220,
+   2972,
+   2014,
+   53983,
+   279,
+   5952,
+   64700,
+   198,
+   262,
+   348,
+   256,
+   5396,
+   25,
+   357,
+   10597,
+   1414,
+   21988,
+   6343,
+   11,
+   6302,
+   11,
+   321,
+   10121,
+   314,
+   264,
+   1558
+  ],
+  "info": [
+   "strata-poly: loaded in 9.4 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads",
+   "strata-poly: VRAM MiB: dense weights 1910, expert cache 0, KV 320 (16384 positions), KV stage 0, recurrent state 62, scratch and the rest 332; 12465 free.  Pinned RAM MiB: KV 0 (0 positions), the rest 26; RAM available 18491 MiB",
+   "prompt 8235 tokens 47.5 tok/s, generated 32 tokens 27.73 tok/s (length); experts from VRAM 0.0%, CPU experts 19.7 ms/token, router wait 1.1 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right"
+  ],
+  "wall_s": 189.7,
+  "softmax": [
+   {
+    "max_logit": 26.001388549804688,
+    "entropy": 0.12239361937021981,
+    "finite": true
+   },
+   {
+    "max_logit": 25.1739444732666,
+    "entropy": 0.0040766298602933,
+    "finite": true
+   },
+   {
+    "max_logit": 28.328536987304688,
+    "entropy": 9.937540107088465e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 26.440330505371094,
+    "entropy": 0.0007225776324692827,
+    "finite": true
+   },
+   {
+    "max_logit": 28.246639251708984,
+    "entropy": 0.0001583279208293251,
+    "finite": true
+   },
+   {
+    "max_logit": 34.32001876831055,
+    "entropy": 4.823204018710384e-06,
+    "finite": true
+   },
+   {
+    "max_logit": 27.87374496459961,
+    "entropy": 7.558484133129756e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 27.67133331298828,
+    "entropy": 8.62570689862821e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 31.10596466064453,
+    "entropy": 0.00027759486804793793,
+    "finite": true
+   },
+   {
+    "max_logit": 30.089052200317383,
+    "entropy": 7.621645561652536e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 28.671031951904297,
+    "entropy": 0.0010484858640832377,
+    "finite": true
+   },
+   {
+    "max_logit": 31.83493423461914,
+    "entropy": 0.0004636253547460078,
+    "finite": true
+   },
+   {
+    "max_logit": 29.83945083618164,
+    "entropy": 0.002343578446171521,
+    "finite": true
+   },
+   {
+    "max_logit": 29.840961456298828,
+    "entropy": 0.0005640954383758411,
+    "finite": true
+   },
+   {
+    "max_logit": 32.89167404174805,
+    "entropy": 1.6149521325488923e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 30.045494079589844,
+    "entropy": 0.00011715583100345732,
+    "finite": true
+   },
+   {
+    "max_logit": 37.756317138671875,
+    "entropy": 2.749930704041435e-05,
+    "finite": true
+   },
+   {
+    "max_logit": 33.90750503540039,
+    "entropy": 0.05850715169088291,
+    "finite": true
+   },
+   {
+    "max_logit": 33.006752014160156,
+    "entropy": 0.0007361453603296283,
+    "finite": true
+   },
+   {
+    "max_logit": 31.57524871826172,
+    "entropy": 0.00015322476243611517,
+    "finite": true
+   },
+   {
+    "max_logit": 26.019010543823242,
+    "entropy": 1.058489028052785,
+    "finite": true
+   },
+   {
+    "max_logit": 28.91446304321289,
+    "entropy": 0.37935828077841394,
+    "finite": true
+   },
+   {
+    "max_logit": 24.683252334594727,
+    "entropy": 0.8194799429560983,
+    "finite": true
+   },
+   {
+    "max_logit": 25.113372802734375,
+    "entropy": 1.0350057159842485,
+    "finite": true
+   },
+   {
+    "max_logit": 30.53845977783203,
+    "entropy": 0.012706503052117072,
+    "finite": true
+   },
+   {
+    "max_logit": 25.7894287109375,
+    "entropy": 1.3999987067493367,
+    "finite": true
+   },
+   {
+    "max_logit": 30.494436264038086,
+    "entropy": 0.002556752613298954,
+    "finite": true
+   },
+   {
+    "max_logit": 24.60050392150879,
+    "entropy": 1.1602324331711678,
+    "finite": true
+   },
+   {
+    "max_logit": 30.7591609954834,
+    "entropy": 0.0649515070463313,
+    "finite": true
+   },
+   {
+    "max_logit": 27.512500762939453,
+    "entropy": 1.0882967349140087,
+    "finite": true
+   },
+   {
+    "max_logit": 28.237377166748047,
+    "entropy": 0.17547073833538285,
+    "finite": true
+   },
+   {
+    "max_logit": 23.843692779541016,
+    "entropy": 1.210738639514195,
+    "finite": true
+   }
+  ]
+ },
+ "tests": [
+  {
+   "args": "--kv-resident 4100",
+   "steps": 32,
+   "same_bits": 32,
+   "first_diff": null,
+   "near_tie": null,
+   "max_dlogit": 0.0,
+   "max_dprob": 0.0,
+   "mean_dprob": 0.0,
+   "max_kl": 0.0,
+   "info": [
+    "strata-poly: KV streaming: positions 0 to 4099 of the attention caches in VRAM (0.08 GiB), 4100 to 16383 in pinned RAM (0.23 GiB), a layer's of them copied to VRAM ahead of its attention",
+    "strata-poly: loaded in 8.9 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads",
+    "strata-poly: VRAM MiB: dense weights 1910, expert cache 0, KV 80 (4100 positions), KV stage 55, recurrent state 62, scratch and the rest 332; 12636 free.  Pinned RAM MiB: KV 239 (12284 positions), the rest 26; RAM available 18586 MiB",
+    "prompt 8235 tokens 47.7 tok/s, generated 32 tokens 27.26 tok/s (length); experts from VRAM 0.0%, CPU experts 19.7 ms/token, router wait 1.1 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right",
+    "strata-poly: KV streaming: 321 copies of a layer's rows in RAM to VRAM, 0 of them made when the head came (not ahead), 2.73 GB copied"
+   ],
+   "wall_s": 186.9,
+   "ids": null
+  },
+  {
+   "args": "--kv-resident 12000",
+   "steps": 32,
+   "same_bits": 32,
+   "first_diff": null,
+   "near_tie": null,
+   "max_dlogit": 0.0,
+   "max_dprob": 0.0,
+   "mean_dprob": 0.0,
+   "max_kl": 0.0,
+   "info": [
+    "strata-poly: KV streaming: positions 0 to 11999 of the attention caches in VRAM (0.23 GiB), 12000 to 16383 in pinned RAM (0.08 GiB), a layer's of them copied to VRAM ahead of its attention",
+    "strata-poly: loaded in 8.6 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads",
+    "strata-poly: VRAM MiB: dense weights 1910, expert cache 0, KV 234 (12000 positions), KV stage 40, recurrent state 62, scratch and the rest 332; 12497 free.  Pinned RAM MiB: KV 85 (4384 positions), the rest 26; RAM available 18724 MiB",
+    "prompt 8235 tokens 46.9 tok/s, generated 32 tokens 29.65 tok/s (length); experts from VRAM 0.0%, CPU experts 20.0 ms/token, router wait 1.1 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right"
+   ],
+   "wall_s": 189.3,
+   "ids": null
+  }
+ ]
+}
