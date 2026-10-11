@@ -2876,6 +2876,21 @@ class Service:
                 names.append(x)
         self.aliases = names
 
+    switch_on_request = False                            # the config's "switch_on_request" (switch_for())
+
+    def switch_for(self, req) -> None:
+        """"switch_on_request": true in the config: a request that names another model of the installation by its
+        exact name (GET /api/models) loads that model first, as POST /api/models/load would, so that the models
+        share one port and a client picks one by name.  Any other name is answered by the loaded model, as before.
+        ModelBusy while another request runs or waits; SwitchFailed when the model does not start."""
+        if not self.switch_on_request:
+            return
+        asked = req.get("model") if isinstance(req, dict) else None
+        if not isinstance(asked, str) or not asked or asked in self.model_names():
+            return
+        if any(e["id"] == asked and not e["current"] for e in self.models()):
+            self.switch_model(asked)
+
     def model_names(self) -> list[str]:
         return [self.model, *self.aliases]
 
@@ -4841,6 +4856,7 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+                    svc.switch_for(req)
                     self.record = svc.begin_request(path, req)
                 if path == "/v1/responses":
                     self._responses(req)
@@ -4869,6 +4885,8 @@ def make_handler(svc: Service):
                     self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
             except ModelBusy as e:
                 self._json(409, {"error": {"type": "model_busy", "message": str(e)}})
+            except SwitchFailed as e:                        # switch_for(): the model asked for did not start
+                self._json(503, {"error": {"type": "server_error", "message": str(e)}})
             except StructuredOutputError as e:
                 self._json(502, {"error": {"type": "structured_output_failed", "code": "structured_output_failed",
                                           "message": str(e)}})
@@ -6045,6 +6063,9 @@ def main() -> int:
         svc.config_path = a.config                      # #564: the web page's Settings view
         svc.models_root = Path(a.config).resolve().parent   # the other models' configs are beside this one
     svc.memory_debug = svc.memory_debug or cfg.get("memory_debug") is True
+    svc.switch_on_request = cfg.get("switch_on_request") is True   # a request names the model it wants (switch_for())
+    if svc.switch_on_request:
+        print("[strata] a request that names another installed model switches to it (switch_on_request)", flush=True)
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:

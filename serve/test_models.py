@@ -194,6 +194,36 @@ class Switch(unittest.TestCase):
         self.assertEqual(call("/api/models/unload", {}), (200, {"status": "unloaded"}))
         self.assertEqual(call("/api/models/current")[1]["loaded"], False)
 
+    def test_a_request_names_the_model_it_wants(self):
+        # off by default: any name is answered by the model that is loaded
+        self.svc.switch_for({"model": "beta"})
+        self.assertEqual((self.svc.model, self.old.stops), ("alpha", 0))
+        self.svc.switch_on_request = True
+        for name in ("alpha", "default", "bet", "gpt-4", None, 5):   # its own, unknown or partial names: no switch
+            self.svc.switch_for({"model": name})
+        self.assertEqual((self.svc.model, self.old.stops), ("alpha", 0))
+        self.svc.switch_for({"model": "beta"})
+        self.assertEqual((self.svc.model, self.old.stops), ("beta", 1))
+        self.assertIs(self.svc.engine, self.new)
+        with self.svc.status_lock:                     # another request runs: refused, nothing stopped
+            self.svc.status["busy"] = True
+        with self.assertRaises(ModelBusy):
+            self.svc.switch_for({"model": "alpha"})
+        self.assertEqual((self.svc.model, self.new.stops), ("beta", 0))
+
+    def test_a_request_switches_through_the_api(self):
+        self.svc.switch_on_request = True
+        httpd = serve(self.svc, port=0)
+        self.addCleanup(httpd.shutdown)
+        body = {"model": "beta", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8}
+        req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions",
+                                     json.dumps(body).encode(), {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            out = json.load(r)
+        self.assertEqual((out["model"], self.svc.model, self.old.stops), ("beta", "beta", 1))
+        message = out["choices"][0]["message"]   # the new engine wrote it (its template opens the thinking)
+        self.assertIn("Hi", (message.get("content") or "") + (message.get("reasoning_content") or ""))
+
 
 if __name__ == "__main__":
     unittest.main()
