@@ -38,6 +38,9 @@ def main() -> int:
     ap.add_argument("--data", help="where the tokenizer folder and the expert profile go (default: beside the GGUF)")
     ap.add_argument("--gguf-py", help="llama.cpp's gguf-py folder, for the tokenizer")
     ap.add_argument("--extra", default="", help="more strata-poly arguments, e.g. \"--vram-reserve-mib 1536\"")
+    ap.add_argument("--no-turn-token", action="store_true",
+                    help="leave out --turn-token (by default the id of <|im_start|> when the tokenizer has it: a chat's "
+                         "next turn then reads only what is new, AMD_PORT_PHASE2.md)")
     a = ap.parse_args()
 
     gguf = pathlib.Path(a.model).resolve()
@@ -50,7 +53,8 @@ def main() -> int:
     data = pathlib.Path(a.data) if a.data else gguf.parent / (name + "-pack")
     tok = data / "tokenizer"
     if not (tok / "vocab.json").exists():
-        candidates = [a.gguf_py, ROOT / "third_party" / "llama.cpp" / "gguf-py"]
+        candidates = [a.gguf_py, ROOT / "third_party" / "llama.cpp" / "gguf-py",
+                      ROOT / "third_party" / "llama.cpp-3cf0325" / "gguf-py"]
         gp = next((pathlib.Path(c) for c in candidates if c and (pathlib.Path(c) / "gguf").is_dir()), None)
         if gp is None:
             raise SystemExit("no gguf-py for the tokenizer: give --gguf-py <llama.cpp>/gguf-py")
@@ -66,6 +70,13 @@ def main() -> int:
     if a.threads > 0:
         args += ["--threads", str(a.threads)]
     args += a.extra.split()
+    if not a.no_turn_token and "--turn-token" not in args:
+        try:
+            turn = json.loads((tok / "vocab.json").read_text(encoding="utf-8")).get("<|im_start|>")
+        except (OSError, ValueError):
+            turn = None
+        if isinstance(turn, int):
+            args += ["--turn-token", str(turn)]
     cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(tok), "model_name": name,
            "display_name": f"{gguf.stem} (HIP, experimental)", "log": str(ROOT / f"strata-{name}.log"),
            "lib_dirs": lib_dirs, "backend": "hip", "port": a.port}
