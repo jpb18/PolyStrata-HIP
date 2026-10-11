@@ -7,8 +7,9 @@ Each check sends what such a client sends (OpenAI chat completions, streamed or 
 and looks at what comes back: the models list, a system prompt that is obeyed, a streamed answer that ends with
 [DONE] and its usage, a conversation of several turns that remembers what was said and reads only its new tokens
 (usage.prompt_tokens_details.cached_tokens), a full tool cycle (call, result, answer), a long answer, a request
-closed half way and the next one served, Anthropic's route streamed and not, and a session of many turns.
-Thinking is off (chat_template_kwargs.enable_thinking false) except in the check named "thinking".
+closed half way and the next one served, Anthropic's route streamed and not, the reasoning streamed apart from the
+answer, Qwen3.6's preserve_thinking over two turns, a session title as OpenCode asks for it, and a session of many
+turns.  Thinking is off (chat_template_kwargs.enable_thinking false) except in the checks named "*thinking*".
 Exit 0 when every check passes.  Nothing here starts or changes the server.
 """
 from __future__ import annotations
@@ -222,6 +223,81 @@ def c_thinking():
                 "usage": r.get("usage")}
 
 
+def c_thinking_stream():
+    """The reasoning streamed apart from the answer (delta.reasoning_content, then delta.content), as OpenChamber
+    shows it, and no thinking tags left in the answer."""
+    t, first_r, first_c, rc, text = time.time(), None, None, "", ""
+    for d in sse(req("/v1/chat/completions", {"model": "default", "temperature": 0, "max_tokens": 1500,
+                                              "stream": True, "reasoning_effort": "low",
+                                              "messages": [{"role": "user", "content": "Is 391 a prime number? "
+                                                            "Answer yes or no, with its factors if it has any."}]},
+                     stream=True)):
+        if d == "[DONE]":
+            continue
+        for c in d.get("choices", []):
+            delta = c.get("delta", {})
+            if delta.get("reasoning_content"):
+                first_r = first_r if first_r is not None else time.time() - t
+                rc += delta["reasoning_content"]
+            if delta.get("content"):
+                first_c = first_c if first_c is not None else time.time() - t
+                text += delta["content"]
+    ok = bool(rc) and bool(text) and first_r is not None and first_c is not None and first_r < first_c and \
+        "think>" not in text and ("17" in text or "23" in text)
+    return ok, {"reasoning_chars": len(rc), "first_reasoning_s": first_r, "first_answer_s": first_c,
+                "answer": text[:160]}
+
+
+def c_preserve_thinking():
+    """Qwen3.6's chat_template_kwargs.preserve_thinking: the reasoning of an earlier turn stays in the history, so the
+    next turn's prompt holds it, and that turn reads only what is new (the template no longer writes the earlier
+    turn otherwise).  Without the option the reasoning leaves the history.  Skipped (and passed) for a template
+    without it.  (Whether the model makes use of what it reasoned is the model's: asked for a number it had "chosen"
+    only in its reasoning, Qwen3.6 had weighed several and named another.)"""
+    if "preserve_thinking" not in (req("/props").get("chat_template") or ""):
+        return True, {"skipped": "the model's chat template has no preserve_thinking"}
+    msgs = [{"role": "user", "content": "Think of a secret three-digit number. Do not write the number in your "
+                                        "answer: answer only with the sum of its digits."}]
+    ask = {"model": "default", "temperature": 0, "max_tokens": 1500, "reasoning_effort": "low"}
+    r1 = req("/v1/chat/completions", {**ask, "messages": msgs, "chat_template_kwargs": {"preserve_thinking": True}})
+    m1 = r1["choices"][0]["message"]
+    msgs.append({"role": "assistant", "content": m1.get("content") or "",
+                 "reasoning_content": m1.get("reasoning_content") or ""})
+    msgs.append({"role": "user", "content": "Now tell me the secret number, only the number."})
+    out = {}
+    for keep in (True, False):
+        r2 = req("/v1/chat/completions", {**ask, "messages": msgs, "chat_template_kwargs": {"preserve_thinking": keep}})
+        out[keep] = (r2.get("usage") or {}, r2["choices"][0]["message"].get("content") or "")
+    u1 = r1.get("usage") or {}
+    first = (u1.get("prompt_tokens") or 0) + (u1.get("completion_tokens") or 0)
+    kept, dropped = out[True][0], out[False][0]
+    holds = (kept.get("prompt_tokens") or 0) >= first and (dropped.get("prompt_tokens") or 0) < first // 2
+    reuse = (kept.get("prompt_tokens_details") or {}).get("cached_tokens", 0) >= first - 16
+    return holds and reuse, {"first_answer": (m1.get("content") or "")[:40], "first_turn_tokens": first,
+                             "kept": {"usage": kept, "answer": out[True][1][:40]},
+                             "dropped": {"usage": dropped, "answer": out[False][1][:40]},
+                             "reasoning_in_prompt": holds, "second_turn_reads_only_new": reuse}
+
+
+def c_title():
+    """A session title as OpenCode asks for it (its title agent, reasoning effort none): short, quick, no
+    reasoning."""
+    t = time.time()
+    r = req("/v1/chat/completions", {"model": "default", "temperature": 0, "max_tokens": 100,
+                                     "reasoning_effort": "none",
+                                     "messages": [{"role": "system", "content": "You are a title generator. You "
+                                                   "output ONLY a thread title, a brief line of at most 50 "
+                                                   "characters, and nothing else."},
+                                                  {"role": "user", "content": "Generate a title for this "
+                                                   "conversation:\nHow do I read a GGUF file's metadata in "
+                                                   "Python without loading the tensors?"}]})
+    wall = time.time() - t
+    m = r["choices"][0]["message"]
+    text = (m.get("content") or "").strip()
+    ok = bool(text) and len(text) <= 80 and not m.get("reasoning_content") and wall < 15
+    return ok, {"title": text, "wall_s": round(wall, 2), "usage": r.get("usage")}
+
+
 def c_session(turns: int):
     """A long session: each turn adds a paragraph to read and a question; each turn reads only what is new."""
     msgs = [{"role": "system", "content": "You are a careful assistant. Answer in at most two sentences."}]
@@ -269,7 +345,9 @@ def main() -> int:
     checks = [("models", c_models), ("system", c_system), ("stream", c_stream), ("multiturn", c_multiturn),
               ("tools", lambda: c_tools(False)), ("tools-stream", lambda: c_tools(True)), ("long", c_long),
               ("cancel", c_cancel), ("anthropic", c_anthropic), ("anthropic-tools", c_anthropic_tools),
-              ("thinking", c_thinking), ("session", lambda: c_session(a.session_turns))]
+              ("thinking", c_thinking), ("thinking-stream", c_thinking_stream),
+              ("preserve-thinking", c_preserve_thinking), ("title", c_title),
+              ("session", lambda: c_session(a.session_turns))]
     if a.only:
         want = a.only.split(",")
         checks = [c for c in checks if any(w in c[0] for w in want)]
