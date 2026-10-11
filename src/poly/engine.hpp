@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -56,6 +57,29 @@ struct Options {
     bool draft = true;            ///< run the block that guesses ahead, when there is one and window is above 1
     std::string draft_model;      ///< a file of the same model to take that block from, when the model's has none;
                                   ///< for an architecture that guesses with a model of its own, that model's file
+    // KV streaming (AMD_KV_STREAMING.md; Qwen3.5 and Qwen3.6).  An attention layer's keys and values for the first
+    // kv_resident positions stay in VRAM and the rest lie in pinned RAM, which the attention reads over PCIe for
+    // every token.  The attention is the same to the bit; the time it takes for the rows in RAM is ~24 times what
+    // it takes for rows in VRAM (12.6 against 300 GB/s on an RX 9060 XT).
+    int kv_resident = 0;          ///< positions whose rows stay in VRAM; 0: every position (no streaming); -1: as
+                                  ///< many as fit in VRAM beside the dense weights, the scratch and the reserve
+                                  ///< (every position when they all fit: the expert cache takes what is left)
+    int64_t kv_ram_mib = -1;      ///< the most RAM the rows outside VRAM may pin; -1: what leaves kv_ram_floor_mib
+                                  ///< of physical RAM available when they are allocated
+    int64_t kv_ram_floor_mib = 4096;
+};
+
+/// Where the engine's memory went (Engine::budget()), in bytes.
+struct Budget {
+    size_t dense = 0;          ///< the dense weights in VRAM
+    size_t experts = 0;        ///< the expert cache in VRAM
+    size_t kv_vram = 0;        ///< the attention caches' rows in VRAM
+    size_t kv_host = 0;        ///< ... in pinned RAM (KV streaming)
+    size_t kv_stage = 0;       ///< VRAM a prompt batch copies the blocks of rows in RAM to
+    size_t state = 0;          ///< the recurrent state and its copies for a window's guesses
+    size_t vram_other = 0;     ///< the rest the engine allocated in VRAM: scratch, staging, tables
+    size_t pinned_other = 0;   ///< the rest of its pinned RAM: staging, uploads, copies to the host
+    int64_t kv_cells_vram = 0, kv_cells_host = 0;   ///< positions of a layer in each
 };
 
 /// A thing a model's file may call by other names than the engine does: converters differ.
@@ -232,6 +256,8 @@ public:
     /// of the reserve free.  True when it did.
     bool mind_vram();
     void save_profile() const;
+    /// Where the engine's memory went.
+    Budget budget() const;
 
 protected:
     // ---- what an architecture supplies ----
@@ -298,6 +324,8 @@ protected:
     /// its output, and the tokens leave their rows in its caches.  block_rows() only leaves the rows.
     virtual void block_attend(int64_t pos, int n) { (void) pos, (void) n; }
     virtual void block_rows(int64_t pos, int n) { (void) pos, (void) n; }
+    /// The attention caches in budget(): their VRAM, pinned RAM and stage bytes and their positions in each.
+    virtual void kv_budget(Budget& b) const { (void) b; }
     /// Which recording of a layer's head fits n tokens from pos().  Launches that are sized by the rows they read
     /// are recorded once for each size (room()), and the architecture numbers the sizes from 0.
     virtual int head_key(int il, int n) const { (void) il, (void) n; return 0; }
@@ -357,6 +385,9 @@ protected:
     int room_key(int n) const;
     void* dmalloc(size_t bytes, const char* what);
     void* hmalloc(size_t bytes, const char* what);
+    /// Pinned RAM the card reads and writes where it lies (zero-copy): its device pointer in *dev.  Throws
+    /// std::runtime_error when the system does not pin that much.
+    void* hmalloc_mapped(size_t bytes, const char* what, void** dev);
 
     Options opt_;
     std::unique_ptr<Shards> gg_;
@@ -372,6 +403,7 @@ protected:
     void* ev_ = nullptr;   ///< marks the router's copy to the host: ev_row_'s first, or a window's row's own
     void* ev_row_[8] = {}; ///< one for each token a window can have
     std::vector<void*> dev_allocs_, host_allocs_;
+    std::unordered_map<void*, size_t> alloc_bytes_;   ///< what each of them took, for budget()
     std::vector<void*> graphs_;   ///< every recorded graph, to destroy
     void* tail_ = nullptr;        ///< one token's launches from the last layer to the logits, recorded
     // A recorded launch cannot be given the position as an argument: it reads it here when it runs.  eval() writes

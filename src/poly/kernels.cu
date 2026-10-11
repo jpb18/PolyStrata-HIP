@@ -414,13 +414,37 @@ __global__ void store_f16_kernel(const float* __restrict__ x, half* __restrict__
     if (i < n) dst[i] = __float2half(x[i]);
 }
 
-// Rows from the position the card holds when the launch runs.
+// Rows from the position the card holds when the launch runs.  SPILL: the rows from `split` on go to `host`.
+template <bool SPILL>
 __global__ void store_f16_at_kernel(const float* __restrict__ x, half* __restrict__ cache, int n, int rows,
-                                    const long long* __restrict__ at, int ring) {
+                                    const long long* __restrict__ at, int ring, half* __restrict__ host,
+                                    long long split) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n * rows) return;
     const long long row = ring > 0 ? (*at + i / n) % ring : *at + i / n;
+    if constexpr (SPILL)
+        if (row >= split) {
+            host[size_t(row - split) * n + i % n] = __float2half(x[i]);
+            return;
+        }
     cache[size_t(row) * n + i % n] = __float2half(x[i]);
+}
+
+// A row of a cache split at `split` (KvSpill): in VRAM below it, in pinned host memory from it on.
+__device__ __forceinline__ const half* spill_row(const half* dev, const half* host, long long split, long long row,
+                                                 size_t width) {
+    return row < split ? dev + size_t(row) * width : host + size_t(row - split) * width;
+}
+
+// Rows [row0, row0 + m) of a split cache, one after the other into `out` (VRAM): 16 bytes a thread.
+__global__ void kv_gather_kernel(const half* __restrict__ dev, const half* __restrict__ host, long long split,
+                                 long long row0, int m, int width, half* __restrict__ out) {
+    const int per = width / 8;   // uint4 a row
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(m) * per) return;
+    const long long row = row0 + (long long) (i / per);
+    const uint4* src = reinterpret_cast<const uint4*>(spill_row(dev, host, split, row, width));
+    reinterpret_cast<uint4*>(out)[i] = src[i % per];
 }
 
 // How many cache rows token `tok` of a call from position pos attends to: every row up to its own while it is
@@ -770,16 +794,21 @@ __device__ __forceinline__ void attn_scores_by(int n, const float* __restrict__ 
 // once between them: the cache of a long context is what the kernel waits for.  A thread sums its products with
 // a query, for up to SCORE_QUERIES heads of a token at a time, and a query's 32 sums are added in pairs.  A
 // token gets scores for the rows of the span it does not attend as well, which the softmax leaves out.
+// SPILL: the rows from `split` on are in khost (KvSpill).
+template <bool SPILL>
 __global__ void attn_score_kernel(const float* __restrict__ q, const half* __restrict__ kcache,
                                   float* __restrict__ score, int n_keys, int dim, int n_head, int kv_heads,
                                   long long pos, int first, int tokens, float scale, int window, int ring,
-                                  long long last, const long long* __restrict__ at) {
+                                  long long last, const long long* __restrict__ at, const half* __restrict__ khost,
+                                  long long split) {
     const int unit = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;   // a row and a group
     const int key = unit / kv_heads, g = unit % kv_heads, per = n_head / kv_heads;
     long long lo;
     if (key >= attn_span((at ? *at : pos) + first, tokens, window, last, &lo)) return;
     const long long row = ring > 0 ? (lo + key) % ring : lo + key;
-    const half* k = kcache + (size_t(row) * kv_heads + g) * dim;
+    const half* k;
+    if constexpr (SPILL) k = spill_row(kcache, khost, split, row, size_t(kv_heads) * dim) + size_t(g) * dim;
+    else k = kcache + (size_t(row) * kv_heads + g) * dim;
     q += (size_t(first) * n_head + g * per) * dim;   // the group's heads of the launch's first token
     score += size_t(g) * per * n_keys + key;         // and their scores of the row
     for (int t = 0; t < tokens; ++t, q += size_t(n_head) * dim, score += size_t(n_head) * n_keys)
@@ -814,32 +843,43 @@ __global__ void attn_softmax_kernel(float* score, int n_keys, long long pos, int
 // A thread's sums of attn_value_kernel for N queries: over its share of the span's rows from `row` of the cache
 // on, of a row's value with each query's weight there.  w: the weights of the lane's query; the warp's first N
 // lanes have the N queries between them.
-template <int N>
+// SPILL: the rows from `split` on are in vh, at the same place in a row as v's (KvSpill); no ring.
+template <int N, bool SPILL>
 __device__ __forceinline__ void attn_values(const float* __restrict__ w, const half* __restrict__ v, size_t width,
-                                            long long row, int ring, int span, float* sums) {
+                                            long long row, int ring, int span, float* sums,
+                                            const half* __restrict__ vh, long long split) {
     float acc[N];
 #pragma unroll
     for (int i = 0; i < N; ++i) acc[i] = 0.0f;
-    v += size_t(row) * width;
-    for (int j = threadIdx.x / VALUE_DIMS; j < span; j += VALUE_SHARES) {
-        const float x = __half2float(*v), weight = w[j];
+    if constexpr (SPILL) {
+        for (int j = threadIdx.x / VALUE_DIMS; j < span; j += VALUE_SHARES, row += VALUE_SHARES) {
+            const float x = __half2float(*spill_row(v, vh, split, row, width)), weight = w[j];
 #pragma unroll
-        for (int i = 0; i < N; ++i) acc[i] += __shfl_sync(0xffffffffu, weight, i) * x;
-        v += VALUE_SHARES * width;
-        row += VALUE_SHARES;
-        if (ring > 0 && row >= ring) row -= ring, v -= size_t(ring) * width;
+            for (int i = 0; i < N; ++i) acc[i] += __shfl_sync(0xffffffffu, weight, i) * x;
+        }
+    } else {
+        v += size_t(row) * width;
+        for (int j = threadIdx.x / VALUE_DIMS; j < span; j += VALUE_SHARES) {
+            const float x = __half2float(*v), weight = w[j];
+#pragma unroll
+            for (int i = 0; i < N; ++i) acc[i] += __shfl_sync(0xffffffffu, weight, i) * x;
+            v += VALUE_SHARES * width;
+            row += VALUE_SHARES;
+            if (ring > 0 && row >= ring) row -= ring, v -= size_t(ring) * width;
+        }
     }
 #pragma unroll
     for (int i = 0; i < N; ++i) sums[i] = acc[i];
 }
 
 // attn_values() for n queries, with N if no smaller power of two holds them.
-template <int N>
+template <int N, bool SPILL>
 __device__ __forceinline__ void attn_values_for(int n, const float* __restrict__ w, const half* __restrict__ v,
-                                                size_t width, long long row, int ring, int span, float* sums) {
+                                                size_t width, long long row, int ring, int span, float* sums,
+                                                const half* __restrict__ vh, long long split) {
     if constexpr (N > 1)
-        if (n <= N / 2) return attn_values_for<N / 2>(n, w, v, width, row, ring, span, sums);
-    attn_values<N>(w, v, width, row, ring, span, sums);
+        if (n <= N / 2) return attn_values_for<N / 2, SPILL>(n, w, v, width, row, ring, span, sums, vh, split);
+    attn_values<N, SPILL>(w, v, width, row, ring, span, sums, vh, split);
 }
 
 // out[token][head][d] = sum over the rows of score[token][head][row] * the value of the head's group in that
@@ -850,10 +890,11 @@ __device__ __forceinline__ void attn_values_for(int n, const float* __restrict__
 // for the block's queries; their weights of the row come in one read as well, a lane a query, and the warp
 // passes them around.  A token's shares are counted from its own first row and added in their order, so that it
 // comes out the same whatever tokens the launch has beside it.
+template <bool SPILL>
 __global__ void attn_value_kernel(const float* __restrict__ score, const half* __restrict__ vcache,
                                   float* __restrict__ out, int n_keys, int dim, int n_head, int kv_heads,
                                   long long pos, int first, int tokens, int window, int ring, long long last,
-                                  const long long* __restrict__ at) {
+                                  const long long* __restrict__ at, const half* __restrict__ vhost, long long split) {
     static_assert(VALUE_DIMS == WARP && VALUE_QUERIES <= WARP, "a warp is a share and reads a query's weight a lane");
     __shared__ float share[VALUE_QUERIES][VALUE_SHARES][VALUE_DIMS];
     const int per = n_head / kv_heads, dims = (dim + VALUE_DIMS - 1) / VALUE_DIMS;
@@ -867,9 +908,11 @@ __global__ void attn_value_kernel(const float* __restrict__ score, const half* _
     // the lane's query, and for a lane past the head's last value a value to read all the same
     const int mine = q0 + min(lane % VALUE_QUERIES, live - 1);
     float sums[VALUE_QUERIES];
-    attn_values_for<VALUE_QUERIES>(live, score + (size_t(mine / per) * n_head + g * per + mine % per) * n_keys,
-                                  vcache + size_t(g) * dim + min(d, dim - 1), size_t(kv_heads) * dim,
-                                  ring > 0 ? (lo + s) % ring : lo + s, ring, span, sums);
+    const size_t in_row = size_t(g) * dim + min(d, dim - 1);
+    attn_values_for<VALUE_QUERIES, SPILL>(live, score + (size_t(mine / per) * n_head + g * per + mine % per) * n_keys,
+                                         vcache + in_row, size_t(kv_heads) * dim,
+                                         ring > 0 ? (lo + s) % ring : lo + s, ring, span, sums,
+                                         SPILL ? vhost + in_row : nullptr, split);
     for (int i = 0; i < live; ++i) {
         long long own;   // the first row of the query's token: the thread's rows are this share of the token's
         attn_rows(p + (q0 + i) / per, window, last, &own);
@@ -1416,13 +1459,30 @@ void kda_step(float* qkv, float* g1, const float* a, const float* beta, float* s
     kda_out_kernel<<<rows * n_head, head_dim, 0, cs(stream)>>>(out, g2, o_norm, norm_eps, group);
 }
 
-void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream) {
-    const size_t all = size_t(n) * rows;
-    store_f16_kernel<<<grid(all, 256), 256, 0, cs(stream)>>>(x, (half*) cache + size_t(pos) * n, int(all));
+void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream, uint16_t* host,
+               int64_t split) {
+    // with a host part, the rows below `split` and the rows from it are two stores
+    const int below = host ? (int) std::clamp<int64_t>(split - pos, 0, rows) : rows;
+    if (below > 0) {
+        const size_t all = size_t(n) * below;
+        store_f16_kernel<<<grid(all, 256), 256, 0, cs(stream)>>>(x, (half*) cache + size_t(pos) * n, int(all));
+    }
+    if (below < rows) {
+        const size_t all = size_t(n) * (rows - below);
+        store_f16_kernel<<<grid(all, 256), 256, 0, cs(stream)>>>(
+            x + size_t(below) * n, (half*) host + size_t(pos + below - split) * n, int(all));
+    }
 }
 
-void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream) {
-    store_f16_at_kernel<<<grid(size_t(n) * rows, 256), 256, 0, cs(stream)>>>(x, (half*) cache, n, rows, at, ring);
+void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream,
+                  uint16_t* host, int64_t split) {
+    if (host && ring > 0) throw std::invalid_argument("store_f16_at: a ring has no host part");
+    if (host)
+        store_f16_at_kernel<true><<<grid(size_t(n) * rows, 256), 256, 0, cs(stream)>>>(
+            x, (half*) cache, n, rows, at, ring, (half*) host, (long long) split);
+    else
+        store_f16_at_kernel<false><<<grid(size_t(n) * rows, 256), 256, 0, cs(stream)>>>(x, (half*) cache, n, rows, at,
+                                                                                        ring, nullptr, 0);
 }
 
 void dsa_attend(void* blas, const float* q, const uint16_t* cache, const int32_t* sel, int sel_stride, int top_rows,
@@ -1543,8 +1603,9 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window,
-            int ring, bool whole, const long long* at, int room) {
+            int ring, bool whole, const long long* at, int room, const KvSpill* spill) {
     if (at && (whole || room < 1)) throw std::invalid_argument("attend: a position on the card needs its room");
+    if (spill && ring > 0) throw std::invalid_argument("attend: a ring has no host part");
     if (dim % SCORE_VALUES || uintptr_t(q) % (SCORE_VALUES * sizeof(float)) || uintptr_t(kcache) % (SCORE_VALUES * 2))
         throw std::invalid_argument("attend: queries and keys are read four values at a time");
     const long long last = whole ? pos + rows - 1 : -1;
@@ -1554,21 +1615,42 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
         // the launch's span: from the first row its first token attends to the last its last token does
         const long long p = pos + first, lo = window > 0 && p >= window ? p - window + 1 : 0;
         const int keys = at ? room : int((whole ? last : p + c - 1) - lo) + 1;
-        attn_score_kernel<<<grid(size_t(keys) * kv_heads, SCORE_WARPS), SCORE_WARPS * WARP, 0, cs(stream)>>>(
-            q, (const half*) kcache, score, keys, dim, n_head, kv_heads, (long long) pos, first, c, scale, window,
-            ring, last, at);
+        const dim3 sg(grid(size_t(keys) * kv_heads, SCORE_WARPS));
+        const dim3 vg(kv_heads * grid(dim, VALUE_DIMS), grid(c * per, VALUE_QUERIES));
+        if (spill)
+            attn_score_kernel<true><<<sg, SCORE_WARPS * WARP, 0, cs(stream)>>>(
+                q, (const half*) kcache, score, keys, dim, n_head, kv_heads, (long long) pos, first, c, scale, window,
+                ring, last, at, (const half*) spill->khost, spill->split);
+        else
+            attn_score_kernel<false><<<sg, SCORE_WARPS * WARP, 0, cs(stream)>>>(
+                q, (const half*) kcache, score, keys, dim, n_head, kv_heads, (long long) pos, first, c, scale, window,
+                ring, last, at, nullptr, 0);
         attn_softmax_kernel<<<dim3(n_head, c), 256, 0, cs(stream)>>>(score, keys, (long long) pos, first, c, window,
                                                                     last, at);
-        attn_value_kernel<<<dim3(kv_heads * grid(dim, VALUE_DIMS), grid(c * per, VALUE_QUERIES)),
-                            VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
-            score, (const half*) vcache, out, keys, dim, n_head, kv_heads, (long long) pos, first, c, window, ring,
-            last, at);
+        if (spill)
+            attn_value_kernel<true><<<vg, VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
+                score, (const half*) vcache, out, keys, dim, n_head, kv_heads, (long long) pos, first, c, window,
+                ring, last, at, (const half*) spill->vhost, spill->split);
+        else
+            attn_value_kernel<false><<<vg, VALUE_DIMS * VALUE_SHARES, 0, cs(stream)>>>(
+                score, (const half*) vcache, out, keys, dim, n_head, kv_heads, (long long) pos, first, c, window,
+                ring, last, at, nullptr, 0);
     }
+}
+
+int attend_batch_block(size_t score_floats, int rows, int n_head) {
+    // as attend_batch() sizes its first chunk's blocks: no block of a call has more rows
+    const size_t cells = score_floats / 3 * 2;
+    const int c = (int) std::min({size_t(rows), size_t(65535 / n_head), cells / n_head});
+    const int fit = (int) (cells / (size_t(c) * n_head));
+    return fit > 16 ? fit & ~15 : fit;
 }
 
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
                   float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
-                  float scale, void* stream, int window, int ring, bool whole) {
+                  float scale, void* stream, int window, int ring, bool whole, const KvSpill* spill) {
+    if (spill && ring > 0) throw std::invalid_argument("attend_batch: a ring has no host part");
+    if (spill && (kv_heads * dim) % 8) throw std::invalid_argument("attend_batch: a row is copied 16 bytes at a time");
     const cublasHandle_t h = (cublasHandle_t) blas;
     const float one = 1.0f, zero = 0.0f;
     const int per = n_head / kv_heads, width = kv_heads * dim;
@@ -1603,11 +1685,25 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
             // the block's rows where the cache has them: a block ends where a ring starts over
             const long long row = ring > 0 ? (lo0 + k0) % ring : lo0 + k0;
             m = (int) std::min<long long>(std::min(block, n_keys - k0), ring > 0 ? ring - row : n_keys);
+            // A block that reaches the host part is copied whole to the stage first: the same rows, so the same
+            // products, as from a cache wholly in VRAM.
+            const half* kb = (const half*) kcache + size_t(row) * width;
+            const half* vb = (const half*) vcache + size_t(row) * width;
+            if (spill && row + m > spill->split) {
+                if (m > spill->stage_rows) throw std::invalid_argument("attend_batch: the stage holds fewer rows");
+                const unsigned g = grid(size_t(m) * width / 8, 256);
+                kv_gather_kernel<<<g, 256, 0, cs(stream)>>>((const half*) kcache, (const half*) spill->khost,
+                                                            spill->split, row, m, width, (half*) spill->kstage);
+                kv_gather_kernel<<<g, 256, 0, cs(stream)>>>((const half*) vcache, (const half*) spill->vhost,
+                                                            spill->split, row, m, width, (half*) spill->vstage);
+                kb = (const half*) spill->kstage;
+                vb = (const half*) spill->vstage;
+            }
             // A product a group: its heads' queries of every token of the chunk against the group's keys.  cuBLAS
             // reads the cache's rows as the transpose, and the groups' keys lie `dim` apart in a row.
             STRATA_BLAS_BEFORE("attention scores");
             blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, m, (int) cols, dim, &scale,
-                                               (const half*) kcache + size_t(row) * width, CUDA_R_16F, width, dim, qg,
+                                               kb, CUDA_R_16F, width, dim, qg,
                                                CUDA_R_16F, dim, cols * dim, &zero, score, CUDA_R_32F, m, cols * m,
                                                kv_heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP),
                     "attention scores");
@@ -1618,7 +1714,7 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                 attn_scale_kernel<<<dim3(grid(dim, 256), c * n_head), 256, 0, cs(stream)>>>(og, shrink, dim, false);
             STRATA_BLAS_BEFORE("attention values");
             blas_ck(cublasGemmStridedBatchedEx(h, CUBLAS_OP_N, CUBLAS_OP_N, dim, (int) cols, m, &one,
-                                               (const half*) vcache + size_t(row) * width, CUDA_R_16F, width, dim,
+                                               vb, CUDA_R_16F, width, dim,
                                                weight, CUDA_R_16F, m, cols * m, k0 > 0 ? &one : &zero, og, CUDA_R_32F,
                                                dim, cols * dim, kv_heads, CUBLAS_COMPUTE_32F,
                                                CUBLAS_GEMM_DEFAULT_TENSOR_OP),

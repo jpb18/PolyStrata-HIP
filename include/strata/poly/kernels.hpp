@@ -58,10 +58,14 @@ void kda_step(float* qkv, float* g1, const float* a, const float* beta, float* s
               const float* o_norm, float* out, int head_dim, int n_head, int rows, float gate_lower_bound,
               float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, int n_snap = 0);
 
-/// Stores the tokens' MLA latents (n values each) as fp16 from row `pos` of the layer's cache.
-void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream);
+/// Stores the tokens' MLA latents (n values each) as fp16 from row `pos` of the layer's cache.  With `host`, the
+/// rows from `split` on go there instead (KvSpill), row `split` first.
+void store_f16(const float* x, uint16_t* cache, int n, int64_t pos, int rows, void* stream, uint16_t* host = nullptr,
+               int64_t split = 0);
 /// The same from the row the card holds at `at` when the launch runs; with `ring`, a row is its number % ring.
-void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream);
+/// `host` and `split` as for store_f16(), not with `ring`.
+void store_f16_at(const float* x, uint16_t* cache, int n, const long long* at, int rows, int ring, void* stream,
+                  uint16_t* host = nullptr, int64_t split = 0);
 /// Attention over cached latents for the tokens from position `pos`.  q: n_head * rank absorbed queries a token.
 /// The first dense_rows tokens attend to every cache row up to their own.  The others each have a list in sel
 /// (sel_stride apart): top_rows cache rows, then the rows of the pool their own position is still filling.
@@ -152,9 +156,27 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 /// window - 1 + rows of them.
 /// With `at`, the tokens start at the position the card holds there; the launches are sized for `room` rows,
 /// which must be no fewer than a launch's tokens attend between them, and score has room for them.
+///
+/// KV streaming (AMD_KV_STREAMING.md): a key and value cache whose sequence rows from `split` on lie in pinned host
+/// memory, row `split` first, read through its device pointer (zero-copy, over PCIe); the rows below `split` are
+/// in the VRAM caches the call is given.  The kernels read the same values in the same order as from caches wholly
+/// in VRAM, so a token comes out with the same bits.  attend_batch() copies a block of rows that reaches past
+/// `split` to kstage / vstage (VRAM, stage_rows rows each) before its products read it.  Not with `ring`.
+struct KvSpill {
+    const uint16_t* khost = nullptr;
+    const uint16_t* vhost = nullptr;
+    long long split = 0;
+    uint16_t* kstage = nullptr;
+    uint16_t* vstage = nullptr;
+    int stage_rows = 0;
+};
+/// The rows of a block attend_batch() takes at most, for a call of `rows` tokens and score_floats floats of scores:
+/// what KvSpill::stage_rows must hold for that call.
+int attend_batch_block(size_t score_floats, int rows, int n_head);
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
-            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0);
+            int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0,
+            const KvSpill* spill = nullptr);
 /// attend() for a prompt batch: the same attention with cuBLAS products on the tensor cores, several times
 /// faster on many tokens.  The products read the cache's halves where they lie, take the queries and the
 /// softmax's weights rounded to halves, and sum floats.  A token's result depends on the tokens beside it, so
@@ -165,7 +187,8 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
 /// std::runtime_error.
 void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows,
                   float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
-                  float scale, void* stream, int window = 0, int ring = 0, bool whole = false);
+                  float scale, void* stream, int window = 0, int ring = 0, bool whole = false,
+                  const KvSpill* spill = nullptr);
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
 /// The first of the largest of n logits and the softmax's probability of it, summed without the logits more than

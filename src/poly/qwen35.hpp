@@ -9,6 +9,8 @@
 
 #include "engine.hpp"
 
+#include "strata/poly/kernels.hpp"
+
 namespace strata::poly {
 
 class Qwen35 final : public Engine {
@@ -42,6 +44,7 @@ protected:
     void block_rows(int64_t pos, int n) override;
     int head_key(int il, int n) const override;
     int64_t turn(int64_t row) const override;
+    void kv_budget(Budget& b) const override;
 
 private:
     /// A layer's weights beside the ones every architecture has (Layer), and its places in the state and caches.
@@ -54,8 +57,13 @@ private:
         float* s = nullptr;      ///< v_heads * s_dim * s_dim
         // attention
         Dev wq, wk, wv, q_norm, k_norm;
-        uint16_t* keys = nullptr;   ///< max_context * n_kv * head_dim, fp16
+        uint16_t* keys = nullptr;   ///< kv_split_ * n_kv * head_dim, fp16: the positions in VRAM
         uint16_t* vals = nullptr;
+        // KV streaming: the positions from kv_split_ on, in pinned RAM, through the card's pointer and the host's
+        uint16_t* keys_h = nullptr;
+        uint16_t* vals_h = nullptr;
+        uint16_t* keys_hp = nullptr;
+        uint16_t* vals_hp = nullptr;
         Dev sh_gate_inp;   ///< the shared expert's gate
     };
 
@@ -63,6 +71,8 @@ private:
     void attn(Block& B, int64_t pos, int n);
     void attn_store(Block& B, int64_t pos, int n);
     void turn_of(int64_t row, int32_t* thw) const;
+    int64_t plan_kv() const;
+    const KvSpill* spill(const Block& B);
     const int32_t* turns(int64_t pos, int n, int64_t* first);
 
     std::vector<Block> blocks_;   ///< one a layer of layers_
@@ -77,6 +87,11 @@ private:
     int s_dim_ = 0, k_heads_ = 0, v_heads_ = 0, d_inner_ = 0, conv_dim_ = 0;
     int n_gdn_ = 0, n_attn_ = 0;
     int chunk_ = 1;   ///< tokens the attention takes at a time
+    // KV streaming (AMD_KV_STREAMING.md)
+    int64_t kv_split_ = 0;                 ///< the positions whose rows are in VRAM; the rest are in pinned RAM
+    uint16_t *kstage_ = nullptr, *vstage_ = nullptr;   ///< a prompt batch's block of rows that reaches RAM
+    int stage_rows_ = 0;
+    KvSpill spill_;                        ///< the block spill() last described
 
     // device scratch
     float *proj_ = nullptr, *qkv_ = nullptr, *z_ = nullptr, *alpha_ = nullptr, *beta_ = nullptr, *gated_ = nullptr;

@@ -700,17 +700,22 @@ void print_top(const float* logits, int n_vocab, int n) {
 }
 
 int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad, long long max_new,
-         const Sampling& s, int top_probs) {
+         const Sampling& s, int top_probs, const std::string& logits_out) {
     std::atomic<bool> stop{false};
     std::string out;
+    // --logits-out: every step's logits as they are, n_vocab floats a step, to compare two runs bit for bit
+    std::FILE* lf = logits_out.empty() ? nullptr : std::fopen(logits_out.c_str(), "wb");
+    if (!logits_out.empty() && !lf) throw std::runtime_error("cannot write " + logits_out);
     const Session::Result r = ss.generate(
         ids, pictures, pad, max_new, s, stop,
         [&](int32_t t) {
             // the logits the token was picked from are still the engine's
             if (top_probs > 0) print_top(ss.engine.logits(), ss.engine.n_vocab(), top_probs);
+            if (lf) std::fwrite(ss.engine.logits(), sizeof(float), (size_t) ss.engine.n_vocab(), lf);
             out += (out.empty() ? "" : ",") + std::to_string(t);
         },
         [](int64_t, int64_t, double, bool) {});
+    if (lf) std::fclose(lf);
     std::printf("%s\n", out.c_str());
     const strata::poly::Stats& st = ss.engine.stats();
     const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
@@ -733,6 +738,12 @@ void usage() {
                  "  --threads N            CPU threads for the experts that are not in VRAM (default: all usable)\n"
                  "  --vram-reserve-mib N   VRAM left free beside the expert cache (default: a sixteenth of the\n"
                  "                         card, 512 to 1024)\n"
+                 "  --kv-resident N|auto|all  KV streaming (Qwen3.5/3.6): the attention caches keep the rows of the\n"
+                 "                         first N positions in VRAM and the rest in pinned RAM, which every token\n"
+                 "                         reads over PCIe: the same results, slower the more is in RAM.  auto: all\n"
+                 "                         in VRAM when they fit beside the rest, else as many as fit (default: all)\n"
+                 "  --kv-ram-mib N         the most RAM the rows outside VRAM may pin (default: what leaves\n"
+                 "                         --kv-ram-floor-mib of physical RAM available, 4096)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, written back on\n"
                  "                         exit and by --serve after an answer, every 10 s at most\n"
                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
@@ -776,7 +787,9 @@ void usage() {
                  "  --images FILE          with --tokens: the prompt's pictures, as strata-vision writes them\n"
                  "  --image-pad ID         the token whose runs in --tokens are the pictures' places, a token a row\n"
                  "  --dump-layers          print a checksum of every layer's stages to stderr\n"
-                 "  --top-probs N          with --tokens: print the N most likely ids of every step to stderr\n");
+                 "  --top-probs N          with --tokens: print the N most likely ids of every step to stderr\n"
+                 "  --logits-out FILE      with --tokens: write every step's logits to FILE (floats, n_vocab a\n"
+                 "                         step), as --top-probs: use --window 1\n");
 }
 
 }  // namespace
@@ -801,7 +814,7 @@ int main(int argc, char** argv) {
     bool want_serve = false;
     long long max_new = 32;
     int top_probs = 0, lookup = 3, image_pad = -1;
-    std::string images;
+    std::string images, logits_out;
     std::vector<int32_t> ids, eos;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -817,6 +830,16 @@ int main(int argc, char** argv) {
         else if (a == "--max-context") o.max_context = std::atoi(val());
         else if (a == "--threads") o.threads = std::atoi(val());
         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
+        else if (a == "--kv-resident") {
+            const std::string v = val();
+            o.kv_resident = v == "auto" ? -1 : v == "all" ? 0 : std::atoi(v.c_str());
+            if (o.kv_resident < -1 || (o.kv_resident == 0 && v != "all" && v != "0")) {
+                std::fprintf(stderr, "strata-poly: --kv-resident takes a number of positions, auto or all\n");
+                return 2;
+            }
+        }
+        else if (a == "--kv-ram-mib") o.kv_ram_mib = std::atoll(val());
+        else if (a == "--kv-ram-floor-mib") o.kv_ram_floor_mib = std::atoll(val());
         else if (a == "--expert-profile") o.profile = val();
         else if (a == "--no-gpu-experts") o.gpu_experts = false;
         else if (a == "--any-node") o.stay_near = false;
@@ -840,6 +863,7 @@ int main(int argc, char** argv) {
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());
         else if (a == "--top-probs") top_probs = std::atoi(val());
+        else if (a == "--logits-out") logits_out = val();
         else if (a == "--max-new") max_new = std::atoll(val());
         else if (a == "--temperature") s.temperature = std::strtof(val(), nullptr);
         else if (a == "--top-k") s.top_k = std::atoi(val());
@@ -895,6 +919,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata-poly: loaded in %.1f s; %d of %d routed experts in VRAM (%.1f GiB), %d CPU threads\n",
                      ms_since(t0) / 1000.0, engine.cached_experts(), engine.total_experts(), engine.cached_gib(),
                      engine.threads());
+        {
+            // where the memory went (AMD_KV_STREAMING.md): VRAM by part, then pinned RAM, then what the system has
+            const strata::poly::Budget b = engine.budget();
+            const auto mib = [](size_t x) { return (long long) (x >> 20); };
+            const std::optional<uint64_t> avail = strata::core::conversation_available_memory();
+            std::fprintf(stderr, "strata-poly: VRAM MiB: dense weights %lld, expert cache %lld, KV %lld (%lld positions), "
+                                 "KV stage %lld, recurrent state %lld, scratch and the rest %lld; %lld free.  Pinned "
+                                 "RAM MiB: KV %lld (%lld positions), the rest %lld; RAM available %lld MiB\n",
+                         mib(b.dense), mib(b.experts), mib(b.kv_vram), (long long) b.kv_cells_vram, mib(b.kv_stage),
+                         mib(b.state), mib(b.vram_other), (long long) engine.vram_free_mib(), mib(b.kv_host),
+                         (long long) b.kv_cells_host, mib(b.pinned_other),
+                         avail ? (long long) (*avail >> 20) : -1LL);
+        }
         // Pages on another node than the threads are read at about two thirds of the speed.  The file cache puts a
         // page on the node of whatever read it first, so a file read back by something else lands on any.
         const bool far = engine.numa_share() > 0.0 && engine.numa_share() < 0.95;
@@ -925,7 +962,7 @@ int main(int argc, char** argv) {
                 const std::string wrong = take_pictures(images, image_pad, engine.n_embd(), ids, pictures);
                 if (!wrong.empty()) throw std::runtime_error(wrong);
             }
-            rc = once(ss, ids, pictures, image_pad, max_new, s, top_probs);
+            rc = once(ss, ids, pictures, image_pad, max_new, s, top_probs, logits_out);
         }
         engine.save_profile();
         return rc;

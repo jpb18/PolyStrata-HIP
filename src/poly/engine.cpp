@@ -337,6 +337,7 @@ void* Engine::dmalloc(size_t bytes, const char* what) {
         throw std::runtime_error("no VRAM for " + std::string(what) + " (" + std::to_string(bytes >> 20) +
                                  " MiB): " + cudaGetErrorString(e));
     dev_allocs_.push_back(p);
+    alloc_bytes_[p] = std::max<size_t>(bytes, 256);
     return p;
 }
 
@@ -344,7 +345,38 @@ void* Engine::hmalloc(size_t bytes, const char* what) {
     void* p = nullptr;
     ck(cudaMallocHost(&p, std::max<size_t>(bytes, 256)), what);
     host_allocs_.push_back(p);
+    alloc_bytes_[p] = std::max<size_t>(bytes, 256);
     return p;
+}
+
+void* Engine::hmalloc_mapped(size_t bytes, const char* what, void** dev) {
+    void* p = nullptr;
+    const cudaError_t e = cudaHostAlloc(&p, std::max<size_t>(bytes, 256), cudaHostAllocMapped);
+    if (e != cudaSuccess) {
+        (void) cudaGetLastError();
+        throw std::runtime_error("the system did not pin " + std::to_string(bytes >> 20) + " MiB of RAM for " +
+                                 what + ": " + cudaGetErrorString(e));
+    }
+    host_allocs_.push_back(p);
+    alloc_bytes_[p] = std::max<size_t>(bytes, 256);
+    ck(cudaHostGetDevicePointer(dev, p, 0), what);
+    return p;
+}
+
+Budget Engine::budget() const {
+    Budget b;
+    kv_budget(b);
+    b.dense = dense_bytes_;
+    b.experts = exp_at_;
+    const size_t snaps = size_t(snap_places_) * rec_n_ * sizeof(float);
+    b.state = state_n_ * sizeof(float) + snaps;
+    size_t dev = 0, host = 0;
+    for (void* p : dev_allocs_) dev += alloc_bytes_.at(p);
+    for (void* p : host_allocs_) host += alloc_bytes_.count(p) ? alloc_bytes_.at(p) : 0;
+    const size_t named = b.dense + (exp_ ? alloc_bytes_.at(exp_) : 0) + b.kv_vram + b.kv_stage + b.state;
+    b.vram_other = dev > named ? dev - named : 0;
+    b.pinned_other = host > b.kv_host ? host - b.kv_host : 0;
+    return b;
 }
 
 float* Engine::fbuf(size_t n) {

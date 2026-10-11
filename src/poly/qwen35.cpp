@@ -3,11 +3,14 @@
 #include "qwen35.hpp"
 
 #include "runtime.hpp"
+#include "strata/core/conversation_memory.hpp"
 #include "strata/poly/kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <stdexcept>
 
 namespace strata::poly {
@@ -116,11 +119,70 @@ size_t Qwen35::recurrent_floats() const {
 
 int Qwen35::widest() const { return std::max(d_inner_, n_head_ * head_dim_); }
 
+// KV streaming (AMD_KV_STREAMING.md): the positions whose rows stay in VRAM.  Every token's attention reads every
+// row, so a row in RAM costs its 2 KiB a layer over PCIe for each token (12.6 GB/s against VRAM's 300 on an RX 9060
+// XT), and a row in VRAM is read more often than any expert the cache gives up for it.  So `auto` keeps every row
+// in VRAM when they fit beside what the engine needs besides the expert cache, and otherwise as many as fit.
+int64_t Qwen35::plan_kv() const {
+    const int64_t ctx = opt_.max_context;
+    if (opt_.kv_resident > 0) return std::min<int64_t>(opt_.kv_resident, ctx);
+    if (opt_.kv_resident == 0 || n_attn_ == 0) return ctx;
+    size_t free_b = 0, total_b = 0;
+    ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    const size_t reserve = opt_.vram_reserve_mib >= 0 ? size_t(opt_.vram_reserve_mib) << 20
+                                                      : std::clamp<size_t>(total_b >> 24, 512, 1024) << 20;
+    // what is still to be allocated: the scratch (about 1.4 MiB a prompt token), the attention's scores (64 MiB),
+    // the stage of a split cache (under 64 MiB) and the recorded launches and libraries' work (some 256 MiB)
+    const size_t later = (size_t) rows_ * (size_t(3) << 19) + (size_t(384) << 20);
+    const size_t per = (size_t) n_attn_ * 2 * n_kv_ * head_dim_ * sizeof(uint16_t);
+    const size_t room = free_b > reserve + later ? free_b - reserve - later : 0;
+    if ((size_t) ctx * per <= room) return ctx;
+    return std::min<int64_t>(ctx, (int64_t) (room / per) / 256 * 256);
+}
+
+// The rows of a block from kv_split_ on, for the kernels (null: every row is in VRAM).
+const KvSpill* Qwen35::spill(const Block& B) {
+    if (!B.keys_h) return nullptr;
+    spill_ = KvSpill{B.keys_h, B.vals_h, (long long) kv_split_, kstage_, vstage_, stage_rows_};
+    return &spill_;
+}
+
+void Qwen35::kv_budget(Budget& b) const {
+    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), caches = size_t(n_attn_) * 2;
+    b.kv_cells_vram = kv_split_;
+    b.kv_cells_host = opt_.max_context - kv_split_;
+    b.kv_vram = caches * (size_t) kv_split_ * row;
+    b.kv_host = caches * (size_t) b.kv_cells_host * row;
+    b.kv_stage = kstage_ ? 2 * (size_t) stage_rows_ * row : 0;
+}
+
 // The attention layers' caches, and each recurrent layer's convolution and delta-rule state in state_.
 void Qwen35::alloc_caches() {
     const size_t past_n = size_t(3) * conv_dim_, s_n = size_t(v_heads_) * s_dim_ * s_dim_;
-    const size_t rows_n = (size_t) opt_.max_context * n_kv_ * head_dim_;
+    const size_t width = (size_t) n_kv_ * head_dim_;
+    kv_split_ = plan_kv();
+    const size_t rows_n = (size_t) kv_split_ * width, host_n = (size_t) (opt_.max_context - kv_split_) * width;
     uint16_t* kv = (uint16_t*) dmalloc(size_t(n_attn_) * 2 * rows_n * sizeof(uint16_t), "the attention cache");
+    uint16_t *hkv = nullptr, *hkv_dev = nullptr;
+    if (host_n > 0 && n_attn_ > 0) {
+        const size_t bytes = size_t(n_attn_) * 2 * host_n * sizeof(uint16_t);
+        // Pinned memory is never paged out, and the experts outside VRAM are read from the file's pages: the rows
+        // in RAM leave kv_ram_floor_mib of it available, or stay under kv_ram_mib.
+        const std::optional<uint64_t> avail = strata::core::conversation_available_memory();
+        const uint64_t floor = (uint64_t) std::max<int64_t>(opt_.kv_ram_floor_mib, 0) << 20;
+        const uint64_t cap = opt_.kv_ram_mib >= 0 ? (uint64_t) opt_.kv_ram_mib << 20
+                             : avail ? (*avail > floor ? *avail - floor : 0) : UINT64_MAX;
+        if (bytes > cap) {
+            const size_t per = size_t(n_attn_) * 2 * width * sizeof(uint16_t);
+            throw std::runtime_error(
+                "KV streaming: the " + std::to_string(opt_.max_context - kv_split_) + " positions outside VRAM need " +
+                std::to_string(bytes >> 20) + " MiB of pinned RAM and " +
+                (opt_.kv_ram_mib >= 0 ? "--kv-ram-mib allows " : "what leaves the RAM floor available is ") +
+                std::to_string(cap >> 20) + " MiB: a context of " + std::to_string(kv_split_ + (int64_t) (cap / per)) +
+                " fits with these settings");
+        }
+        hkv = (uint16_t*) hmalloc_mapped(bytes, "the attention cache's rows in RAM", (void**) &hkv_dev);
+    }
     float* st = state_;
     for (Block& B : blocks_) {
         if (B.gdn) {
@@ -133,9 +195,34 @@ void Qwen35::alloc_caches() {
             kv += rows_n;
             B.vals = kv;
             kv += rows_n;
+            if (hkv) {
+                B.keys_hp = hkv;
+                B.keys_h = hkv_dev;
+                hkv += host_n;
+                hkv_dev += host_n;
+                B.vals_hp = hkv;
+                B.vals_h = hkv_dev;
+                hkv += host_n;
+                hkv_dev += host_n;
+            }
         }
     }
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), 1, (size_t) rows_);
+    if (host_n > 0 && n_attn_ > 0) {
+        // a prompt batch copies the blocks of rows that reach RAM here: as many rows as its widest block
+        if (rows_ >= kStageRows) {
+            stage_rows_ = (int) std::min<int64_t>(
+                opt_.max_context,
+                attend_batch_block((size_t) chunk_ * n_head_ * opt_.max_context, kStageRows, n_head_));
+            kstage_ = (uint16_t*) dmalloc((size_t) stage_rows_ * width * sizeof(uint16_t), "the attention's stage");
+            vstage_ = (uint16_t*) dmalloc((size_t) stage_rows_ * width * sizeof(uint16_t), "the attention's stage");
+        }
+        std::fprintf(stderr, "strata-poly: KV streaming: positions 0 to %lld of the attention caches in VRAM (%.2f GiB), "
+                             "%lld to %d in pinned RAM (%.2f GiB)\n",
+                     (long long) kv_split_ - 1, double(size_t(n_attn_) * 2 * rows_n * 2) / 1073741824.0,
+                     (long long) kv_split_, opt_.max_context - 1,
+                     double(size_t(n_attn_) * 2 * host_n * 2) / 1073741824.0);
+    }
     axes_ = (int32_t*) dmalloc((size_t) rows_ * 3 * sizeof(int32_t), "a call's rotary positions");
     h_axes_.resize((size_t) rows_ * 3);
 }
@@ -177,11 +264,21 @@ void Qwen35::save_rows(int64_t first, int64_t n, uint8_t* dst) {
     if (first < 0 || n < 0 || first + n > opt_.max_context)
         throw std::logic_error("save_rows: the rows are outside the context");
     ck(cudaStreamSynchronize(cs(st_)), "save rows");
-    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), at = (size_t) first * row, bytes = (size_t) n * row;
+    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), bytes = (size_t) n * row;
+    // the rows below kv_split_ from VRAM, the others from pinned RAM
+    const int64_t below = std::clamp<int64_t>(kv_split_ - first, 0, n);
     for (const Block& B : blocks_) {
         if (B.gdn || bytes == 0) continue;
-        for (const uint16_t* cache : {B.keys, B.vals}) {
-            ck(cudaMemcpy(dst, (const uint8_t*) cache + at, bytes, cudaMemcpyDeviceToHost), "save rows");
+        for (int c = 0; c < 2; ++c) {
+            const uint16_t* cache = c ? B.vals : B.keys;
+            if (below > 0)
+                ck(cudaMemcpy(dst, (const uint8_t*) cache + (size_t) first * row, (size_t) below * row,
+                              cudaMemcpyDeviceToHost),
+                   "save rows");
+            if (below < n)
+                std::memcpy(dst + (size_t) below * row,
+                            (const uint8_t*) (c ? B.vals_hp : B.keys_hp) + (size_t) (first + below - kv_split_) * row,
+                            (size_t) (n - below) * row);
             dst += bytes;
         }
     }
@@ -191,12 +288,20 @@ void Qwen35::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t 
     if (from < 0 || first < from || n < 0 || first + n > from + count || first + n > opt_.max_context)
         throw std::logic_error("load_rows: the rows are outside what was saved");
     ck(cudaStreamSynchronize(cs(st_)), "load rows");
-    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), at = (size_t) first * row, bytes = (size_t) n * row;
+    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), bytes = (size_t) n * row;
     const size_t skip = (size_t) (first - from) * row, all = (size_t) count * row;
+    const int64_t below = std::clamp<int64_t>(kv_split_ - first, 0, n);
     for (const Block& B : blocks_) {
         if (B.gdn || bytes == 0) continue;
-        for (uint16_t* cache : {B.keys, B.vals}) {
-            ck(cudaMemcpy((uint8_t*) cache + at, src + skip, bytes, cudaMemcpyHostToDevice), "load rows");
+        for (int c = 0; c < 2; ++c) {
+            uint16_t* cache = c ? B.vals : B.keys;
+            if (below > 0)
+                ck(cudaMemcpy((uint8_t*) cache + (size_t) first * row, src + skip, (size_t) below * row,
+                              cudaMemcpyHostToDevice),
+                   "load rows");
+            if (below < n)
+                std::memcpy((uint8_t*) (c ? B.vals_hp : B.keys_hp) + (size_t) (first + below - kv_split_) * row,
+                            src + skip + (size_t) below * row, (size_t) (n - below) * row);
             src += all;
         }
     }
@@ -270,11 +375,11 @@ void Qwen35::attn_store(Block& B, int64_t pos, int n) {
                    nullptr, axes, sections_, at ? at + 1 : nullptr);
     lin(B.wv, xn_, v_, n, xq_);
     if (at) {
-        store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_);
-        store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_);
+        store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_, B.keys_h, kv_split_);
+        store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_, B.vals_h, kv_split_);
     } else {
-        store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_);
-        store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_);
+        store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_, B.keys_h, kv_split_);
+        store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_, B.vals_h, kv_split_);
     }
 }
 
@@ -299,10 +404,10 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
     if (n >= kStageRows)
         attend_batch(blas_, q_, B.keys, B.vals, pos, n, score_, (size_t) chunk_ * n_head_ * opt_.max_context, awork_,
-                     att_, head_dim_, n_head_, n_kv_, scale, st_);
+                     att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false, spill(B));
     else
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
-               at, at ? room(n) : 0);
+               at, at ? room(n) : 0, spill(B));
     mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
     lin(B.wo, att_, ao_, n);
 }
