@@ -1,0 +1,35 @@
+{
+ "listening": [
+  "127.0.0.1:8091"
+ ],
+ "preserve-thinking": {
+  "ok": true,
+  "first_answer": "13",
+  "first_turn_tokens": 382,
+  "kept": {
+   "usage": {
+    "prompt_tokens": 404,
+    "completion_tokens": 410,
+    "total_tokens": 814,
+    "prompt_tokens_details": {
+     "cached_tokens": 381
+    }
+   },
+   "answer": "472"
+  },
+  "dropped": {
+   "usage": {
+    "prompt_tokens": 59,
+    "completion_tokens": 1257,
+    "total_tokens": 1316,
+    "prompt_tokens_details": {
+     "cached_tokens": 31
+    }
+   },
+   "answer": "463"
+  },
+  "reasoning_in_prompt": true,
+  "second_turn_reads_only_new": true,
+  "seconds": 28.23
+ }
+}

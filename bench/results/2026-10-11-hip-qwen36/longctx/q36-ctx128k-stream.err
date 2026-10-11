@@ -1,0 +1,7 @@
+strata-poly: KV streaming: positions 0 to 49151 of the attention caches in VRAM (1.03 GiB), 49152 to 131071 in pinned RAM (1.72 GiB), a layer's of them copied to VRAM ahead of its attention
+strata-poly: STRATA_POLY_CARD_ROUTE: a token on its own is routed on the card (40 of 40 MoE layers have the kernels)
+strata: Windows budgets 15416 of this card's 16304 MiB for this process; free VRAM is counted within that (STRATA_WDDM_BUDGET=0: off)
+strata-poly: loaded in 26.7 s; 4385 of 10496 routed experts in VRAM (7.8 GiB), 6 CPU threads
+strata-poly: VRAM MiB: dense weights 1961, expert cache 7988, KV 1056 (49152 positions), KV stage 202, recurrent state 251, scratch and the rest 1018; 1006 free.  Pinned RAM MiB: KV 1760 (81920 positions), the rest 1088; RAM available 13928 MiB
+strata-poly: 770048 of 982050 prompt tokens were not read again (78.4%); 0 conversations parked in 0 MiB, 0 pushed out; 968 MiB of VRAM free at the end
+strata-poly: KV streaming: 2785 copies of a layer's rows in RAM to VRAM, 180 of them made when the head came (not ahead), 245.03 GB copied

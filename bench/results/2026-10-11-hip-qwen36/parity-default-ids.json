@@ -1,0 +1,165 @@
+[
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 41,
+  "worst_llama_top2": [
+   [
+    471,
+    1.0
+   ],
+   [
+    3274,
+    1.3498394099967792e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    36022,
+    0.1879
+   ],
+   [
+    553,
+    0.1699
+   ]
+  ],
+  "name": "doc-30k",
+  "prompt_tokens": 35575
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 20,
+  "worst_llama_top2": [
+   [
+    25,
+    1.0
+   ],
+   [
+    16561,
+    4.244826021143801e-09
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9841
+   ],
+   [
+    90700,
+    0.0154
+   ]
+  ],
+  "name": "short",
+  "prompt_tokens": 22
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 45,
+  "worst_llama_top2": [
+   [
+    471,
+    0.9999998807907033
+   ],
+   [
+    2972,
+    6.520842327273962e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9544
+   ],
+   [
+    90700,
+    0.0445
+   ]
+  ],
+  "name": "code",
+  "prompt_tokens": 870
+ },
+ {
+  "same": 36,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 30,
+  "worst_llama_top2": [
+   [
+    321,
+    0.9999998807907033
+   ],
+   [
+    1142,
+    6.571672558276714e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.969
+   ],
+   [
+    90700,
+    0.0305
+   ]
+  ],
+  "parted_at": 36,
+  "llama_top2": [
+   [
+    1785,
+    0.3979554519364578
+   ],
+   [
+    2313,
+    0.33464070903162474
+   ]
+  ],
+  "engine_top2": "(not compared)",
+  "near_tie": true,
+  "name": "doc-2.5k",
+  "prompt_tokens": 3069
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 25,
+  "worst_llama_top2": [
+   [
+    279,
+    1.0
+   ],
+   [
+    660,
+    6.731593580572998e-09
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9596
+   ],
+   [
+    90700,
+    0.0351
+   ]
+  ],
+  "name": "doc-8k",
+  "prompt_tokens": 11481
+ }
+]

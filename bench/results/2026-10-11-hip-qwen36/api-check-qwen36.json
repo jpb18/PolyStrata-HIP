@@ -1,0 +1,525 @@
+{
+ "listening": [
+  "127.0.0.1:8091"
+ ],
+ "models": {
+  "ok": true,
+  "models": [
+   "qwen3.6-35b-a3b-ud-q4_k_m-hip"
+  ],
+  "seconds": 0.19
+ },
+ "system": {
+  "ok": true,
+  "answer": "Arr, 2+2 be 4, ye scallywag!",
+  "usage": {
+   "prompt_tokens": 38,
+   "completion_tokens": 17,
+   "total_tokens": 55,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "seconds": 3.49
+ },
+ "stream": {
+  "ok": true,
+  "chunks": 69,
+  "done": true,
+  "finish": "stop",
+  "ttft_s": 0.35752320289611816,
+  "usage": {
+   "prompt_tokens": 25,
+   "completion_tokens": 70,
+   "total_tokens": 95,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "text": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20",
+  "seconds": 1.8
+ },
+ "multiturn": {
+  "ok": true,
+  "turns": [
+   {
+    "q": "My name is Jorge and my favourite number",
+    "a": "OK",
+    "usage": {
+     "prompt_tokens": 38,
+     "completion_tokens": 2,
+     "total_tokens": 40,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "ttft_s": 0.5864970684051514
+   },
+   {
+    "q": "What is my name?",
+    "a": "Jorge",
+    "usage": {
+     "prompt_tokens": 54,
+     "completion_tokens": 3,
+     "total_tokens": 57,
+     "prompt_tokens_details": {
+      "cached_tokens": 31
+     }
+    },
+    "ttft_s": 0.2768123149871826
+   },
+   {
+    "q": "What is my favourite number plus one?",
+    "a": "418",
+    "usage": {
+     "prompt_tokens": 74,
+     "completion_tokens": 4,
+     "total_tokens": 78,
+     "prompt_tokens_details": {
+      "cached_tokens": 47
+     }
+    },
+    "ttft_s": 0.34732794761657715
+   }
+  ],
+  "cached_tokens": [
+   0,
+   31,
+   47
+  ],
+  "seconds": 1.4
+ },
+ "tools": {
+  "ok": true,
+  "finish": "tool_calls",
+  "call": {
+   "id": "call_9190819e90a743278f7ddfae",
+   "name": "get_weather",
+   "arguments": "{\"city\":\"Lisbon\"}"
+  },
+  "answer": "The weather in Lisbon is currently sunny with a temperature of 23°C.",
+  "usage": {
+   "prompt_tokens": 349,
+   "completion_tokens": 17,
+   "total_tokens": 366,
+   "prompt_tokens_details": {
+    "cached_tokens": 308
+   }
+  },
+  "seconds": 4.53
+ },
+ "tools-stream": {
+  "ok": true,
+  "finish": "tool_calls",
+  "call": {
+   "id": "call_722cd34fa5a74ac8ab1b6f26",
+   "name": "get_weather",
+   "arguments": "{\"city\":\"Lisbon\"}"
+  },
+  "answer": "The weather in Lisbon right now is sunny with a temperature of 23°C.",
+  "usage": {
+   "prompt_tokens": 349,
+   "completion_tokens": 18,
+   "total_tokens": 367,
+   "prompt_tokens_details": {
+    "cached_tokens": 308
+   }
+  },
+  "seconds": 1.5
+ },
+ "long": {
+  "ok": true,
+  "completion_tokens": 2326,
+  "finish": "stop",
+  "chars": 11118,
+  "tok_s": 55.5,
+  "seconds": 42.43
+ },
+ "cancel": {
+  "ok": true,
+  "events_before_close": 10,
+  "next_request_s": 0.81,
+  "next": "Hello! How can I help you today?",
+  "seconds": 1.75
+ },
+ "anthropic": {
+  "ok": true,
+  "text": "The capital of France is Paris.",
+  "stream_text": "The capital of France is Paris.",
+  "events": [
+   "content_block_delta",
+   "content_block_start",
+   "content_block_stop",
+   "message_delta",
+   "message_start",
+   "message_stop"
+  ],
+  "usage": {
+   "input_tokens": 30,
+   "output_tokens": 8,
+   "cache_read_input_tokens": 0
+  },
+  "seconds": 0.92
+ },
+ "anthropic-tools": {
+  "ok": true,
+  "tool_use": {
+   "type": "tool_use",
+   "id": "call_3443c564d2834774a711e647",
+   "name": "get_weather",
+   "input": {
+    "city": "Porto"
+   }
+  },
+  "answer": "The weather in Porto is currently cloudy with a temperature of 19°C.",
+  "seconds": 3.39
+ },
+ "thinking": {
+  "ok": true,
+  "reasoning_chars": 1688,
+  "answer": "No, **391 is not a prime number**. It is a composite number.\n\nYou can see this by factoring it:\n**391 = 17 × 23**\n\nSince it has divisors other than 1 and itself",
+  "usage": {
+   "prompt_tokens": 19,
+   "completion_tokens": 815,
+   "total_tokens": 834,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "seconds": 17.57
+ },
+ "thinking-stream": {
+  "ok": true,
+  "reasoning_chars": 1496,
+  "first_reasoning_s": 0.5821521282196045,
+  "first_answer_s": 10.810758590698242,
+  "answer": "No. Its factors are 1, 17, 23, and 391.",
+  "seconds": 11.1
+ },
+ "preserve-thinking": {
+  "ok": false,
+  "first_answer": "14",
+  "second_answer": "590",
+  "number_in_first_reasoning": false,
+  "usage_1": {
+   "prompt_tokens": 36,
+   "completion_tokens": 1037,
+   "total_tokens": 1073,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "usage_2": {
+   "prompt_tokens": 1095,
+   "completion_tokens": 749,
+   "total_tokens": 1844,
+   "prompt_tokens_details": {
+    "cached_tokens": 1072
+   }
+  },
+  "second_turn_reads_only_new": true,
+  "seconds": 30.32
+ },
+ "title": {
+  "ok": true,
+  "title": "Read GGUF Metadata in Python",
+  "wall_s": 0.97,
+  "usage": {
+   "prompt_tokens": 70,
+   "completion_tokens": 7,
+   "total_tokens": 77,
+   "prompt_tokens_details": {
+    "cached_tokens": 0
+   }
+  },
+  "seconds": 0.97
+ },
+ "session": {
+  "ok": true,
+  "turns": [
+   {
+    "turn": 1,
+    "prompt_tokens": 326,
+    "cached": 0,
+    "ttft_s": 1.718,
+    "right": true
+   },
+   {
+    "turn": 2,
+    "prompt_tokens": 643,
+    "cached": 319,
+    "ttft_s": 1.518,
+    "right": true
+   },
+   {
+    "turn": 3,
+    "prompt_tokens": 960,
+    "cached": 636,
+    "ttft_s": 1.601,
+    "right": true
+   },
+   {
+    "turn": 4,
+    "prompt_tokens": 1277,
+    "cached": 953,
+    "ttft_s": 1.584,
+    "right": true
+   },
+   {
+    "turn": 5,
+    "prompt_tokens": 1594,
+    "cached": 1270,
+    "ttft_s": 1.555,
+    "right": true
+   },
+   {
+    "turn": 6,
+    "prompt_tokens": 1911,
+    "cached": 1587,
+    "ttft_s": 1.536,
+    "right": true
+   },
+   {
+    "turn": 7,
+    "prompt_tokens": 2228,
+    "cached": 1904,
+    "ttft_s": 2.25,
+    "right": true
+   },
+   {
+    "turn": 8,
+    "prompt_tokens": 2545,
+    "cached": 2221,
+    "ttft_s": 1.516,
+    "right": true
+   },
+   {
+    "turn": 9,
+    "prompt_tokens": 2862,
+    "cached": 2538,
+    "ttft_s": 1.557,
+    "right": true
+   },
+   {
+    "turn": 10,
+    "prompt_tokens": 3191,
+    "cached": 2855,
+    "ttft_s": 1.547,
+    "right": true
+   },
+   {
+    "turn": 11,
+    "prompt_tokens": 3520,
+    "cached": 3184,
+    "ttft_s": 1.502,
+    "right": true
+   },
+   {
+    "turn": 12,
+    "prompt_tokens": 3849,
+    "cached": 3513,
+    "ttft_s": 1.516,
+    "right": true
+   },
+   {
+    "turn": 13,
+    "prompt_tokens": 4178,
+    "cached": 3842,
+    "ttft_s": 2.23,
+    "right": true
+   },
+   {
+    "turn": 14,
+    "prompt_tokens": 4507,
+    "cached": 4171,
+    "ttft_s": 1.497,
+    "right": true
+   },
+   {
+    "turn": 15,
+    "prompt_tokens": 4836,
+    "cached": 4500,
+    "ttft_s": 1.55,
+    "right": true
+   },
+   {
+    "turn": 16,
+    "prompt_tokens": 5165,
+    "cached": 4829,
+    "ttft_s": 1.55,
+    "right": true
+   },
+   {
+    "turn": 17,
+    "prompt_tokens": 5494,
+    "cached": 5158,
+    "ttft_s": 1.499,
+    "right": true
+   },
+   {
+    "turn": 18,
+    "prompt_tokens": 5823,
+    "cached": 5487,
+    "ttft_s": 1.517,
+    "right": true
+   },
+   {
+    "turn": 19,
+    "prompt_tokens": 6152,
+    "cached": 5816,
+    "ttft_s": 2.169,
+    "right": true
+   },
+   {
+    "turn": 20,
+    "prompt_tokens": 6481,
+    "cached": 6145,
+    "ttft_s": 1.531,
+    "right": true
+   },
+   {
+    "turn": 21,
+    "prompt_tokens": 6810,
+    "cached": 6474,
+    "ttft_s": 1.534,
+    "right": true
+   },
+   {
+    "turn": 22,
+    "prompt_tokens": 7139,
+    "cached": 6803,
+    "ttft_s": 1.563,
+    "right": true
+   },
+   {
+    "turn": 23,
+    "prompt_tokens": 7468,
+    "cached": 7132,
+    "ttft_s": 1.52,
+    "right": true
+   },
+   {
+    "turn": 24,
+    "prompt_tokens": 7797,
+    "cached": 7461,
+    "ttft_s": 1.496,
+    "right": true
+   },
+   {
+    "turn": 25,
+    "prompt_tokens": 8126,
+    "cached": 7790,
+    "ttft_s": 1.522,
+    "right": true
+   },
+   {
+    "turn": 26,
+    "prompt_tokens": 8467,
+    "cached": 8119,
+    "ttft_s": 2.279,
+    "right": true
+   },
+   {
+    "turn": 27,
+    "prompt_tokens": 8809,
+    "cached": 8460,
+    "ttft_s": 1.534,
+    "right": true
+   },
+   {
+    "turn": 28,
+    "prompt_tokens": 9151,
+    "cached": 8802,
+    "ttft_s": 1.562,
+    "right": true
+   },
+   {
+    "turn": 29,
+    "prompt_tokens": 9493,
+    "cached": 9144,
+    "ttft_s": 1.538,
+    "right": true
+   },
+   {
+    "turn": 30,
+    "prompt_tokens": 9835,
+    "cached": 9486,
+    "ttft_s": 1.519,
+    "right": true
+   },
+   {
+    "turn": 31,
+    "prompt_tokens": 10177,
+    "cached": 9828,
+    "ttft_s": 1.509,
+    "right": true
+   },
+   {
+    "turn": 32,
+    "prompt_tokens": 10519,
+    "cached": 10170,
+    "ttft_s": 2.27,
+    "right": true
+   },
+   {
+    "turn": 33,
+    "prompt_tokens": 10861,
+    "cached": 10512,
+    "ttft_s": 1.57,
+    "right": true
+   },
+   {
+    "turn": 34,
+    "prompt_tokens": 11203,
+    "cached": 10854,
+    "ttft_s": 1.528,
+    "right": true
+   },
+   {
+    "turn": 35,
+    "prompt_tokens": 11545,
+    "cached": 11196,
+    "ttft_s": 1.546,
+    "right": true
+   },
+   {
+    "turn": 36,
+    "prompt_tokens": 11887,
+    "cached": 11538,
+    "ttft_s": 1.493,
+    "right": true
+   },
+   {
+    "turn": 37,
+    "prompt_tokens": 12229,
+    "cached": 11880,
+    "ttft_s": 1.541,
+    "right": true
+   },
+   {
+    "turn": 38,
+    "prompt_tokens": 12571,
+    "cached": 12222,
+    "ttft_s": 2.266,
+    "right": true
+   },
+   {
+    "turn": 39,
+    "prompt_tokens": 12913,
+    "cached": 12564,
+    "ttft_s": 1.531,
+    "right": true
+   },
+   {
+    "turn": 40,
+    "prompt_tokens": 13255,
+    "cached": 12906,
+    "ttft_s": 1.587,
+    "right": true
+   }
+  ],
+  "recall": "There were 100 crates in section A at the start of our talk.",
+  "reuse_every_turn": true,
+  "seconds": 72.8
+ }
+}

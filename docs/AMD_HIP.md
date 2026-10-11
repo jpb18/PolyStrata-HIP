@@ -576,6 +576,41 @@ fails with the context that fits rather than page. The measurements, the parity 
 (`tools/hip/kv_parity.py`, `kv_needles.py`, `poly_kernel_bench attn`) are in
 [AMD_KV_STREAMING.md](../AMD_KV_STREAMING.md).
 
+Qwen3.6-35B-A3B runs on the same class (`qwen35moe`, the same layout with a draft block in the file). Its Unsloth
+UD-Q4_K_M, the first file there with K-quant experts (Q4_K, Q5_K, Q6_K) and a draft block, needed four changes, all
+under `STRATA_USE_HIP` ([AMD_QWEN36_IMPLEMENTATION.md](../AMD_QWEN36_IMPLEMENTATION.md)):
+
+- **Routing on the card:** the expert products with their slots in device memory had a kernel only for rows that
+  fit half a warp, so the routing on the card was off for every layer of a K-quant file. It now has the general
+  kernel, with the same bits (30 of 30 shapes); 10,240 routings on the card picked the host's experts.
+- **Pages of the file (Windows):** the pages of the experts copied to VRAM stayed in the working set and
+  `map_pages()` read every expert again. With a 22.7 GB file beside a browser on 32 GB, Windows trimmed the pages
+  the CPU's experts read. An expert copied to VRAM gives its pages up (`VirtualUnlock`), and only the experts
+  outside the cache are read ahead, in large requests. RAM available after the load went from 4-6 to ~15 GB, and
+  Qwen3.5's working set from 18.5 to 10.6 GB, at the same speed. `STRATA_POLY_PAGES=0` reads and keeps every page
+  as before.
+- **A wait the card gave up:** a layer whose CPU experts took over a second could leave a token without them and
+  no error, when the host was busy with those experts. That is now an error and the routing goes to the host. While
+  the pages are read after the load, tokens are routed on the host. `STRATA_POLY_WARM=1` makes the load wait for
+  the pages.
+- **Recorded heads:** recordings are kept apart for the two routings.
+
+On the RX 9060 XT, context 49,152, median of three alternated runs:
+
+| Model | Decode at 2K / 8K / 31K / 45K (tok/s) | Prefill (tok/s) |
+| --- | --- | --- |
+| Qwen3.6 UD-Q4_K_M | 65 / 68 / 59 / 53 | 696-1,273 |
+| Qwen3.5 Q3_K_M | 81 / 77 / 62 / 56 | 1,213-1,502 |
+
+The draft block guesses 85% right, but windows are still routed on the host: +1 to +7% over one token a call.
+Notes at 5, 50 and 95% were found up to 261,000 tokens, with the KV in VRAM and streamed. With Q4_K/Q5_K experts the
+prompt path's MMQ (llama.cpp's WMMA kernels keep a block's scale times its sub-block's scale as one fp16) was 2-3
+times further from fp64 than a token alone. The largest probability difference to llama.cpp on two documents was
+0.145-0.158, against 0.072-0.099 with `STRATA_POLY_MMQ=0` (opt-in: prompts read about 8 times slower).
+`START-POLY-HIP.bat` asks which model when more than one is set up; Qwen3.6 serves on port 8091 and has its own
+OpenCode provider. A request can keep earlier turns' reasoning with
+`"chat_template_kwargs": {"preserve_thinking": true}`.
+
 Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four
 prompts of 22 to 11,481 tokens, with and without graphs, guesses and copy kernels, and with every expert on the CPU;
 through the server a prompt of 44,419 tokens at a context of 49,152. The figures and what was not checked are in

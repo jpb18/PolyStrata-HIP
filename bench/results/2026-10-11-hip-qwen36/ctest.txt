@@ -1,0 +1,230 @@
+Test project C:/Users/user/Documents/PolyStrata/build-hip-poly-win
+        Start   1: conversation_cache_test
+  1/103 Test   #1: conversation_cache_test ...........   Passed    0.02 sec
+        Start   2: conversation_split_failure_test
+  2/103 Test   #2: conversation_split_failure_test ...   Passed    0.02 sec
+        Start   3: conversation_memory_test
+  3/103 Test   #3: conversation_memory_test ..........   Passed    0.01 sec
+        Start   4: glm_conversations_test
+  4/103 Test   #4: glm_conversations_test ............   Passed    0.19 sec
+        Start   5: poly_guesses_test
+  5/103 Test   #5: poly_guesses_test .................   Passed    0.02 sec
+        Start   6: conversation_file_test
+  6/103 Test   #6: conversation_file_test ............   Passed    1.97 sec
+        Start   7: gguf_reader_test
+  7/103 Test   #7: gguf_reader_test ..................   Passed    0.03 sec
+        Start   8: gguf_split_test
+  8/103 Test   #8: gguf_split_test ...................   Passed    0.09 sec
+        Start   9: tuning_header_arch_family_test
+  9/103 Test   #9: tuning_header_arch_family_test ....   Passed    0.06 sec
+        Start  10: qsa_select_bench
+ 10/103 Test  #10: qsa_select_bench ..................   Passed    0.57 sec
+        Start  11: exchange_storage_test
+ 11/103 Test  #11: exchange_storage_test .............   Passed    0.27 sec
+        Start  12: file_expert_source_test
+ 12/103 Test  #12: file_expert_source_test ...........   Passed    0.28 sec
+        Start  13: vmm_test
+ 13/103 Test  #13: vmm_test ..........................   Passed    0.06 sec
+        Start  14: expert_profile_save_test
+ 14/103 Test  #14: expert_profile_save_test ..........   Passed    0.06 sec
+        Start  15: expert_profile_version_test
+ 15/103 Test  #15: expert_profile_version_test .......   Passed    0.06 sec
+        Start  16: expert_layout_test
+ 16/103 Test  #16: expert_layout_test ................   Passed    0.29 sec
+        Start  17: native_dense_ple_key_test
+ 17/103 Test  #17: native_dense_ple_key_test .........   Passed    0.42 sec
+        Start  18: expert_cache_per_layer_test
+ 18/103 Test  #18: expert_cache_per_layer_test .......   Passed    0.43 sec
+        Start  19: expert_cache_segmented_test
+ 19/103 Test  #19: expert_cache_segmented_test .......***Failed    0.40 sec
+        Start  20: conversation_snapshot_test
+ 20/103 Test  #20: conversation_snapshot_test ........   Passed    1.61 sec
+        Start  21: conversation_validation_test
+ 21/103 Test  #21: conversation_validation_test ......   Passed    0.10 sec
+        Start  22: hip_prefill_gemm
+ 22/103 Test  #22: hip_prefill_gemm ..................   Passed    2.72 sec
+        Start  23: hip_gemm_f16_io_parity
+ 23/103 Test  #23: hip_gemm_f16_io_parity ............   Passed    4.35 sec
+        Start  24: hip_q2_zero
+ 24/103 Test  #24: hip_q2_zero .......................   Passed    0.42 sec
+        Start  25: hip_expert_cache_staging
+ 25/103 Test  #25: hip_expert_cache_staging ..........   Passed    0.44 sec
+        Start  26: hip_intrinsics
+ 26/103 Test  #26: hip_intrinsics ....................   Passed    0.39 sec
+        Start  27: hip_handoff
+ 27/103 Test  #27: hip_handoff .......................***Failed    3.96 sec
+        Start  28: hip_mapped_alias
+ 28/103 Test  #28: hip_mapped_alias ..................   Passed    0.42 sec
+        Start  29: hip_native_qsa_score
+ 29/103 Test  #29: hip_native_qsa_score ..............   Passed    0.42 sec
+        Start  30: hip_prefill_native_batch
+ 30/103 Test  #30: hip_prefill_native_batch ..........   Passed    1.08 sec
+        Start  31: hip_gdn_rec_head
+ 31/103 Test  #31: hip_gdn_rec_head ..................   Passed    1.58 sec
+        Start  32: hip_prefill_wmma_gemm_parity
+ 32/103 Test  #32: hip_prefill_wmma_gemm_parity ......***Skipped   0.06 sec
+        Start  33: hip_prefill_hcd_exact_parity
+ 33/103 Test  #33: hip_prefill_hcd_exact_parity ......***Skipped   0.07 sec
+        Start  34: hip_router_fast
+ 34/103 Test  #34: hip_router_fast ...................   Passed    1.45 sec
+        Start  35: hip_prompt_attn_wmma
+ 35/103 Test  #35: hip_prompt_attn_wmma ..............   Passed    3.87 sec
+        Start  36: hip_prefill_hipblaslt_gemm
+ 36/103 Test  #36: hip_prefill_hipblaslt_gemm ........***Skipped   0.07 sec
+        Start  37: dequant_s2_parity
+ 37/103 Test  #37: dequant_s2_parity .................   Passed    0.43 sec
+        Start  38: s2_gemv_parity
+ 38/103 Test  #38: s2_gemv_parity ....................   Passed    0.40 sec
+        Start  39: iq_parity_fixtures
+ 39/103 Test  #39: iq_parity_fixtures ................***Skipped   0.21 sec
+        Start  40: iq_parity
+ 40/103 Test  #40: iq_parity .........................***Skipped   0.40 sec
+        Start  41: iq_multi_parity
+ 41/103 Test  #41: iq_multi_parity ...................   Passed    1.51 sec
+        Start  42: native_grouped_parity
+ 42/103 Test  #42: native_grouped_parity .............   Passed    2.32 sec
+        Start  43: shared_expert_parity
+ 43/103 Test  #43: shared_expert_parity ..............   Passed    0.44 sec
+        Start  44: gr_parity
+ 44/103 Test  #44: gr_parity .........................   Passed    0.61 sec
+        Start  45: gdn_parity
+ 45/103 Test  #45: gdn_parity ........................   Passed    0.58 sec
+        Start  46: s2_gemv_q8_parity
+ 46/103 Test  #46: s2_gemv_q8_parity .................   Passed    0.40 sec
+        Start  47: sampler_parity
+ 47/103 Test  #47: sampler_parity ....................   Passed    1.48 sec
+        Start  48: spec_verify_parity
+ 48/103 Test  #48: spec_verify_parity ................   Passed    3.30 sec
+        Start  49: sampler_parity_one_block
+ 49/103 Test  #49: sampler_parity_one_block ..........   Passed    1.63 sec
+        Start  50: sampler_parity_old
+ 50/103 Test  #50: sampler_parity_old ................   Passed    3.97 sec
+        Start  51: rope_parity
+ 51/103 Test  #51: rope_parity .......................   Passed    0.42 sec
+        Start  52: quantize_act_parity
+ 52/103 Test  #52: quantize_act_parity ...............   Passed    0.44 sec
+        Start  53: route_window_parity
+ 53/103 Test  #53: route_window_parity ...............   Passed    0.44 sec
+        Start  54: router_top10_parity
+ 54/103 Test  #54: router_top10_parity ...............   Passed    0.40 sec
+        Start  55: native_multi_parity
+ 55/103 Test  #55: native_multi_parity ...............   Passed    0.51 sec
+        Start  56: kv_steps_parity
+ 56/103 Test  #56: kv_steps_parity ...................   Passed    0.47 sec
+        Start  57: resident_plan_parity
+ 57/103 Test  #57: resident_plan_parity ..............   Passed    0.58 sec
+        Start  58: gr_multi_parity
+ 58/103 Test  #58: gr_multi_parity ...................   Passed    0.53 sec
+        Start  59: s_gemv_parity
+ 59/103 Test  #59: s_gemv_parity .....................   Passed    0.42 sec
+        Start  60: elementwise_parity
+ 60/103 Test  #60: elementwise_parity ................   Passed    0.45 sec
+        Start  61: bf16_gemv_parity
+ 61/103 Test  #61: bf16_gemv_parity ..................   Passed    0.50 sec
+        Start  62: s_gemv_q8k_parity
+ 62/103 Test  #62: s_gemv_q8k_parity .................   Passed    0.41 sec
+        Start  63: qsa_parity
+ 63/103 Test  #63: qsa_parity ........................   Passed    1.45 sec
+        Start  64: qsa_topk_parity
+ 64/103 Test  #64: qsa_topk_parity ...................   Passed    1.26 sec
+        Start  65: ple_parity
+ 65/103 Test  #65: ple_parity ........................***Failed    0.05 sec
+        Start  66: kv_q8_parity
+ 66/103 Test  #66: kv_q8_parity ......................   Passed    0.57 sec
+        Start  67: kv_stream_parity
+ 67/103 Test  #67: kv_stream_parity ..................   Passed   41.87 sec
+        Start  68: kv_hybrid_parity
+ 68/103 Test  #68: kv_hybrid_parity ..................   Passed    0.92 sec
+        Start  69: kv_q4_parity
+ 69/103 Test  #69: kv_q4_parity ......................   Passed    0.53 sec
+        Start  70: verify_batch_parity
+ 70/103 Test  #70: verify_batch_parity ...............   Passed    0.44 sec
+        Start  71: cvec_parity
+ 71/103 Test  #71: cvec_parity .......................   Passed    0.51 sec
+        Start  72: s2_expert_grouped_parity
+ 72/103 Test  #72: s2_expert_grouped_parity ..........   Passed    0.55 sec
+        Start  73: platform_memory_test
+ 73/103 Test  #73: platform_memory_test ..............   Passed    0.06 sec
+        Start  74: ple_reader_selftest
+ 74/103 Test  #74: ple_reader_selftest ...............   Passed   21.16 sec
+        Start  75: hip_device_selftest
+ 75/103 Test  #75: hip_device_selftest ...............   Passed    0.40 sec
+        Start  76: arch_defaults_test
+ 76/103 Test  #76: arch_defaults_test ................   Passed    0.01 sec
+        Start  77: suffix_drafter_test
+ 77/103 Test  #77: suffix_drafter_test ...............   Passed    0.04 sec
+        Start  78: controller_test
+ 78/103 Test  #78: controller_test ...................   Passed    0.02 sec
+        Start  79: draft_policy_test
+ 79/103 Test  #79: draft_policy_test .................   Passed    0.02 sec
+        Start  80: message_boundary_test
+ 80/103 Test  #80: message_boundary_test .............   Passed    0.02 sec
+        Start  81: conv_cache_test
+ 81/103 Test  #81: conv_cache_test ...................   Passed    0.02 sec
+        Start  82: coupled_draft_test
+ 82/103 Test  #82: coupled_draft_test ................   Passed    0.02 sec
+        Start  83: spec_prob_test
+ 83/103 Test  #83: spec_prob_test ....................   Passed    3.61 sec
+        Start  84: bf16_bits_test
+ 84/103 Test  #84: bf16_bits_test ....................   Passed    6.72 sec
+        Start  85: dequant_q5_1_test
+ 85/103 Test  #85: dequant_q5_1_test .................   Passed    0.09 sec
+        Start  86: pool_tasks_test
+ 86/103 Test  #86: pool_tasks_test ...................   Passed    3.45 sec
+        Start  87: router_dot_parity
+ 87/103 Test  #87: router_dot_parity .................   Passed    0.16 sec
+        Start  88: router_dot_parity_avx
+ 88/103 Test  #88: router_dot_parity_avx .............   Passed    0.12 sec
+        Start  89: iq_avx2_parity
+ 89/103 Test  #89: iq_avx2_parity ....................   Passed    0.15 sec
+        Start  90: iq_avx2_parity_iq3s_mt1
+ 90/103 Test  #90: iq_avx2_parity_iq3s_mt1 ...........   Passed    0.16 sec
+        Start  91: q8k_quant_parity
+ 91/103 Test  #91: q8k_quant_parity ..................   Passed    0.03 sec
+        Start  92: q8k_quant_parity_avx
+ 92/103 Test  #92: q8k_quant_parity_avx ..............   Passed    0.04 sec
+        Start  93: hip_prefill_fused_moe
+ 93/103 Test  #93: hip_prefill_fused_moe .............***Skipped   0.06 sec
+        Start  94: hip_prefill_fused_iq
+ 94/103 Test  #94: hip_prefill_fused_iq ..............***Skipped   0.06 sec
+        Start  95: hip_prefill_mmq_parity
+ 95/103 Test  #95: hip_prefill_mmq_parity ............   Passed    0.90 sec
+        Start  96: pool_affinity_test
+ 96/103 Test  #96: pool_affinity_test ................   Passed    0.08 sec
+        Start  97: expert_multi_test
+ 97/103 Test  #97: expert_multi_test .................***Skipped   0.03 sec
+        Start  98: q2_bitplane_parity
+ 98/103 Test  #98: q2_bitplane_parity ................   Passed    0.03 sec
+        Start  99: expert_parity
+ 99/103 Test  #99: expert_parity .....................   Passed    0.03 sec
+        Start 100: pool_test
+100/103 Test #100: pool_test .........................   Passed    0.03 sec
+        Start 101: pool_stress
+101/103 Test #101: pool_stress .......................   Passed    0.03 sec
+        Start 102: isa_guard_check
+102/103 Test #102: isa_guard_check ...................***Skipped   0.25 sec
+        Start 103: poly_workers_test
+103/103 Test #103: poly_workers_test .................   Passed    0.14 sec
+
+97% tests passed, 3 tests failed out of 103
+
+Total Test time (real) = 140.35 sec
+
+The following tests did not run:
+	 32 - hip_prefill_wmma_gemm_parity (Skipped)
+	 33 - hip_prefill_hcd_exact_parity (Skipped)
+	 36 - hip_prefill_hipblaslt_gemm (Skipped)
+	 39 - iq_parity_fixtures (Skipped)
+	 40 - iq_parity (Skipped)
+	 93 - hip_prefill_fused_moe (Skipped)
+	 94 - hip_prefill_fused_iq (Skipped)
+	 97 - expert_multi_test (Skipped)
+	102 - isa_guard_check (Skipped)
+
+The following tests FAILED:
+	 19 - expert_cache_segmented_test (Failed)
+	 27 - hip_handoff (Failed)
+	 65 - ple_parity (Failed)
+Errors while running CTest
+Output from these tests are in: C:/Users/user/Documents/PolyStrata/build-hip-poly-win/Testing/Temporary/LastTest.log
+Use "--rerun-failed --output-on-failure" to re-run the failed cases verbosely.

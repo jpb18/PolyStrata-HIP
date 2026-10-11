@@ -1,0 +1,5 @@
+strata-poly: STRATA_POLY_CARD_ROUTE: a token on its own is routed on the card (40 of 40 MoE layers have the kernels)
+strata: Windows budgets 15416 of this card's 16304 MiB for this process; free VRAM is counted within that (STRATA_WDDM_BUDGET=0: off)
+strata-poly: loaded in 25.0 s; 4503 of 10496 routed experts in VRAM (8.0 GiB), 6 CPU threads
+strata-poly: VRAM MiB: dense weights 1961, expert cache 8203, KV 1056 (49152 positions), KV stage 0, recurrent state 251, scratch and the rest 1017; 985 free.  Pinned RAM MiB: KV 0 (0 positions), the rest 1088; RAM available 15891 MiB
+strata-poly: 319488 of 429605 prompt tokens were not read again (74.4%); 0 conversations parked in 0 MiB, 0 pushed out; 968 MiB of VRAM free at the end

@@ -1,0 +1,191 @@
+[
+ {
+  "same": 37,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 8,
+  "worst_llama_top2": [
+   [
+    13,
+    0.9999879598614788
+   ],
+   [
+    8,
+    5.128083766194613e-06
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    271,
+    0.9998
+   ],
+   [
+    198,
+    0.0001
+   ]
+  ],
+  "parted_at": 37,
+  "llama_top2": [
+   [
+    36022,
+    0.20939183600520703
+   ],
+   [
+    553,
+    0.1776075429134723
+   ]
+  ],
+  "engine_top2": "(not compared)",
+  "near_tie": true,
+  "name": "doc-30k",
+  "prompt_tokens": 35575
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 26,
+  "worst_llama_top2": [
+   [
+    314,
+    0.9999998807907033
+   ],
+   [
+    3177,
+    8.742943930430253e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    279,
+    1.0
+   ],
+   [
+    6511,
+    0.0
+   ]
+  ],
+  "name": "short",
+  "prompt_tokens": 22
+ },
+ {
+  "same": 28,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 28,
+  "worst_llama_top2": [
+   [
+    15992,
+    0.5325691698814694
+   ],
+   [
+    3431,
+    0.4350061904187261
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    3431,
+    0.4987
+   ],
+   [
+    15992,
+    0.47
+   ]
+  ],
+  "parted_at": 28,
+  "llama_top2": [
+   [
+    15992,
+    0.5325691698814694
+   ],
+   [
+    3431,
+    0.4350061904187261
+   ]
+  ],
+  "engine_top2": "(not compared)",
+  "near_tie": true,
+  "name": "code",
+  "prompt_tokens": 870
+ },
+ {
+  "same": 36,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 33,
+  "worst_llama_top2": [
+   [
+    1,
+    0.9999988079071329
+   ],
+   [
+    364,
+    6.20293737772398e-07
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    1364,
+    1.0
+   ],
+   [
+    400,
+    0.0
+   ]
+  ],
+  "parted_at": 36,
+  "llama_top2": [
+   [
+    1785,
+    0.3979554519364578
+   ],
+   [
+    2313,
+    0.33464070903162474
+   ]
+  ],
+  "engine_top2": "(not compared)",
+  "near_tie": true,
+  "name": "doc-2.5k",
+  "prompt_tokens": 3069
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 29,
+  "worst_llama_top2": [
+   [
+    411,
+    0.9999997615814209
+   ],
+   [
+    279,
+    1.3610161729945632e-07
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    279,
+    1.0
+   ],
+   [
+    660,
+    0.0
+   ]
+  ],
+  "name": "doc-8k",
+  "prompt_tokens": 11481
+ }
+]
