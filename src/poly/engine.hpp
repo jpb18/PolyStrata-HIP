@@ -326,6 +326,10 @@ protected:
     virtual void block_rows(int64_t pos, int n) { (void) pos, (void) n; }
     /// The attention caches in budget(): their VRAM, pinned RAM and stage bytes and their positions in each.
     virtual void kv_budget(Budget& b) const { (void) b; }
+    /// Around a layer's head in run(), outside any recording: what the architecture hands other streams before
+    /// and after the head's launches (KV streaming's copies ahead, Qwen35).
+    virtual void before_head(int il, int n) { (void) il, (void) n; }
+    virtual void after_head(int il, int n) { (void) il, (void) n; }
     /// Which recording of a layer's head fits n tokens from pos().  Launches that are sized by the rows they read
     /// are recorded once for each size (room()), and the architecture numbers the sizes from 0.
     virtual int head_key(int il, int n) const { (void) il, (void) n; return 0; }

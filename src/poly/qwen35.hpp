@@ -45,6 +45,13 @@ protected:
     int head_key(int il, int n) const override;
     int64_t turn(int64_t row) const override;
     void kv_budget(Budget& b) const override;
+    void before_head(int il, int n) override;
+    void after_head(int il, int n) override;
+
+public:
+    ~Qwen35() override;
+
+protected:
 
 private:
     /// A layer's weights beside the ones every architecture has (Layer), and its places in the state and caches.
@@ -73,6 +80,7 @@ private:
     void turn_of(int64_t row, int32_t* thw) const;
     int64_t plan_kv() const;
     const KvSpill* spill(const Block& B);
+    void ahead(int il, int64_t rows);
     const int32_t* turns(int64_t pos, int n, int64_t* first);
 
     std::vector<Block> blocks_;   ///< one a layer of layers_
@@ -92,6 +100,17 @@ private:
     uint16_t *kstage_ = nullptr, *vstage_ = nullptr;   ///< a prompt batch's block of rows that reaches RAM
     int stage_rows_ = 0;
     KvSpill spill_;                        ///< the block spill() last described
+    // The rows in RAM of one attention layer, copied to VRAM on another stream while the layers before it run, for
+    // the calls of a few tokens (before_head(), after_head()).  STRATA_POLY_KV_AHEAD=0: they read the RAM instead.
+    uint16_t *pre_k_ = nullptr, *pre_v_ = nullptr;
+    void* pre_st_ = nullptr;               ///< the stream that copies them
+    void* ev_used_ = nullptr;              ///< the main stream is through the head that last read the copy
+    void* ev_ready_ = nullptr;             ///< the copy is there
+    int pre_layer_ = -1;                   ///< the layer the copy is of (-1: none that can be used)
+    int64_t pre_rows_ = 0;                 ///< its rows, from position kv_split_ on
+    bool in_head_ = false;                 ///< a head of a few tokens with the copy ready is being handed over
+    int64_t aheads_ = 0, late_ = 0;        ///< copies made ahead, and made only when the head came
+    double ahead_bytes_ = 0;
 
     // device scratch
     float *proj_ = nullptr, *qkv_ = nullptr, *z_ = nullptr, *alpha_ = nullptr, *beta_ = nullptr, *gated_ = nullptr;

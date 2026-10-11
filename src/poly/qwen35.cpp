@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -140,11 +141,87 @@ int64_t Qwen35::plan_kv() const {
     return std::min<int64_t>(ctx, (int64_t) (room / per) / 256 * 256);
 }
 
-// The rows of a block from kv_split_ on, for the kernels (null: every row is in VRAM).
+// The rows of a block from kv_split_ on, for the kernels (null: every row is in VRAM): the copy in VRAM in a head
+// before_head() made ready, else the RAM itself.
 const KvSpill* Qwen35::spill(const Block& B) {
     if (!B.keys_h) return nullptr;
-    spill_ = KvSpill{B.keys_h, B.vals_h, (long long) kv_split_, kstage_, vstage_, stage_rows_};
+    spill_ = in_head_ ? KvSpill{pre_k_, pre_v_, (long long) kv_split_, kstage_, vstage_, stage_rows_}
+                      : KvSpill{B.keys_h, B.vals_h, (long long) kv_split_, kstage_, vstage_, stage_rows_};
     return &spill_;
+}
+
+Qwen35::~Qwen35() {
+    if (pre_k_ && aheads_ > 0)
+        std::fprintf(stderr, "strata-poly: KV streaming: %lld copies of a layer's rows in RAM to VRAM, %lld of them made "
+                             "when the head came (not ahead), %.2f GB copied\n",
+                     (long long) aheads_, (long long) late_, ahead_bytes_ / 1e9);
+    if (pre_st_) {
+        cudaStreamSynchronize(cs(pre_st_));
+        cudaStreamDestroy(cs(pre_st_));
+    }
+    for (void* e : {ev_used_, ev_ready_})
+        if (e) cudaEventDestroy((cudaEvent_t) e);
+}
+
+// Layer il's rows in RAM up to `rows` (from position kv_split_ on), to pre_k_ / pre_v_ on pre_st_, once the main
+// stream is through ev_used_: the head that read the copy before.
+void Qwen35::ahead(int il, int64_t rows) {
+    const Block& B = blocks_[(size_t) il];
+    const size_t bytes = (size_t) rows * n_kv_ * head_dim_ * sizeof(uint16_t);
+    ck(cudaStreamWaitEvent(cs(pre_st_), (cudaEvent_t) ev_used_, 0), "KV ahead");
+    if (bytes > 0) {
+        ck(cudaMemcpyAsync(pre_k_, B.keys_hp, bytes, cudaMemcpyHostToDevice, cs(pre_st_)), "KV ahead");
+        ck(cudaMemcpyAsync(pre_v_, B.vals_hp, bytes, cudaMemcpyHostToDevice, cs(pre_st_)), "KV ahead");
+    }
+    ck(cudaEventRecord((cudaEvent_t) ev_ready_, cs(pre_st_)), "KV ahead");
+    pre_layer_ = il;
+    pre_rows_ = rows;
+    ++aheads_;
+    ahead_bytes_ += 2.0 * (double) bytes;
+}
+
+// KV streaming's copies ahead.  A head of a few tokens reads its layer's rows in RAM from a copy in VRAM, made on
+// another stream while the layers before it ran: the copy engine moves them at 14.2 GB/s where a kernel reads them
+// at 6.6, and the card computes meanwhile.  The kernels read the same values from the copy, so the same bits.  The
+// head's own rows go to the RAM and to the copy (attn_store()).  A copy that is not of the layer, or lacks rows, is
+// made when the head comes.  A prompt batch, and any store outside these heads, writes the RAM alone: the copy is
+// of no layer after it.  Every head of a few tokens takes the copy, whatever its position, because its launches are
+// recorded once for many positions: a recording that read the RAM would not keep the copy up to date.
+void Qwen35::before_head(int il, int n) {
+    in_head_ = false;
+    if (!pre_k_) return;
+    if (n >= kStageRows) {
+        pre_layer_ = -1;
+        return;
+    }
+    if (blocks_[(size_t) il].gdn) return;
+    const int64_t need = std::max<int64_t>(pos_ - kv_split_, 0);
+    if (pre_layer_ != il || pre_rows_ < need) {
+        ck(cudaEventRecord((cudaEvent_t) ev_used_, cs(st_)), "KV ahead");
+        ahead(il, need);
+        ++late_;
+    }
+    ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_ready_, 0), "KV ahead");
+    in_head_ = true;
+}
+
+void Qwen35::after_head(int il, int n) {
+    in_head_ = false;
+    if (!pre_k_ || n >= kStageRows) return;
+    // the next attention layer of this call, or the first of the next call, whose rows from this one are written
+    // by the time the main stream is through this head
+    int next = -1;
+    for (int j = il + 1; j < n_layer_ && next < 0; ++j)
+        if (!blocks_[(size_t) j].gdn) next = j;
+    int64_t rows = std::max<int64_t>(pos_ - kv_split_, 0);
+    if (next < 0) {
+        for (int j = 0; j < n_layer_ && next < 0; ++j)
+            if (!blocks_[(size_t) j].gdn) next = j;
+        rows = std::max<int64_t>(pos_ + n - kv_split_, 0);
+    }
+    if (next < 0 || (next == pre_layer_ && pre_rows_ >= rows)) return;
+    ck(cudaEventRecord((cudaEvent_t) ev_used_, cs(st_)), "KV ahead");
+    ahead(next, rows);
 }
 
 void Qwen35::kv_budget(Budget& b) const {
@@ -153,7 +230,7 @@ void Qwen35::kv_budget(Budget& b) const {
     b.kv_cells_host = opt_.max_context - kv_split_;
     b.kv_vram = caches * (size_t) kv_split_ * row;
     b.kv_host = caches * (size_t) b.kv_cells_host * row;
-    b.kv_stage = kstage_ ? 2 * (size_t) stage_rows_ * row : 0;
+    b.kv_stage = (kstage_ ? 2 * (size_t) stage_rows_ * row : 0) + (pre_k_ ? 2 * (size_t) b.kv_cells_host * row : 0);
 }
 
 // The attention layers' caches, and each recurrent layer's convolution and delta-rule state in state_.
@@ -217,11 +294,26 @@ void Qwen35::alloc_caches() {
             kstage_ = (uint16_t*) dmalloc((size_t) stage_rows_ * width * sizeof(uint16_t), "the attention's stage");
             vstage_ = (uint16_t*) dmalloc((size_t) stage_rows_ * width * sizeof(uint16_t), "the attention's stage");
         }
+        // the copies ahead: one layer's rows in RAM, in VRAM
+        const char* ahead_env = std::getenv("STRATA_POLY_KV_AHEAD");
+        if (!(ahead_env && std::string(ahead_env) == "0")) {
+            pre_k_ = (uint16_t*) dmalloc(host_n * sizeof(uint16_t), "the attention's copy ahead");
+            pre_v_ = (uint16_t*) dmalloc(host_n * sizeof(uint16_t), "the attention's copy ahead");
+            cudaStream_t ps = nullptr;
+            ck(cudaStreamCreateWithFlags(&ps, cudaStreamNonBlocking), "cudaStreamCreate");
+            pre_st_ = ps;
+            for (void** e : {&ev_used_, &ev_ready_}) {
+                cudaEvent_t ev = nullptr;
+                ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+                *e = ev;
+            }
+        }
         std::fprintf(stderr, "strata-poly: KV streaming: positions 0 to %lld of the attention caches in VRAM (%.2f GiB), "
-                             "%lld to %d in pinned RAM (%.2f GiB)\n",
+                             "%lld to %d in pinned RAM (%.2f GiB)%s\n",
                      (long long) kv_split_ - 1, double(size_t(n_attn_) * 2 * rows_n * 2) / 1073741824.0,
                      (long long) kv_split_, opt_.max_context - 1,
-                     double(size_t(n_attn_) * 2 * host_n * 2) / 1073741824.0);
+                     double(size_t(n_attn_) * 2 * host_n * 2) / 1073741824.0,
+                     pre_k_ ? ", a layer's of them copied to VRAM ahead of its attention" : ", read over PCIe");
     }
     axes_ = (int32_t*) dmalloc((size_t) rows_ * 3 * sizeof(int32_t), "a call's rotary positions");
     h_axes_.resize((size_t) rows_ * 3);
@@ -291,6 +383,7 @@ void Qwen35::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t 
     const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), bytes = (size_t) n * row;
     const size_t skip = (size_t) (first - from) * row, all = (size_t) count * row;
     const int64_t below = std::clamp<int64_t>(kv_split_ - first, 0, n);
+    if (below < n) pre_layer_ = -1;   // the RAM changes under the copy ahead
     for (const Block& B : blocks_) {
         if (B.gdn || bytes == 0) continue;
         for (int c = 0; c < 2; ++c) {
@@ -380,6 +473,22 @@ void Qwen35::attn_store(Block& B, int64_t pos, int n) {
     } else {
         store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_, B.keys_h, kv_split_);
         store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_, B.vals_h, kv_split_);
+    }
+    if (!B.keys_h || !pre_k_) return;
+    if (!in_head_) {   // the RAM changed, and the copy ahead did not (the draft block's rows are its own)
+        if (&B - blocks_.data() < n_layer_) pre_layer_ = -1;
+        return;
+    }
+    // the rows below kv_split_ were stored above; the copy gets the others again
+    if (at) {
+        store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_, pre_k_, kv_split_);
+        store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_, pre_v_, kv_split_);
+    } else if (pos + n > kv_split_) {
+        const int64_t from = std::max<int64_t>(pos, kv_split_), skip = from - pos;
+        store_f16(k_ + (size_t) skip * n_kv_ * head_dim_, pre_k_, n_kv_ * head_dim_, from - kv_split_, (int) (n - skip),
+                  st_);
+        store_f16(v_ + (size_t) skip * n_kv_ * head_dim_, pre_v_, n_kv_ * head_dim_, from - kv_split_, (int) (n - skip),
+                  st_);
     }
 }
 

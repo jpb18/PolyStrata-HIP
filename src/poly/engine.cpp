@@ -1950,8 +1950,10 @@ void Engine::run(const int32_t* tokens, int n) {
     const auto up = [&](int il, int m, size_t rec) {
         Layer& L = layers_[(size_t) il];
         const size_t head = (size_t) head_key(il, m) * recs + rec;
+        before_head(il, m);
         if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, m); });
         else layer_head(L, il, m);
+        after_head(il, m);
         if (!L.moe || (mmq_ && m >= kStageRows)) return;
         ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
         if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, m); });
