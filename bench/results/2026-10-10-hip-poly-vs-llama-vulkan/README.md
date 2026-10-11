@@ -34,6 +34,7 @@ prompt time, decode the 128 tokens over their time. VRAM is the process's dedica
 | `full.json` | 3 runs of each of 4 configurations, interleaved (poly default, Vulkan, poly `--window 1`, llama.cpp HIP), and 3 of poly with `--conversation-cache-mib 6144` |
 | `sweep-vulkan.json`, `sweep-hip.json`, `sweep-poly.json` | the first sweep of llama.cpp's `--n-cpu-moe` / `-ub` (A-8k, A-31k), before other programs' VRAM was recorded |
 | `sweep2-vulkan.json`, `sweep2-hip.json` | the second sweep, with it recorded |
+| `server-benchmark-48k-phase2.json` | `polystrata.py benchmark --prompt-tokens 2000,8000,24000,34000` through the server (`--turn-token 248045`), as `../2026-10-10-hip-poly-rx9060xt-baseline/server-benchmark-48k.json` was in the first phase |
 
 `python tools/hip/bench_compare.py summary --json full.json` prints the tables below.
 
