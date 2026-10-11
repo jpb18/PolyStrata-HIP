@@ -477,6 +477,11 @@ deste ramo lhes toca; não o alterei. A suite completa da fase 1 tinha 73 testes
 
 ## 11. Instruções
 
+O mais simples: `START-POLY-HIP.bat` (duplo clique). Compila o motor e cria o `.venv` se faltarem, arranca o
+servidor em `127.0.0.1:8090` e abre a página. Na primeira vez, `START-POLY-HIP.bat C:\caminho\modelo.gguf`
+(ou arrastar o `.gguf` para cima do script) escreve a configuração; `START-POLY-HIP.bat chat` abre um chat na
+janela; `START-POLY-HIP.bat check` diz o que arrancaria. Os passos à mão:
+
 Compilar (a fonte do llama.cpp está agora no repositório, fora do git):
 
 ```bat

@@ -524,6 +524,9 @@ python tools\hip\poly_config.py --model C:\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --
 ```
 
 The last writes a run config, so `polystrata.py --model <name>`, its benchmark and the server take the model.
+`START-POLY-HIP.bat` does all of it with a double-click: it builds the engine and creates `.venv` when they are
+missing, then starts the server on `127.0.0.1:8090` and opens its page (`START-POLY-HIP.bat C:\models\X.gguf` the first
+time, to write the run config; `START-POLY-HIP.bat chat` for a chat in the window).
 What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT (gfx1200, 16 GB), Ryzen 5 5600X,
 32 GB of RAM, Windows 11, ROCm 10.2.0a20260930 from TheRock, with the two programs the build adds (`hip_poly_probe`,
 `poly_kernel_bench`):
