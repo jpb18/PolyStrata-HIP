@@ -1358,6 +1358,11 @@ __global__ void wait_add_kernel(const int* need, const uint32_t* go, const uint3
         const long long t0 = wall_clock64();
         ok = 1;
         while (__hip_atomic_load(go, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != want) {
+            // a layer before this one gave up: the token is lost, and the host stops (Engine::card_host())
+            if (__hip_atomic_load(failed, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) != 0) {
+                ok = 0;
+                break;
+            }
             if (wall_clock64() - t0 > ticks) {
                 ok = 0;
                 *(volatile uint32_t*) failed = 1;

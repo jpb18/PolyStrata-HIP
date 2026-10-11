@@ -36,6 +36,15 @@
 #if defined(STRATA_USE_HIP)
 #include <cstdlib>
 #endif
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace strata::poly {
 namespace {
@@ -151,6 +160,34 @@ int stay_near(const std::vector<std::pair<const uint8_t*, size_t>>& spans, const
 #endif
 }
 
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+// Which of the experts' pages this process keeps (AMD_QWEN36_IMPLEMENTATION.md).  The file is read in place, and the
+// pages a token's CPU experts read have to be in RAM: on a 32 GB PC with a browser open there is room for the
+// experts outside VRAM, not for every expert.  Those in VRAM are read from the file once, to copy them there, and
+// then never by the CPU, but their pages stayed in the process's working set, and map_pages() read them again:
+// Windows then trimmed pages without telling one from another, and the CPU's experts came from the disk.  With
+// Qwen3.6-35B-A3B UD-Q4_K_M (18.2 GiB of experts, 9 GiB of them in an RX 9060 XT's VRAM) and Qwen3.5-35B-A3B
+// Q3_K_M (13 GiB, 9.1 in VRAM) that was 29 ms of a token's experts on the CPU.  So an expert copied to VRAM gives its
+// pages up (drop_pages()), and map_pages() reads only the experts outside the cache.  STRATA_POLY_PAGES=0: as
+// before, every expert's pages read and kept.
+bool expert_pages() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_PAGES");
+        return !(v != nullptr && v[0] == '0');
+    }();
+    return on;
+}
+
+// The whole pages within [p, p + n) leave this process's working set: VirtualUnlock() does that to pages that are
+// not locked.  They go to the standby list, still in RAM until it is wanted for something else, and a read of
+// them later is a fault that finds them there.  A page that [p, p + n) shares with a neighbour stays.
+void drop_pages(const uint8_t* p, size_t n) {
+    if (!expert_pages()) return;
+    const uintptr_t a = ((uintptr_t) p + 4095) & ~uintptr_t(4095), b = ((uintptr_t) p + n) & ~uintptr_t(4095);
+    if (b > a) VirtualUnlock((void*) a, b - a);
+}
+#endif
+
 // The mapped file's pages come into this process's page table as they are first read, a fault every few pages,
 // and an expert read through those faults arrives at half the speed: 21.0 against 11.0 ms a token for GLM 5.3
 // Flash's CPU experts on the two-socket Xeon, while every expert a token meets is new to the process.  So one
@@ -160,6 +197,20 @@ int stay_near(const std::vector<std::pair<const uint8_t*, size_t>>& spans, const
 void map_pages(const std::vector<std::pair<const uint8_t*, size_t>>& spans, const std::atomic<bool>& quit) {
     constexpr size_t kPage = 4096, kLook = size_t(1) << 24;   // `quit` is looked at every 16 MiB
     volatile uint8_t seen = 0;
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    // Windows reads a mapped file's pages from the disk a few at a time as they fault in; asked for whole spans it
+    // reads them in large requests, and the faults below find them in RAM (expert_pages()).  At background I/O
+    // priority a first token came sooner after the load, but the reading took longer and the tokens after it met
+    // the disk: 20 to 26 tokens/s of Qwen3.6 UD-Q4_K_M where 47 at the normal priority.
+    if (expert_pages())
+        for (const auto& s : spans) {
+            constexpr size_t kAsk = size_t(256) << 20;
+            for (size_t at = 0; at < s.second && !quit.load(std::memory_order_relaxed); at += kAsk) {
+                WIN32_MEMORY_RANGE_ENTRY r{(void*) (s.first + at), std::min(kAsk, s.second - at)};
+                PrefetchVirtualMemory(GetCurrentProcess(), 1, &r, 0);
+            }
+        }
+#endif
     for (const auto& s : spans) {
         for (size_t at = 0; at < s.second; at += kPage) {
             if (at % kLook == 0 && quit.load(std::memory_order_relaxed)) return;
@@ -686,7 +737,36 @@ void Engine::fill_expert_cache() {
     }
     std::sort(taken.begin(), taken.end(),
               [](const Cand& a, const Cand& b) { return a.il != b.il ? a.il < b.il : a.e < b.e; });
-    for (const Cand& c : taken) {
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+    // The copies below read the file through its pages' faults, a few pages a read from the disk: 35 s of
+    // Qwen3.6 UD-Q4_K_M's load.  A layer's experts are asked for in large requests while the layer before is
+    // copied (expert_pages()).
+    const auto ask_layer = [&](size_t from) {
+        if (!expert_pages() || from >= taken.size()) return;
+        std::vector<WIN32_MEMORY_RANGE_ENTRY> r;
+        const Layer& L = layers_[(size_t) taken[from].il];
+        for (size_t i = from; i < taken.size() && taken[i].il == taken[from].il; ++i) {
+            const size_t e = (size_t) taken[i].e;
+            r.push_back({(void*) (L.exp_gate + e * L.gu_stride), L.gu_stride == L.gu_bytes ? L.gu_bytes : L.gu_stride});
+            if (L.gu_stride == L.gu_bytes) r.push_back({(void*) (L.exp_up + e * L.gu_stride), L.gu_bytes});
+            r.push_back({(void*) (L.exp_down + e * L.d_bytes), L.d_bytes});
+        }
+        PrefetchVirtualMemory(GetCurrentProcess(), r.size(), r.data(), 0);
+    };
+    size_t second = 0;   // where the second layer's experts start
+    while (second < taken.size() && taken[second].il == taken[0].il) ++second;
+    ask_layer(0);
+    ask_layer(second);
+#endif
+    for (size_t ti = 0; ti < taken.size(); ++ti) {
+        const Cand& c = taken[ti];
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+        if (ti > 0 && c.il != taken[ti - 1].il) {   // a layer starts: ask for the one after it
+            size_t next = ti;
+            while (next < taken.size() && taken[next].il == c.il) ++next;
+            ask_layer(next);
+        }
+#endif
         Layer& L = layers_[(size_t) c.il];
         uint8_t* s = exp_ + exp_at_;
         exp_at_ += c.bytes;
@@ -696,6 +776,11 @@ void Engine::fill_expert_cache() {
            "expert upload");
         ck(cudaMemcpy(s + 2 * L.gu_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice),
            "expert upload");
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+        drop_pages(L.exp_gate + e * L.gu_stride, L.gu_stride == L.gu_bytes ? L.gu_bytes : L.gu_stride);
+        if (L.gu_stride == L.gu_bytes) drop_pages(L.exp_up + e * L.gu_stride, L.gu_bytes);
+        drop_pages(L.exp_down + e * L.d_bytes, L.d_bytes);
+#endif
         L.slot[e] = s;
         ++cached_;
     }
@@ -794,6 +879,11 @@ void Engine::follow_loop() {
         std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
         std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
         std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+        drop_pages(L.exp_gate + e * L.gu_stride, L.gu_stride == gu ? gu : L.gu_stride);
+        if (L.gu_stride == gu) drop_pages(L.exp_up + e * L.gu_stride, gu);
+        drop_pages(L.exp_down + e * L.d_bytes, L.d_bytes);
+#endif
         cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, cs(swap_st_));
         if (err == cudaSuccess) err = cudaEventRecord(s->done, cs(swap_st_));
         lk.lock();
@@ -995,6 +1085,24 @@ void Engine::load(const Options& o) {
     std::vector<std::pair<const uint8_t*, size_t>> spans;   // the routed experts in the mapped files
     for (const Layer& L : layers_) {
         if (!L.moe) continue;
+#if defined(STRATA_USE_HIP) && defined(_WIN32)
+        if (expert_pages()) {   // the runs of experts outside the cache (drop_pages())
+            for (int e0 = 0; e0 < n_expert_;) {
+                if (L.slot[(size_t) e0]) {
+                    ++e0;
+                    continue;
+                }
+                int e1 = e0;
+                while (e1 < n_expert_ && !L.slot[(size_t) e1]) ++e1;
+                const size_t n = (size_t) (e1 - e0);
+                spans.emplace_back(L.exp_gate + e0 * L.gu_stride, n * L.gu_stride);
+                if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up + e0 * L.gu_bytes, n * L.gu_bytes);
+                spans.emplace_back(L.exp_down + e0 * L.d_bytes, n * L.d_bytes);
+                e0 = e1;
+            }
+            continue;
+        }
+#endif
         spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
         if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
         spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
@@ -1173,6 +1281,15 @@ void Engine::save_profile() const {
 }
 
 void Engine::reset() {
+#if defined(STRATA_USE_HIP)
+    // A token the card gave up waiting for the CPU's experts left a wrong state, which goes now; its flag stayed
+    // up, and every token after it failed at once (wait_add()).  The token's later waits give up when they see the
+    // flag, so the stream is through it soon.
+    if (h_failed_ && *(volatile uint32_t*) h_failed_) {
+        ck(cudaStreamSynchronize(cs(st_)), "reset");
+        *(volatile uint32_t*) h_failed_ = 0;
+    }
+#endif
     ck(cudaMemsetAsync(state_, 0, state_n_ * sizeof(float), cs(st_)), "reset");
     pos_ = 0;
     ahead_pos_ = -1;
