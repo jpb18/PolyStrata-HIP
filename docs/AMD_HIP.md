@@ -562,6 +562,20 @@ chat apps and coding agents use it (streaming, tools, Anthropic's route, cancell
 the title agent on the variant without thinking (OpenCode asks for a title with the chat's model, and Qwen3.5
 thought for up to 9,345 tokens over it).
 
+Long contexts (Qwen3.5/3.6): the model's 10 attention layers keep 20 KiB of KV a position, 5 GiB at its native
+262,144, which fits beside the dense weights on a 16 GB card; the expert cache takes what is left (4.7 GiB at
+262,144 there). Every token reads every position, so a context of 262,144 with the KV in VRAM answered notes put at
+5, 50 and 95 % of a 261,000-token prompt, decoding at 16.7 tok/s (prefill 477 tok/s). `--kv-resident N` (off by
+default) keeps the first N positions in VRAM and the rest in pinned RAM: the same results to the bit (the same
+kernels and sums; a layer's rows in RAM are copied to VRAM by the copy engine while the layers before it run,
+`STRATA_POLY_KV_AHEAD=0` reads them over PCIe instead), more experts in VRAM below N, and PCIe-bound decode above it
+(N = 49,152: 25 tok/s at 65,536, 8.1 at 130,900, 2.8 at 261,000; with the KV in VRAM 43 and 29 at a context of
+131,072, 17 at 262,144).
+`--kv-resident auto` keeps everything in VRAM when it fits, and `--kv-ram-mib` bounds the pinned RAM; the load
+fails with the context that fits rather than page. The measurements, the parity tests and the needle tests
+(`tools/hip/kv_parity.py`, `kv_needles.py`, `poly_kernel_bench attn`) are in
+[AMD_KV_STREAMING.md](../AMD_KV_STREAMING.md).
+
 Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four
 prompts of 22 to 11,481 tokens, with and without graphs, guesses and copy kernels, and with every expert on the CPU;
 through the server a prompt of 44,419 tokens at a context of 49,152. The figures and what was not checked are in
