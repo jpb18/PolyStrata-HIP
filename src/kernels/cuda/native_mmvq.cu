@@ -1467,13 +1467,63 @@ __global__ void native_mmvq_slots_half_dev_kernel(const MmvqSlots* slots, int n_
     slots_half_rows<F>(slots->w[blockIdx.y], slots->x[blockIdx.y], slots->y[blockIdx.y], n_in, n_out);
 }
 
-// The kernel above for slots in device memory, where it is the one launch_slots() would pick.
+// native_mmvq_slots_kernel with its slots in device memory, for rows too long for half a warp: a k-quant expert's
+// gate and up (2048 inputs of Q4_K are 8 blocks of 16 threads) and its down where a block takes more than 8
+// threads (Q4_K, Q5_K and Q6_K of 512 inputs), as Qwen3.6's UD-Q4_K_M has them.  The body is that kernel's, line
+// for line, so a row comes out with its bits; a slot without a matrix adds nothing and writes zeros.
+template<typename F, int ROWS>
+__launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 1))
+__global__ void native_mmvq_slots_dev_kernel(const MmvqSlots* slots, int n_in, int n_out) {
+    const auto* w = static_cast<const typename F::Block*>(slots->w[blockIdx.y]);
+    const auto* x = static_cast<const Q81Block*>(slots->x[blockIdx.y]);
+    float* y = slots->y[blockIdx.y];
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / F::DIV;
+    float tmp[ROWS] = {};
+    for (int kbx = tid / F::T; w && kbx < blocks_per_row; kbx += F::BPI) {
+        const int kby = kbx * F::KBY;
+        const int kqs = F::kqs(tid);
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                tmp[i] += F::apply(F::load(w + block, kqs), x + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        tmp[i] = warp_sum(tmp[i]);
+        if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
+    }
+}
+
+// The kernels above for slots in device memory, each where launch_slots() would pick its twin.
 template<typename F>
 bool launch_slots_dev(const MmvqSlots* slots, int count, int n_in, int n_out, cudaStream_t s) {
-    if ((n_in / F::DIV) * F::T > 16) return false;
-    const unsigned rows_a_block = 2 * WARPS;
-    const dim3 blocks(unsigned((std::size_t(n_out) + rows_a_block - 1) / rows_a_block), unsigned(count));
-    native_mmvq_slots_half_dev_kernel<F><<<blocks, dim3(WARP, WARPS), 0, s>>>(slots, n_in, n_out);
+    const dim3 threads(WARP, WARPS);
+    if ((n_in / F::DIV) * F::T <= 16) {
+        const unsigned rows_a_block = 2 * WARPS;
+        const dim3 blocks(unsigned((std::size_t(n_out) + rows_a_block - 1) / rows_a_block), unsigned(count));
+        native_mmvq_slots_half_dev_kernel<F><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+    } else if (n_in / F::DIV < F::BPI) {
+        constexpr int ROWS = 2;
+        const dim3 blocks(unsigned((std::size_t(n_out) + ROWS - 1) / ROWS), unsigned(count));
+        native_mmvq_slots_dev_kernel<F, ROWS><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+    } else {
+        native_mmvq_slots_dev_kernel<F, 1><<<dim3(unsigned(n_out), unsigned(count)), threads, 0, s>>>(slots, n_in,
+                                                                                                      n_out);
+    }
     return true;
 }
 #endif
@@ -2746,7 +2796,11 @@ bool native_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int
     }
     const auto s = static_cast<cudaStream_t>(stream);
     bool done = false;
-    switch (ggml_type) {   // the k-quants whose rows fit half a warp: the shapes of a small expert's down
+    switch (ggml_type) {   // native_mmvq_slots()'s formats but Q2_0, each in the kernel launch_slots() picks
+    case 2: done = n_in % 32 == 0 && launch_slots_dev<SmallTraits<Q40Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 6: done = n_in % 32 == 0 && launch_slots_dev<SmallTraits<Q50Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 8: done = n_in % 32 == 0 && launch_slots_dev<SmallTraits<Q80Block, 8>>(slots, count, n_in, n_out, s); break;
+    case 20: done = n_in % 32 == 0 && launch_slots_dev<SmallTraits<IQ4NLBlock, 4>>(slots, count, n_in, n_out, s); break;
     case 10: done = n_in % 256 == 0 && launch_slots_dev<Q2KTraits>(slots, count, n_in, n_out, s); break;
     case 11: done = n_in % 256 == 0 && launch_slots_dev<Q3KTraits>(slots, count, n_in, n_out, s); break;
     case 12: done = n_in % 256 == 0 && launch_slots_dev<Q4KTraits>(slots, count, n_in, n_out, s); break;

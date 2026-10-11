@@ -323,8 +323,10 @@ int main(int argc, char** argv) {
                  for (int j = 0; j < 8; ++j) kernels::native_mmvq(23, b.w[j], b.x[j], b.y[j], 512, 2048, 1, st);
              }), 8.0 * dn);
     }
-    {   // several matrices a launch give each the bits of a launch of its own, for every format and the short
-        // rows of an expert's down projection (n_in 256 and 512), on random bytes: the results are compared, not judged
+    {   // several matrices a launch give each the bits of a launch of its own, for every format, the short rows of an
+        // expert's down projection (n_in 256 and 512) and the long ones of its gate and up (2048), with the slots
+        // given by value and read from device memory (the routing on the card; a slot of no matrix gives zeros), on
+        // random bytes: the results are compared, not judged
         // where each block keeps its fp16 scales (d, and dmin where there is one): random bytes there would be
         // infinities and NaNs, whose bits two correct sums need not share
         const struct {
@@ -334,10 +336,12 @@ int main(int argc, char** argv) {
                     {20, 32, 18, 0, -1, "IQ4_NL"},  {10, 256, 84, 80, 82, "Q2_K"},  {11, 256, 110, 108, -1, "Q3_K"},
                     {12, 256, 144, 0, 2, "Q4_K"},   {13, 256, 176, 0, 2, "Q5_K"},   {14, 256, 210, 208, -1, "Q6_K"},
                     {23, 256, 136, 0, -1, "IQ4_XS"}};
-        int bad = 0, checked = 0;
+        int bad = 0, checked = 0, dev_bad = 0, dev_checked = 0;
+        void* dslots = nullptr;
+        cudaMalloc(&dslots, sizeof(kernels::MmvqSlots));
         for (const auto& f : fmts) {
-            for (int n_in : {256, 512}) {
-                const int n_out = 2048;
+            for (int n_in : {256, 512, 2048}) {
+                const int n_out = n_in == 2048 ? 1024 : 2048;
                 const size_t wb = (size_t) n_out * (n_in / f.block_elems) * f.block_bytes;
                 void* w = dev_random(2 * wb, false);
                 tame_scales(w, 2 * wb, f.block_bytes, f.d_at);
@@ -345,7 +349,8 @@ int main(int argc, char** argv) {
                 void* q = dev_random(kernels::native_q8_1_bytes(n_in) * 2, false);
                 kernels::native_quantize_q8_1(x, q, n_in, 1, st);
                 kernels::native_quantize_q8_1(x + 4096, (uint8_t*) q + kernels::native_q8_1_bytes(n_in), n_in, 1, st);
-                float* o = (float*) dev_random((size_t) 4 * n_out * 4, true);
+                // [0, 2): slots by value, [2, 4): one launch each, [4, 7): slots in device memory, the last of no matrix
+                float* o = (float*) dev_random((size_t) 7 * n_out * 4, true);
                 kernels::MmvqSlots m{};
                 for (int j = 0; j < 2; ++j) {
                     m.w[j] = (const uint8_t*) w + j * wb;
@@ -354,7 +359,16 @@ int main(int argc, char** argv) {
                     kernels::native_mmvq(f.type, m.w[j], m.x[j], o + (2 + j) * n_out, n_in, n_out, 1, st);
                 }
                 if (!kernels::native_mmvq_slots(f.type, m, 2, n_in, n_out, st)) continue;
-                std::vector<uint32_t> h((size_t) 4 * n_out);
+                kernels::MmvqSlots md{};
+                for (int j = 0; j < 3; ++j) {
+                    md.w[j] = j < 2 ? m.w[j] : nullptr;
+                    md.x[j] = m.x[j < 2 ? j : 0];
+                    md.y[j] = o + (4 + j) * n_out;
+                }
+                cudaMemcpyAsync(dslots, &md, sizeof md, cudaMemcpyHostToDevice, g_st);
+                const bool dev = kernels::native_mmvq_slots_dev(f.type, (const kernels::MmvqSlots*) dslots, 3, n_in,
+                                                                n_out, st);
+                std::vector<uint32_t> h((size_t) 7 * n_out);
                 cudaStreamSynchronize(g_st);   // the stream does not wait for the default one, nor it for the stream
                 cudaMemcpy(h.data(), o, h.size() * 4, cudaMemcpyDeviceToHost);
                 ++checked;
@@ -362,13 +376,27 @@ int main(int argc, char** argv) {
                     ++bad;
                     std::printf("  slots and one launch each DIFFER: %s, n_in %d\n", f.name, n_in);
                 }
+                if (dev) {
+                    ++dev_checked;
+                    const bool zeros = std::all_of(h.begin() + 6 * n_out, h.end(), [](uint32_t b) { return b == 0; });
+                    if (std::memcmp(h.data() + 4 * n_out, h.data() + 2 * n_out, (size_t) 2 * n_out * 4) != 0 || !zeros) {
+                        ++dev_bad;
+                        std::printf("  slots in device memory DIFFER: %s, n_in %d%s\n", f.name, n_in,
+                                    zeros ? "" : " (the slot of no matrix is not zeros)");
+                    }
+                } else {
+                    std::printf("  slots in device memory: no kernel for %s, n_in %d\n", f.name, n_in);
+                }
                 cudaFree(w);
                 cudaFree(q);
                 cudaFree(o);
             }
         }
+        cudaFree(dslots);
         std::printf("  slots against one launch each, bit for bit: %d of %d shapes the same\n", checked - bad, checked);
-        if (bad) return 1;
+        std::printf("  slots in device memory against one launch each, bit for bit: %d of %d shapes the same\n",
+                    dev_checked - dev_bad, dev_checked);
+        if (bad || dev_bad) return 1;
     }
     {   // the small copies of a layer: the router's scores and the experts' input out, the CPU's sum back in
         float* h = nullptr;
