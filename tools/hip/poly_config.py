@@ -37,6 +37,10 @@ def main() -> int:
     ap.add_argument("--rocm-venv", default=str(ROOT / ".rocm-win"))
     ap.add_argument("--data", help="where the tokenizer folder and the expert profile go (default: beside the GGUF)")
     ap.add_argument("--gguf-py", help="llama.cpp's gguf-py folder, for the tokenizer")
+    ap.add_argument("--kv-resident", help="KV streaming (AMD_KV_STREAMING.md): positions of the attention caches kept "
+                    "in VRAM, the rest in pinned RAM; auto: all in VRAM when they fit, else as many as fit (default: "
+                    "the engine's, all in VRAM)")
+    ap.add_argument("--kv-ram-mib", type=int, help="with --kv-resident: the most RAM the rest may pin")
     ap.add_argument("--extra", default="", help="more strata-poly arguments, e.g. \"--vram-reserve-mib 1536\"")
     ap.add_argument("--no-turn-token", action="store_true",
                     help="leave out --turn-token (by default the id of <|im_start|> when the tokenizer has it: a chat's "
@@ -69,6 +73,10 @@ def main() -> int:
             str(data / "expert-profile.txt")]
     if a.threads > 0:
         args += ["--threads", str(a.threads)]
+    if a.kv_resident:
+        args += ["--kv-resident", a.kv_resident]
+    if a.kv_ram_mib is not None:
+        args += ["--kv-ram-mib", str(a.kv_ram_mib)]
     args += a.extra.split()
     if not a.no_turn_token and "--turn-token" not in args:
         try:

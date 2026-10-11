@@ -28,6 +28,7 @@ using Clock = std::chrono::steady_clock;
 using namespace strata;
 
 int g_reps = 400;
+int g_warm = 20;   // launches before the timed ones
 cudaStream_t g_st = nullptr;
 
 void* dev_random(size_t bytes, bool floats) {
@@ -64,7 +65,7 @@ void tame_scales(void* w, size_t bytes, int block_bytes, int scale_at) {
 }
 
 double time_us(const std::function<void()>& f) {
-    for (int i = 0; i < 20; ++i) f();
+    for (int i = 0; i < g_warm; ++i) f();
     cudaStreamSynchronize(g_st);
     const Clock::time_point t0 = Clock::now();
     for (int i = 0; i < g_reps; ++i) f();
@@ -85,11 +86,117 @@ void line(const char* what, double us, double bytes = 0) {
         std::printf("  %-52s %8.2f us\n", what, us);
 }
 
+// poly_kernel_bench attn [reps]: a decode token's attention (attend()) and a prompt batch's (attend_batch(), 1,024
+// tokens) at Qwen3.5-35B-A3B's shapes (16 heads, 2 key-value heads of 256) over caches of 8K to 262K positions:
+// wholly in VRAM, and with KV streaming (AMD_KV_STREAMING.md) from position 0 and from 49,152 on in pinned RAM.
+// Each split's results against the cache wholly in VRAM, bit for bit.
+int attn_bench() {
+    const int dim = 256, n_head = 16, kv = 2, width = kv * dim, batch = 1024;
+    const float scale = 1.f / 16.f;
+    const int64_t most = 262144;
+    const size_t cache_bytes = (size_t) most * width * 2;
+    uint16_t* k = (uint16_t*) dev_random(cache_bytes, false);
+    uint16_t* v = (uint16_t*) dev_random(cache_bytes, false);
+    {   // random halves can be infinities: values in [-1, 1)
+        std::vector<uint16_t> h((size_t) most * width);
+        std::mt19937 rng(7);
+        for (auto& x : h) x = (uint16_t) (0x3000 + (rng() & 0x0bff)) | (uint16_t) ((rng() & 1) << 15);
+        cudaMemcpy(k, h.data(), cache_bytes, cudaMemcpyHostToDevice);
+        for (auto& x : h) x = (uint16_t) (0x3000 + (rng() & 0x0bff)) | (uint16_t) ((rng() & 1) << 15);
+        cudaMemcpy(v, h.data(), cache_bytes, cudaMemcpyHostToDevice);
+    }
+    uint16_t *hk = nullptr, *hv = nullptr, *hk_dev = nullptr, *hv_dev = nullptr;
+    if (cudaHostAlloc((void**) &hk, cache_bytes, cudaHostAllocMapped) != cudaSuccess ||
+        cudaHostAlloc((void**) &hv, cache_bytes, cudaHostAllocMapped) != cudaSuccess) {
+        std::printf("no pinned memory for the host part\n");
+        return 1;
+    }
+    cudaHostGetDevicePointer((void**) &hk_dev, hk, 0);
+    cudaHostGetDevicePointer((void**) &hv_dev, hv, 0);
+    float* q = (float*) dev_random((size_t) batch * n_head * dim * 4, true);
+    const size_t score_floats = size_t(16) << 20;
+    float* score = (float*) dev_random(score_floats * 4, true);
+    float* work = (float*) dev_random((size_t) batch * n_head * (dim + dim / 2 + 3) * 4 + 64, true);
+    float* out = (float*) dev_random((size_t) (batch + 1) * n_head * dim * 4, true);   // the token's, the batch's
+    float* ref = (float*) dev_random((size_t) (batch + 1) * n_head * dim * 4, true);
+    void* blas = poly::blas_create(g_st);
+    const int stage_rows = poly::attend_batch_block(score_floats, 32, n_head);
+    uint16_t* ks = (uint16_t*) dev_random((size_t) stage_rows * width * 2, false);
+    uint16_t* vs = (uint16_t*) dev_random((size_t) stage_rows * width * 2, false);
+    int bad = 0;
+    for (int64_t ctx : {8192, 32768, 49152, 65536, 131072, 262144}) {
+        const int chunk = (int) std::max<int64_t>(1, (int64_t) score_floats / (n_head * ctx));
+        const int64_t pos = ctx - 1;   // a decode token at the end of the cache
+        std::printf("context %lld\n", (long long) ctx);
+        for (int64_t split : {ctx, std::min<int64_t>(49152, ctx), int64_t(0)}) {
+            poly::KvSpill sp{hk_dev, hv_dev, (long long) split, ks, vs, stage_rows};
+            if (split < ctx) {   // the rows from split on, as the cache in VRAM has them
+                cudaMemcpy(hk, k + (size_t) split * width, (size_t) (ctx - split) * width * 2, cudaMemcpyDeviceToHost);
+                cudaMemcpy(hv, v + (size_t) split * width, (size_t) (ctx - split) * width * 2, cudaMemcpyDeviceToHost);
+            }
+            const poly::KvSpill* s = split < ctx ? &sp : nullptr;
+            const double host_mb = (double) (ctx - split) * width * 4 / 1e6;   // K and V rows read from RAM
+            const int reps = g_reps;
+            g_reps = std::max(5, (int) (g_reps * 8192 / ctx));
+            const double us = time_us([&] {
+                poly::attend(q, k, v, pos, 1, score, chunk, out, dim, n_head, kv, scale, g_st, 0, 0, false, nullptr, 0, s);
+            });
+            g_reps = std::max(3, reps / 64);
+            const int64_t bpos = ctx - batch;   // a prompt batch that ends the cache
+            const double bus = time_us([&] {
+                poly::attend_batch(blas, q, k, v, bpos, batch, score, score_floats, work, out + (size_t) n_head * dim, dim,
+                                   n_head, kv, scale, g_st, 0, 0, false, s);
+            });
+            if (split == 0) {   // which reads cost: the keys' from RAM and the values' from VRAM, and the other way
+                poly::KvSpill only_k = sp, only_v = sp;
+                only_k.vhost = v;
+                only_v.khost = k;
+                g_reps = std::max(5, (int) (reps * 8192 / ctx));
+                const double ku = time_us([&] {
+                    poly::attend(q, k, v, pos, 1, score, chunk, out, dim, n_head, kv, scale, g_st, 0, 0, false, nullptr,
+                                 0, &only_k);
+                });
+                const double vu = time_us([&] {
+                    poly::attend(q, k, v, pos, 1, score, chunk, out, dim, n_head, kv, scale, g_st, 0, 0, false, nullptr,
+                                 0, &only_v);
+                });
+                std::printf("  keys from RAM only: %.1f us, values from RAM only: %.1f us\n", ku, vu);
+            }
+            g_reps = reps;
+            char name[96];
+            std::snprintf(name, sizeof name, "%s: decode token", split == ctx ? "all in VRAM" :
+                          split == 0 ? "all in RAM" : "from 49,152 in RAM");
+            std::printf("  %-36s %9.1f us (%7.1f MB from RAM, %5.1f GB/s overall); batch of 1,024 %9.1f ms\n", name,
+                        us, host_mb, host_mb > 0 ? host_mb * 1e3 / us : 0.0, bus / 1e3);
+            // bit for bit against the cache wholly in VRAM
+            std::vector<uint32_t> a((size_t) (batch + 1) * n_head * dim), b(a.size());
+            cudaStreamSynchronize(g_st);
+            cudaMemcpy(split == ctx ? a.data() : b.data(), out, a.size() * 4, cudaMemcpyDeviceToHost);
+            if (split == ctx) cudaMemcpy(ref, out, a.size() * 4, cudaMemcpyDeviceToDevice);
+            else {
+                cudaMemcpy(a.data(), ref, a.size() * 4, cudaMemcpyDeviceToHost);
+                const bool same = std::memcmp(a.data(), b.data(), a.size() * 4) == 0;
+                std::printf("    the same bits as all in VRAM: %s\n", same ? "yes" : "NO");
+                bad += !same;
+            }
+        }
+    }
+    poly::blas_destroy(blas);
+    cudaFreeHost(hk);
+    cudaFreeHost(hv);
+    return bad ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc > 1) g_reps = std::max(10, std::atoi(argv[1]));
     cudaStreamCreateWithFlags(&g_st, cudaStreamNonBlocking);
+    if (argc > 1 && std::strcmp(argv[1], "attn") == 0) {
+        g_reps = argc > 2 ? std::max(10, std::atoi(argv[2])) : 200;
+        g_warm = 2;
+        return attn_bench();
+    }
+    if (argc > 1) g_reps = std::max(10, std::atoi(argv[1]));
     void* st = g_st;
     const int E = 2048;   // n_embd
     float* x = (float*) dev_random(16384 * 4, true);

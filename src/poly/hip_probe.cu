@@ -107,6 +107,15 @@ __global__ void read_all(const uint4* __restrict__ p, size_t n, unsigned* out) {
     if (acc == 0x12345678u) *out = acc;   // keeps the reads
 }
 
+// the same with narrower reads a thread (the attention's keys are read 8 bytes a thread a step)
+template <typename T>
+__global__ void read_narrow(const T* __restrict__ p, size_t n, unsigned* out) {
+    unsigned acc = 0;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
+        acc ^= (unsigned) p[i];
+    if (acc == 0x12345678u) *out = acc;
+}
+
 int kv_steps(double want_gib) {
     const size_t bytes = size_t(512) << 20;
     void *dv = nullptr, *hv = nullptr, *hdev = nullptr;
@@ -143,6 +152,12 @@ int kv_steps(double want_gib) {
             std::snprintf(name, sizeof name, "pinned host, kernel read (%d x %d)", blocks, threads);
             rate(name, [&] { read_all<<<blocks, threads, 0, st>>>((const uint4*) hdev, n, out); });
         }
+    rate("pinned host, kernel read, 8 bytes a thread", [&] {
+        read_narrow<unsigned long long><<<4096, 256, 0, st>>>((const unsigned long long*) hdev, bytes / 8, out);
+    });
+    rate("pinned host, kernel read, 4 bytes a thread", [&] {
+        read_narrow<unsigned><<<4096, 256, 0, st>>>((const unsigned*) hdev, bytes / 4, out);
+    });
     rate("pinned host -> VRAM, copy engine (512 MiB)", [&] { cudaMemcpyAsync(dv, hv, bytes, cudaMemcpyHostToDevice, st); });
     for (size_t piece : {size_t(1) << 20, size_t(4) << 20, size_t(32) << 20}) {
         char name[96];
