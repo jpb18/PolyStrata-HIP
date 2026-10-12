@@ -614,6 +614,25 @@ the loaded model. `tools/hip/opencode-polystrata-hip.json` is one provider with 
 a `current` model for the title agent that never switches. A request can keep earlier turns' reasoning with
 `"chat_template_kwargs": {"preserve_thinking": true}`.
 
+Unsloth's Qwen3.6 UD-Q3_K_M (17.1 GB) has the experts of Qwen3.5's Q3_K_M (IQ3_XXS gate/up, IQ4_XS down, Q6_K
+down in three layers; its draft block is Q3_K/Q4_K). It runs on the same binary with no change
+([AMD_QWEN36_Q3_MIGRATION.md](../AMD_QWEN36_Q3_MIGRATION.md)). On the same PC, the same prompts, median of three
+alternated runs:
+
+| Model | Decode at 2K / 8K / 31K / 45K (tok/s) | Prefill (tok/s) | Process working set |
+| --- | --- | --- | ---: |
+| Qwen3.6 UD-Q3_K_M | 93 / 86 / 71 / 62 | 1,123-1,433 | 11.4 GB |
+| Qwen3.6 UD-Q3_K_M, `--window 1` | 80 / 75 / 61 / 55 | 1,183-1,464 | 10.5 GB |
+
+The card holds about 60% of its experts and serves 97% of the ones used. The draft block guesses 87.5% right. In a
+process that has answered already, its windows now write 12 to 17% faster than one token a call.
+
+Against llama.cpp on the same file, all nine settings pass, among them the two that failed with UD-Q4_K_M: the
+routing on the card against llama.cpp's GPU experts, and every expert on the CPU. The batched expert products are as
+close to fp64 as a token alone in the formats of its main layers. One step of one document still moves with the
+prompt batch: 0.815 with batches of 1,024 against llama.cpp's 0.93, and 0.87-0.91 with batches of 256 or 16,
+without MMQ, or with CPU experts. It is the largest difference left (0.125-0.134).
+
 Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four
 prompts of 22 to 11,481 tokens, with and without graphs, guesses and copy kernels, and with every expert on the CPU;
 through the server a prompt of 44,419 tokens at a context of 49,152. The figures and what was not checked are in

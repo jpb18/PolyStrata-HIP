@@ -1,0 +1,106 @@
+{
+ "engine_args": "--threads 6 --expert-profile C:\\Users\\user\\models\\qwen36-q3-pack\\expert-profile.txt --no-gpu-experts",
+ "ctx": 49152,
+ "load_s": 10.315499067306519,
+ "system_before": {
+  "ram_available_mib": 18451,
+  "pagefile_used_mib": 2724,
+  "commit_mib": 33384,
+  "commit_limit_mib": 65388
+ },
+ "system_after": {
+  "ram_available_mib": 18325,
+  "pagefile_used_mib": 2611,
+  "commit_mib": 33498,
+  "commit_limit_mib": 65388
+ },
+ "peak": {
+  "vram_dedicated_mib": 4068,
+  "vram_shared_mib": 240,
+  "ram_private_mib": 1610,
+  "ram_ws_mib": 17354
+ },
+ "failed": null,
+ "rows": [
+  {
+   "length": 32768,
+   "prompt_tokens": 32751,
+   "question": "What is the access code of the north archive?",
+   "codes": [
+    "4817-PLUM"
+   ],
+   "found": [
+    "4817-PLUM"
+   ],
+   "answer": "4817-PLUM",
+   "ttft_s": 623.43,
+   "read_tokens": 32751,
+   "prompt_tok_s": 52.5,
+   "produced": 8,
+   "decode_tok_s": 39.5,
+   "page_faults": 3812938,
+   "experts_vram": 0.0
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32753,
+   "question": "What is the name of the blue team's backup server?",
+   "codes": [
+    "HERON-62"
+   ],
+   "found": [
+    "HERON-62"
+   ],
+   "answer": "HERON-62",
+   "ttft_s": 39.11,
+   "read_tokens": 2033,
+   "prompt_tok_s": 52.0,
+   "produced": 6,
+   "decode_tok_s": 21.56,
+   "page_faults": 16456,
+   "experts_vram": 0.0
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32750,
+   "question": "In which room is the meeting on Thursday?",
+   "codes": [
+    "3B-917"
+   ],
+   "found": [
+    "3B-917"
+   ],
+   "answer": "3B-917",
+   "ttft_s": 39.11,
+   "read_tokens": 2030,
+   "prompt_tok_s": 51.9,
+   "produced": 7,
+   "decode_tok_s": 30.52,
+   "page_faults": 16390,
+   "experts_vram": 0.0
+  },
+  {
+   "length": 32768,
+   "prompt_tokens": 32768,
+   "question": "List the access code of the north archive, the name of the blue team's backup server and the room of the meeting on Thursday.",
+   "codes": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "found": [
+    "4817-PLUM",
+    "HERON-62",
+    "3B-917"
+   ],
+   "answer": "4817-PLUM, HERON-62, 3B-917",
+   "ttft_s": 39.37,
+   "read_tokens": 2048,
+   "prompt_tok_s": 52.0,
+   "produced": 22,
+   "decode_tok_s": 37.14,
+   "page_faults": 16677,
+   "experts_vram": 0.0
+  }
+ ]
+}

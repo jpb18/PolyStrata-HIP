@@ -1,0 +1,5 @@
+[0m
+> build · qwen3.6-35b-a3b
+[0m→ [0mRead notes.yaml 
+> build · qwen3.6-35b-a3b
+The backup server's name is **HERON-62**.

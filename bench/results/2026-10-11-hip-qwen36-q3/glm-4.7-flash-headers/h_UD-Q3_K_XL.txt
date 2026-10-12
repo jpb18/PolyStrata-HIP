@@ -1,0 +1,67 @@
+general.architecture = deepseek2
+general.type = model
+general.sampling.top_p = 0.949999988079071
+general.sampling.temp = 1.0
+general.name = Glm-4.7-Flash
+general.basename = Glm-4.7-Flash
+general.quantized_by = Unsloth
+general.size_label = 64x2.6B
+general.license = mit
+general.repo_url = https://huggingface.co/unsloth
+general.base_model.count = 1
+general.base_model.0.name = GLM 4.7 Flash
+general.base_model.0.organization = Zai Org
+general.base_model.0.repo_url = https://huggingface.co/zai-org/GLM-4.7-Flash
+general.tags = ['unsloth', 'text-generation']
+general.languages = ['en', 'zh']
+deepseek2.block_count = 47
+deepseek2.context_length = 202752
+deepseek2.embedding_length = 2048
+deepseek2.feed_forward_length = 10240
+deepseek2.attention.head_count = 20
+deepseek2.attention.head_count_kv = 1
+deepseek2.rope.freq_base = 1000000.0
+deepseek2.attention.layer_norm_rms_epsilon = 9.999999747378752e-06
+deepseek2.expert_used_count = 4
+deepseek2.expert_group_count = 1
+deepseek2.expert_group_used_count = 1
+deepseek2.expert_gating_func = 2
+deepseek2.leading_dense_block_count = 1
+deepseek2.vocab_size = 154880
+deepseek2.attention.q_lora_rank = 768
+deepseek2.attention.kv_lora_rank = 512
+deepseek2.attention.key_length = 576
+deepseek2.attention.value_length = 512
+deepseek2.attention.key_length_mla = 256
+deepseek2.attention.value_length_mla = 256
+deepseek2.expert_feed_forward_length = 1536
+deepseek2.expert_count = 64
+deepseek2.expert_shared_count = 1
+deepseek2.expert_weights_scale = 1.7999999523162842
+deepseek2.expert_weights_norm = True
+deepseek2.rope.dimension_count = 64
+tokenizer.ggml.model = gpt2
+tokenizer.ggml.pre = glm4
+tokenizer.ggml.eos_token_id = 154820
+tokenizer.ggml.padding_token_id = 154821
+tokenizer.ggml.bos_token_id = 154822
+tokenizer.ggml.eot_token_id = 154827
+tokenizer.ggml.unknown_token_id = 154820
+tokenizer.ggml.eom_token_id = 154829
+tokenizer.chat_template = [gMASK]<sop>
+{%- if tools -%}
+<|system|>
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+
+general.quantization_version = 2
+general.file_type = 12
+quantize.imatrix.file = GLM-4.7-Flash-GGUF/imatrix_unsloth.gguf
+quantize.imatrix.dataset = unsloth_calibration_GLM-4.7-Flash.txt
+quantize.imatrix.entries_count = 607
+quantize.imatrix.chunks_count = 85
+tensors: 844 header bytes: 9475932

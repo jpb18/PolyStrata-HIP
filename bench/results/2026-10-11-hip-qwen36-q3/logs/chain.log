@@ -1,0 +1,155 @@
+== diag step 29
+pb1024       p(step 29 token 16471) = 0.815  (A 0.933, B 0.941)  max dA 0.119 dB 0.126  parts at None
+pb256        p(step 29 token 16471) = 0.914  (A 0.933, B 0.941)  max dA 0.081 dB 0.089  parts at 36
+pb16         p(step 29 token 16471) = 0.873  (A 0.933, B 0.941)  max dA 0.072 dB 0.079  parts at None
+nommq        p(step 29 token 16471) = 0.867  (A 0.933, B 0.941)  max dA 0.066 dB 0.074  parts at None
+cpu-experts  p(step 29 token 16471) = 0.881  (A 0.933, B 0.941)  max dA 0.052 dB 0.061  parts at None
+diag exit 0
+== card route check, B-2k, 256 tokens
+exit 0
+strata-poly: STRATA_POLY_CARD_ROUTE: a token on its own is routed on the card (40 of 40 MoE layers have the kernels), checked against the host's routing
+strata-poly: loaded in 26.5 s; 7092 of 10240 routed experts in VRAM (9.2 GiB), 6 CPU threads
+prompt 2068 tokens 782.3 tok/s, generated 256 tokens 74.88 tok/s (length); experts from VRAM 96.3%, CPU experts 0.1 ms/token, router wait 1.4 ms/token, 648 experts swapped into VRAM, 0 of 0 guessed tokens right
+strata-poly: routing on the card against the host's: 10240 routings, 0 picks not the host's, 25323 weights not bit for bit (largest difference 8.94e-08)
+== warm-up of the expert profile (not counted)
+[q36q3-warmup] loaded in 23.8 s (RAM free before: 18498 MiB, VRAM held by other processes: 4787 MiB)
+[q36q3-warmup] cold  A-2k      2061 tok (read   2061): TTFT    4.76 s, prefill 432.7 tok/s, decode 75.69 tok/s (128 tok, length)
+[q36q3-warmup] cold  A-8k      8216 tok (read   8216): TTFT    5.82 s, prefill 1413.6 tok/s, decode 80.75 tok/s (128 tok, length)
+[q36q3-warmup] peak: {'vram_dedicated_mib': 13161, 'vram_shared_mib': 1402, 'ram_private_mib': 11193, 'ram_ws_mib': 10271}
+== round 1
+[q36q3-default-r1] loaded in 31.3 s (RAM free before: 18345 MiB, VRAM held by other processes: 4787 MiB)
+[q36q3-default-r1] cold  A-2k      2061 tok (read   2061): TTFT    8.94 s, prefill 230.7 tok/s, decode 58.54 tok/s (128 tok, length)
+[q36q3-default-r1] cold  A-8k      8216 tok (read   8216): TTFT    6.07 s, prefill 1353.7 tok/s, decode 77.81 tok/s (128 tok, length)
+[q36q3-default-r1] cold  A-31k    31296 tok (read  31296): TTFT   23.73 s, prefill 1319.1 tok/s, decode 63.97 tok/s (128 tok, length)
+[q36q3-default-r1] cold  A-45k    45236 tok (read  45236): TTFT   38.29 s, prefill 1181.8 tok/s, decode 62.93 tok/s (128 tok, length)
+[q36q3-default-r1] warm  B-2k      2068 tok (read   2068): TTFT    1.83 s, prefill 1131.8 tok/s, decode 93.36 tok/s (128 tok, length)
+[q36q3-default-r1] warm  B-8k      8235 tok (read   8235): TTFT    5.75 s, prefill 1432.8 tok/s, decode 88.46 tok/s (128 tok, length)
+[q36q3-default-r1] warm  B-31k    31296 tok (read  31296): TTFT   23.62 s, prefill 1325.3 tok/s, decode 70.7 tok/s (128 tok, length)
+[q36q3-default-r1] warm  B-45k    45355 tok (read  45355): TTFT   37.44 s, prefill 1211.8 tok/s, decode 61.71 tok/s (128 tok, length)
+[q36q3-default-r1] cache B-2k      2068 tok (read   2068): TTFT    1.83 s, prefill 1132.5 tok/s, decode 90.14 tok/s (128 tok, length)
+[q36q3-default-r1] cache B-8k      8235 tok (read   8235): TTFT    5.66 s, prefill 1456.5 tok/s, decode 88.68 tok/s (128 tok, length)
+[q36q3-default-r1] peak: {'vram_dedicated_mib': 13162, 'vram_shared_mib': 2042, 'ram_private_mib': 11904, 'ram_ws_mib': 11351}
+[q36q3-w1-r1] loaded in 29.4 s (RAM free before: 17795 MiB, VRAM held by other processes: 4808 MiB)
+[q36q3-w1-r1] cold  A-2k      2061 tok (read   2061): TTFT    3.88 s, prefill 531.2 tok/s, decode 69.47 tok/s (128 tok, length)
+[q36q3-w1-r1] cold  A-8k      8216 tok (read   8216): TTFT    5.49 s, prefill 1496.8 tok/s, decode 73.34 tok/s (128 tok, length)
+[q36q3-w1-r1] cold  A-31k    31296 tok (read  31296): TTFT   23.33 s, prefill 1341.9 tok/s, decode 58.98 tok/s (128 tok, length)
+[q36q3-w1-r1] cold  A-45k    45236 tok (read  45236): TTFT   37.25 s, prefill 1214.7 tok/s, decode 54.43 tok/s (128 tok, length)
+[q36q3-w1-r1] warm  B-2k      2068 tok (read   2068): TTFT    1.76 s, prefill 1173.9 tok/s, decode 79.79 tok/s (128 tok, length)
+[q36q3-w1-r1] warm  B-8k      8235 tok (read   8235): TTFT    5.63 s, prefill 1462.3 tok/s, decode 74.7 tok/s (128 tok, length)
+[q36q3-w1-r1] warm  B-31k    31296 tok (read  31296): TTFT   23.39 s, prefill 1338.1 tok/s, decode 61.1 tok/s (128 tok, length)
+[q36q3-w1-r1] warm  B-45k    45355 tok (read  45355): TTFT   37.27 s, prefill 1217.0 tok/s, decode 55.18 tok/s (128 tok, length)
+[q36q3-w1-r1] cache B-2k      2068 tok (read   2068): TTFT    1.70 s, prefill 1215.5 tok/s, decode 80.61 tok/s (128 tok, length)
+[q36q3-w1-r1] cache B-8k      8235 tok (read   8235): TTFT    5.58 s, prefill 1476.9 tok/s, decode 75.6 tok/s (128 tok, length)
+[q36q3-w1-r1] peak: {'vram_dedicated_mib': 13158, 'vram_shared_mib': 2034, 'ram_private_mib': 12247, 'ram_ws_mib': 10511}
+== round 2
+[q36q3-default-r2] loaded in 26.2 s (RAM free before: 18679 MiB, VRAM held by other processes: 4808 MiB)
+[q36q3-default-r2] cold  A-2k      2061 tok (read   2061): TTFT    3.45 s, prefill 597.4 tok/s, decode 67.83 tok/s (128 tok, length)
+[q36q3-default-r2] cold  A-8k      8216 tok (read   8216): TTFT    5.96 s, prefill 1378.9 tok/s, decode 77.59 tok/s (128 tok, length)
+[q36q3-default-r2] cold  A-31k    31296 tok (read  31296): TTFT   23.44 s, prefill 1335.4 tok/s, decode 63.63 tok/s (128 tok, length)
+[q36q3-default-r2] cold  A-45k    45236 tok (read  45236): TTFT   37.85 s, prefill 1195.5 tok/s, decode 62.63 tok/s (128 tok, length)
+[q36q3-default-r2] warm  B-2k      2068 tok (read   2068): TTFT    1.84 s, prefill 1123.2 tok/s, decode 87.76 tok/s (128 tok, length)
+[q36q3-default-r2] warm  B-8k      8235 tok (read   8235): TTFT    5.77 s, prefill 1426.9 tok/s, decode 85.85 tok/s (128 tok, length)
+[q36q3-default-r2] warm  B-31k    31296 tok (read  31296): TTFT   23.60 s, prefill 1326.2 tok/s, decode 67.95 tok/s (128 tok, length)
+[q36q3-default-r2] warm  B-45k    45355 tok (read  45355): TTFT   37.48 s, prefill 1210.2 tok/s, decode 61.92 tok/s (128 tok, length)
+[q36q3-default-r2] cache B-2k      2068 tok (read   2068): TTFT    1.81 s, prefill 1143.0 tok/s, decode 94.57 tok/s (128 tok, length)
+[q36q3-default-r2] cache B-8k      8235 tok (read   8235): TTFT    5.68 s, prefill 1450.8 tok/s, decode 95.15 tok/s (128 tok, length)
+[q36q3-default-r2] peak: {'vram_dedicated_mib': 13158, 'vram_shared_mib': 2042, 'ram_private_mib': 11901, 'ram_ws_mib': 11400}
+[q36q3-w1-r2] loaded in 27.7 s (RAM free before: 18647 MiB, VRAM held by other processes: 4808 MiB)
+[q36q3-w1-r2] cold  A-2k      2061 tok (read   2061): TTFT    3.41 s, prefill 604.5 tok/s, decode 68.15 tok/s (128 tok, length)
+[q36q3-w1-r2] cold  A-8k      8216 tok (read   8216): TTFT    5.79 s, prefill 1419.2 tok/s, decode 72.12 tok/s (128 tok, length)
+[q36q3-w1-r2] cold  A-31k    31296 tok (read  31296): TTFT   23.28 s, prefill 1344.8 tok/s, decode 59.19 tok/s (128 tok, length)
+[q36q3-w1-r2] cold  A-45k    45236 tok (read  45236): TTFT   37.44 s, prefill 1208.4 tok/s, decode 54.61 tok/s (128 tok, length)
+[q36q3-w1-r2] warm  B-2k      2068 tok (read   2068): TTFT    1.75 s, prefill 1183.1 tok/s, decode 79.56 tok/s (128 tok, length)
+[q36q3-w1-r2] warm  B-8k      8235 tok (read   8235): TTFT    5.58 s, prefill 1477.6 tok/s, decode 75.0 tok/s (128 tok, length)
+[q36q3-w1-r2] warm  B-31k    31296 tok (read  31296): TTFT   23.34 s, prefill 1340.9 tok/s, decode 61.21 tok/s (128 tok, length)
+[q36q3-w1-r2] warm  B-45k    45355 tok (read  45355): TTFT   37.06 s, prefill 1223.9 tok/s, decode 55.25 tok/s (128 tok, length)
+[q36q3-w1-r2] cache B-2k      2068 tok (read   2068): TTFT    1.77 s, prefill 1166.8 tok/s, decode 79.58 tok/s (128 tok, length)
+[q36q3-w1-r2] cache B-8k      8235 tok (read   8235): TTFT    5.53 s, prefill 1489.6 tok/s, decode 75.42 tok/s (128 tok, length)
+[q36q3-w1-r2] peak: {'vram_dedicated_mib': 13158, 'vram_shared_mib': 2034, 'ram_private_mib': 12246, 'ram_ws_mib': 10511}
+== round 3
+[q36q3-default-r3] loaded in 27.8 s (RAM free before: 18360 MiB, VRAM held by other processes: 4809 MiB)
+[q36q3-default-r3] cold  A-2k      2061 tok (read   2061): TTFT    4.27 s, prefill 482.6 tok/s, decode 65.57 tok/s (128 tok, length)
+[q36q3-default-r3] cold  A-8k      8216 tok (read   8216): TTFT    5.86 s, prefill 1402.6 tok/s, decode 80.22 tok/s (128 tok, length)
+[q36q3-default-r3] cold  A-31k    31296 tok (read  31296): TTFT   23.82 s, prefill 1314.3 tok/s, decode 67.53 tok/s (128 tok, length)
+[q36q3-default-r3] cold  A-45k    45236 tok (read  45236): TTFT   37.76 s, prefill 1198.4 tok/s, decode 60.54 tok/s (128 tok, length)
+[q36q3-default-r3] warm  B-2k      2068 tok (read   2068): TTFT    1.94 s, prefill 1070.6 tok/s, decode 95.37 tok/s (128 tok, length)
+[q36q3-default-r3] warm  B-8k      8235 tok (read   8235): TTFT    5.73 s, prefill 1438.2 tok/s, decode 84.81 tok/s (128 tok, length)
+[q36q3-default-r3] warm  B-31k    31296 tok (read  31296): TTFT   23.58 s, prefill 1327.5 tok/s, decode 71.66 tok/s (128 tok, length)
+[q36q3-default-r3] warm  B-45k    45355 tok (read  45355): TTFT   37.52 s, prefill 1209.1 tok/s, decode 63.82 tok/s (128 tok, length)
+[q36q3-default-r3] cache B-2k      2068 tok (read   2068): TTFT    1.81 s, prefill 1144.9 tok/s, decode 93.44 tok/s (128 tok, length)
+[q36q3-default-r3] cache B-8k      8235 tok (read   8235): TTFT    5.69 s, prefill 1447.1 tok/s, decode 96.75 tok/s (128 tok, length)
+[q36q3-default-r3] peak: {'vram_dedicated_mib': 13166, 'vram_shared_mib': 2042, 'ram_private_mib': 11909, 'ram_ws_mib': 11376}
+[q36q3-w1-r3] loaded in 33.1 s (RAM free before: 18348 MiB, VRAM held by other processes: 4819 MiB)
+[q36q3-w1-r3] cold  A-2k      2061 tok (read   2061): TTFT    6.03 s, prefill 341.7 tok/s, decode 68.73 tok/s (128 tok, length)
+[q36q3-w1-r3] cold  A-8k      8216 tok (read   8216): TTFT    5.77 s, prefill 1425.3 tok/s, decode 73.51 tok/s (128 tok, length)
+[q36q3-w1-r3] cold  A-31k    31296 tok (read  31296): TTFT   23.33 s, prefill 1341.5 tok/s, decode 59.29 tok/s (128 tok, length)
+[q36q3-w1-r3] cold  A-45k    45236 tok (read  45236): TTFT   37.34 s, prefill 1211.7 tok/s, decode 54.79 tok/s (128 tok, length)
+[q36q3-w1-r3] warm  B-2k      2068 tok (read   2068): TTFT    1.73 s, prefill 1198.7 tok/s, decode 79.32 tok/s (128 tok, length)
+[q36q3-w1-r3] warm  B-8k      8235 tok (read   8235): TTFT    5.63 s, prefill 1463.5 tok/s, decode 75.0 tok/s (128 tok, length)
+[q36q3-w1-r3] warm  B-31k    31296 tok (read  31296): TTFT   23.36 s, prefill 1340.3 tok/s, decode 60.81 tok/s (128 tok, length)
+[q36q3-w1-r3] warm  B-45k    45355 tok (read  45355): TTFT   37.10 s, prefill 1222.6 tok/s, decode 54.96 tok/s (128 tok, length)
+[q36q3-w1-r3] cache B-2k      2068 tok (read   2068): TTFT    1.73 s, prefill 1199.1 tok/s, decode 80.55 tok/s (128 tok, length)
+[q36q3-w1-r3] cache B-8k      8235 tok (read   8235): TTFT    5.53 s, prefill 1488.6 tok/s, decode 75.54 tok/s (128 tok, length)
+[q36q3-w1-r3] peak: {'vram_dedicated_mib': 13157, 'vram_shared_mib': 2034, 'ram_private_mib': 12246, 'ram_ws_mib': 10527}
+BENCH_DONE
+== ctx48k
+corpus: 64412 tokens from 189000 characters in 2 s
+loaded in 26.6 s; system before: {'ram_available_mib': 18709, 'pagefile_used_mib': 2277, 'commit_mib': 32809, 'commit_limit_mib': 65388}
+   8192 OK  1/1 (8 tokens) TTFT     5.8 s (read   8175, 1405.1 tok/s), decode 44.33 tok/s, page faults 1635809: 'What is the access code of the north arc' -> '4817-PLUM'
+   8192 OK  1/1 (6 tokens) TTFT     1.5 s (read   2033, 1326.1 tok/s), decode 32.96 tok/s, page faults 38779: "What is the name of the blue team's back" -> 'HERON-62'
+   8192 OK  1/1 (7 tokens) TTFT     1.5 s (read   2030, 1330.5 tok/s), decode 67.42 tok/s, page faults 37407: 'In which room is the meeting on Thursday' -> '3B-917'
+   8192 OK  3/3 (22 tokens) TTFT     1.5 s (read   2048, 1332.1 tok/s), decode 53.33 tok/s, page faults 48222: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+   8192 OK  0/0 (128 tokens) TTFT     1.5 s (read   2033, 1338.1 tok/s), decode 66.04 tok/s, page faults 167103: 'Summarize in detail what the documents a' -> '```text\nThe provided documents are technical installation and configur'
+  32768 OK  1/1 (8 tokens) TTFT    24.3 s (read  32751, 1347.1 tok/s), decode 35.19 tok/s, page faults 356622: 'What is the access code of the north arc' -> '4817-PLUM'
+  32768 OK  1/1 (6 tokens) TTFT     2.0 s (read   2033, 999.6 tok/s), decode 42.96 tok/s, page faults 29154: "What is the name of the blue team's back" -> 'HERON-62'
+  32768 OK  1/1 (7 tokens) TTFT     2.1 s (read   2030, 973.9 tok/s), decode 40.32 tok/s, page faults 43694: 'In which room is the meeting on Thursday' -> '3B-917'
+  32768 MISS 1/3 (8 tokens) TTFT     2.0 s (read   2048, 1000.8 tok/s), decode 57.24 tok/s, page faults 26532: 'List the access code of the north archiv' -> '4817-PLUM'
+  32768 OK  0/0 (128 tokens) TTFT     2.0 s (read   2033, 1010.7 tok/s), decode 55.35 tok/s, page faults 61646: 'Summarize in detail what the documents a' -> '```text\nThe documents provide comprehensive technical documentation fo'
+  45000 OK  1/1 (8 tokens) TTFT    36.1 s (read  44983, 1246.2 tok/s), decode 38.11 tok/s, page faults 275644: 'What is the access code of the north arc' -> '4817-PLUM'
+  45000 OK  1/1 (6 tokens) TTFT     2.3 s (read   1977, 876.6 tok/s), decode 50.76 tok/s, page faults 23113: "What is the name of the blue team's back" -> 'HERON-62'
+  45000 OK  1/1 (7 tokens) TTFT     2.3 s (read   1974, 865.5 tok/s), decode 51.33 tok/s, page faults 19425: 'In which room is the meeting on Thursday' -> '3B-917'
+  45000 OK  3/3 (20 tokens) TTFT     2.3 s (read   1992, 863.0 tok/s), decode 53.99 tok/s, page faults 18499: 'List the access code of the north archiv' -> '4817-PLUM HERON-62 3B-917'
+  45000 OK  0/0 (128 tokens) TTFT     2.3 s (read   1977, 868.4 tok/s), decode 56.69 tok/s, page faults 39492: 'Summarize in detail what the documents a' -> '```text\nThe provided documents are technical installation guides, back'
+peak of the process: {'vram_dedicated_mib': 13161, 'vram_shared_mib': 1946, 'ram_private_mib': 11805, 'ram_ws_mib': 11312}; system after: {'ram_available_mib': 18517, 'pagefile_used_mib': 2275, 'commit_mib': 32943, 'commit_limit_mib': 65388}
+exit 1
+== ctx128k
+corpus: 173356 tokens from 549780 characters in 0 s
+loaded in 24.7 s; system before: {'ram_available_mib': 18514, 'pagefile_used_mib': 2275, 'commit_mib': 32943, 'commit_limit_mib': 65388}
+  65536 OK  1/1 (8 tokens) TTFT    57.8 s (read  65519, 1133.0 tok/s), decode 28.49 tok/s, page faults 2249900: 'What is the access code of the north arc' -> '4817-PLUM'
+  65536 OK  1/1 (6 tokens) TTFT     3.0 s (read   2033, 677.7 tok/s), decode 19.63 tok/s, page faults 40012: "What is the name of the blue team's back" -> 'HERON-62'
+  65536 OK  1/1 (7 tokens) TTFT     3.0 s (read   2030, 677.4 tok/s), decode 35.27 tok/s, page faults 40647: 'In which room is the meeting on Thursday' -> '3B-917'
+  65536 OK  3/3 (22 tokens) TTFT     3.0 s (read   2048, 677.7 tok/s), decode 32.48 tok/s, page faults 56817: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+  65536 OK  0/0 (128 tokens) TTFT     3.0 s (read   2033, 668.5 tok/s), decode 37.89 tok/s, page faults 215722: 'Summarize in detail what the documents a' -> '```text\nThe provided documents are technical installation guides, back'
+ 130900 OK  1/1 (8 tokens) TTFT   167.9 s (read 130883, 779.6 tok/s), decode 22.5 tok/s, page faults 383611: 'What is the access code of the north arc' -> '4817-PLUM'
+ 130900 OK  1/1 (6 tokens) TTFT     4.2 s (read   1861, 450.0 tok/s), decode 23.33 tok/s, page faults 39777: "What is the name of the blue team's back" -> 'HERON-62'
+ 130900 OK  1/1 (7 tokens) TTFT     4.2 s (read   1858, 448.8 tok/s), decode 17.49 tok/s, page faults 31724: 'In which room is the meeting on Thursday' -> '3B-917'
+ 130900 MISS 1/3 (8 tokens) TTFT     4.2 s (read   1876, 446.2 tok/s), decode 29.86 tok/s, page faults 41355: 'List the access code of the north archiv' -> '4817-PLUM'
+ 130900 OK  0/0 (128 tokens) TTFT     4.2 s (read   1861, 446.6 tok/s), decode 27.41 tok/s, page faults 126358: 'Summarize in detail what the documents a' -> '```json\n{\n  "summary": "The documents provide comprehensive technical '
+peak of the process: {'vram_dedicated_mib': 13161, 'vram_shared_mib': 1786, 'ram_private_mib': 10143, 'ram_ws_mib': 13141}; system after: {'ram_available_mib': 18139, 'pagefile_used_mib': 2237, 'commit_mib': 33248, 'commit_limit_mib': 65388}
+exit 1
+== ctx262k
+corpus: 338455 tokens from 1096200 characters in 0 s
+loaded in 24.6 s; system before: {'ram_available_mib': 18168, 'pagefile_used_mib': 2237, 'commit_mib': 33215, 'commit_limit_mib': 65388}
+ 261000 OK  1/1 (8 tokens) TTFT   515.8 s (read 260983, 506.1 tok/s), decode 13.1 tok/s, page faults 3188915: 'What is the access code of the north arc' -> '4817-PLUM'
+ 261000 OK  1/1 (6 tokens) TTFT     3.8 s (read    889, 235.6 tok/s), decode 12.32 tok/s, page faults 37641: "What is the name of the blue team's back" -> 'HERON-62'
+ 261000 OK  1/1 (7 tokens) TTFT     3.8 s (read    886, 233.3 tok/s), decode 12.07 tok/s, page faults 43197: 'In which room is the meeting on Thursday' -> '3B-917'
+ 261000 OK  3/3 (22 tokens) TTFT     3.9 s (read    904, 237.0 tok/s), decode 13.12 tok/s, page faults 67834: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+ 261000 OK  0/0 (128 tokens) TTFT     4.0 s (read    889, 226.0 tok/s), decode 14.14 tok/s, page faults 305692: 'Summarize in detail what the documents a' -> '```json\n{\n  "summary": "The provided documents constitute comprehensiv'
+peak of the process: {'vram_dedicated_mib': 13161, 'vram_shared_mib': 1786, 'ram_private_mib': 12962, 'ram_ws_mib': 15441}; system after: {'ram_available_mib': 18988, 'pagefile_used_mib': 2677, 'commit_mib': 32731, 'commit_limit_mib': 65388}
+exit 0
+== ctx262k-stream
+corpus: 338455 tokens from 1096200 characters in 0 s
+loaded in 32.9 s; system before: {'ram_available_mib': 18984, 'pagefile_used_mib': 2677, 'commit_mib': 32728, 'commit_limit_mib': 65388}
+  65536 OK  1/1 (8 tokens) TTFT    62.9 s (read  65519, 1041.4 tok/s), decode 12.73 tok/s, page faults 1930926: 'What is the access code of the north arc' -> '4817-PLUM'
+  65536 OK  1/1 (6 tokens) TTFT     2.9 s (read   2033, 702.4 tok/s), decode 14.78 tok/s, page faults 38345: "What is the name of the blue team's back" -> 'HERON-62'
+  65536 OK  1/1 (7 tokens) TTFT     3.0 s (read   2030, 687.9 tok/s), decode 24.23 tok/s, page faults 43134: 'In which room is the meeting on Thursday' -> '3B-917'
+  65536 OK  3/3 (22 tokens) TTFT     3.0 s (read   2048, 696.1 tok/s), decode 24.06 tok/s, page faults 48478: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+  65536 OK  0/0 (128 tokens) TTFT     3.1 s (read   2033, 665.7 tok/s), decode 28.1 tok/s, page faults 174839: 'Summarize in detail what the documents a' -> '```text\nThe provided documents are technical installation guides, back'
+ 261000 OK  1/1 (8 tokens) TTFT   571.0 s (read 260983, 457.1 tok/s), decode 4.31 tok/s, page faults 510162: 'What is the access code of the north arc' -> '4817-PLUM'
+ 261000 OK  1/1 (6 tokens) TTFT     4.1 s (read    889, 221.6 tok/s), decode 5.16 tok/s, page faults 29519: "What is the name of the blue team's back" -> 'HERON-62'
+ 261000 OK  1/1 (7 tokens) TTFT     4.1 s (read    886, 220.9 tok/s), decode 2.97 tok/s, page faults 31960: 'In which room is the meeting on Thursday' -> '3B-917'
+ 261000 OK  3/3 (22 tokens) TTFT     4.0 s (read    904, 227.2 tok/s), decode 2.81 tok/s, page faults 30751: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+ 261000 OK  0/0 (128 tokens) TTFT     4.2 s (read    889, 216.6 tok/s), decode 3.64 tok/s, page faults 107509: 'Summarize in detail what the documents a' -> '```json\n{\n  "summary": "The provided documents constitute comprehensiv'
+peak of the process: {'vram_dedicated_mib': 13153, 'vram_shared_mib': 6364, 'ram_private_mib': 16035, 'ram_ws_mib': 16360}; system after: {'ram_available_mib': 18928, 'pagefile_used_mib': 2725, 'commit_mib': 33023, 'commit_limit_mib': 65388}
+exit 0
+LONGCTX_DONE

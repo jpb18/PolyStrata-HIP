@@ -1,0 +1,193 @@
+== A + window 1, card route (warm)
+reference: C:\Users\user\.unsloth\llama.cpp\build\bin\Release\llama-server.exe -m C:\Users\user\models\Qwen3.6-35B-A3B-UD-Q3_K_M.gguf --port 8187 -c 40960 --no-webui --cpu-moe -ngl 99
+doc-30k: 35575 prompt tokens, reference done
+short: 22 prompt tokens, reference done
+code: 870 prompt tokens, reference done
+doc-2.5k: 3069 prompt tokens, reference done
+doc-8k: 11481 prompt tokens, reference done
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.072 (step 36), mean 0.0066, p95 0.046
+     strata-poly: the pages of the experts outside VRAM read in 6.5 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 48.8 s; 6455 of 10240 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 35575 tokens 1271.3 tok/s, generated 64 tokens 32.54 tok/s (length); experts from VRAM 89.3%, CPU experts 0.0 ms/token, router wait 0.7 ms/token, 389 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.060 (step 62), mean 0.0028, p95 0.019
+     strata-poly: the pages of the experts outside VRAM read in 7.0 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 51.7 s; 6536 of 10240 routed experts in VRAM (8.5 GiB), 6 CPU threads
+     prompt 22 tokens 33.3 tok/s, generated 64 tokens 56.27 tok/s (length); experts from VRAM 81.9%, CPU experts 5.1 ms/token, router wait 11.8 ms/token, 626 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   code         870 tokens: 28/64 same, max diff 0.109 (step 28), mean 0.0060, p95 0.016, parts at 28: llama [(3431, 0.5222140624469621), (15992, 0.448317254253044)] engine [(15992, 0.5576), (3431, 0.4192)] (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 12.9 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 57.2 s; 6473 of 10240 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 870 tokens 199.4 tok/s, generated 64 tokens 55.70 tok/s (length); experts from VRAM 90.2%, CPU experts 0.2 ms/token, router wait 0.8 ms/token, 370 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.125 (step 29), mean 0.0055, p95 0.036
+     strata-poly: the pages of the experts outside VRAM read in 6.5 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 50.1 s; 6646 of 10240 routed experts in VRAM (8.6 GiB), 6 CPU threads
+     prompt 3069 tokens 685.7 tok/s, generated 64 tokens 47.59 tok/s (length); experts from VRAM 90.4%, CPU experts 0.1 ms/token, router wait 0.7 ms/token, 360 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-8k     11481 tokens: 39/64 same, max diff 0.148 (step 39), mean 0.0044, p95 0.013, parts at 39: llama [(2425, 0.4092140793223046), (1536, 0.3231708783725741)] engine [(1536, 0.4713), (2425, 0.2867)] (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 6.5 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 44.0 s; 6649 of 10240 routed experts in VRAM (8.6 GiB), 6 CPU threads
+     prompt 11481 tokens 1273.0 tok/s, generated 64 tokens 43.65 tok/s (length); experts from VRAM 89.7%, CPU experts 0.0 ms/token, router wait 0.5 ms/token, 420 experts swapped into VRAM, 0 of 0 guessed tokens right
+parity: PASS
+== B: llama.cpp HIP --n-cpu-moe 22, against A
+reference: C:\Users\user\.unsloth\llama.cpp\build\bin\Release\llama-server.exe -m C:\Users\user\models\Qwen3.6-35B-A3B-UD-Q3_K_M.gguf --port 8187 -c 40960 --no-webui --n-cpu-moe 22 -ngl 99
+doc-30k: 35575 prompt tokens, reference done
+short: 22 prompt tokens, reference done
+code: 870 prompt tokens, reference done
+doc-2.5k: 3069 prompt tokens, reference done
+doc-8k: 11481 prompt tokens, reference done
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.017 (step 35), mean 0.0020, p95 0.012
+ok   short         22 tokens: 64/64 same, max diff 0.036 (step 60), mean 0.0015, p95 0.010
+ok   code         870 tokens: 64/64 same, max diff 0.026 (step 60), mean 0.0023, p95 0.017
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.025 (step 20), mean 0.0017, p95 0.011
+ok   doc-8k     11481 tokens: 39/64 same, max diff 0.054 (step 39), mean 0.0018, p95 0.008, parts at 39: llama [(1536, 0.3663203011390412), (2425, 0.35515411502601646)] engine [(2425, 0.4092140793223046), (1536, 0.3231708783725741)] (near tie)
+parity: PASS
+== window 1, card route (warm), against B
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-gpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.064 (step 53), mean 0.0058, p95 0.037
+     strata-poly: the pages of the experts outside VRAM read in 2.2 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 37.1 s; 6630 of 10240 routed experts in VRAM (8.6 GiB), 6 CPU threads
+     prompt 35575 tokens 1244.6 tok/s, generated 64 tokens 44.51 tok/s (length); experts from VRAM 90.2%, CPU experts 0.0 ms/token, router wait 0.7 ms/token, 358 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.085 (step 59), mean 0.0052, p95 0.040
+     strata-poly: the pages of the experts outside VRAM read in 2.0 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 33.5 s; 6645 of 10240 routed experts in VRAM (8.6 GiB), 6 CPU threads
+     prompt 22 tokens 33.7 tok/s, generated 64 tokens 55.09 tok/s (length); experts from VRAM 82.9%, CPU experts 4.9 ms/token, router wait 11.7 ms/token, 598 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   code         870 tokens: 64/64 same, max diff 0.079 (step 36), mean 0.0047, p95 0.026
+     strata-poly: the pages of the experts outside VRAM read in 1.8 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 41.9 s; 6446 of 10240 routed experts in VRAM (8.3 GiB), 6 CPU threads
+     prompt 870 tokens 264.9 tok/s, generated 64 tokens 47.44 tok/s (length); experts from VRAM 89.6%, CPU experts 0.2 ms/token, router wait 1.0 ms/token, 391 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.134 (step 29), mean 0.0060, p95 0.038
+     strata-poly: the pages of the experts outside VRAM read in 1.5 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 27.4 s; 6726 of 10240 routed experts in VRAM (8.7 GiB), 6 CPU threads
+     prompt 3069 tokens 896.8 tok/s, generated 64 tokens 55.21 tok/s (length); experts from VRAM 90.7%, CPU experts 0.1 ms/token, router wait 0.6 ms/token, 353 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-8k     11481 tokens: 64/64 same, max diff 0.061 (step 47), mean 0.0059, p95 0.029
+     strata-poly: the pages of the experts outside VRAM read in 1.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 26.7 s; 6727 of 10240 routed experts in VRAM (8.7 GiB), 6 CPU threads
+     prompt 11481 tokens 1445.2 tok/s, generated 64 tokens 56.31 tok/s (length); experts from VRAM 90.1%, CPU experts 0.0 ms/token, router wait 0.5 ms/token, 409 experts swapped into VRAM, 0 of 0 guessed tokens right
+parity: PASS
+== window 1, host route
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-cpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.078 (step 14), mean 0.0058, p95 0.036
+     strata-poly: loaded in 28.6 s; 6695 of 10240 routed experts in VRAM (8.7 GiB), 6 CPU threads
+     prompt 35575 tokens 1312.3 tok/s, generated 64 tokens 39.76 tok/s (length); experts from VRAM 91.2%, CPU experts 0.0 ms/token, router wait 0.6 ms/token, 353 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.037 (step 48), mean 0.0022, p95 0.019
+     strata-poly: loaded in 24.7 s; 6729 of 10240 routed experts in VRAM (8.7 GiB), 6 CPU threads
+     prompt 22 tokens 37.2 tok/s, generated 64 tokens 43.05 tok/s (length); experts from VRAM 85.4%, CPU experts 5.5 ms/token, router wait 14.3 ms/token, 676 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   code         870 tokens: 28/64 same, max diff 0.045 (step 28), mean 0.0031, p95 0.025, parts at 28: llama [(3431, 0.5222140624469621), (15992, 0.448317254253044)] engine [(15992, 0.493), (3431, 0.4843)] (near tie)
+     strata-poly: loaded in 25.7 s; 6728 of 10240 routed experts in VRAM (8.7 GiB), 6 CPU threads
+     prompt 870 tokens 478.8 tok/s, generated 64 tokens 50.22 tok/s (length); experts from VRAM 91.5%, CPU experts 0.2 ms/token, router wait 1.1 ms/token, 347 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.127 (step 29), mean 0.0062, p95 0.036
+     strata-poly: loaded in 39.4 s; 6636 of 10240 routed experts in VRAM (8.6 GiB), 6 CPU threads
+     prompt 3069 tokens 441.1 tok/s, generated 64 tokens 39.86 tok/s (length); experts from VRAM 90.7%, CPU experts 0.1 ms/token, router wait 0.9 ms/token, 367 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-8k     11481 tokens: 39/64 same, max diff 0.064 (step 39), mean 0.0020, p95 0.006, parts at 39: llama [(2425, 0.4092140793223046), (1536, 0.3231708783725741)] engine [(1536, 0.3825), (2425, 0.3453)] (near tie)
+     strata-poly: loaded in 28.0 s; 6730 of 10240 routed experts in VRAM (8.7 GiB), 6 CPU threads
+     prompt 11481 tokens 1403.3 tok/s, generated 64 tokens 44.66 tok/s (length); experts from VRAM 90.6%, CPU experts 0.0 ms/token, router wait 0.5 ms/token, 405 experts swapped into VRAM, 0 of 0 guessed tokens right
+parity: PASS
+== window 1, every expert on the CPU
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-cpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.081 (step 53), mean 0.0055, p95 0.038
+     strata-poly: loaded in 8.9 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads
+     prompt 35575 tokens 48.2 tok/s, generated 64 tokens 25.31 tok/s (length); experts from VRAM 0.0%, CPU experts 19.4 ms/token, router wait 1.2 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.042 (step 59), mean 0.0025, p95 0.018
+     strata-poly: loaded in 11.4 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads
+     prompt 22 tokens 26.5 tok/s, generated 64 tokens 24.86 tok/s (length); experts from VRAM 0.0%, CPU experts 27.1 ms/token, router wait 8.4 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   code         870 tokens: 64/64 same, max diff 0.039 (step 40), mean 0.0032, p95 0.022
+     strata-poly: loaded in 13.8 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads
+     prompt 870 tokens 41.6 tok/s, generated 64 tokens 28.70 tok/s (length); experts from VRAM 0.0%, CPU experts 19.4 ms/token, router wait 1.6 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.052 (step 29), mean 0.0036, p95 0.033
+     strata-poly: loaded in 12.4 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads
+     prompt 3069 tokens 48.6 tok/s, generated 64 tokens 29.94 tok/s (length); experts from VRAM 0.0%, CPU experts 19.1 ms/token, router wait 1.2 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-8k     11481 tokens: 39/64 same, max diff 0.069 (step 39), mean 0.0022, p95 0.006, parts at 39: llama [(2425, 0.4092140793223046), (1536, 0.3231708783725741)] engine [(1536, 0.3626), (2425, 0.3398)] (near tie)
+     strata-poly: loaded in 8.4 s; 0 of 10240 routed experts in VRAM (0.0 GiB), 6 CPU threads
+     prompt 11481 tokens 53.3 tok/s, generated 64 tokens 29.42 tok/s (length); experts from VRAM 0.0%, CPU experts 17.5 ms/token, router wait 1.2 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right
+parity: PASS
+== window 1, no MMQ, against A
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-cpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 37/64 same, max diff 0.075 (step 37), mean 0.0076, p95 0.057, parts at 37: llama [(553, 0.22042188303138746), (78905, 0.19040482153682972)] engine [(36022, 0.2318), (553, 0.2017)] (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 25.2 s; 7242 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 35575 tokens 335.1 tok/s, generated 64 tokens 51.37 tok/s (length); experts from VRAM 97.3%, CPU experts 0.5 ms/token, router wait 2.2 ms/token, 192 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.088 (step 59), mean 0.0040, p95 0.037
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 24.7 s; 7241 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 22 tokens 106.1 tok/s, generated 64 tokens 66.72 tok/s (length); experts from VRAM 89.2%, CPU experts 2.6 ms/token, router wait 7.6 ms/token, 521 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   code         870 tokens: 64/64 same, max diff 0.073 (step 61), mean 0.0038, p95 0.023
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 24.0 s; 7229 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 870 tokens 299.9 tok/s, generated 64 tokens 67.73 tok/s (length); experts from VRAM 95.2%, CPU experts 0.9 ms/token, router wait 2.1 ms/token, 675 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.082 (step 25), mean 0.0045, p95 0.027
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 24.6 s; 7241 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 3069 tokens 339.8 tok/s, generated 64 tokens 66.96 tok/s (length); experts from VRAM 97.6%, CPU experts 0.5 ms/token, router wait 2.2 ms/token, 399 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-8k     11481 tokens: 42/64 same, max diff 0.095 (step 42), mean 0.0049, p95 0.036, parts at 42: llama [(10597, 0.38510445117340797), (1248, 0.30322646832098754)] engine [(1248, 0.3981), (10597, 0.2982)] (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 31.4 s; 7215 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 11481 tokens 333.7 tok/s, generated 64 tokens 56.81 tok/s (length); experts from VRAM 96.9%, CPU experts 0.7 ms/token, router wait 2.0 ms/token, 267 experts swapped into VRAM, 0 of 0 guessed tokens right
+parity: PASS
+== window 1, no MMQ, against B
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-gpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.045 (step 37), mean 0.0052, p95 0.035
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 30.1 s; 7224 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 35575 tokens 329.5 tok/s, generated 64 tokens 48.07 tok/s (length); experts from VRAM 97.3%, CPU experts 0.6 ms/token, router wait 2.2 ms/token, 191 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.124 (step 53), mean 0.0049, p95 0.028
+     strata-poly: the pages of the experts outside VRAM read in 1.4 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 27.3 s; 7217 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 22 tokens 76.9 tok/s, generated 64 tokens 64.29 tok/s (length); experts from VRAM 88.6%, CPU experts 3.0 ms/token, router wait 8.3 ms/token, 521 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   code         870 tokens: 28/64 same, max diff 0.058 (step 27), mean 0.0051, p95 0.057, parts at 28: llama [(3431, 0.5216747030586973), (15992, 0.4501837177702393)] engine [(15992, 0.5076), (3431, 0.4654)] (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.4 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 30.8 s; 7223 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 870 tokens 262.4 tok/s, generated 64 tokens 66.33 tok/s (length); experts from VRAM 95.1%, CPU experts 1.1 ms/token, router wait 2.0 ms/token, 664 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.091 (step 25), mean 0.0047, p95 0.036
+     strata-poly: the pages of the experts outside VRAM read in 1.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 30.0 s; 7223 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 3069 tokens 271.0 tok/s, generated 64 tokens 65.80 tok/s (length); experts from VRAM 97.6%, CPU experts 0.6 ms/token, router wait 2.2 ms/token, 396 experts swapped into VRAM, 0 of 0 guessed tokens right
+ok   doc-8k     11481 tokens: 64/64 same, max diff 0.086 (step 14), mean 0.0062, p95 0.029
+     strata-poly: the pages of the experts outside VRAM read in 1.4 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 35.1 s; 7223 of 10240 routed experts in VRAM (9.4 GiB), 6 CPU threads
+     prompt 11481 tokens 316.6 tok/s, generated 64 tokens 55.86 tok/s (length); experts from VRAM 96.9%, CPU experts 0.7 ms/token, router wait 2.0 ms/token, 267 experts swapped into VRAM, 0 of 0 guessed tokens right
+parity: PASS
+== default (MTP draft block), ids only
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-cpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.000 (step 40), mean 0.0000, p95 0.000
+     strata-poly: the pages of the experts outside VRAM read in 5.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 35.0 s; 6471 of 10496 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 35575 tokens 1265.2 tok/s, generated 64 tokens 44.35 tok/s (length); experts from VRAM 85.8%, CPU experts 0.0 ms/token, router wait 0.6 ms/token, 317 experts swapped into VRAM, 38 of 48 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.000 (step 20), mean 0.0000, p95 0.000
+     strata-poly: the pages of the experts outside VRAM read in 3.3 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 40.1 s; 6460 of 10496 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 22 tokens 58.8 tok/s, generated 64 tokens 70.53 tok/s (length); experts from VRAM 75.4%, CPU experts 5.8 ms/token, router wait 5.7 ms/token, 258 experts swapped into VRAM, 47 of 49 guessed tokens right
+ok   code         870 tokens: 28/64 same, max diff 0.000 (step 18), mean 0.0000, p95 0.000, parts at 28: llama [(3431, 0.5222140624469621), (15992, 0.448317254253044)] engine (not compared) (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.8 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 36.5 s; 6471 of 10496 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 870 tokens 365.4 tok/s, generated 64 tokens 52.88 tok/s (length); experts from VRAM 87.4%, CPU experts 0.3 ms/token, router wait 0.8 ms/token, 367 experts swapped into VRAM, 31 of 40 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.000 (step 30), mean 0.0000, p95 0.000
+     strata-poly: the pages of the experts outside VRAM read in 1.8 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 28.3 s; 6471 of 10496 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 3069 tokens 849.4 tok/s, generated 64 tokens 52.92 tok/s (length); experts from VRAM 86.3%, CPU experts 0.1 ms/token, router wait 0.6 ms/token, 389 experts swapped into VRAM, 32 of 47 guessed tokens right
+ok   doc-8k     11481 tokens: 39/64 same, max diff 0.000 (step 25), mean 0.0000, p95 0.000, parts at 39: llama [(2425, 0.4092140793223046), (1536, 0.3231708783725741)] engine (not compared) (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.8 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 28.8 s; 6468 of 10496 routed experts in VRAM (8.4 GiB), 6 CPU threads
+     prompt 11481 tokens 1311.3 tok/s, generated 64 tokens 50.24 tok/s (length); experts from VRAM 84.4%, CPU experts 0.0 ms/token, router wait 0.5 ms/token, 351 experts swapped into VRAM, 36 of 47 guessed tokens right
+parity: PASS
+== --no-draft, ids only
+reference: bench/results/2026-10-11-hip-qwen36-q3/refs-llama-hip-cpu.json (5 prompts)
+ok   doc-30k    35575 tokens: 64/64 same, max diff 0.000 (step 57), mean 0.0000, p95 0.000
+     strata-poly: the pages of the experts outside VRAM read in 1.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 30.5 s; 6568 of 10240 routed experts in VRAM (8.5 GiB), 6 CPU threads
+     prompt 35575 tokens 1292.9 tok/s, generated 64 tokens 42.20 tok/s (length); experts from VRAM 90.2%, CPU experts 0.0 ms/token, router wait 0.6 ms/token, 381 experts swapped into VRAM, 8 of 13 guessed tokens right
+ok   short         22 tokens: 64/64 same, max diff 0.000 (step 26), mean 0.0000, p95 0.000
+     strata-poly: the pages of the experts outside VRAM read in 1.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 28.8 s; 6582 of 10240 routed experts in VRAM (8.5 GiB), 6 CPU threads
+     prompt 22 tokens 55.7 tok/s, generated 64 tokens 55.91 tok/s (length); experts from VRAM 83.2%, CPU experts 4.8 ms/token, router wait 9.4 ms/token, 597 experts swapped into VRAM, 3 of 12 guessed tokens right
+ok   code         870 tokens: 28/64 same, max diff 0.000 (step 28), mean 0.0000, p95 0.000, parts at 28: llama [(3431, 0.5222140624469621), (15992, 0.448317254253044)] engine (not compared) (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 27.9 s; 6593 of 10240 routed experts in VRAM (8.5 GiB), 6 CPU threads
+     prompt 870 tokens 428.7 tok/s, generated 64 tokens 50.29 tok/s (length); experts from VRAM 91.1%, CPU experts 0.2 ms/token, router wait 0.9 ms/token, 342 experts swapped into VRAM, 1 of 4 guessed tokens right
+ok   doc-2.5k    3069 tokens: 64/64 same, max diff 0.000 (step 46), mean 0.0000, p95 0.000
+     strata-poly: the pages of the experts outside VRAM read in 1.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 29.1 s; 6568 of 10240 routed experts in VRAM (8.5 GiB), 6 CPU threads
+     prompt 3069 tokens 891.7 tok/s, generated 64 tokens 52.72 tok/s (length); experts from VRAM 90.4%, CPU experts 0.1 ms/token, router wait 0.6 ms/token, 389 experts swapped into VRAM, 1 of 6 guessed tokens right
+ok   doc-8k     11481 tokens: 39/64 same, max diff 0.000 (step 29), mean 0.0000, p95 0.000, parts at 39: llama [(2425, 0.4092140793223046), (1536, 0.3231708783725741)] engine (not compared) (near tie)
+     strata-poly: the pages of the experts outside VRAM read in 1.6 s (STRATA_POLY_WARM)
+     strata-poly: loaded in 29.1 s; 6582 of 10240 routed experts in VRAM (8.5 GiB), 6 CPU threads
+     prompt 11481 tokens 1286.9 tok/s, generated 64 tokens 47.49 tok/s (length); experts from VRAM 89.6%, CPU experts 0.0 ms/token, router wait 0.5 ms/token, 450 experts swapped into VRAM, 9 of 16 guessed tokens right
+parity: PASS
+PARITY_DONE

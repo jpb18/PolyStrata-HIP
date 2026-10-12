@@ -1,0 +1,56 @@
+[
+ {
+  "label": "q36q3-warmup",
+  "engine": "poly",
+  "exe": "C:\\Users\\user\\Documents\\PolyStrata\\build-hip-poly-win\\strata-poly.exe",
+  "args": "--expert-profile C:\\Users\\user\\models\\qwen36-q3-pack\\expert-profile.txt --threads 6",
+  "ctx": 49152,
+  "max_new": 128,
+  "load_s": 23.81,
+  "memory": {
+   "vram_dedicated_mib": 13161,
+   "vram_shared_mib": 1402,
+   "ram_private_mib": 11193,
+   "ram_ws_mib": 10271
+  },
+  "ram_free_mib_before": 18498,
+  "vram_others_mib_before": 4787,
+  "rows": [
+   {
+    "ttft_s": 4.764,
+    "wall_s": 6.455,
+    "produced": 128,
+    "prompt_tokens": 2061,
+    "read_tokens": 2061,
+    "prompt_ms": 4763.5,
+    "decode_ms": 1691.0,
+    "finish": "length",
+    "guessed_right": 76,
+    "guessed": 89,
+    "vram_expert_hits": 0.89,
+    "phase": "cold",
+    "prompt": "A-2k",
+    "prefill_tok_s": 432.7,
+    "decode_tok_s": 75.69
+   },
+   {
+    "ttft_s": 5.815,
+    "wall_s": 7.399,
+    "produced": 128,
+    "prompt_tokens": 8216,
+    "read_tokens": 8216,
+    "prompt_ms": 5812.0,
+    "decode_ms": 1585.1,
+    "finish": "length",
+    "guessed_right": 70,
+    "guessed": 85,
+    "vram_expert_hits": 0.963,
+    "phase": "cold",
+    "prompt": "A-8k",
+    "prefill_tok_s": 1413.6,
+    "decode_tok_s": 80.75
+   }
+  ],
+  "time": "2026-10-12 00:27:06"
+ }
+]

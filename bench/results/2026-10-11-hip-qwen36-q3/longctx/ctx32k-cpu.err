@@ -1,0 +1,4 @@
+strata-poly: loaded in 8.5 s; 0 of 10496 routed experts in VRAM (0.0 GiB), 6 CPU threads
+strata: Windows budgets 15416 of this card's 16304 MiB for this process; free VRAM is counted within that (STRATA_WDDM_BUDGET=0: off)
+strata-poly: VRAM MiB: dense weights 1961, expert cache 0, KV 1056 (49152 positions), KV stage 0, recurrent state 251, scratch and the rest 379; 11440 free.  Pinned RAM MiB: KV 0 (0 positions), the rest 33; RAM available 15571 MiB
+strata-poly: 92160 of 131022 prompt tokens were not read again (70.3%); 0 conversations parked in 0 MiB, 0 pushed out; 11402 MiB of VRAM free at the end

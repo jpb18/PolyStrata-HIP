@@ -1,0 +1,178 @@
+[
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 40,
+  "worst_llama_top2": [
+   [
+    471,
+    1.0
+   ],
+   [
+    2972,
+    3.7565298125948136e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    553,
+    0.2169
+   ],
+   [
+    36022,
+    0.1983
+   ]
+  ],
+  "name": "doc-30k",
+  "prompt_tokens": 35575
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 20,
+  "worst_llama_top2": [
+   [
+    25,
+    1.0
+   ],
+   [
+    16561,
+    1.5574147585742482e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9318
+   ],
+   [
+    90700,
+    0.0676
+   ]
+  ],
+  "name": "short",
+  "prompt_tokens": 22
+ },
+ {
+  "same": 28,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 18,
+  "worst_llama_top2": [
+   [
+    471,
+    0.9999980926513672
+   ],
+   [
+    561,
+    1.7936183417286836e-06
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9614
+   ],
+   [
+    90700,
+    0.0365
+   ]
+  ],
+  "parted_at": 28,
+  "llama_top2": [
+   [
+    3431,
+    0.5222140624469621
+   ],
+   [
+    15992,
+    0.448317254253044
+   ]
+  ],
+  "engine_top2": "(not compared)",
+  "near_tie": true,
+  "name": "code",
+  "prompt_tokens": 870
+ },
+ {
+  "same": 64,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 30,
+  "worst_llama_top2": [
+   [
+    321,
+    1.0
+   ],
+   [
+    1142,
+    2.7669977344065073e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9971
+   ],
+   [
+    90700,
+    0.0026
+   ]
+  ],
+  "name": "doc-2.5k",
+  "prompt_tokens": 3069
+ },
+ {
+  "same": 39,
+  "of": 64,
+  "max_diff": 0.0,
+  "mean_diff": 0.0,
+  "p95_diff": 0.0,
+  "worst_step": 25,
+  "worst_llama_top2": [
+   [
+    279,
+    1.0
+   ],
+   [
+    1822,
+    1.3330907596876858e-08
+   ]
+  ],
+  "worst_engine_top2": [
+   [
+    8160,
+    0.9674
+   ],
+   [
+    90700,
+    0.0163
+   ]
+  ],
+  "parted_at": 39,
+  "llama_top2": [
+   [
+    2425,
+    0.4092140793223046
+   ],
+   [
+    1536,
+    0.3231708783725741
+   ]
+  ],
+  "engine_top2": "(not compared)",
+  "near_tie": true,
+  "name": "doc-8k",
+  "prompt_tokens": 11481
+ }
+]

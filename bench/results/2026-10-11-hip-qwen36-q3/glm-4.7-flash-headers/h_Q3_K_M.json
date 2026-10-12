@@ -1,0 +1,7667 @@
+{
+ "version": 3,
+ "meta": {
+  "general.architecture": "deepseek2",
+  "general.type": "model",
+  "general.sampling.top_p": 0.949999988079071,
+  "general.sampling.temp": 1.0,
+  "general.name": "Glm-4.7-Flash",
+  "general.basename": "Glm-4.7-Flash",
+  "general.quantized_by": "Unsloth",
+  "general.size_label": "64x2.6B",
+  "general.license": "mit",
+  "general.repo_url": "https://huggingface.co/unsloth",
+  "general.base_model.count": 1,
+  "general.base_model.0.name": "GLM 4.7 Flash",
+  "general.base_model.0.organization": "Zai Org",
+  "general.base_model.0.repo_url": "https://huggingface.co/zai-org/GLM-4.7-Flash",
+  "general.tags": [
+   "unsloth",
+   "text-generation"
+  ],
+  "general.languages": [
+   "en",
+   "zh"
+  ],
+  "deepseek2.block_count": 47,
+  "deepseek2.context_length": 202752,
+  "deepseek2.embedding_length": 2048,
+  "deepseek2.feed_forward_length": 10240,
+  "deepseek2.attention.head_count": 20,
+  "deepseek2.attention.head_count_kv": 1,
+  "deepseek2.rope.freq_base": 1000000.0,
+  "deepseek2.attention.layer_norm_rms_epsilon": 9.999999747378752e-06,
+  "deepseek2.expert_used_count": 4,
+  "deepseek2.expert_group_count": 1,
+  "deepseek2.expert_group_used_count": 1,
+  "deepseek2.expert_gating_func": 2,
+  "deepseek2.leading_dense_block_count": 1,
+  "deepseek2.vocab_size": 154880,
+  "deepseek2.attention.q_lora_rank": 768,
+  "deepseek2.attention.kv_lora_rank": 512,
+  "deepseek2.attention.key_length": 576,
+  "deepseek2.attention.value_length": 512,
+  "deepseek2.attention.key_length_mla": 256,
+  "deepseek2.attention.value_length_mla": 256,
+  "deepseek2.expert_feed_forward_length": 1536,
+  "deepseek2.expert_count": 64,
+  "deepseek2.expert_shared_count": 1,
+  "deepseek2.expert_weights_scale": 1.7999999523162842,
+  "deepseek2.expert_weights_norm": true,
+  "deepseek2.rope.dimension_count": 64,
+  "tokenizer.ggml.model": "gpt2",
+  "tokenizer.ggml.pre": "glm4",
+  "tokenizer.ggml.tokens": "<array of 154880 strings>",
+  "tokenizer.ggml.token_type": "<array of 154880>",
+  "tokenizer.ggml.merges": "<array of 321649 strings>",
+  "tokenizer.ggml.eos_token_id": 154820,
+  "tokenizer.ggml.padding_token_id": 154821,
+  "tokenizer.ggml.bos_token_id": 154822,
+  "tokenizer.ggml.eot_token_id": 154827,
+  "tokenizer.ggml.unknown_token_id": 154820,
+  "tokenizer.ggml.eom_token_id": 154829,
+  "tokenizer.chat_template": "[gMASK]<sop>\n{%- if tools -%}\n<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{% for tool in tools %}\n{{ tool | tojson(ensure_ascii=False) }}\n{% endfor %}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call>{%- endif -%}\n{%- macro visible_text(content) -%}\n    {%- if content is string -%}\n        {{- content }}\n    {%- elif content is iterable and content is not mapping -%}\n        {%- for item in content -%}\n            {%- if item is mapping and item.type == 'text' -%}\n                {{- item.text }}\n            {%- elif item is string -%}\n                {{- item }}\n            {%- endif -%}\n        {%- endfor -%}\n    {%- else -%}\n        {{- content }}\n    {%- endif -%}\n{%- endmacro -%}\n{%- set ns = namespace(last_user_index=-1) %}\n{%- for m in messages %}\n    {%- if m.role == 'user' %}\n        {% set ns.last_user_index = loop.index0 -%}\n    {%- endif %}\n{%- endfor %}\n{% for m in messages %}\n{%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}\n{%- elif m.role == 'assistant' -%}\n<|assistant|>\n{%- set reasoning_content = '' %}\n{%- set content = visible_text(m.content) %}\n{%- if m.reasoning_content is string %}\n    {%- set reasoning_content = m.reasoning_content %}\n{%- else %}\n    {%- if '</think>' in content %}\n        {%- set reasoning_content = content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') %}\n        {%- set content = content.split('</think>')[-1].lstrip('\\n') %}\n    {%- endif %}\n{%- endif %}\n{%- if ((clear_thinking is defined and not clear_thinking) or loop.index0 > ns.last_user_index) and reasoning_content -%}\n{{ '<think>' + reasoning_content.strip() +  '</think>'}}\n{%- else -%}\n{{ '</think>' }}\n{%- endif -%}\n{%- if content.strip() -%}\n{{ content.strip() }}\n{%- endif -%}\n{% if m.tool_calls %}\n{% for tc in m.tool_calls %}\n{%- if tc.function %}\n    {%- set tc = tc.function %}\n{%- endif %}\n{{- '<tool_call>' + tc.name -}}\n{% set _args = tc.arguments %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}\n{% endif %}\n{%- elif m.role == 'tool' -%}\n{%- if m.content is string -%}\n{%- if loop.first or (messages[loop.index0 - 1].role != \"tool\") %}\n    {{- '<|observation|>' }}\n{%- endif %}\n{{- '<tool_response>' }}\n{{- m.content }}\n{{- '</tool_response>' }}\n{%- else -%}\n<|observation|>{% for tr in m.content %}\n<tool_response>{{ tr.output if tr.output is defined else tr }}</tool_response>{% endfor -%}\n{% endif -%}\n{%- elif m.role == 'system' -%}\n<|system|>{{ visible_text(m.content) }}\n{%- endif -%}\n{%- endfor -%}\n{%- if add_generation_prompt -%}\n    <|assistant|>{{- '</think>' if (enable_thinking is defined and not enable_thinking) else '<think>' -}}\n{%- endif -%}",
+  "general.quantization_version": 2,
+  "general.file_type": 12,
+  "quantize.imatrix.file": "GLM-4.7-Flash-GGUF/imatrix_unsloth.gguf",
+  "quantize.imatrix.dataset": "unsloth_calibration_GLM-4.7-Flash.txt",
+  "quantize.imatrix.entries_count": 607,
+  "quantize.imatrix.chunks_count": 85
+ },
+ "tensors": [
+  {
+   "name": "output.weight",
+   "dims": [
+    2048,
+    154880
+   ],
+   "type": "Q6_K",
+   "bytes": 260198400
+  },
+  {
+   "name": "output_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "token_embd.weight",
+   "dims": [
+    2048,
+    154880
+   ],
+   "type": "Q3_K",
+   "bytes": 136294400
+  },
+  {
+   "name": "blk.0.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.0.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.0.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.0.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.0.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.0.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.0.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.0.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.0.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.0.ffn_down.weight",
+   "dims": [
+    10240,
+    2048
+   ],
+   "type": "Q5_K",
+   "bytes": 14417920
+  },
+  {
+   "name": "blk.0.ffn_gate.weight",
+   "dims": [
+    2048,
+    10240
+   ],
+   "type": "Q3_K",
+   "bytes": 9011200
+  },
+  {
+   "name": "blk.0.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.0.ffn_up.weight",
+   "dims": [
+    2048,
+    10240
+   ],
+   "type": "Q3_K",
+   "bytes": 9011200
+  },
+  {
+   "name": "blk.1.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.1.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.1.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.1.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.1.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.1.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.1.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.1.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.1.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.1.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.1.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q5_K",
+   "bytes": 138412032
+  },
+  {
+   "name": "blk.1.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.1.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.1.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.1.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.1.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.1.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.1.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.2.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.2.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.2.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.2.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.2.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.2.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.2.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.2.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.2.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.2.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.2.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.2.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.2.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.2.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.2.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.2.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.2.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.2.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.3.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.3.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.3.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.3.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.3.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.3.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.3.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.3.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.3.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.3.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.3.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.3.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.3.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.3.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.3.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.3.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.3.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.3.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.4.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.4.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.4.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.4.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.4.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.4.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.4.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.4.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.4.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.4.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.4.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.4.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.4.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.4.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.4.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.4.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.4.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.4.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.5.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.5.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.5.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.5.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.5.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.5.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.5.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.5.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.5.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.5.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.5.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.5.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.5.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.5.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.5.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.5.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.5.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.5.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.6.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.6.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.6.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.6.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.6.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.6.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.6.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.6.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.6.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.6.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.6.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.6.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.6.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.6.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.6.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.6.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.6.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.6.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.7.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.7.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.7.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.7.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.7.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.7.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.7.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.7.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.7.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.7.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.7.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.7.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.7.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.7.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.7.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.7.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.7.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.7.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.8.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.8.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.8.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.8.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.8.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.8.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.8.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.8.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.8.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.8.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.8.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.8.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.8.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.8.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.8.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.8.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.8.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.8.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.9.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.9.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.9.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.9.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.9.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.9.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.9.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.9.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.9.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.9.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.9.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.9.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.9.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.9.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.9.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.9.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.9.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.9.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.10.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.10.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.10.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.10.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.10.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.10.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.10.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.10.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.10.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.10.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.10.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.10.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.10.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.10.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.10.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.10.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.10.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.10.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.11.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.11.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.11.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.11.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.11.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.11.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.11.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.11.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.11.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.11.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.11.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.11.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.11.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.11.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.11.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.11.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.11.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.11.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.12.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.12.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.12.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.12.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.12.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.12.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.12.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.12.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.12.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.12.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.12.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.12.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.12.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.12.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.12.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.12.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.12.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.12.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.13.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.13.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.13.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.13.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.13.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.13.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.13.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.13.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.13.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.13.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.13.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.13.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.13.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.13.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.13.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.13.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.13.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.13.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.14.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.14.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.14.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.14.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.14.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.14.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.14.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.14.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.14.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.14.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.14.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.14.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.14.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.14.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.14.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.14.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.14.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.14.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.15.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.15.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.15.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.15.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.15.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.15.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.15.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.15.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.15.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.15.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.15.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.15.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.15.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.15.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.15.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.15.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.15.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.15.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.16.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.16.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.16.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.16.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.16.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.16.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.16.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.16.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.16.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.16.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.16.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.16.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.16.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.16.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.16.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.16.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.16.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.16.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.17.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.17.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.17.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.17.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.17.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.17.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.17.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.17.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.17.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.17.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.17.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.17.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.17.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.17.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.17.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.17.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.17.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.17.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.18.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.18.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.18.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.18.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.18.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.18.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.18.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.18.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.18.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.18.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.18.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.18.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.18.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.18.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.18.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.18.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.18.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.18.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.19.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.19.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.19.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.19.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.19.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.19.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.19.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.19.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.19.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.19.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.19.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.19.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.19.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.19.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.19.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.19.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.19.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.19.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.20.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.20.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.20.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.20.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.20.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.20.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.20.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.20.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.20.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.20.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.20.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.20.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.20.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.20.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.20.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.20.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.20.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.20.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.21.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.21.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.21.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.21.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.21.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.21.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.21.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.21.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.21.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.21.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.21.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.21.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.21.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.21.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.21.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.21.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.21.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.21.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.22.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.22.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.22.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.22.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.22.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.22.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.22.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.22.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.22.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.22.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.22.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.22.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.22.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.22.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.22.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.22.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.22.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.22.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.23.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.23.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.23.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.23.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.23.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.23.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.23.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.23.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.23.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.23.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.23.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.23.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.23.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.23.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.23.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.23.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.23.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.23.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.24.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.24.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.24.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.24.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.24.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.24.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.24.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.24.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.24.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.24.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.24.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.24.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.24.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.24.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.24.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.24.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.24.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.24.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.25.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.25.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.25.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.25.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.25.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.25.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.25.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.25.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.25.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.25.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.25.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.25.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.25.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.25.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.25.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.25.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.25.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.25.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.26.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.26.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.26.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.26.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.26.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.26.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.26.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.26.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.26.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.26.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.26.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.26.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.26.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.26.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.26.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.26.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.26.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.26.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.27.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.27.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.27.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.27.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.27.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.27.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.27.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.27.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.27.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.27.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.27.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.27.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.27.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.27.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.27.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.27.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.27.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.27.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.28.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.28.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.28.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.28.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.28.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.28.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.28.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.28.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.28.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.28.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.28.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.28.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.28.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.28.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.28.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.28.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.28.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.28.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.29.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.29.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.29.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.29.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.29.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.29.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.29.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.29.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.29.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.29.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.29.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.29.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.29.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.29.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.29.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.29.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.29.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.29.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.30.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.30.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.30.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.30.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.30.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.30.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.30.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.30.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.30.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.30.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.30.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.30.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.30.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.30.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.30.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.30.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.30.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.30.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.31.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.31.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.31.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.31.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.31.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.31.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.31.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.31.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.31.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.31.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.31.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.31.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.31.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.31.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.31.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.31.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.31.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.31.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.32.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.32.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.32.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.32.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.32.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.32.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.32.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.32.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.32.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.32.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.32.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.32.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.32.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.32.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.32.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.32.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.32.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.32.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.33.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.33.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.33.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.33.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.33.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.33.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.33.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.33.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.33.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.33.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.33.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.33.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.33.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.33.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.33.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.33.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.33.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.33.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.34.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.34.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.34.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.34.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.34.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.34.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.34.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.34.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.34.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.34.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.34.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.34.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.34.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.34.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.34.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.34.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.34.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.34.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.35.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.35.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.35.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.35.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.35.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.35.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.35.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.35.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.35.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.35.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.35.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.35.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.35.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.35.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.35.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.35.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.35.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.35.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.36.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.36.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.36.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.36.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.36.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.36.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.36.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.36.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.36.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.36.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.36.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.36.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.36.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.36.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.36.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.36.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.36.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.36.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.37.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.37.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.37.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.37.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.37.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.37.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.37.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.37.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.37.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.37.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.37.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.37.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.37.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.37.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.37.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.37.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.37.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.37.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.38.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.38.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.38.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.38.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.38.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.38.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.38.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.38.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.38.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.38.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.38.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.38.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.38.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.38.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.38.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.38.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.38.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.38.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.39.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.39.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.39.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.39.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.39.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.39.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.39.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.39.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.39.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.39.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.39.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.39.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.39.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.39.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.39.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.39.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.39.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.39.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.40.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.40.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.40.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.40.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.40.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.40.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.40.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.40.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.40.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.40.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.40.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.40.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.40.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.40.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.40.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.40.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.40.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.40.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.41.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.41.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.41.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.41.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.41.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.41.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.41.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.41.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.41.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.41.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.41.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.41.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.41.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.41.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.41.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.41.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.41.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.41.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.42.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.42.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.42.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.42.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.42.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.42.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.42.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.42.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.42.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.42.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.42.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.42.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.42.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.42.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.42.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.42.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.42.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.42.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.43.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.43.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.43.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.43.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.43.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.43.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.43.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.43.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.43.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.43.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.43.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.43.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.43.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.43.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.43.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.43.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.43.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.43.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.44.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.44.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.44.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.44.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.44.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.44.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.44.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.44.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.44.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.44.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.44.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.44.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.44.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.44.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.44.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.44.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.44.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.44.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.45.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.45.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.45.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.45.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.45.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.45.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.45.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.45.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.45.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.45.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.45.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.45.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.45.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.45.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.45.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.45.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.45.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.45.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.46.attn_k_b.weight",
+   "dims": [
+    192,
+    512,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2088960
+  },
+  {
+   "name": "blk.46.attn_kv_a_mqa.weight",
+   "dims": [
+    2048,
+    576
+   ],
+   "type": "Q8_0",
+   "bytes": 1253376
+  },
+  {
+   "name": "blk.46.attn_kv_a_norm.weight",
+   "dims": [
+    512
+   ],
+   "type": "F32",
+   "bytes": 2048
+  },
+  {
+   "name": "blk.46.attn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.46.attn_output.weight",
+   "dims": [
+    5120,
+    2048
+   ],
+   "type": "Q4_K",
+   "bytes": 5898240
+  },
+  {
+   "name": "blk.46.attn_q_a.weight",
+   "dims": [
+    2048,
+    768
+   ],
+   "type": "Q3_K",
+   "bytes": 675840
+  },
+  {
+   "name": "blk.46.attn_q_a_norm.weight",
+   "dims": [
+    768
+   ],
+   "type": "F32",
+   "bytes": 3072
+  },
+  {
+   "name": "blk.46.attn_q_b.weight",
+   "dims": [
+    768,
+    5120
+   ],
+   "type": "Q3_K",
+   "bytes": 1689600
+  },
+  {
+   "name": "blk.46.attn_v_b.weight",
+   "dims": [
+    512,
+    256,
+    20
+   ],
+   "type": "Q8_0",
+   "bytes": 2785280
+  },
+  {
+   "name": "blk.46.exp_probs_b.bias",
+   "dims": [
+    64
+   ],
+   "type": "F32",
+   "bytes": 256
+  },
+  {
+   "name": "blk.46.ffn_down_exps.weight",
+   "dims": [
+    1536,
+    2048,
+    64
+   ],
+   "type": "Q4_K",
+   "bytes": 113246208
+  },
+  {
+   "name": "blk.46.ffn_down_shexp.weight",
+   "dims": [
+    1536,
+    2048
+   ],
+   "type": "Q6_K",
+   "bytes": 2580480
+  },
+  {
+   "name": "blk.46.ffn_gate_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.46.ffn_gate_inp.weight",
+   "dims": [
+    2048,
+    64
+   ],
+   "type": "F32",
+   "bytes": 524288
+  },
+  {
+   "name": "blk.46.ffn_gate_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  },
+  {
+   "name": "blk.46.ffn_norm.weight",
+   "dims": [
+    2048
+   ],
+   "type": "F32",
+   "bytes": 8192
+  },
+  {
+   "name": "blk.46.ffn_up_exps.weight",
+   "dims": [
+    2048,
+    1536,
+    64
+   ],
+   "type": "Q3_K",
+   "bytes": 86507520
+  },
+  {
+   "name": "blk.46.ffn_up_shexp.weight",
+   "dims": [
+    2048,
+    1536
+   ],
+   "type": "Q4_K",
+   "bytes": 1769472
+  }
+ ],
+ "header_bytes": 9475932
+}

@@ -1,0 +1,33 @@
+== 32K, --window 1
+corpus: 47533 tokens from 137625 characters in 0 s
+loaded in 31.5 s; system before: {'ram_available_mib': 18944, 'pagefile_used_mib': 2725, 'commit_mib': 32959, 'commit_limit_mib': 65388}
+  32768 OK  1/1 (8 tokens) TTFT    22.7 s (read  32751, 1445.3 tok/s), decode 51.43 tok/s, page faults 1545159: 'What is the access code of the north arc' -> '4817-PLUM'
+  32768 OK  1/1 (6 tokens) TTFT     1.9 s (read   2033, 1045.4 tok/s), decode 54.7 tok/s, page faults 33931: "What is the name of the blue team's back" -> 'HERON-62'
+  32768 OK  1/1 (7 tokens) TTFT     1.9 s (read   2030, 1052.0 tok/s), decode 51.5 tok/s, page faults 37807: 'In which room is the meeting on Thursday' -> '3B-917'
+  32768 OK  3/3 (22 tokens) TTFT     2.0 s (read   2048, 1047.8 tok/s), decode 54.82 tok/s, page faults 49210: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+peak of the process: {'vram_dedicated_mib': 13160, 'vram_shared_mib': 1522, 'ram_private_mib': 11782, 'ram_ws_mib': 9603}; system after: {'ram_available_mib': 18781, 'pagefile_used_mib': 2724, 'commit_mib': 33103, 'commit_limit_mib': 65388}
+== 32K, --no-draft
+corpus: 47533 tokens from 137625 characters in 0 s
+loaded in 25.1 s; system before: {'ram_available_mib': 18803, 'pagefile_used_mib': 2724, 'commit_mib': 33086, 'commit_limit_mib': 65388}
+  32768 OK  1/1 (8 tokens) TTFT    22.6 s (read  32751, 1451.8 tok/s), decode 36.05 tok/s, page faults 1596380: 'What is the access code of the north arc' -> '4817-PLUM'
+  32768 OK  1/1 (6 tokens) TTFT     2.0 s (read   2033, 1036.7 tok/s), decode 51.39 tok/s, page faults 33530: "What is the name of the blue team's back" -> 'HERON-62'
+  32768 OK  1/1 (7 tokens) TTFT     2.0 s (read   2030, 1036.7 tok/s), decode 49.26 tok/s, page faults 40146: 'In which room is the meeting on Thursday' -> '3B-917'
+  32768 OK  3/3 (22 tokens) TTFT     2.0 s (read   2048, 1027.9 tok/s), decode 52.9 tok/s, page faults 51404: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+peak of the process: {'vram_dedicated_mib': 13160, 'vram_shared_mib': 1530, 'ram_private_mib': 11544, 'ram_ws_mib': 9791}; system after: {'ram_available_mib': 18603, 'pagefile_used_mib': 2724, 'commit_mib': 33264, 'commit_limit_mib': 65388}
+== 32K, no MMQ
+corpus: 47533 tokens from 137625 characters in 0 s
+loaded in 25.8 s; system before: {'ram_available_mib': 18614, 'pagefile_used_mib': 2724, 'commit_mib': 33255, 'commit_limit_mib': 65388}
+  32768 OK  1/1 (8 tokens) TTFT    96.4 s (read  32751, 339.9 tok/s), decode 65.36 tok/s, page faults 1494571: 'What is the access code of the north arc' -> '4817-PLUM'
+  32768 OK  1/1 (6 tokens) TTFT     6.3 s (read   2033, 322.4 tok/s), decode 39.87 tok/s, page faults 33416: "What is the name of the blue team's back" -> 'HERON-62'
+  32768 OK  1/1 (7 tokens) TTFT     6.3 s (read   2030, 322.0 tok/s), decode 52.63 tok/s, page faults 31718: 'In which room is the meeting on Thursday' -> '3B-917'
+  32768 OK  3/3 (22 tokens) TTFT     6.4 s (read   2048, 321.7 tok/s), decode 64.98 tok/s, page faults 26699: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+peak of the process: {'vram_dedicated_mib': 13158, 'vram_shared_mib': 244, 'ram_private_mib': 10697, 'ram_ws_mib': 8445}; system after: {'ram_available_mib': 18462, 'pagefile_used_mib': 2724, 'commit_mib': 33407, 'commit_limit_mib': 65388}
+== 32K, CPU experts
+corpus: 47533 tokens from 137625 characters in 0 s
+loaded in 10.3 s; system before: {'ram_available_mib': 18451, 'pagefile_used_mib': 2724, 'commit_mib': 33384, 'commit_limit_mib': 65388}
+  32768 OK  1/1 (8 tokens) TTFT   623.4 s (read  32751, 52.5 tok/s), decode 39.5 tok/s, page faults 3812938: 'What is the access code of the north arc' -> '4817-PLUM'
+  32768 OK  1/1 (6 tokens) TTFT    39.1 s (read   2033, 52.0 tok/s), decode 21.56 tok/s, page faults 16456: "What is the name of the blue team's back" -> 'HERON-62'
+  32768 OK  1/1 (7 tokens) TTFT    39.1 s (read   2030, 51.9 tok/s), decode 30.52 tok/s, page faults 16390: 'In which room is the meeting on Thursday' -> '3B-917'
+  32768 OK  3/3 (22 tokens) TTFT    39.4 s (read   2048, 52.0 tok/s), decode 37.14 tok/s, page faults 16677: 'List the access code of the north archiv' -> '4817-PLUM, HERON-62, 3B-917'
+peak of the process: {'vram_dedicated_mib': 4068, 'vram_shared_mib': 240, 'ram_private_mib': 1610, 'ram_ws_mib': 17354}; system after: {'ram_available_mib': 18325, 'pagefile_used_mib': 2611, 'commit_mib': 33498, 'commit_limit_mib': 65388}
+COMBINED_DONE
