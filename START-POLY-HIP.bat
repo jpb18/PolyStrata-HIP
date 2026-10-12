@@ -1,9 +1,10 @@
 @echo off
 rem strata-poly on an AMD card (HIP, experimental: AMD_PORT_PHASE2.md, AMD_KV_STREAMING.md), started with a double-click.
 rem
-rem   START-POLY-HIP.bat                  a menu: the model, when more than one is set up (Qwen3.5, Qwen3.6), and the
-rem                                       context (48K, 128K, 262K, 262K with KV streaming), then the server on this PC
-rem                                       only (http://127.0.0.1:8090/) and its page in the browser
+rem   START-POLY-HIP.bat                  a menu: the model, when more than one is set up (here Qwen3.6-35B-A3B
+rem                                       UD-Q3_K_M only: no model menu), and the context (48K, 128K, 262K, 262K with
+rem                                       KV streaming), then the server on this PC only (http://127.0.0.1:8090/) and
+rem                                       its page in the browser
 rem   START-POLY-HIP.bat 128k             no menu: that profile (48k, 128k, 262k, 262k-stream)
 rem   START-POLY-HIP.bat qwen3.6 [128k]   no model menu: the model set up here whose name has that text in it
 rem   START-POLY-HIP.bat chat [128k]      a chat in this window (the server starts by itself)
@@ -70,7 +71,7 @@ if not defined GGUF (
   if not defined ANY (
     echo.
     echo  Ainda nao ha nenhum modelo configurado. Indica o GGUF uma vez, por exemplo:
-    echo    START-POLY-HIP.bat C:\Users\%USERNAME%\models\Qwen3.5-35B-A3B-Q3_K_M.gguf
+    echo    START-POLY-HIP.bat C:\Users\%USERNAME%\models\Qwen3.6-35B-A3B-UD-Q3_K_M.gguf
     echo  ^(ou arrasta o ficheiro .gguf para cima deste script^)
     goto fail
   )
@@ -105,6 +106,8 @@ if not defined GGUF if not defined MODEL (
     )
     for %%I in (!CHM!) do set "MODEL=!BASE%%I!"
   )
+  rem one model set up: it is the one (the context menu shows its speeds)
+  if !N! EQU 1 set "MODEL=!BASE1!"
 )
 set "LAST=build-hip-poly-win\last-profile.txt"
 if not defined PROFILE (
@@ -115,13 +118,14 @@ if not defined PROFILE (
     if /i "!PREV!"=="262k" set "DEF=3"
     if /i "!PREV!"=="262k-stream" set "DEF=4"
   )
-  rem the speeds measured on an RX 9060 XT (AMD_KV_STREAMING.md, AMD_QWEN36_IMPLEMENTATION.md)
-  set "S1=~68 tok/s numa conversa curta"
-  set "S2=~29 tok/s com 128K preenchidos"
-  set "S3=~17 tok/s com 261K preenchidos"
-  if defined MODEL if not "!MODEL:qwen3.6=!"=="!MODEL!" (
-    set "S1=~65 tok/s numa conversa curta"
-    set "S2=~24 tok/s com 128K preenchidos"
+  rem the speeds of Qwen3.6-35B-A3B UD-Q3_K_M measured on an RX 9060 XT (AMD_QWEN36_Q3_MIGRATION.md); another
+  rem model's were not measured here
+  set "S1=velocidade nao medida"
+  set "S2=velocidade nao medida"
+  set "S3=velocidade nao medida"
+  if defined MODEL if not "!MODEL:qwen3.6-35b-a3b-ud-q3_k_m=!"=="!MODEL!" (
+    set "S1=~93 tok/s numa conversa curta"
+    set "S2=~27 tok/s com 128K preenchidos"
     set "S3=~14 tok/s com 261K preenchidos"
   )
   echo.
