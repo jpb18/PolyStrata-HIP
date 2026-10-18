@@ -156,6 +156,9 @@ void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int 
 /// window - 1 + rows of them.
 /// With `at`, the tokens start at the position the card holds there; the launches are sized for `room` rows,
 /// which must be no fewer than a launch's tokens attend between them, and score has room for them.
+/// score_floats (STRATA_POLY_ATTN_FIT): the floats `score` really holds.  At Qwen3.5/3.6's shape a launch of the
+/// rows kernels then takes as many tokens as its scores and parts' sums fit there, instead of `chunk` tokens when
+/// they fit in chunk tokens' scores of the launch's own span; 0, the default, keeps that.
 ///
 /// KV streaming (AMD_KV_STREAMING.md): a key and value cache whose sequence rows from `split` on lie in pinned host
 /// memory, row `split` first, read through its device pointer (zero-copy, over PCIe); the rows below `split` are
@@ -176,7 +179,7 @@ int attend_batch_block(size_t score_floats, int rows, int n_head);
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
             int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0,
-            const KvSpill* spill = nullptr);
+            const KvSpill* spill = nullptr, size_t score_floats = 0);
 /// attend() for a prompt batch: the same attention with cuBLAS products on the tensor cores, several times
 /// faster on many tokens.  The products read the cache's halves where they lie, take the queries and the
 /// softmax's weights rounded to halves, and sum floats.  A token's result depends on the tokens beside it, so
@@ -189,6 +192,62 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                   float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
                   float scale, void* stream, int window = 0, int ring = 0, bool whole = false,
                   const KvSpill* spill = nullptr);
+// ---- the same attention over a Q8_0 key and value cache (docs/AMD_HIP_KV_Q8.md); the fp16 functions above are
+// untouched by it
+//
+// A row (one position of one layer's keys, or of its values) holds, for each of the kv_heads heads, its dim values
+// as int8 codes and then their dim / 32 scales as fp16, one for each block of 32 values, the head padded to a multiple
+// of 16 bytes: kv_heads * q8_head_bytes(dim), 544 bytes at 2 heads of 256 against 1,024 in fp16.  A value is code *
+// scale.  The codes are ggml's quantize_row_q8_0's: the block's largest |x| over 127 is its scale d, a code is x
+// times 1/d rounded half away from zero (every code 0 when the block is), and d is kept rounded to fp16.  A value so
+// lies within d / 2 of x, plus 127 times the scale's rounding: 0.562 d at most.  dim is a multiple of 32.
+constexpr int kQ8Block = 32;
+inline size_t q8_head_bytes(int dim) { return (size_t(dim) + size_t(dim / kQ8Block) * 2 + 15) & ~size_t(15); }
+inline size_t q8_row_bytes(int dim, int kv_heads) { return size_t(kv_heads) * q8_head_bytes(dim); }
+/// store_f16() for a q8_0 cache: the tokens' rows of kv_heads * dim floats each, quantized into the cache's rows from
+/// row `pos` on.
+void store_q8(const float* x, uint8_t* cache, int dim, int kv_heads, int64_t pos, int rows, void* stream);
+/// The same from the row the card holds at `at` when the launch runs, for a launch that is recorded once and replayed.
+void store_q8_at(const float* x, uint8_t* cache, int dim, int kv_heads, const long long* at, int rows, void* stream);
+/// Rows [row0, row0 + m) of a q8_0 cache as halves, one row after the other into `out` (kv_heads * dim halves a row):
+/// each value rounded to fp16, as attend_batch_q8() hands its products.
+void kv_dequant_q8(const uint8_t* cache, long long row0, int m, int dim, int kv_heads, uint16_t* out, void* stream);
+/// attend() over q8_0 caches: the same tokens, positions, scratch and results, each key and value read as its code
+/// times its scale where attend() reads a half.  The same choice of kernels: at Qwen3.5/3.6's shape (dim 256, 8 heads
+/// a group, no window, ring or `whole`) the rows kernels when the scratch has room for the parts' sums (counted as
+/// attend() counts it, with or without score_floats), unless STRATA_POLY_ATTN=0; else the general ones.  A token
+/// comes out the same whatever tokens the call has beside it.
+/// No KV streaming.  q lies at a multiple of 16 bytes, and so do the caches.
+void attend_q8(const float* q, const uint8_t* kcache, const uint8_t* vcache, int64_t pos, int rows, float* score,
+               int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
+               int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0,
+               size_t score_floats = 0);
+/// attend_batch() over q8_0 caches: each block of rows is turned into halves in kstage and vstage first
+/// (kv_dequant_q8), stage_rows rows each, which is the most a block takes, and the same products read them there.
+/// Where the blocks are attend_batch()'s (stage_rows no fewer than its block), the result is attend_batch()'s over a
+/// cache of those halves, bit for bit.  No KV streaming.
+void attend_batch_q8(void* blas, const float* q, const uint8_t* kcache, const uint8_t* vcache, int64_t pos, int rows,
+                     float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
+                     float scale, void* stream, uint16_t* kstage, uint16_t* vstage, int stage_rows, int window = 0,
+                     int ring = 0, bool whole = false);
+/// attend_q8() and attend_batch_q8() with the keys and the values each in its own format: k_q8 / v_q8, a q8_0 cache,
+/// else an fp16 one (Options::kv_k / kv_v, docs/AMD_HIP_KV_Q8.md 3.3).  The scores read only the keys and the sums
+/// only the values, so a cache in q8_0 is read by the q8_0 kernels and one in fp16 by attend()'s, in the same launches
+/// and order: with both true they are attend_q8() and attend_batch_q8().  The fp16 cache of a prompt batch is read
+/// where it lies; only a q8_0 one needs its stage.  For tests of the two halves of the error apart, and the engine's
+/// q8_0 cache.  No KV streaming.
+void attend_kv(const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8, int64_t pos, int rows,
+               float* score, int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream,
+               int window = 0, int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0,
+               size_t score_floats = 0);
+void attend_batch_kv(void* blas, const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8,
+                     int64_t pos, int rows, float* score, size_t score_floats, float* work, float* out, int dim,
+                     int n_head, int kv_heads, float scale, void* stream, uint16_t* kstage, uint16_t* vstage,
+                     int stage_rows, int window = 0, int ring = 0, bool whole = false);
+/// The rows of the stage attend_batch_kv() dequantizes a q8_0 cache's blocks into (kv_heads * dim halves each): 16
+/// MiB for the two at Qwen3.6's shape.  Its blocks are no longer, so a call of a few hundred tokens or fewer takes more.
+constexpr int kQ8StageRows = 8192;
+
 /// x = cap * tanh(x / cap).
 void softcap(float* x, size_t n, float cap, void* stream);
 /// The first of the largest of n logits and the softmax's probability of it, summed without the logits more than
@@ -217,6 +276,10 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s,
               const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
               float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
+/// The kernel of a prompt batch's state update in gdn_step() (32 tokens or more, no snapshots, heads of 128): 0
+/// the one of a few tokens, 1, 2 or 4 the one that keeps the state in registers, with that many columns a warp; the
+/// same bits.  STRATA_POLY_GDN_STATE sets it when this is not called; 4 when neither is.
+void gdn_state_way(int way);
 
 #if defined(STRATA_USE_HIP)
 /// n words of 4 bytes from src to dst, bit for bit, by a kernel.  Either side may be pinned host memory
@@ -240,20 +303,25 @@ struct CardRoute {
     int* need = nullptr;            ///< on the card: 1 when a pick is not cached (wait_add() waits for the host)
     uint32_t* ready = nullptr;      ///< set to *seq once all of the above is written (null: not set)
     const uint32_t* seq = nullptr;  ///< on the card: the number of the token under way
+    uint32_t* blocks = nullptr;     ///< on the card, 0 between calls: counts the tokens routed, for `ready`
 };
 
 /// A token's routing on the card, as Qwen35::route() does it on the host: the softmax of n_expert scores, the
 /// n_used likeliest (the lower number first among equals), their probabilities over the sum of them (at least
 /// min_sum).  table holds the layer's experts' slots in VRAM (null: not cached).  For pick k: gate_up->w[k] and
 /// down->w[k] (at down_off into the slot) get the slot or null, w_dev[k] its weight (0 if not cached); `out` gets
-/// the rest.  One block; n_expert at most 1024, n_used at most 8.
+/// the rest.  n_expert at most 1024, n_used at most 8.  rows tokens (up to 8), a block each, each the same as
+/// alone: token r's scores at scores + r * n_expert, its slots gate_up[r] and down[r], its weights at w_dev + 8 r,
+/// and in `out` ids, w and cached at 8 r, x and x_host at r * n_x, need at r; `ready` is set once, when all are.
 void route_topk_softmax(const float* scores, int n_expert, int n_used, float min_sum, const uint8_t* const* table,
-                        size_t down_off, void* gate_up, void* down, float* w_dev, const CardRoute& out, void* stream);
+                        size_t down_off, void* gate_up, void* down, float* w_dev, const CardRoute& out, int rows,
+                        void* stream);
 
-/// When *need: waits for *go == *seq (the host's word that its experts' sum is in cpu), then fo += cpu (n values).
-/// A wait of more than `ticks` (wall_clock64()) sets *failed and adds nothing.
-void wait_add(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, int n,
-              long long ticks, uint32_t* failed, void* stream);
+/// When need[r] for any of rows tokens: waits for *go == *seq (the host's word that its experts' sums are in cpu),
+/// then fo's row r += cpu's row r (n values each) for each r with need[r].  A wait of more than `ticks`
+/// (wall_clock64()) sets *failed and adds nothing.  `waited`, when given, gets the ticks waited added to it.
+void wait_add(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, int n, int rows,
+              long long ticks, uint32_t* failed, void* stream, unsigned long long* waited = nullptr);
 
 /// *p = v, in stream order.
 void set_word(uint32_t* p, uint32_t v, void* stream);
@@ -261,5 +329,19 @@ void set_word(uint32_t* p, uint32_t v, void* stream);
 /// table[i] = slot, in stream order (the expert cache's table on the card follows the host's).
 void set_slot(const uint8_t** table, size_t i, const uint8_t* slot, void* stream);
 #endif
+
+/// STRATA_POLY_PREFILL_PROF, a diagnostic (engine.cpp): the parts of a prompt batch whose card time is measured,
+/// from an event recorded on the stream after each.  A part is the time from the event before it to its own.
+enum PrefillPart {
+    kPpStart = -1,   // a measured stretch starts: the time before it belongs to no part
+    kPpEmbed, kPpNormIn, kPpGdnProj, kPpGdnConv, kPpGdnNorm, kPpGdnGates, kPpGdnState, kPpGdnOut, kPpGdnWo,
+    kPpAttnQ, kPpAttnKv, kPpAttnGroup, kPpAttnScore, kPpAttnSoftmax, kPpAttnScale, kPpAttnValue, kPpAttnFinish,
+    kPpAttnCore, kPpAttnOut, kPpResidNorm, kPpRouter, kPpShared, kPpHostGap, kPpMoeTables, kPpCachedGu,
+    kPpCachedAct, kPpCachedDown, kPpStageWait, kPpStagedMmq, kPpMoeSum, kPpTail, kPpCkpt, kPpOut, kPpParts
+};
+/// Set by the engine while a prompt batch is measured, null otherwise: gdn_step() calls it between its launches,
+/// and attend_batch() calls prefill_mark_fine between its products (STRATA_POLY_PREFILL_PROF=2).
+extern void (*prefill_mark)(void* stream, int part);
+extern void (*prefill_mark_fine)(void* stream, int part);
 
 }  // namespace strata::poly

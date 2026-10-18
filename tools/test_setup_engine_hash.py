@@ -295,6 +295,11 @@ class WhatARefusalDoesToTheCaller(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         (Path(self.tmp.name) / "engine").mkdir(parents=True, exist_ok=True)
+        # Keep refusal tests away from installed engines and real release HEAD requests.
+        for patcher in (mock.patch.object(setup, "engine_dir", return_value=Path(self.tmp.name) / "engine"),
+                        mock.patch.object(setup.urllib.request, "urlopen", return_value=mock.MagicMock())):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def fake_download(self, url, dst, what=None):
         with zipfile.ZipFile(dst, "w") as z:

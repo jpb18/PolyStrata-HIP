@@ -8,7 +8,9 @@
 #include "conversations.hpp"
 #include "engine.hpp"
 #include "guesses.hpp"
+#include "window_fixed.hpp"
 #include "strata/core/conversation_memory.hpp"
+#include "strata/poly/gpu_failure.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 
@@ -300,6 +302,84 @@ struct CacheFlags {
     int32_t turn_token = -1;
 };
 
+// STRATA_POLY_TRACE=1, a diagnostic: where an answer's time goes, round by round (a round is the token the model
+// wrote and the guesses that go with it), printed after each answer.  The parts are the calls that wait for the
+// card anyway, so timing them changes nothing of what runs.
+struct Trace {
+    bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_TRACE");
+        return v != nullptr && (v[0] == '1' || v[0] == '2');   // 2: the card's time of the parts too
+    }();
+    long long rounds = 0, drafts = 0, evals = 0, windows[9] = {}, wrote[9] = {}, right[5] = {};
+    double draft_ms = 0, eval_ms = 0, window_ms[9] = {}, keep_ms = 0, pick_ms = 0, show_ms = 0, all_ms = 0;
+    strata::poly::Stats at;
+    void begin(const Engine& e) { *this = Trace{on, e.stats()}; }
+    Trace() = default;
+    Trace(bool o, const strata::poly::Stats& s) : on(o), at(s) {}
+    void print(const Engine& e, long long produced) const {
+        if (!on || produced == 0) return;
+        const strata::poly::Stats& s = e.stats();
+        double parts = draft_ms + eval_ms + keep_ms + pick_ms + show_ms;
+        for (double w : window_ms) parts += w;
+        std::fprintf(stderr, "strata-poly trace: %lld tokens in %.1f ms (%.2f ms a token), %lld rounds\n", produced,
+                     all_ms, all_ms / (double) produced, rounds);
+        std::fprintf(stderr, "  drafts  %6lld calls %9.1f ms  %.3f ms a call\n", drafts, draft_ms,
+                     drafts ? draft_ms / (double) drafts : 0.0);
+        std::fprintf(stderr, "  eval(1) %6lld calls %9.1f ms  %.3f ms a call\n", evals, eval_ms,
+                     evals ? eval_ms / (double) evals : 0.0);
+        for (int t = 2; t <= 8; ++t)
+            if (windows[t])
+                std::fprintf(stderr, "  window(%d) %4lld calls %9.1f ms  %.3f ms a call, %.2f tokens a call\n", t,
+                             windows[t], window_ms[t], window_ms[t] / (double) windows[t],
+                             (double) wrote[t] / (double) windows[t]);
+        std::fprintf(stderr, "  keep %.1f ms, pick %.1f ms, show %.1f ms, the rest %.1f ms\n", keep_ms, pick_ms, show_ms,
+                     all_ms - parts);
+        std::fprintf(stderr, "  guesses right in a window of 4: 0:%lld 1:%lld 2:%lld 3:%lld\n", right[0], right[1],
+                     right[2], right[3]);
+        std::fprintf(stderr, "  engine: host waits for routing %.1f ms, CPU experts %.1f ms; experts from VRAM %lld, "
+                             "on the CPU %lld\n",
+                     s.route_wait_ms - at.route_wait_ms, s.cpu_ms - at.cpu_ms, s.gpu_experts - at.gpu_experts,
+                     s.cpu_experts - at.cpu_experts);
+        e.print_trace();
+    }
+};
+
+// STRATA_POLY_PREFILL_TRACE=1, a diagnostic: a line a request on where its prompt's time went, and how much of the
+// prompt was found again (bench/results/2026-10-12-hip-prefill).  The parts are timed around calls that wait for
+// the card anyway, so timing them changes nothing of what runs.
+struct PrefillTrace {
+    bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_PREFILL_TRACE");
+        return v != nullptr && v[0] == '1';
+    }();
+    int reads = 0, evals = 0, marks = 0;
+    double resume_ms = 0, read_ms = 0, eval_ms = 0, mark_ms = 0;
+    strata::poly::Stats at;
+    void begin(const Engine& e) { *this = PrefillTrace{on, e.stats()}; }
+    PrefillTrace() = default;
+    PrefillTrace(bool o, const strata::poly::Stats& s) : on(o), at(s) {}
+    template<class Kept>
+    void print(const Engine& e, const Kept& kept, int64_t n, int64_t resume, int64_t read, double prompt_ms) const {
+        if (!on) return;
+        const strata::poly::Stats& s = e.stats();
+        const auto& w = kept.last_resumed();
+        std::string pos;
+        for (const int64_t m : w.marks) pos += (pos.empty() ? "" : ",") + std::to_string(m);
+        std::fprintf(stderr,
+                     "strata-poly prefill: prompt %lld, alike %lld (best %lld of %lld kept), resumed at %lld from "
+                     "checkpoints [%s], read %lld in %.1f ms: resume %.1f ms, %d reads %.1f ms, %d evals %.1f ms, "
+                     "%d checkpoints %.1f ms; experts staged %lld (%.0f MiB, host %.1f ms), batch rows cached %lld "
+                     "staged %lld, route wait %.1f ms; state %.1f MiB\n",
+                     (long long) n, (long long) w.alike, (long long) w.same, (long long) w.had, (long long) resume,
+                     pos.c_str(), (long long) read, prompt_ms, resume_ms, reads, read_ms, evals, eval_ms, marks,
+                     mark_ms, (long long) (s.staged_experts - at.staged_experts),
+                     (double) (s.staged_bytes - at.staged_bytes) / 1048576.0, s.stage_ms - at.stage_ms,
+                     (long long) (s.batch_cached - at.batch_cached), (long long) (s.batch_staged - at.batch_staged),
+                     s.route_wait_ms - at.route_wait_ms, (double) e.state_bytes() / 1048576.0);
+        e.print_prefill_prof();   // STRATA_POLY_PREFILL_PROF: the card's time of each part of the prompt batches
+    }
+};
+
 struct Session {
     Engine& engine;
     std::vector<int32_t> eos;
@@ -314,9 +394,17 @@ struct Session {
     // time, which of the two pays.  It and the repeats are the other engine's (strata/spec).
     int most;                             // the tokens of a window at most; 1: no guesses
     bool look;                            // guess from repeats
+    int fixed_window = 0;                 // --window-fixed: the round's window, without the policy's
+                                          // decision (window_fixed.hpp); 0: the adaptive one
     strata::spec::SuffixDrafter repeats;
     strata::spec::DraftPolicy policy;
     Guesses guesses;                      // whether the block is asked in a round, and for how many (guesses.hpp)
+    Trace trace;                          // STRATA_POLY_TRACE=1
+    PrefillTrace pt;                      // STRATA_POLY_PREFILL_TRACE=1
+    bool metrics = [] {
+        const char* v = std::getenv("STRATA_POLY_INFERENCE_METRICS");
+        return v != nullptr && v[0] == '1';
+    }();                                  // opt-in: only host clocks, no additional GPU work
 
     Session(Engine& e, std::vector<int32_t> eos_ids, const CacheFlags& f, int lookup)
         : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
@@ -339,6 +427,11 @@ struct Session {
         int64_t produced = 0, resume = 0, read = 0;
         int64_t guessed = 0, guessed_right = 0;
         double prompt_ms = 0, decode_ms = 0;
+        int64_t common = 0, best_common = 0, context_start = -1, context_end = -1;
+        int64_t context_before = -1;
+        int prefill_reads = 0, prefill_evals = 0;
+        double cache_resume_ms = 0, prefill_compute_ms = 0, ttft_ms = -1, decode_after_first_ms = -1;
+        bool partial_read = false;
         const char* finish = "length";
     };
 
@@ -348,10 +441,30 @@ struct Session {
     Result generate(const std::vector<int32_t>& ids, const Pictures& pictures, int32_t pad, int64_t max_new,
                     const Sampling& s, const std::atomic<bool>& stop, OnToken on_token, OnProgress on_progress) {
         Result r;
+        if (metrics) r.context_before = engine.pos();
         const int64_t n = (int64_t) ids.size();
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
+        const Clock::time_point began = t0;
+        Clock::time_point first_token;
         engine.images(pictures.at.data(), (int) pictures.at.size());
-        r.resume = kept.resume(ids);
+        if (pt.on) pt.begin(engine);
+        const int reads_before = pt.reads, evals_before = pt.evals;
+        // STRATA_POLY_PREFILL_TRACE: the time of what `work` does, added to `ms`
+        const auto ptimed = [&](double& ms, auto&& work) {
+            if (!pt.on) return work();
+            const Clock::time_point at = Clock::now();
+            struct Add {
+                double& ms;
+                Clock::time_point at;
+                ~Add() { ms += ms_since(at); }
+            } add{ms, at};
+            return work();
+        };
+        const Clock::time_point restoring = metrics ? Clock::now() : Clock::time_point{};
+        r.resume = ptimed(pt.resume_ms, [&] { return kept.resume(ids); });
+        if (metrics) r.cache_resume_ms = ms_since(restoring);
+        r.common = kept.last_resumed().same;
+        r.best_common = kept.last_resumed().alike;
         asked += n;
         reused += r.resume;
         on_progress(r.resume, n, 0.0, true);
@@ -377,9 +490,11 @@ struct Session {
             int64_t room = std::min<int64_t>(n - 1 - i, text ? engine.max_read() : engine.max_rows());
             if (i < turn) room = std::min(room, turn - i);
             const int64_t m = last ? 1 : text ? room : engine.whole(i, kept.until_checkpoint(i, room));
-            kept.before(i, last || i == turn);
+            if (pt.on && (last || i == turn || (flags.o.every > 0 && i > 0 && i % flags.o.every == 0))) ++pt.marks;
+            ptimed(pt.mark_ms, [&] { kept.before(i, last || i == turn); });
             if (text && !last) {
                 kept.inside(i, m, due);
+                if (pt.on) pt.marks += (int) due.size();
                 marks.clear();
                 for (const auto& d : due) marks.push_back({(int) d.first, d.second});
                 // A long prompt is one read.  Between its layers the read says how far it is, and a request that
@@ -392,13 +507,24 @@ struct Session {
                     }
                     return true;
                 };
-                if (!engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn)) {
+                ++pt.reads;
+                const Clock::time_point reading = metrics ? Clock::now() : Clock::time_point{};
+                const bool complete = ptimed(pt.read_ms,
+                            [&] { return engine.read(ids.data() + i, (int) m, marks.data(), (int) marks.size(), &turn); });
+                if (metrics) r.prefill_compute_ms += ms_since(reading);
+                if (!complete) {
+                    // A layered read may stop with only some layers evaluated. There is no full-token count
+                    // for that work; retain the completed reads, and report the total as unavailable.
+                    r.partial_read = true;
                     kept.rewind();
                     r.finish = "cancel";
                     break;
                 }
             } else {
-                engine.eval(ids.data() + i, (int) m, last);
+                ++pt.evals;
+                const Clock::time_point reading = metrics ? Clock::now() : Clock::time_point{};
+                ptimed(pt.eval_ms, [&] { engine.eval(ids.data() + i, (int) m, last); });
+                if (metrics) r.prefill_compute_ms += ms_since(reading);
             }
             kept.read(ids.data() + i, m);
             i += m;
@@ -410,8 +536,17 @@ struct Session {
         }
         kept.prompt_was(n);
         r.prompt_ms = ms_since(t0);
-        if (std::strcmp(r.finish, "cancel") == 0) return r;
+        if (metrics) {
+            r.prefill_reads = pt.reads - reads_before;
+            r.prefill_evals = pt.evals - evals_before;
+        }
+        pt.print(engine, kept, n, r.resume, r.read, r.prompt_ms);
+        if (std::strcmp(r.finish, "cancel") == 0) {
+            r.context_end = engine.pos();
+            return r;
+        }
 
+        r.context_start = engine.pos();
         t0 = Clock::now();
         std::vector<int32_t> history = kept.seq();
         std::replace_if(history.begin(), history.end(), [](int32_t t) { return t < 0; }, pad);
@@ -424,6 +559,13 @@ struct Session {
         };
         // Shows a token.  False when the answer ends with it.
         const auto show = [&](int32_t t) {
+#if defined(STRATA_USE_HIP)
+            strata::poly::gpu_failure_guard();
+#endif
+            if (metrics && r.produced == 0) {
+                first_token = Clock::now();
+                r.ttft_ms = ms_since(began);
+            }
             on_token(t);
             ++r.produced;
             history.push_back(t);
@@ -433,54 +575,96 @@ struct Session {
             else return r.produced < max_new;
             return false;
         };
+        const bool tr = trace.on;
+        if (tr) trace.begin(engine);
+        // STRATA_POLY_TRACE: the time of what `work` does, added to `ms`
+        const auto timed = [tr](double& ms, auto&& work) {
+            if (!tr) return work();
+            const Clock::time_point at = Clock::now();
+            struct Add {
+                double& ms;
+                Clock::time_point at;
+                ~Add() { ms += ms_since(at); }
+            } add{ms, at};
+            return work();
+        };
         if (max_new > 0) {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
             int32_t t = pick(engine.logits());   // picked, and not shown yet
-            while (show(t)) {
+            while (timed(trace.show_ms, [&] { return show(t); })) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
-                const bool room = engine.pos() + most <= engine.max_context();
-                const int offered = look && room ? repeats.propose(most - 1, w + 1) : 0;
+                ++trace.rounds;
+                // --window-fixed: the same tokens verified every round (window_fixed.hpp); 0: what the
+                // policy pays for.  A model without a block to ask verifies one token, as --window 1.
+                const int fx = fixed_window <= 0 ? 0 : engine.drafts() ? std::min(fixed_window, most) : 1;
+                const bool room = engine.pos() + (fx ? fx : most) <= engine.max_context();
+                const int offered = look && room && !fx ? repeats.propose(most - 1, w + 1) : 0;
                 const int match = repeats.last_match();
-                const int widest = match >= kCopyMatch ? most : std::min(most, kBlockWindow);   // this round's window
+                const int widest = fx ? fx : match >= kCopyMatch ? most : std::min(most, kBlockWindow);   // this round's window
                 const int k = std::min(offered, widest - 1);
                 // A repeat that fills the window, from a match of a length that has been right nine times in ten,
                 // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
                 // block guesses, each guess from the one before, while a guess more pays (Guesses).
-                const bool blocks = engine.drafts() && room && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
-                const bool ask = guesses.begin(blocks, policy);
+                const bool blocks = engine.drafts() && room &&
+                                    (fx ? fx > 1 : !(k == widest - 1 && policy.lookup_rate(match) >= 0.9));
+                const bool gate_ask = guesses.begin(blocks, policy);
+                const bool ask = fx ? blocks : gate_ask;
                 // the round's time, as the policy counts it: a window of `in` tokens wrote n of them
                 const auto count = [&](int in, int n) {
                     return guesses.end(in, n, ms_since(round), engine.took_record());
                 };
-                strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
+                strata::spec::DraftPolicy::Pick use = fx ? strata::spec::DraftPolicy::Pick{false, ask ? fx : 1}
+                                                         : policy.choose(1, k, match);
                 if (ask) {
                     int n_d = 0;
+                    if (fx) {   // --window-fixed: fx-1 drafts, each from the one before; the policy has no word
+                        for (int32_t from = t; n_d < fx - 1; from = d[n_d++]) {
+                            float p = 0.f;
+                            const Clock::time_point asked_at = Clock::now();
+                            d[n_d] = engine.draft(from, n_d, &p);
+                            if (tr) {
+                                ++trace.drafts;
+                                trace.draft_ms += ms_since(asked_at);
+                            }
+                        }
+                    } else {
                     for (int32_t from = t; n_d < std::min(most, kBlockWindow) - 1 && guesses.wants(n_d); from = d[n_d++]) {
                         float p = 0.f;
                         const Clock::time_point asked_at = Clock::now();
                         d[n_d] = engine.draft(from, n_d, &p);
-                        if (!guesses.takes(n_d, p, ms_since(asked_at))) break;
+                        const double asked_ms = ms_since(asked_at);
+                        if (tr) {
+                            ++trace.drafts;
+                            trace.draft_ms += asked_ms;
+                        }
+                        if (!guesses.takes(n_d, p, asked_ms)) break;
                     }
                     use = policy.choose(1 + n_d, k, match);
+                    }
                 }
                 if (use.t == 1) {
-                    engine.eval(&t, 1, true);
+                    timed(trace.eval_ms, [&] { engine.eval(&t, 1, true); });
+                    ++trace.evals;
                     kept.read(&t, 1);
-                    t = pick(engine.logits());
+                    t = timed(trace.pick_ms, [&] { return pick(engine.logits()); });
                     policy.observe(false, 1, 0, 0, count(1, 1));
                     continue;
                 }
                 w[0] = t;
                 if (!use.lookup) std::copy(d, d + use.t - 1, w + 1);
-                engine.window(w, use.t);
+                timed(trace.window_ms[std::min(use.t, 8)], [&] { engine.window(w, use.t); });
+                ++trace.windows[std::min(use.t, 8)];
                 // logits_of(i) is what follows w[i].  A guess that is what was picked has been through the model
                 // already; the token an answer ends with is shown and never fed, as without guesses.
                 int right = 0;
                 bool more = true;
-                t = pick(engine.logits_of(0));
-                while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) t = pick(engine.logits_of(++right));
-                engine.keep(right + 1);
+                t = timed(trace.pick_ms, [&] { return pick(engine.logits_of(0)); });
+                while (right < use.t - 1 && t == w[right + 1] && (more = timed(trace.show_ms, [&] { return show(t); })))
+                    t = timed(trace.pick_ms, [&] { return pick(engine.logits_of(++right)); });
+                trace.wrote[std::min(use.t, 8)] += right + 1;
+                if (use.t == 4) ++trace.right[right];
+                timed(trace.keep_ms, [&] { engine.keep(right + 1); });
                 kept.read(w, right + 1);
                 r.guessed += use.t - 1;
                 r.guessed_right += right + (more ? 0 : 1);
@@ -489,6 +673,12 @@ struct Session {
             }
         }
         r.decode_ms = ms_since(t0);
+        if (metrics && r.produced > 0) r.decode_after_first_ms = ms_since(first_token);
+        r.context_end = engine.pos();
+        if (tr) {
+            trace.all_ms = r.decode_ms;
+            trace.print(engine, r.produced);
+        }
         return r;
     }
 };
@@ -538,12 +728,17 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
 
 int serve(Session& ss) {
     Engine& engine = ss.engine;
-    std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
+    std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld expert_slots_min=%d "
+                "vram_reserve_short_mib=%d pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
-                "engine=" STRATA_VERSION "\n",
+                "kv=%s kv_bytes_per_position=%zu engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
-                engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
-                (long long) engine.vram_free_mib());
+                engine.cache_floor_experts(), engine.reserve_short_mib(), engine.threads(),
+                (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
+                (long long) engine.vram_free_mib(), engine.kv_format().c_str(), engine.row_bytes());
+    if (ss.metrics)
+        std::printf("INFO inference_metrics_version=1 inference_metrics_enabled=1 prefill_max_read_tokens=%d "
+                    "prefill_batch_tokens=%d\n", engine.max_read(), engine.max_rows());
     std::printf("READY %d stop\n", engine.max_context());
     std::fflush(stdout);
 
@@ -578,15 +773,24 @@ int serve(Session& ss) {
                 engine.resize_cache((int) reserve);
                 const long long free_mib = (long long) engine.vram_free_mib();
                 std::fprintf(stderr, "strata-poly: VRAM %d MiB kept free: the expert cache %d -> %d of %d experts "
-                                     "(%.2f of %.2f GiB), %lld MiB free now, in %.0f ms\n",
+                                     "(%.2f of %.2f GiB), %lld MiB free now, in %.0f ms%s\n",
                              engine.reserve_mib(), before, engine.cached_experts(), engine.full_experts(),
-                             engine.cached_gib(), engine.full_gib(), free_mib, ms_since(t0));
-                std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_cache_mib=%lld "
-                            "expert_cache_full_mib=%lld vram_free_mib=%lld prompt_chunk=%d\n",
+                             engine.cached_gib(), engine.full_gib(), free_mib, ms_since(t0),
+                             engine.reserve_short_mib() > 0
+                                 ? " - the cache's floor left that reserve short, raise the reserve or lower "
+                                   "--expert-cache-min"
+                                 : "");
+                std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_slots_min=%d "
+                            "expert_cache_mib=%lld expert_cache_full_mib=%lld vram_free_mib=%lld "
+                            "vram_reserve_short_mib=%d prompt_chunk=%d\n",
                             engine.reserve_mib(), engine.cached_experts(), engine.full_experts(),
-                            (long long) (engine.cached_gib() * 1024.0), (long long) (engine.full_gib() * 1024.0),
-                            free_mib, engine.max_rows());
+                            engine.cache_floor_experts(), (long long) (engine.cached_gib() * 1024.0),
+                            (long long) (engine.full_gib() * 1024.0), free_mib, engine.reserve_short_mib(),
+                            engine.max_rows());
             } catch (const std::exception& e) {
+#if defined(STRATA_USE_HIP)
+                strata::poly::gpu_fatal("VRAM", e.what());
+#endif
                 std::printf("ERR VRAM: %s\n", e.what());
             }
             std::fflush(stdout);
@@ -631,8 +835,11 @@ int serve(Session& ss) {
             const int had = engine.cached_experts();
             if (engine.mind_vram())
                 std::fprintf(stderr, "strata-poly: the card had little VRAM left: the expert cache %d -> %d experts, "
-                                     "%lld MiB free now\n",
-                             had, engine.cached_experts(), (long long) engine.vram_free_mib());
+                                     "%lld MiB free now%s\n",
+                             had, engine.cached_experts(), (long long) engine.vram_free_mib(),
+                             engine.reserve_short_mib() > 0
+                                 ? " - the cache's floor left the reserve short, lower --expert-cache-min to give VRAM back"
+                                 : "");
             r = ss.generate(
                 ids, pictures, pad, max_new, s, lines.stop,
                 [](int32_t t) {
@@ -650,6 +857,11 @@ int serve(Session& ss) {
                     std::fflush(stdout);
                 });
         } catch (const std::exception& e) {
+#if defined(STRATA_USE_HIP)
+            // Validation above is recoverable. Once inference mutates KV, recurrent
+            // state or cache slots, an exception leaves their consistency unknown.
+            strata::poly::gpu_fatal("generate", e.what());
+#endif
             // the engine's state is unknown now: the conversation it was reading is lost
             ss.kept.drop();
             try { engine.reset(); } catch (const std::exception&) {}
@@ -663,9 +875,29 @@ int serve(Session& ss) {
         // the cache's share of the experts looked up while answering: a prompt batch's go through VRAM either way
         const long long hits = now.gpu_experts - before.gpu_experts;
         const long long misses = now.cpu_experts - before.cpu_experts;
-        std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld 0 0 0.0 %lld 0\n", (long long) r.produced, n,
+        std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld 0 0 0.0 %lld 0", (long long) r.produced, n,
                     r.prompt_ms, r.decode_ms, r.finish, (long long) r.guessed_right, (long long) r.guessed,
                     (long long) r.resume, hits, hits + misses, (long long) r.read);
+        if (ss.metrics) {
+            const int64_t reread = std::max<int64_t>(0, std::min(r.resume + r.read, r.common) - r.resume);
+            // Additive, versioned DONE fields: no extra protocol lines or GPU synchronizations. -1 is unavailable.
+            std::printf(" metrics_version=1 prefill_tokens=%lld prefill_committed_tokens=%lld reread_tokens=%lld"
+                        " new_prompt_tokens=%lld common_prefix_tokens=%lld best_common_prefix_tokens=%lld"
+                        " resume_tokens=%lld cache_resume_ms=%.3f prefill_ms=%.3f prefill_compute_ms=%.3f"
+                        " ttft_ms=%.3f decode_tokens=%lld decode_ms=%.3f context_start_tokens=%lld"
+                        " context_end_tokens=%lld logical_context_end_tokens=%lld prefill_complete=%d"
+                        " context_before_request_tokens=%lld prefill_read_calls=%d prefill_eval_calls=%d\n",
+                        (long long) (r.partial_read ? -1 : r.read), (long long) r.read,
+                        (long long) (r.partial_read ? -1 : reread), (long long) (r.partial_read ? -1 : r.read - reread),
+                        (long long) r.common, (long long) r.best_common, (long long) r.resume, r.cache_resume_ms,
+                        std::max(0.0, r.prompt_ms - r.cache_resume_ms), r.prefill_compute_ms, r.ttft_ms,
+                        (long long) std::max<int64_t>(0, r.produced - 1), r.decode_after_first_ms,
+                        (long long) r.context_start, (long long) r.context_end,
+                        (long long) (r.context_start < 0 ? -1 : n + r.produced), r.resume + r.read == n && !r.partial_read,
+                        (long long) r.context_before, r.prefill_reads, r.prefill_evals);
+        } else {
+            std::printf("\n");
+        }
         std::fflush(stdout);
         if (ms_since(saved) >= kProfileSaveMs) {
             try {
@@ -731,6 +963,122 @@ int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures,
     return 0;
 }
 
+// --force-tokens (tests, tools/hip/kv_q8_compare.py): the prompt read, then the given tokens fed one at a time in
+// place of the ones the logits would pick, so that two runs with different settings (--kv, a build) are compared on
+// the same text at every step.  The prompt but its last token goes through read() in calls of max_read(), as a
+// long prompt does; each later token is a call of one, the decode's path.  Step i's logits are the ones token i of
+// --force-tokens follows, so a run writes as many steps as it is given tokens, and prints the given tokens.
+// --force-window N[/K][,...]: the tokens after the first go through window() N at a time instead (the sizes taken
+// in turn), as a decode's windows of guesses, and keep(K) keeps the first K (all N without /K): the guesses after the
+// K-th are wrong ones (the given token + 1), as when the model picks another.  Step i's logits are then logits_of() of
+// its window, which Engine::window() promises are what the calls of one token give.  A size of 1 is a call of eval().
+//
+// --dump-kv FILE: after the prompt's last token, its queries at each attention layer and the attention caches' rows
+// of every position so far (save_rows()), for poly_kernel_bench's tests on a real model's keys and values:
+//   "PKVD" | u32 1 | i64 positions | i64 row_bytes | i64 query floats | the queries | positions * row_bytes bytes
+int forced(Engine& engine, const std::vector<int32_t>& ids, const std::vector<int32_t>& force, int top_probs,
+           const std::string& logits_out, const std::string& dump_kv,
+           const std::vector<std::pair<int, int>>& force_window, int fixed_window) {
+    std::FILE* lf = logits_out.empty() ? nullptr : std::fopen(logits_out.c_str(), "wb");
+    if (!logits_out.empty() && !lf) throw std::runtime_error("cannot write " + logits_out);
+    engine.reset();
+    const Clock::time_point t0 = Clock::now();
+    const int n = (int) ids.size();
+    for (int at = 0; at + 1 < n;) {
+        const int m = std::min(engine.max_read(), n - 1 - at);
+        if (!engine.read(ids.data() + at, m)) throw std::runtime_error("the prompt's read stopped");
+        at += m;
+    }
+    std::vector<float> queries;
+    if (!dump_kv.empty()) engine.capture_queries(&queries);
+    engine.eval(ids.data() + n - 1, 1, true);
+    engine.capture_queries(nullptr);
+    const double prompt_ms = ms_since(t0);
+    if (!dump_kv.empty()) {
+        const int64_t rows = engine.pos();
+        const size_t row = engine.row_bytes();
+        std::vector<uint8_t> kv((size_t) rows * row);
+        engine.save_rows(0, rows, kv.data());
+        std::FILE* f = std::fopen(dump_kv.c_str(), "wb");
+        if (!f) throw std::runtime_error("cannot write " + dump_kv);
+        const uint32_t version = 1;
+        const int64_t head[3] = {rows, (int64_t) row, (int64_t) queries.size()};
+        const bool ok = std::fwrite("PKVD", 1, 4, f) == 4 && std::fwrite(&version, 4, 1, f) == 1 &&
+                        std::fwrite(head, 8, 3, f) == 3 &&
+                        std::fwrite(queries.data(), 4, queries.size(), f) == queries.size() &&
+                        std::fwrite(kv.data(), 1, kv.size(), f) == kv.size();
+        if (std::fclose(f) != 0 || !ok) throw std::runtime_error("cannot write " + dump_kv);
+        std::fprintf(stderr, "strata-poly: --dump-kv %s: %lld positions of %zu bytes, %zu query floats\n",
+                     dump_kv.c_str(), (long long) rows, row, queries.size());
+    }
+    const Clock::time_point t1 = Clock::now();
+    std::string out;
+    std::vector<int32_t> w;
+    // --window-fixed with --force-tokens: the block is asked for exactly fx-1 drafts after every step's
+    // forced token, whose guesses are checked against the given tokens' exact ones that follow.  The
+    // same forced text puts the two formats' blocks over the same tokens: the acceptance is then
+    // theirs, with no trajectory in it (b/2026-10-16 investigation, CORRECTION-PROPOSAL.md §3).
+    const int fxf = fixed_window > 0 ? std::min(fixed_window, engine.max_window()) : 0;
+    long long fx_right = 0, fx_guessed = 0;
+    for (size_t i = 0, k = 0; i < force.size();) {
+        const std::pair<int, int> size = i > 0 ? force_window[k++ % force_window.size()] : std::pair<int, int>{1, 1};
+        if (size.first > 1) {   // steps i to i + kept - 1 from one window of t
+            const int rest = (int) (force.size() - i);
+            const int kept = std::min(size.second, rest);
+            const int t = std::min<int>(size.first, (int) std::min<int64_t>(engine.max_context() - engine.pos(),
+                                                                             size.second < size.first ? size.first : rest));
+            w.assign(force.begin() + (long) i - 1, force.begin() + (long) i - 1 + kept);
+            for (int j = kept; j < t; ++j)   // wrong guesses
+                w.push_back((int32_t) ((force[std::min(i - 1 + j, force.size() - 1)] + 1) % engine.n_vocab()));
+            engine.window(w.data(), t);
+            for (int j = 0; j < kept; ++j, ++i) {
+                const float* lg = engine.logits_of(j);
+                if (top_probs > 0) print_top(lg, engine.n_vocab(), top_probs);
+                if (lf) std::fwrite(lg, sizeof(float), (size_t) engine.n_vocab(), lf);
+                out += (out.empty() ? "" : ",") + std::to_string(force[i]);
+            }
+            engine.keep(kept);
+            continue;
+        }
+        if (i > 0) engine.eval(&force[i - 1], 1, true);
+        if (top_probs > 0) print_top(engine.logits(), engine.n_vocab(), top_probs);
+        if (lf) std::fwrite(engine.logits(), sizeof(float), (size_t) engine.n_vocab(), lf);
+        out += (out.empty() ? "" : ",") + std::to_string(force[i]);
+        if (fxf > 0 && (long long) i + fxf <= (long long) force.size()) {
+            if (engine.drafts() && fxf > 1) {   // drafts after the forced token, checked at the ones that follow
+                int32_t d[strata::spec::DraftPolicy::kMaxT];
+                int nn = 0;
+                for (int32_t from = force[i]; nn < fxf - 1; from = d[nn++]) {
+                    float p = 0.f;
+                    d[nn] = engine.draft(from, nn, &p);
+                }
+                fx_right += strata::poly::drafts_right(d, fxf - 1, force.data() + i + 1);
+                fx_guessed += fxf - 1;
+            }
+        }
+        ++i;
+    }
+    if (lf) std::fclose(lf);
+    std::printf("%s\n", out.c_str());
+    const double decode_ms = ms_since(t1);
+    std::fprintf(stderr, "prompt %d tokens %.1f tok/s, forced %zu tokens %.2f tok/s (--kv %s)\n", n,
+                 prompt_ms > 0 ? 1000.0 * n / prompt_ms : 0.0, force.size(),
+                 decode_ms > 0 && force.size() > 1 ? 1000.0 * (double) (force.size() - 1) / decode_ms : 0.0,
+                 engine.kv_format().c_str());
+    if (fxf > 0) {
+        if (!engine.drafts())
+            std::fprintf(stderr, "strata-poly: --window-fixed %d: this model has no block that guesses ahead\n",
+                         fixed_window);
+        else if (fx_guessed > 0)
+            std::fprintf(stderr,
+                         "strata-poly: --window-fixed %d: the block's drafts at %lld forced steps: %lld of %lld "
+                         "right (%.1f%% accepted)\n",
+                         fixed_window, (long long) (fx_guessed / (fxf - 1)), fx_right, fx_guessed,
+                         100.0 * (double) fx_right / (double) fx_guessed);
+    }
+    return 0;
+}
+
 void usage() {
     std::fprintf(stderr,
                  "usage: strata-poly --model FILE.gguf (--serve | --tokens ID,ID,...|@FILE [--max-new N])\n"
@@ -742,6 +1090,11 @@ void usage() {
                  "                         first N positions in VRAM and the rest in pinned RAM, which every token\n"
                  "                         reads over PCIe: the same results, slower the more is in RAM.  auto: all\n"
                  "                         in VRAM when they fit beside the rest, else as many as fit (default: all)\n"
+                 "  --kv fp16|q8_0         the attention caches' format (default fp16).  q8_0 (Qwen3.5/3.6,\n"
+                 "                         docs/AMD_HIP_KV_Q8.md; experimental): blocks of 32 values with an fp16\n"
+                 "                         scale, 11,968 bytes a position against 22,528; every position in VRAM\n"
+                 "                         (not with --kv-resident).  What cannot be stops the load, never fp16\n"
+                 "  --kv-k F, --kv-v F     tests: the format of the keys or of the values alone\n"
                  "  --kv-ram-mib N         the most RAM the rows outside VRAM may pin (default: what leaves\n"
                  "                         --kv-ram-floor-mib of physical RAM available, 4096)\n"
                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, written back on\n"
@@ -753,6 +1106,10 @@ void usage() {
                  "                         written: the one that is known and guesses at the ones after it, which\n"
                  "                         count when they turn out right (1 = no guesses; default 8, of which\n"
                  "                         the block guesses 3, and 4 for GLM 5.3 Flash)\n"
+                 "  --window-fixed N       tests, an instrument: verify a window of N tokens (at most --window's)\n"
+                 "                         every round, without the gate and the policy's measured times that\n"
+                 "                         --window lets decide it.  With --force-tokens: also count what the\n"
+                 "                         block's drafts say about the given tokens.  Default 0, off\n"
                  "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
                  "                         (default 3, 0 = never)\n"
                  "  --no-draft             do not run the block that guesses ahead\n"
@@ -773,7 +1130,11 @@ void usage() {
                  "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
                  "                         (default 2048, 0 = none)\n"
-                 "  --turn-token ID        also one in front of the prompt's last turn, which starts with token ID\n"
+                 "  --prompt-cache-recent  of more checkpoints than are kept, the one that goes is the one whose loss\n"
+                 "                         costs the fewest tokens read again when a prompt parts from the\n"
+                 "                         conversation as often a few hundred tokens from its end as thousands: they\n"
+                 "                         lie closer together near the end (default: spread evenly)\n"
+                 "  --turn-token ID       also one in front of the prompt's last turn, which starts with token ID\n"
                  "                         (Qwen3.5: <|im_start|>), so the next turn of a chat is not read again\n"
                  "                         from the last of those (default: none)\n"
                  "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
@@ -789,7 +1150,21 @@ void usage() {
                  "  --dump-layers          print a checksum of every layer's stages to stderr\n"
                  "  --top-probs N          with --tokens: print the N most likely ids of every step to stderr\n"
                  "  --logits-out FILE      with --tokens: write every step's logits to FILE (floats, n_vocab a\n"
-                 "                         step), as --top-probs: use --window 1\n");
+                 "                         step), as --top-probs: use --window 1\n"
+                 "  --force-tokens ID,...|@FILE  tests, with --tokens: after the prompt, feed these tokens one at a\n"
+                 "                         time in place of the ones picked (--logits-out: a step each)\n"
+                 "  --force-window N[/K][,...]  tests, with --force-tokens: feed them through windows of N tokens\n"
+                 "                         (at most --window; several in turn), the first K kept and the guesses\n"
+                 "                         after them wrong (all kept without /K), and write each window's logits\n"
+                 "  --dump-kv FILE         tests, with --force-tokens and --no-graphs: write the prompt's last token's\n"
+                 "                         queries and the attention caches' rows to FILE (poly_kernel_bench attn-q8,\n"
+                 "                         which reads fp16 caches; the rows are in the --kv format)\n"
+                 "  --expert-cache-max N   tests: cache at most N experts, so runs with a little more or less free\n"
+                 "                         VRAM cache the same ones (STRATA_POLY_CACHE_HASH=1 prints which)\n"
+                 "  --expert-cache-min N   the fewest experts the cache may be cut to (default 0: as many as the\n"
+                 "                         reserve allows).  When the reserve cannot be had with that many experts\n"
+                 "                         in VRAM the floor wins and the reserve stays short by the MiB the engine\n"
+                 "                         reports (vram_reserve_short_mib on the INFO line and POST /v1/vram)\n");
 }
 
 }  // namespace
@@ -814,8 +1189,10 @@ int main(int argc, char** argv) {
     bool want_serve = false;
     long long max_new = 32;
     int top_probs = 0, lookup = 3, image_pad = -1;
-    std::string images, logits_out;
+    std::string images, logits_out, force_spec, dump_kv;
+    int window_fixed = 0;                 // --window-fixed: 0, the adaptive windows the policy pays for
     std::vector<int32_t> ids, eos;
+    std::vector<std::pair<int, int>> force_window{{1, 1}};
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto val = [&]() -> const char* {
@@ -838,6 +1215,36 @@ int main(int argc, char** argv) {
                 return 2;
             }
         }
+        else if (a == "--kv" || a == "--kv-k" || a == "--kv-v") {
+            const std::string v = val();
+            strata::poly::KvType t;
+            if (!strata::poly::kv_parse(v, &t)) {
+                std::fprintf(stderr, "strata-poly: %s takes fp16 or q8_0, not %s\n", a.c_str(), v.c_str());
+                return 2;
+            }
+            if (a != "--kv-v") o.kv_k = t;
+            if (a != "--kv-k") o.kv_v = t;
+        }
+        else if (a == "--expert-cache-max") o.expert_cache_max = std::atoi(val());
+        else if (a == "--expert-cache-min") o.expert_cache_min = std::atoi(val());
+        else if (a == "--force-tokens") force_spec = val();
+        else if (a == "--dump-kv") dump_kv = val();
+        else if (a == "--force-window") {
+            force_window.clear();
+            for (const char* p = val(); *p != '\0';) {
+                char* e = nullptr;
+                const long n = std::strtol(p, &e, 10);
+                long kept = n;
+                if (e != p && *e == '/') kept = std::strtol(e + 1, &e, 10);
+                if (e == p || n < 1 || kept < 1 || kept > n || (*e != '\0' && *e != ',')) {
+                    std::fprintf(stderr, "strata-poly: --force-window takes sizes N or N/K separated by commas\n");
+                    return 2;
+                }
+                force_window.emplace_back((int) n, (int) kept);
+                p = *e == ',' ? e + 1 : e;
+            }
+            if (force_window.empty()) force_window.emplace_back(1, 1);
+        }
         else if (a == "--kv-ram-mib") o.kv_ram_mib = std::atoll(val());
         else if (a == "--kv-ram-floor-mib") o.kv_ram_floor_mib = std::atoll(val());
         else if (a == "--expert-profile") o.profile = val();
@@ -845,6 +1252,7 @@ int main(int argc, char** argv) {
         else if (a == "--any-node") o.stay_near = false;
         else if (a == "--no-graphs") o.graphs = false;
         else if (a == "--window") o.window = std::atoi(val());
+        else if (a == "--window-fixed") window_fixed = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
         else if (a == "--no-draft") o.draft = false;
         else if (a == "--draft-model") o.draft_model = val();
@@ -855,6 +1263,7 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
         else if (a == "--turn-token") cache.turn_token = (int32_t) std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
+        else if (a == "--prompt-cache-recent") cache.o.recent = true;
         else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
@@ -903,6 +1312,44 @@ int main(int argc, char** argv) {
         usage();
         return 2;
     }
+    if (window_fixed < 0) {
+        std::fprintf(stderr, "strata-poly: --window-fixed takes 0 (off) or the tokens of a window\n");
+        return 2;
+    }
+    std::vector<int32_t> force;
+    if (!force_spec.empty() || !dump_kv.empty()) {
+        if (want_serve || force_spec.empty()) {
+            std::fprintf(stderr, "strata-poly: --force-tokens and --dump-kv go with --tokens, --dump-kv with "
+                                 "--force-tokens\n");
+            return 2;
+        }
+        std::string text = force_spec;
+        if (force_spec[0] == '@') {
+            std::FILE* f = std::fopen(force_spec.c_str() + 1, "rb");
+            if (!f) {
+                std::fprintf(stderr, "strata-poly: cannot read %s\n", force_spec.c_str() + 1);
+                return 2;
+            }
+            text.clear();
+            char buf[1 << 16];
+            for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, got);
+            std::fclose(f);
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' ')) text.pop_back();
+        }
+        if (!parse_ids(text.c_str(), force) || force.empty()) {
+            std::fprintf(stderr, "strata-poly: --force-tokens takes token ids separated by commas\n");
+            return 2;
+        }
+        for (const auto& w : force_window)
+            if (w.first > (o.window > 0 ? o.window : 8)) {
+                std::fprintf(stderr, "strata-poly: --force-window takes 1 to --window tokens\n");
+                return 2;
+            }
+        if (!dump_kv.empty() && o.graphs) {
+            std::fprintf(stderr, "strata-poly: --dump-kv needs --no-graphs (a replayed launch shows no queries)\n");
+            return 2;
+        }
+    }
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
@@ -924,14 +1371,18 @@ int main(int argc, char** argv) {
             const strata::poly::Budget b = engine.budget();
             const auto mib = [](size_t x) { return (long long) (x >> 20); };
             const std::optional<uint64_t> avail = strata::core::conversation_available_memory();
-            std::fprintf(stderr, "strata-poly: VRAM MiB: dense weights %lld, expert cache %lld, KV %lld (%lld positions), "
-                                 "KV stage %lld, recurrent state %lld, scratch and the rest %lld; %lld free.  Pinned "
+            std::fprintf(stderr, "strata-poly: VRAM MiB: dense weights %lld, expert cache %lld, KV %lld (%lld positions, "
+                                 "%s), KV stage %lld, recurrent state %lld, scratch and the rest %lld; %lld free.  Pinned "
                                  "RAM MiB: KV %lld (%lld positions), the rest %lld; RAM available %lld MiB\n",
-                         mib(b.dense), mib(b.experts), mib(b.kv_vram), (long long) b.kv_cells_vram, mib(b.kv_stage),
+                         mib(b.dense), mib(b.experts), mib(b.kv_vram), (long long) b.kv_cells_vram,
+                         engine.kv_format().c_str(), mib(b.kv_stage),
                          mib(b.state), mib(b.vram_other), (long long) engine.vram_free_mib(), mib(b.kv_host),
                          (long long) b.kv_cells_host, mib(b.pinned_other),
                          avail ? (long long) (*avail >> 20) : -1LL);
         }
+        if (const char* h = std::getenv("STRATA_POLY_CACHE_HASH"); h != nullptr && h[0] == '1')
+            std::fprintf(stderr, "strata-poly: expert set %016llx (%d experts in VRAM)\n",
+                         (unsigned long long) engine.expert_set_hash(), engine.cached_experts());
         // Pages on another node than the threads are read at about two thirds of the speed.  The file cache puts a
         // page on the node of whatever read it first, so a file read back by something else lands on any.
         const bool far = engine.numa_share() > 0.0 && engine.numa_share() < 0.95;
@@ -949,6 +1400,19 @@ int main(int argc, char** argv) {
                 if (id >= 0 && std::find(eos.begin(), eos.end(), (int32_t) id) == eos.end()) eos.push_back((int32_t) id);
             }
         Session ss(engine, eos, cache, lookup);
+        if (window_fixed > 0) {
+            // the round's verified window, what the engine itself holds: a window more than `most`
+            // (the engine's round state) would not be a straight comparison
+            ss.fixed_window = strata::poly::window_fixed_effective(window_fixed, (int) ss.most);
+            if (ss.fixed_window != window_fixed)
+                std::fprintf(stderr,
+                             "strata-poly: --window-fixed %d: the rounds verify %d tokens, the engine's most\n",
+                             window_fixed, ss.fixed_window);
+            else if (!engine.drafts())
+                std::fprintf(stderr, "strata-poly: --window-fixed %d: this model has no block that guesses "
+                                     "ahead: the rounds verify one token\n",
+                             window_fixed);
+        }
         int rc = 0;
         if (want_serve) {
             rc = serve(ss);
@@ -962,7 +1426,14 @@ int main(int argc, char** argv) {
                 const std::string wrong = take_pictures(images, image_pad, engine.n_embd(), ids, pictures);
                 if (!wrong.empty()) throw std::runtime_error(wrong);
             }
-            rc = once(ss, ids, pictures, image_pad, max_new, s, top_probs, logits_out);
+            if (!force.empty()) {
+                if (!images.empty()) throw std::runtime_error("--force-tokens takes no pictures");
+                if ((long long) ids.size() + (long long) force.size() > engine.max_context())
+                    throw std::runtime_error("the prompt and --force-tokens together exceed --max-context");
+                rc = forced(engine, ids, force, top_probs, logits_out, dump_kv, force_window, window_fixed);
+            } else {
+                rc = once(ss, ids, pictures, image_pad, max_new, s, top_probs, logits_out);
+            }
         }
         engine.save_profile();
         return rc;

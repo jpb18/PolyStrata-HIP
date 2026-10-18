@@ -95,6 +95,15 @@ class Units(unittest.TestCase):
         self.assertEqual(got[("strata:gpu_mem_used_bytes", lab + ',gpu="0"')], 1 << 30)
         self.assertNotIn(("strata:gpu_power_watts", lab + ',gpu="0"'), got)   # not measured: no sample
         self.assertEqual(got[("strata:ram_total_bytes", lab)], 64 << 30)
+        self.assertFalse(any(k[0] == "strata:engine_kv_format" for k in got))   # an engine that does not say
+
+    def test_the_kv_format_the_engine_reports(self):
+        for kv, per in (("fp16", 22528), ("q8_0", 11968), ("k=q8_0,v=fp16", 17248)):
+            m = {"engine": {"model": "m", "max_context": 1000, "kv": kv, "kv_bytes_per_position": per}}
+            got = parse(render(m, Latencies().snapshot()))
+            lab = 'model_name="m"'
+            self.assertEqual(got[("strata:engine_kv_format", lab + f',format="{kv}"')], 1)
+            self.assertEqual(got[("strata:engine_kv_bytes_per_position", lab)], per)
 
 
 class Endpoint(unittest.TestCase):

@@ -8,6 +8,7 @@ import time
 import unittest
 import json
 import urllib.request
+import urllib.error
 from serve.server import StrataEngine, Service, ChatTemplate, EngineDied, serve
 from serve.test_server import ByteTokenizer
 
@@ -16,13 +17,19 @@ import sys
 from pathlib import Path
 state=Path(sys.argv[sys.argv.index('--state')+1])
 mode=sys.argv[sys.argv.index('--mode')+1]
+if mode=='gpu-startfail' and state.exists():
+ print('ERR GPU_FATAL backend=hip operation=startup code=709 name=hipErrorContextIsDestroyed',flush=True)
+ sys.exit(70)
 print('READY 4096 stop',flush=True)
 for line in sys.stdin:
  if line.startswith('QUIT'):break
  if line.startswith(('GEN','BGEN')):
-  if not state.exists():
+  if not state.exists() or mode=='gpu-always':
    state.write_text('first request was attempted')
    if mode=='invalid':print('ERR prompt exceeds context',flush=True)
+   elif mode in ('gpu','gpu-always','gpu-startfail'):
+    print('ERR GPU_FATAL backend=hip operation=window code=700 name=hipErrorIllegalAddress: mock; new process required',flush=True)
+    print('T 90\nDONE 1 1 0 1 stop',flush=True)
    else:
     kind='verify batch' if mode=='batch' else 'verify'
     print(f'ERR {kind}: timed out at layer 18; its GPU waits were released and the GPU finished (#267)',flush=True)
@@ -71,7 +78,12 @@ class FatalRecovery(unittest.TestCase):
                 with urllib.request.urlopen(req,timeout=5) as r:return r.read().decode()
             text=post()
             self.assertIn('"error"',text);self.assertTrue(text.rstrip().endswith('data: [DONE]'))
-            with urllib.request.urlopen(base+'/health',timeout=5) as r:self.assertFalse(json.load(r)['loaded'])
+            with self.assertRaises(urllib.error.HTTPError) as failed:
+                urllib.request.urlopen(base+'/health',timeout=5)
+            self.assertEqual(failed.exception.code,503)
+            health=json.load(failed.exception)
+            failed.exception.close()
+            self.assertFalse(health['loaded']);self.assertEqual(health['status'],'error')
             body['stream']=False
             self.assertEqual(json.loads(post())['usage']['completion_tokens'],1)
             with urllib.request.urlopen(base+'/health',timeout=5) as r:self.assertTrue(json.load(r)['loaded'])
@@ -81,6 +93,79 @@ class FatalRecovery(unittest.TestCase):
         e=self.engine('batch')
         with self.assertRaises(EngineDied):list(e.generate([1],8,{},threading.Event()))
         self.wait_dead(e)
+
+    def test_gpu_fatal_discards_trailing_success_and_recovers_in_new_process(self):
+        e=self.engine('gpu');svc=self.service(e);pid=e.proc.pid;born=e.gen
+        with self.assertRaises(EngineDied):self.run_request(svc)
+        self.wait_dead(e);self.assertIn('hipErrorIllegalAddress',e.death_note())
+        self.assertFalse(svc.loaded());self.assertEqual(svc.history[-1]['finish'],'error')
+        result=self.run_request(svc);self.addCleanup(svc.engine.close)
+        self.assertNotEqual(svc.engine.proc.pid,pid)
+        self.assertIsNone(svc.engine.fatal_note)
+        with self.assertRaises(EngineDied):svc.engine._check_fatal(born)
+        svc.engine._check_fatal(svc.engine.gen)
+        self.assertEqual(result[-1][1]['completion_tokens'],1)
+
+    def test_gpu_fault_discards_buffered_serial_and_batch_lines(self):
+        e=self.engine('gpu')
+        self.feed(e,['T 90\n','BT 0 90\n','BT 1 91\n',
+                     'ERR GPU_FATAL backend=hip operation=draft code=709 name=hipErrorContextIsDestroyed\n',
+                     'DONE 1 1 0 1 stop\n','BDONE 0 1 stop 1\n'],2)
+        self.assertTrue(all(q.get_nowait() is None and q.empty() for q in e.slot_q))
+        self.assertFalse(e.alive())
+        with self.assertRaises(EngineDied):e._check_fatal()
+
+    def test_health_stays_failed_when_failed_engine_is_unloaded(self):
+        e=self.engine('gpu');svc=self.service(e)
+        with self.assertRaises(EngineDied):self.run_request(svc)
+        e.unload();http=serve(svc,port=0)
+        try:
+            for path in ('/health','/api/health'):
+                with self.assertRaises(urllib.error.HTTPError) as failed:
+                    urllib.request.urlopen(f'http://127.0.0.1:{http.server_address[1]}'+path,timeout=5)
+                self.assertEqual(failed.exception.code,503)
+                self.assertEqual(json.load(failed.exception)['recovery'],'new_engine_process')
+                failed.exception.close()
+        finally:
+            http.shutdown();http.server_close()
+
+    def test_failed_new_process_does_not_clear_fault_latch(self):
+        e=self.engine('gpu-startfail')
+        with self.assertRaises(EngineDied):list(e.generate([1],8,{},threading.Event()))
+        note=e.fatal_note
+        with self.assertRaises(RuntimeError):e.restart(tries=1)
+        self.assertEqual(e.fatal_note,note)
+        self.assertFalse(e.alive())
+
+    def test_gpu_fault_http_apis_streamed_and_nonstreamed(self):
+        bodies = {
+            '/v1/chat/completions': {'messages':[{'role':'user','content':'hi'}],'max_tokens':8,
+                                    'chat_template_kwargs':{'enable_thinking':False}},
+            '/v1/messages': {'model':'strata','messages':[{'role':'user','content':'hi'}],'max_tokens':8},
+            '/v1/responses': {'model':'strata','input':'hi','max_output_tokens':8},
+        }
+        for path, body in bodies.items():
+            for stream in (False, True):
+                with self.subTest(path=path, stream=stream):
+                    e=self.engine('gpu-always');svc=self.service(e);http=serve(svc,port=0)
+                    try:
+                        req=urllib.request.Request(f'http://127.0.0.1:{http.server_address[1]}'+path,
+                            data=json.dumps(body|{'stream':stream}).encode(),
+                            headers={'Content-Type':'application/json'})
+                        if stream:
+                            with urllib.request.urlopen(req,timeout=5) as r:text=r.read().decode()
+                            self.assertIn('"error"',text)
+                            self.assertNotIn('response.completed',text)
+                        else:
+                            with self.assertRaises(urllib.error.HTTPError) as failed:
+                                urllib.request.urlopen(req,timeout=5)
+                            self.assertEqual(failed.exception.code,503)
+                            self.assertIn('error',json.load(failed.exception))
+                            failed.exception.close()
+                        self.assertFalse(svc.loaded())
+                        self.assertEqual(svc.history[-1]['finish'],'error')
+                    finally:
+                        http.shutdown();http.server_close();e.close()
 
     def feed(self,e,lines,slots):
         import queue

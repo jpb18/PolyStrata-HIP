@@ -4,6 +4,7 @@
 #include "engine.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
+#include "strata/poly/gpu_failure.hpp"
 
 #include <cuda_runtime.h>
 
@@ -24,6 +25,8 @@ constexpr int kMaxUsed = 32;
 constexpr int kSumRows = 32;        // routed experts one launch adds into their tokens' rows (ScaledRows)
 constexpr int kSlots = 8;           // cached experts one launch multiplies (kernels::MmvqSlots)
 constexpr int kCpuRows = 8;         // tokens whose CPU experts one call computes; a window has no more
+constexpr int kDraftVocab = 65536;  // the tokens the draft block chooses its guesses among (Engine::draft_vocab_)
+constexpr int kCardRows = 8;        // tokens of a call that can be routed on the card (HIP): a window's at most
 // From this many tokens, a call runs its routed experts on the GPU alone and copies the ones that are not cached
 // through VRAM.  Below it, that copy costs more than the CPU takes to compute the few experts.
 constexpr int kStageRows = 32;
@@ -63,7 +66,19 @@ inline double ms_since(Clock::time_point t) {
 }
 
 inline void ck(cudaError_t e, const char* what) {
+#if defined(STRATA_USE_HIP)
+    hip_check(e, what);
+#else
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
+#endif
+}
+
+inline void sync(cudaStream_t stream, const char* what) {
+#if defined(STRATA_USE_HIP)
+    hip_sync(stream, what);
+#else
+    ck(cudaStreamSynchronize(stream), what);
+#endif
 }
 
 inline size_t pad(size_t n) { return (n + 255) & ~size_t(255); }

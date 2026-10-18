@@ -8,8 +8,8 @@ Profiles: 48k (context 49,152: the fastest for chats), 128k and 262k (the KV cac
 long prompts on a 16 GB card), 262k-stream (context 262,144 with positions from 49,152 on in RAM: for a card whose
 VRAM other programs hold).  The model is --gguf, else the one of a run config strata-<name>-hip.json already here
 (with several, --base picks the one whose name has that text in it, else the first by name); the profiles share its
-tokenizer folder and expert profile.  Prints the run config's file name.  --list prints the models set up here, a line
-each: name|display name|GGUF.
+tokenizer folder and expert profile, and keep its --window and its sampling block when it has them.  If the base config has a "vision" section and the derived profile's name contains "vision", the vision config is also copied; otherwise vision is never added to normal (non-vision) profiles.  Prints the run config's file name.  --list prints
+the models set up here, a line each: name|display name|GGUF.
 """
 from __future__ import annotations
 
@@ -51,6 +51,8 @@ def main() -> int:
     ap.add_argument("--gguf", help="the model (default: the one already set up here)")
     ap.add_argument("--base", help="of the models set up here, the one whose name has this text in it")
     ap.add_argument("--list", action="store_true", help="print the models set up here and stop")
+    ap.add_argument("--no-overwrite", action="store_true", help="refuse a conflicting existing profile (launcher)")
+    ap.add_argument("--read-only", action="store_true", help="reuse an existing matching profile; never create one")
     a = ap.parse_args()
 
     # the models' base configs: those without a profile's suffix
@@ -96,9 +98,19 @@ def main() -> int:
                 pathlib.Path(arg(args, "--model")).resolve() == pathlib.Path(gguf).resolve():
             print(out.name)
             return 0
+        if a.no_overwrite or a.read_only:
+            print(f"profile conflicts with the requested model/context: {out.name}; "
+                  "choose another --name with poly_config.py, or edit the existing config explicitly",
+                  file=sys.stderr)
+            return 2
+    if a.read_only:
+        print(f"profile missing: {out.name}; configure it explicitly before running check", file=sys.stderr)
+        return 2
 
     cmd = [sys.executable, str(ROOT / "tools" / "hip" / "poly_config.py"), "--model", gguf, "--name", name,
            "--context", str(ctx)]
+    if out.exists():  # Only the explicit developer path reaches a conflicting existing profile.
+        cmd += ["--overwrite"]
     threads = arg(base[1]["args"], "--threads") if base else None
     cmd += ["--threads", threads or str(cores())]
     if base and base[1].get("port"):   # a model's profiles share its port
@@ -109,10 +121,24 @@ def main() -> int:
     else:
         cmd += ["--data", str(pathlib.Path(gguf).parent / (base_name + "-pack"))]
     cmd += extra
+    # and what the base config chose for its model: its guessing (--window 1 for a model whose windows cost more
+    # than they save) and its sampling block (a model that loops when greedy)
+    window = arg(base[1]["args"], "--window") if base else None
+    if window:
+        cmd += ["--extra", f"--window {window}"]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0 or not out.exists():
         sys.stderr.write(p.stdout + p.stderr)
         return 1
+    if base and base[1].get("sampling"):
+        cfg = json.loads(out.read_text(encoding="utf-8"))
+        cfg["sampling"] = base[1]["sampling"]
+        out.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    # propagate "vision" from the base only when this derived profile is a vision one
+    if base and base[1].get("vision") and "vision" in name.lower():
+        cfg = json.loads(out.read_text(encoding="utf-8"))
+        cfg["vision"] = base[1]["vision"]
+        out.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     print(out.name)
     return 0
 

@@ -29,6 +29,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="the GGUF (the first file of a split one)")
     ap.add_argument("--name", help="the model's name in the server (default: from the file's name, with -hip)")
+    ap.add_argument("--overwrite", action="store_true", help="explicitly replace an existing named config")
     ap.add_argument("--context", type=int, default=32768)
     ap.add_argument("--threads", type=int, default=0, help="CPU threads for the experts outside VRAM (0: the "
                     "engine's own count, every logical CPU; on a 6-core CPU 6 was faster than 12 here)")
@@ -57,11 +58,17 @@ def main() -> int:
     if not exe.is_file():
         raise SystemExit(f"no {exe}: build it first (tools\\hip\\build_windows.bat poly)")
     name = a.name or re.sub(r"[^a-z0-9.]+", "-", gguf.stem.lower()).strip("-") + "-hip"
+    out = ROOT / f"strata-{name}.json"
+    if out.exists() and not a.overwrite:
+        raise SystemExit(f"config already exists: {out}; choose another --name or use --overwrite explicitly")
     data = pathlib.Path(a.data) if a.data else gguf.parent / (name + "-pack")
     tok = data / "tokenizer"
     if not (tok / "vocab.json").exists():
         candidates = [a.gguf_py, ROOT / "third_party" / "llama.cpp" / "gguf-py",
-                      ROOT / "third_party" / "llama.cpp-3cf0325" / "gguf-py"]
+                      ROOT / "third_party" / "llama.cpp-3cf0325" / "gguf-py",
+                      pathlib.Path(a.build) / "_deps" / "strata_llamacpp-src" / "gguf-py"]
+        if os.environ.get("STRATA_GGML_DIR"):
+            candidates.insert(1, pathlib.Path(os.environ["STRATA_GGML_DIR"]) / "gguf-py")
         gp = next((pathlib.Path(c) for c in candidates if c and (pathlib.Path(c) / "gguf").is_dir()), None)
         if gp is None:
             raise SystemExit("no gguf-py for the tokenizer: give --gguf-py <llama.cpp>/gguf-py")
@@ -93,8 +100,8 @@ def main() -> int:
            "lib_dirs": lib_dirs, "backend": "hip", "port": a.port}
     if not a.no_switch_on_request:
         cfg["switch_on_request"] = True
-    out = ROOT / f"strata-{name}.json"
-    out.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    with out.open("w" if a.overwrite else "x", encoding="utf-8") as stream:
+        stream.write(json.dumps(cfg, indent=1))
     print(f"written: {out}\nmodel name: {name}")
     return 0
 

@@ -66,6 +66,8 @@ struct Fake {
 int64_t far = 0;
 // Above zero: one such read in so many is given up part way (rewind()), and the request is made again.
 unsigned quits = 0;
+// CacheOptions::recent for the conversations made here (--prompt-cache-recent).
+bool recent = false;
 
 struct Chat {
     Fake e;
@@ -136,6 +138,7 @@ std::vector<int32_t> operator+(std::vector<int32_t> a, const std::vector<int32_t
 CacheOptions options(int64_t park_mib, int slots = 4) {
     CacheOptions o;
     o.every = 2048;
+    o.recent = recent;
     o.park_mib = park_mib;
     o.park_slots = slots;
     return o;
@@ -243,6 +246,7 @@ void any_order() {
         o.park_mib = budget[rng() % 3];
         o.park_slots = (int) (rng() % 4);
         o.park_min = rng() % 2 ? 200 : 0;
+        o.recent = recent;
         Chat c(o);
         c.e.state = rng() % 2 ? 100 << 10 : 8;
         c.rng.seed((unsigned) round);
@@ -270,7 +274,7 @@ void any_order() {
 // A long prompt read in one go has more checkpoints due than a conversation keeps.  Only the ones it keeps get a
 // state, and they are the ones that reading up to each checkpoint in turn leaves: where a prompt that goes on
 // from each place is taken up says which are there.
-void long_read() {
+std::vector<int64_t> long_read() {
     std::vector<int64_t> left[2];
     const std::vector<int32_t> a = text(1, 31000);
     for (int way = 0; way < 2; ++way) {
@@ -287,9 +291,35 @@ void long_read() {
     }
     far = 0;
     check(left[0] == left[1], "a read past its checkpoints keeps the ones a read to each of them keeps");
+    if (recent) return left[1];
     const std::vector<int64_t> six = {0,     0,     0,     8192,  8192,  8192,  8192, 16384,
                                       16384, 16384, 22528, 22528, 22528, 28672, 30720};
     check(left[1] == six, "which are five of the fifteen inside, beside the one before the prompt's last token");
+    return left[1];
+}
+
+// --prompt-cache-recent keeps the same number of checkpoints, closer together the nearer they are to the end: a
+// prompt that parts from the conversation near its end reads less again, and one that parts near its start more.
+void recent_policy() {
+    const std::vector<int64_t> even = long_read();
+    recent = true;
+    const std::vector<int64_t> near = long_read();
+    recent = false;
+    int64_t lost_even = 0, lost_near = 0;
+    for (size_t k = 0; k < near.size(); ++k) {
+        const int64_t place = 2048 * (int64_t) (k + 1);
+        check(near[k] <= place && near[k] % 2048 == 0, "a prompt is taken up at a checkpoint before it parts");
+        lost_even += place - even[k];
+        lost_near += place - near[k];
+    }
+    for (size_t k = near.size() - 4; k < near.size(); ++k)
+        check(near[k] >= even[k], "the last few thousand tokens are read again no more than before");
+    // Within one read the drops are decided as the checkpoints come, each against the end so far: a single read
+    // keeps them about as evenly as before (8192, 16384, 24576, 28672, 30720 here).  The tail fills in over the
+    // requests that follow, each with its own checkpoints near its end.
+    check(near.back() == 30720 && near[near.size() - 2] == 28672, "the last two checkpoints inside are kept");
+    std::printf("conversations_test: tokens read again, parting at each 2,048: %lld spread evenly, %lld recent\n",
+                (long long) lost_even, (long long) lost_near);
 }
 
 int main() {
@@ -307,7 +337,24 @@ int main() {
         any_order();
     }
     quits = 0;
+    recent = true;   // the same with --prompt-cache-recent
+    for (const int64_t f : {0, 6000, 700}) {
+        far = f;
+        one_conversation();
+        two_conversations();
+        shared_start();
+        limits();
+        any_order();
+    }
+    quits = 3;
+    for (const int64_t f : {6000, 700}) {
+        far = f;
+        any_order();
+    }
+    quits = 0;
+    recent = false;
     long_read();
+    recent_policy();
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }

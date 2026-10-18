@@ -511,6 +511,10 @@ it works but is not part of this build).
 
 ## strata-poly on AMD (experimental, built from source)
 
+For observable GPU failures, the HIP engine stops and the server requires a new
+engine process before generation resumes. See [failure handling and its limits](HIP_GPU_FAILURES.md)
+and the [validation results](../bench/results/2026-10-12-hip-failclosed-validation/README.md).
+
 `-DSTRATA_POLY_HIP=ON` beside `-DSTRATA_ENABLE_HIP=ON` builds `strata-poly` for the same wave32 cards: its sources
 through the same CUDA->HIP shim, llama.cpp's MMQ kernels with ggml's own HIP header. It is off by default, setup
 does not install it, and the CUDA build of `strata-poly` is unchanged. On Windows:
@@ -574,11 +578,11 @@ kernels and sums; a layer's rows in RAM are copied to VRAM by the copy engine wh
 `--kv-resident auto` keeps everything in VRAM when it fits, and `--kv-ram-mib` bounds the pinned RAM; the load
 fails with the context that fits rather than page. The measurements, the parity tests and the needle tests
 (`tools/hip/kv_parity.py`, `kv_needles.py`, `poly_kernel_bench attn`) are in
-[AMD_KV_STREAMING.md](../AMD_KV_STREAMING.md).
+[AMD_KV_STREAMING.md](reports/AMD_KV_STREAMING.md).
 
 Qwen3.6-35B-A3B runs on the same class (`qwen35moe`, the same layout with a draft block in the file). Its Unsloth
 UD-Q4_K_M, the first file there with K-quant experts (Q4_K, Q5_K, Q6_K) and a draft block, needed four changes, all
-under `STRATA_USE_HIP` ([AMD_QWEN36_IMPLEMENTATION.md](../AMD_QWEN36_IMPLEMENTATION.md)):
+under `STRATA_USE_HIP` ([AMD_QWEN36_IMPLEMENTATION.md](reports/AMD_QWEN36_IMPLEMENTATION.md)):
 
 - **Routing on the card:** the expert products with their slots in device memory had a kernel only for rows that
   fit half a warp, so the routing on the card was off for every layer of a K-quant file. It now has the general
@@ -616,7 +620,7 @@ a `current` model for the title agent that never switches. A request can keep ea
 
 Unsloth's Qwen3.6 UD-Q3_K_M (17.1 GB) has the experts of Qwen3.5's Q3_K_M (IQ3_XXS gate/up, IQ4_XS down, Q6_K
 down in three layers; its draft block is Q3_K/Q4_K). It runs on the same binary with no change
-([AMD_QWEN36_Q3_MIGRATION.md](../AMD_QWEN36_Q3_MIGRATION.md)). On the same PC, the same prompts, median of three
+([AMD_QWEN36_Q3_MIGRATION.md](reports/AMD_QWEN36_Q3_MIGRATION.md)). On the same PC, the same prompts, median of three
 alternated runs:
 
 | Model | Decode at 2K / 8K / 31K / 45K (tok/s) | Prefill (tok/s) | Process working set |
@@ -636,7 +640,7 @@ without MMQ, or with CPU experts. It is the largest difference left (0.125-0.134
 Qwen3.5-35B-A3B Q3_K_M (Unsloth) there, 6 CPU threads: llama.cpp's tokens (`tools/hip/poly_llama_parity.py`) on four
 prompts of 22 to 11,481 tokens, with and without graphs, guesses and copy kernels, and with every expert on the CPU;
 through the server a prompt of 44,419 tokens at a context of 49,152. The figures and what was not checked are in
-[AMD_PORT_IMPLEMENTATION.md](../AMD_PORT_IMPLEMENTATION.md).
+[AMD_PORT_IMPLEMENTATION.md](reports/AMD_PORT_IMPLEMENTATION.md).
 
 ## Tuning table
 

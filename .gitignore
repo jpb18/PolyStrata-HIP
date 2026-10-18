@@ -1,6 +1,4 @@
-# Generated, not source: deterministic build products of tools/ (see docs/).
-# tiny-qwen4exp.gguf is ~113 MB, over GitHub's 100 MB file limit -- regenerate with
-#   python tools/make_tiny_model.py
+# Local fixture models and microbenchmark outputs (when generated).
 bench/tiny-*.gguf
 bench/wide-*.gguf
 bench/micro/*.exe
@@ -20,6 +18,7 @@ __pycache__/
 *.nsys-rep
 
 # Pi harness metadata (local session state, not project source)
+/.lcm/
 *.sqlite
 *.npz
 *.occ1
@@ -29,6 +28,8 @@ td.log
 /.venv/
 /build/
 /third_party/llama.cpp
+# Pinned local checkouts used through STRATA_GGML_DIR (keep third_party/ggml tracked).
+/third_party/llama.cpp-*/
 /models/
 /packs/
 /mtp/
@@ -66,3 +67,39 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+
+# Local weights (curated data/ fixtures already tracked by Git remain tracked).
+*.gguf
+*.safetensors
+*.onnx
+
+# Compiler products outside build folders, backups and scratch runs.
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.bak
+/tmp/
+/strata-*.json.*
+/opencode.json
+/test_*.png
+
+# One-off local vision experiments with machine-specific paths, retained on disk.
+# Reusable encoder source is tools/vision/; these are not release entry points.
+/build-vision-test.bat
+/debug_vision.py
+/download_correct_mmproj.py
+/download_mmproj.py
+/download_mmproj_bartowski.py
+/enable_vision.py
+/search_mmproj.py
+/search_mmproj2.py
+/test_image_download.py
+/test_vision.py
+
+# Generated benchmark campaigns stay local by default. Already tracked evidence
+# remains versioned. Publish new evidence only after reviewing paths and prompts
+# (git add -f for a deliberately selected, redacted report).
+/bench/results/*/

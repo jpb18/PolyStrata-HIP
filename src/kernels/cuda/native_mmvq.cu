@@ -1464,7 +1464,9 @@ __global__ void native_mmvq_slots_half_kernel(MmvqSlots slots, int n_in, int n_o
 template<typename F>
 __launch_bounds__(WARPS * WARP, 4)
 __global__ void native_mmvq_slots_half_dev_kernel(const MmvqSlots* slots, int n_in, int n_out) {
-    slots_half_rows<F>(slots->w[blockIdx.y], slots->x[blockIdx.y], slots->y[blockIdx.y], n_in, n_out);
+    const MmvqSlots& at = slots[blockIdx.y / 8];   // slot i is slots[i / 8]'s (i % 8)-th: up to 64 (a window's)
+    const int i = int(blockIdx.y % 8);
+    slots_half_rows<F>(at.w[i], at.x[i], at.y[i], n_in, n_out);
 }
 
 // native_mmvq_slots_kernel with its slots in device memory, for rows too long for half a warp: a k-quant expert's
@@ -1474,9 +1476,10 @@ __global__ void native_mmvq_slots_half_dev_kernel(const MmvqSlots* slots, int n_
 template<typename F, int ROWS>
 __launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 1))
 __global__ void native_mmvq_slots_dev_kernel(const MmvqSlots* slots, int n_in, int n_out) {
-    const auto* w = static_cast<const typename F::Block*>(slots->w[blockIdx.y]);
-    const auto* x = static_cast<const Q81Block*>(slots->x[blockIdx.y]);
-    float* y = slots->y[blockIdx.y];
+    const MmvqSlots& at = slots[blockIdx.y / 8];   // slot i is slots[i / 8]'s (i % 8)-th: up to 64 (a window's)
+    const auto* w = static_cast<const typename F::Block*>(at.w[blockIdx.y % 8]);
+    const auto* x = static_cast<const Q81Block*>(at.x[blockIdx.y % 8]);
+    float* y = at.y[blockIdx.y % 8];
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
     const int row0 = ROWS * int(blockIdx.x);
     const int blocks_per_row = n_in / F::DIV;
@@ -2788,7 +2791,7 @@ bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_i
 bool native_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream) {
     const bool iq = ggml_type == 7 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 || ggml_type == 21 ||
                     ggml_type == 22 || ggml_type == 29;
-    if (!slots || !stream || n_out <= 0 || n_in <= 0 || count < 1 || count > MAX_NCOLS) return false;
+    if (!slots || !stream || n_out <= 0 || n_in <= 0 || count < 1 || count > 8 * MAX_NCOLS) return false;
     if (iq) {
         if (n_in % (ggml_type == 7 ? 32 : 256) != 0) return false;
         iq_mmvq_slots_dev(ggml_type, slots, count, n_in, n_out, stream);

@@ -131,7 +131,7 @@ bool device_summary(int ordinal, std::string& name, std::string& detail) {
 
 namespace strata::hip_compat {
 namespace {
-IDXGIAdapter3* budget_adapter(int device) {
+IDXGIAdapter3* budget_adapter(int device, hipError_t& error) {
     constexpr int kMaxDevices = 16;
     static std::mutex mu;
     static IDXGIAdapter3* adapters[kMaxDevices] = {};
@@ -141,8 +141,10 @@ IDXGIAdapter3* budget_adapter(int device) {
     if (tried[device]) return adapters[device];
     tried[device] = true;
     hipDeviceProp_t p{};
-    if (hipGetDeviceProperties(&p, device) != hipSuccess) {
-        (void) hipGetLastError();
+    error = hipGetDeviceProperties(&p, device);
+    if (error != hipSuccess) {
+        // An optional DXGI budget may be absent; a HIP device error must reach
+        // the caller rather than becoming a successful memory query.
         return nullptr;
     }
     LUID luid{};
@@ -167,10 +169,14 @@ IDXGIAdapter3* budget_adapter(int device) {
 // error, and a failure of the retry, are returned as they are (a real failure is never retried).
 static hipError_t first_mem_get_info(size_t* free_bytes, size_t* total_bytes) {
     static std::atomic<bool> warmed{false}, retried{false};
-    if (!warmed.exchange(true)) (void) hipFree(nullptr);
+    if (!warmed.exchange(true)) {
+        const hipError_t warm = hipFree(nullptr);
+        if (warm != hipSuccess) return warm;
+    }
     hipError_t e = hipMemGetInfo(free_bytes, total_bytes);
     if (e == hipErrorInvalidValue && !retried.exchange(true)) {
-        (void) hipGetLastError();
+        const hipError_t sticky = hipGetLastError();
+        if (sticky != hipSuccess && sticky != hipErrorInvalidValue) return sticky;
         std::fprintf(stderr, "strata: hipMemGetInfo failed (%s); retrying once after 250 ms\n", hipGetErrorString(e));
         Sleep(250);
         e = hipMemGetInfo(free_bytes, total_bytes);
@@ -188,11 +194,10 @@ hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes) {
     }();
     if (e != hipSuccess || off || free_bytes == nullptr || total_bytes == nullptr) return e;
     int device = 0;
-    if (hipGetDevice(&device) != hipSuccess) {
-        (void) hipGetLastError();
-        return e;
-    }
-    IDXGIAdapter3* adapter = budget_adapter(device);
+    hipError_t device_error = hipGetDevice(&device);
+    if (device_error != hipSuccess) return device_error;
+    IDXGIAdapter3* adapter = budget_adapter(device, device_error);
+    if (device_error != hipSuccess) return device_error;
     DXGI_QUERY_VIDEO_MEMORY_INFO local{};
     if (adapter == nullptr || FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
         local.Budget == 0 || local.Budget >= *total_bytes)

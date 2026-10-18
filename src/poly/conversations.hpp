@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -32,6 +33,12 @@ struct CacheOptions {
     int64_t park_mib = 0;      ///< host memory for parked conversations; 0: none is parked
     int park_slots = 4;        ///< parked conversations at most
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
+    /// Which checkpoint goes when there are more than are kept.  false: the one whose neighbours are closest
+    /// together, which spreads them evenly over the conversation.  true (--prompt-cache-recent): the one whose loss
+    /// costs the fewest tokens read again, for a prompt that parts from the conversation as far from its end as
+    /// often at any scale (a few hundred tokens back as often as a few thousand, or tens of thousands): they then
+    /// lie closer together the nearer they are to the end (bench/results/2026-10-12-hip-prefill).
+    bool recent = false;
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
     FILE* log = nullptr;       ///< where parking is reported; the server reads these lines
 };
@@ -50,10 +57,14 @@ public:
         const int64_t n = (int64_t) ids.size();
         size_t best = cur_;
         int64_t at = 0, same = 0;
+        int64_t alike = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
             const int64_t c = common(slots_[i].seq, ids), r = reach(i, c, n);
+            alike = std::max(alike, c);
             if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
         }
+        last_ = Resumed{alike, same, len(slots_[best]), {}};
+        for (const Checkpoint& m : slots_[best].marks) last_.marks.push_back(m.pos);
         ++clock_;
         if (at == 0) {
             // nothing kept starts like this
@@ -157,6 +168,14 @@ public:
     size_t parked_bytes() const { return held(slots_.size()).bytes; }
     size_t evictions() const { return evictions_; }
 
+    /// What the last resume() found, for a diagnostic: the most tokens a kept conversation has alike with the
+    /// prompt, those of the one it went on from, that one's length and its checkpoints then.
+    struct Resumed {
+        int64_t alike = 0, same = 0, had = 0;
+        std::vector<int64_t> marks;
+    };
+    const Resumed& last_resumed() const { return last_; }
+
 private:
     using Clock = std::chrono::steady_clock;
 
@@ -237,12 +256,29 @@ private:
 
     // Of more checkpoints than are kept, the one that goes: the one whose neighbours are closest together.  The
     // last two stay, the end of this prompt and of the one before being where a client most often comes back to.
-    static size_t drop_of(const std::vector<int64_t>& pos) {
+    size_t drop_of(const std::vector<int64_t>& pos) const {
+        if (o_.recent) return drop_recent(pos);
         size_t drop = 0;
         int64_t gap = INT64_MAX;
         for (size_t k = 0; k + 2 < pos.size(); ++k) {
             const int64_t g = pos[k + 1] - (k ? pos[k - 1] : 0);
             if (g < gap) gap = g, drop = k;
+        }
+        return drop;
+    }
+
+    // CacheOptions::recent.  Without checkpoint k, a prompt that parts from the conversation between it and the
+    // next goes back to the one before: pos[k] - pos[k-1] tokens more to read.  With the part's distance from the
+    // end as likely at any scale, the share of prompts that part there is ln((end - pos[k]) / (end - pos[k+1])).
+    // The one that goes is the one whose product is least.  The last two stay, as above.
+    static size_t drop_recent(const std::vector<int64_t>& pos) {
+        size_t drop = 0;
+        double least = 0;
+        const double end = (double) pos.back() + 1.0;
+        for (size_t k = 0; k + 2 < pos.size(); ++k) {
+            const double lo = k ? (double) pos[k - 1] : 0.0, at = (double) pos[k], hi = (double) pos[k + 1];
+            const double loss = (at - lo) * std::log((end - at) / (end - hi));
+            if (k == 0 || loss < least) least = loss, drop = k;
         }
         return drop;
     }
@@ -386,6 +422,7 @@ private:
     size_t cur_ = 0;
     uint64_t clock_ = 0;
     size_t evictions_ = 0;
+    Resumed last_;
     std::vector<Checkpoint> due_;   // inside()'s checkpoints, until read() makes them the conversation's
     std::vector<int64_t> after_;    // where the conversation's checkpoints are once that read is done
 };

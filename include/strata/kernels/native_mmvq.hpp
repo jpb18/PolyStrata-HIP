@@ -135,8 +135,9 @@ struct MmvqSlots {
 bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
 #if defined(STRATA_USE_HIP)
 // native_mmvq_slots() with the slots in device memory, written there by a kernel before it on the stream
-// (strata-poly's routing on the card).  A slot whose w is null gives zeros.  False, with nothing launched: the
-// format or shape has no such kernel.
+// (strata-poly's routing on the card).  A slot whose w is null gives zeros.  count is up to 64: slot i is the
+// (i % 8)-th of slots[i / 8], the structs back to back.  False, with nothing launched: the format or shape has no
+// such kernel.
 bool native_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream);
 #endif
 

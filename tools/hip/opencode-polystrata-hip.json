@@ -153,6 +153,34 @@
               }
             }
           ]
+        },
+        "qwen3.8-35b-a3b-distill": {
+          "modelID": "qwen3.8-35b-a3b-distill-iq3_m-hip",
+          "name": "PolyStrata / Qwen3.8-35B-A3B Distill IQ3_M (Empero) 48K (RX 9060 XT)",
+          "limit": {
+            "context": 49152,
+            "output": 8192
+          },
+          "variants": [
+            {
+              "id": "none",
+              "settings": {
+                "reasoningEffort": "none"
+              }
+            },
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            }
+          ]
         }
       }
     }

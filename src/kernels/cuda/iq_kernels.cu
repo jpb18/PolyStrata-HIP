@@ -2781,14 +2781,15 @@ __global__ void __launch_bounds__(128) mmvq_slots_dev_kernel(const MmvqSlots* sl
     const int row = blockIdx.x * 4 + threadIdx.y;
     if (row >= n_out) return;
     const int lane = threadIdx.x;
-    const uint8_t* w = (const uint8_t*) slots->w[blockIdx.y];
+    const MmvqSlots& at = slots[blockIdx.y / 8];   // slot i is slots[i / 8]'s (i % 8)-th: up to 64 (a window's)
+    const int i = int(blockIdx.y % 8);
+    const uint8_t* w = (const uint8_t*) at.w[i];
     if (!w) {
-        if (lane == 0) slots->y[blockIdx.y][row] = 0.0f;
+        if (lane == 0) at.y[i][row] = 0.0f;
         return;
     }
-    const float s = row_dot<TY>(w + (size_t) row * row_bytes, (const block_q8_1*) slots->x[blockIdx.y],
-                                n_in / Fmt<TY>::qk, lane);
-    if (lane == 0) slots->y[blockIdx.y][row] = s;
+    const float s = row_dot<TY>(w + (size_t) row * row_bytes, (const block_q8_1*) at.x[i], n_in / Fmt<TY>::qk, lane);
+    if (lane == 0) at.y[i][row] = s;
 }
 }  // namespace
 

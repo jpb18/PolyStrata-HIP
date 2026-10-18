@@ -24,7 +24,9 @@ protected:
     void load_geometry() override;
     void load_layer(int il) override;
     void begin_pass() override;
+    int layer_kind(int il) const override { return blocks_[(size_t) il].gdn ? 0 : 1; }
     void check_draft_block() override;
+    void check_kv_format() const override;
     size_t recurrent_floats() const override;
     bool snaps_spread() const override { return true; }
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
@@ -66,6 +68,9 @@ private:
         Dev wq, wk, wv, q_norm, k_norm;
         uint16_t* keys = nullptr;   ///< kv_split_ * n_kv * head_dim, fp16: the positions in VRAM
         uint16_t* vals = nullptr;
+        // the same caches in q8_0 (Options::kv_k / kv_v), in place of keys / vals: q8_row_bytes() a position
+        uint8_t* keys8 = nullptr;
+        uint8_t* vals8 = nullptr;
         // KV streaming: the positions from kv_split_ on, in pinned RAM, through the card's pointer and the host's
         uint16_t* keys_h = nullptr;
         uint16_t* vals_h = nullptr;
@@ -79,6 +84,8 @@ private:
     void attn_store(Block& B, int64_t pos, int n);
     void turn_of(int64_t row, int32_t* thw) const;
     int64_t plan_kv() const;
+    size_t cache_row(int c) const;
+    uint8_t* cache_of(const Block& B, int c) const;
     const KvSpill* spill(const Block& B);
     void ahead(int il, int64_t rows);
     const int32_t* turns(int64_t pos, int n, int64_t* first);
@@ -95,6 +102,12 @@ private:
     int s_dim_ = 0, k_heads_ = 0, v_heads_ = 0, d_inner_ = 0, conv_dim_ = 0;
     int n_gdn_ = 0, n_attn_ = 0;
     int chunk_ = 1;   ///< tokens the attention takes at a time
+    size_t fit_floats_ = 0;   ///< STRATA_POLY_ATTN_FIT=1: score_'s floats, for attend()'s choice of kernels; else 0
+    // a q8_0 cache (docs/AMD_HIP_KV_Q8.md): its keys or values, and the stage a prompt batch turns its blocks of rows
+    // into halves in (kQ8StageRows rows), one for each cache that is q8_0
+    bool k_q8_ = false, v_q8_ = false;
+    uint16_t *q8_kstage_ = nullptr, *q8_vstage_ = nullptr;
+    int q8_stage_rows_ = 0;
     // KV streaming (AMD_KV_STREAMING.md)
     int64_t kv_split_ = 0;                 ///< the positions whose rows are in VRAM; the rest are in pinned RAM
     uint16_t *kstage_ = nullptr, *vstage_ = nullptr;   ///< a prompt batch's block of rows that reaches RAM

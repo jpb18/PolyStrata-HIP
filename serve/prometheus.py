@@ -42,12 +42,13 @@ class Latencies:
         self.lock = threading.Lock()
         self.ttft, self.itl, self.e2e = Histogram(), Histogram(), Histogram()
 
-    def observe(self, ttft_s, output_tokens, decode_s, total_s):
+    def observe(self, ttft_s, output_tokens, token_span_s, total_s):
         with self.lock:
             self.ttft.observe(ttft_s)
-            if output_tokens and output_tokens > 1 and decode_s:
-                # the mean gap, once per gap: the engine reports the decode time, not each token's
-                self.itl.observe(decode_s / (output_tokens - 1), output_tokens - 1)
+            if output_tokens and output_tokens > 1 and token_span_s is not None:
+                # Mean observed gap from the server's first to last native token. No engine phase clock,
+                # injected wrap-up tokens or STOP drain time in this denominator.
+                self.itl.observe(token_span_s / (output_tokens - 1), output_tokens - 1)
             self.e2e.observe(total_s)
 
     def snapshot(self):
@@ -94,7 +95,7 @@ def render(m: dict, lat: dict) -> str:
            _num(totals.get("drafts_accepted")))
     metric("vllm:num_preemptions_total", "counter", "Preempted requests (PolyStrata does not preempt).", 0)
     for name, key, help_ in (("vllm:time_to_first_token_seconds", "ttft", "Time to the first token."),
-                             ("vllm:inter_token_latency_seconds", "itl", "Time between two tokens."),
+                             ("vllm:inter_token_latency_seconds", "itl", "Mean server-observed token gap, weighted by gaps."),
                              ("vllm:e2e_request_latency_seconds", "e2e", "A request from start to end.")):
         counts, total, n = lat[key]
         out.append(f"# HELP {name} {help_}\n# TYPE {name} histogram")
@@ -130,12 +131,24 @@ def strata(m: dict, out: list, lab: str):
            live.get("prefill_tok_s_mean") or 0)
     metric("live_prompt_read", "gauge", "Prompt tokens read so far by the running request (live.prompt_read).",
            live.get("prompt_read") or 0)
+    for key in ("prompt_position_tokens", "server_observed_tokens", "server_token_span_tok_s", "server_token_span_ms"):
+        value = live.get(key)
+        name = key[:-3] + "_seconds" if key.endswith("_ms") else key
+        metric("live_" + name, "gauge", f"Running request live.{key}.",
+               value / 1000 if key.endswith("_ms") and isinstance(value, (int, float)) else value)
     for state in ("idle", "reading", "generating"):
         slots = live.get("slots")
         if isinstance(slots, list) and slots:
             metric("live_slots", "gauge", "The batch slots in each state (live.slots).",
                    sum(1 for x in slots if isinstance(x, dict) and x.get("state") == state), f',state="{state}"')
     metric("engine_max_context", "gauge", "The engine's context (engine.max_context).", eng.get("max_context"))
+    kv = eng.get("kv")
+    if isinstance(kv, str) and kv:                       # the attention caches' format, as the engine reports it
+        fmt = kv.replace("\\", "\\\\").replace('"', '\\"')
+        metric("engine_kv_format", "gauge", "1, labelled with the attention caches' format (engine.kv).", 1,
+               f',format="{fmt}"')
+        metric("engine_kv_bytes_per_position", "gauge", "Attention cache bytes a context position takes, every "
+               "layer (engine.kv_bytes_per_position).", eng.get("kv_bytes_per_position"))
     metric("totals_prompt_seconds_total", "counter", "Time spent reading prompts (totals.prompt_ms).",
            round((totals.get("prompt_ms") or 0) / 1000, 3))
     metric("totals_decode_seconds_total", "counter", "Time spent generating (totals.decode_ms).",
@@ -145,6 +158,23 @@ def strata(m: dict, out: list, lab: str):
            last.get("hit_rate"))
     metric("last_decode_tok_s", "gauge", "The last request's decode rate (requests[0].decode_tok_s).",
            last.get("decode_tok_s"))
+    for key, value in (last.get("inference") or {}).items():
+        if key.endswith("_ms"):
+            metric("last_" + key[:-3] + "_seconds", "gauge", f"Last request inference.{key}, seconds.",
+                   value / 1000 if isinstance(value, (int, float)) else None)
+        elif key.endswith(("_tokens", "_tok_s", "_segments", "_calls")):
+            metric("last_" + key, "gauge", f"Last request inference.{key}.", value)
+        elif key in ("engine_complete", "engine_prefill_complete") and value is not None:
+            metric("last_" + key, "gauge", f"Last request inference.{key} (1 = true).", int(value))
+    if last.get("inference") is not None:
+        metric("last_engine_metrics_reported", "gauge", "1 when every acknowledged segment has native metrics.",
+               int(last["inference"].get("engine_metrics_status") == "reported"))
+    for key, counter in (totals.get("inference") or {}).items():
+        name = key[:-3] + "_seconds" if key.endswith("_ms") else key
+        value = counter["sum"] / 1000 if key.endswith("_ms") else counter["sum"]
+        metric("totals_" + name + "_total", "counter", f"Sum of available inference.{key} measurements.", value)
+        metric("totals_" + name + "_requests_total", "counter", f"Requests contributing inference.{key}.",
+               counter["requests"])
     gpus = hw.get("gpus") or ([{"index": 0, "util": hw.get("gpu_util"), "mem_used": hw.get("gpu_mem_used"),
                                 "mem_total": hw.get("gpu_mem_total"), "temp": hw.get("gpu_temp"),
                                 "power": hw.get("gpu_power")}] if hw.get("gpu_util") is not None else [])

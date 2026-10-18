@@ -5,8 +5,9 @@ normal PC: one NVIDIA or AMD graphics card plus system RAM, on Windows or Linux.
 (`src/`, `include/`), a Python server with an OpenAI- and Anthropic-compatible API and a web app (`serve/`), and a
 one-click installer (`setup.py`, started by `START-HERE.bat` / `setup.sh`).
 
-A second engine, `strata-poly` (`src/poly/`), runs GLM 5.3 Flash and three smaller models from their GGUF files, on
-Linux with one NVIDIA card: [docs/GLM.md](docs/GLM.md), [docs/BACKENDS.md](docs/BACKENDS.md). The Qwen engine, the installer, the server and the web app come from
+A second engine, `strata-poly` (`src/poly/`), reads GLM 5.3 Flash and smaller models from GGUF files:
+[docs/GLM.md](docs/GLM.md), [docs/BACKENDS.md](docs/BACKENDS.md); experimental AMD support: [docs/AMD_HIP.md](docs/AMD_HIP.md).
+The Qwen engine, the installer, the server and the web app come from
 [Strata](https://github.com/Niko1221/Strata).
 
 ## Installing PolyStrata for a user
@@ -18,6 +19,11 @@ offers the same steps as tools.
 
 ## Working on the code
 
+- Start searches in `src/`, `include/`, `serve/`, `tools/`, `tests/`, `sycl/` and the relevant top-level build/setup files.
+  `.rgignore` omits historical results and root AMD reports; use `rg --no-ignore <pattern> bench/results/<run>`
+  (or a specific report) when evidence is needed. See [docs/REPOSITORY_AUDIT.md](docs/REPOSITORY_AUDIT.md) for the inventory.
+- Skip `build*/`, `engine*/`, `.venv/`, `.rocm-win/`, `.lcm/` and generated logs in routine source searches.
+  Build folders can hold operational binaries and rollback copies: preserve these, validation reports, patches and existing local work.
 - How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
   the [paper](docs/paper/Strata-Paper.pdf).
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md).

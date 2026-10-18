@@ -20,6 +20,7 @@ class VramEngine(ResidentEngine):
     def __init__(self, tok, elastic=True):
         super().__init__(tok)
         self.elastic, self.calls = elastic, []
+        self.floor, self.short = 0, 0
 
     def vram(self, reserve_mib, timeout=120.0):
         self.calls.append(reserve_mib)
@@ -27,7 +28,8 @@ class VramEngine(ResidentEngine):
             raise ValueError("VRAM needs an engine started with --vram-elastic (one NVIDIA GPU, --serve)")
         r = 700 if reserve_mib is None else reserve_mib
         out = {"reserve_mib": r, "expert_slots": max(100, 4000 - r), "expert_cache_mib": max(500, 6000 - r),
-               "expert_cache_full_mib": 6000, "vram_free_mib": r, "prompt_chunk": 4096}
+               "expert_cache_full_mib": 6000, "vram_free_mib": r, "prompt_chunk": 4096,
+               "expert_slots_min": self.floor, "vram_reserve_short_mib": self.short}
         self.info["vram"] = out
         return out
 
@@ -46,16 +48,29 @@ class EngineCommand(unittest.TestCase):
 
     def test_the_line_and_the_answer(self):
         e = self.engine(["strata serve: something else\n",
-                         "VRAM reserve_mib=6000 expert_slots=1200 expert_slots_full=3700 expert_cache_mib=1536 "
+                         "VRAM reserve_mib=6000 expert_slots=1200 expert_slots_full=3700 expert_slots_min=0 "
+                         "vram_reserve_short_mib=0 expert_cache_mib=1536 "
                          "expert_cache_full_mib=4900 vram_free_mib=6100 prompt_chunk=2048\n"])
         out = e.vram(6000)
         self.assertEqual(e.proc.stdin.getvalue(), "VRAM 6000\n")
         self.assertEqual(out["expert_slots"], 1200)
         self.assertEqual(out["prompt_chunk"], 2048)
         self.assertEqual(e.info["expert_slots"], 1200)
+        self.assertEqual(e.info["expert_slots_min"], 0)
+        self.assertEqual(e.info["vram_reserve_short_mib"], 0)
         e = self.engine(["VRAM reserve_mib=700 expert_slots=3700\n"])
         e.vram(None)
         self.assertEqual(e.proc.stdin.getvalue(), "VRAM\n")
+
+    def test_the_floor_leaving_the_reserve_short_is_kept(self):
+        e = self.engine(["VRAM reserve_mib=1536 expert_slots=2000 expert_slots_full=3700 expert_slots_min=2000 "
+                         "vram_reserve_short_mib=900 expert_cache_mib=4000 expert_cache_full_mib=4900 "
+                         "vram_free_mib=636 prompt_chunk=2048\n"])
+        out = e.vram(1536)
+        self.assertEqual(out["expert_slots"], 2000)
+        self.assertEqual(out["vram_reserve_short_mib"], 900)
+        self.assertEqual(e.info["expert_slots_min"], 2000)
+        self.assertEqual(e.info["vram_reserve_short_mib"], 900)
 
     def test_refused_and_died(self):
         e = self.engine(["ERR VRAM needs an engine started with --vram-elastic\n"])

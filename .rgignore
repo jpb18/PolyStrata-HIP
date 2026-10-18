@@ -1,0 +1,6 @@
+# Search scope only; these files remain available and retain their Git status.
+/bench/results/
+/docs/benchmarks/
+/AMD_*.md
+
+/docs/reports/

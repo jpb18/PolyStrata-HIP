@@ -5,6 +5,7 @@
 #include "common.cuh"
 #include "mmq.cuh"
 #include "quantize.cuh"
+#include "strata/poly/gpu_failure.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -20,8 +21,12 @@ namespace {
 int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 
 void ck(const char* what) {
+#if defined(GGML_USE_HIP)
+    hip_launch_check(what);
+#else
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
+#endif
 }
 
 }  // namespace

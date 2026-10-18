@@ -1,7 +1,7 @@
 # Installing PolyStrata
 
 Everything about installing, starting, updating and configuring PolyStrata, on Windows and Linux, with an NVIDIA or an
-AMD graphics card. The short version is in the [README](../README.md#install); an AI coding assistant can do all of
+AMD graphics card. The short version is in the [README](UPSTREAM_README.md#install); an AI coding assistant can do all of
 this for you with [AI_SETUP.md](AI_SETUP.md).
 
 > **On this page:** [What you need](#what-you-need) · [Windows](#windows) · [Linux](#linux) ·

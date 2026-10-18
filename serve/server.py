@@ -59,6 +59,7 @@ from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_mess
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
+from serve.inference_metrics import parse_done_fields, request_inference, log_fields, observe_totals  # noqa: E402
 from serve import models as registry  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
@@ -567,10 +568,11 @@ def btrace(*a):
 EOS_IDS = {248044, 248046}   # <|endoftext|>, <|im_end|>: the engine's default --eos-ids
 
 
-# The engine's own words for a verifier that cannot go on (its GPU waits were released, or an earlier window never
-# finished, #267): the process may stay alive and even print DONE, but it must not take another request.
+# Fatal verifier signatures (#267) and the HIP engine's explicit GPU failure marker:
+# the process may stay alive and even print DONE, but it must not take another request.
 FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed out at layer ",
-                  "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
+                  "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished",
+                  "ERR GPU_FATAL ")
 
 
 class StrataEngine:
@@ -586,6 +588,7 @@ class StrataEngine:
     gpu_busy = None                      # #1317: () -> bool, "the GPU is working" (the telemetry's reading); a GPU at work is not frozen
     last_err = None                      # #997: an ERR that was its last stdout line (death_note says it)
     batch = 0                            # --batch: the engine's batch slots (0: one request at a time)
+    gen = 0                              # before the first READY (also used by driver-free protocol fixtures)
 
     # `last`: the figures of the engine's last DONE line.  With batch slots several requests run at once, each on its
     # own thread, so each one reads its own request's figures (Service.run records them); one at a time, the one dict.
@@ -623,6 +626,8 @@ class StrataEngine:
         self.reused = 0                  # RESUME: prompt tokens not read again (a client takes them out of the work)
         self.silent_note = None
         self.last_err = None
+        # Keep a fault latched during loading; clear it only after a new READY.
+        self.fatal_note = self.__dict__.get("fatal_note")
         try:                            # a ready-made engine's BUILD.json says its version
             self.info["version"] = json.loads((Path(exe).parent / "BUILD.json").read_text()).get("version")
         except (OSError, ValueError):
@@ -702,6 +707,7 @@ class StrataEngine:
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):
             self.info["version"] = str(self.info["engine"])
+        self.fatal_note = None                          # a new process, with fresh inference state
         self.ended = False                              # READY: alive from here (restart() set it True, #344)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
@@ -761,12 +767,24 @@ class StrataEngine:
                 # release_gpu_waits invalidates the verifier, even if the native
                 # process stays alive and prints DONE afterwards.
                 if self.proc is proc:
-                    self.silent_note = "Unrecoverable native verification failure: " + line[4:].strip()
+                    self.silent_note = "Unrecoverable native failure: " + line[4:].strip()
+                    self.fatal_note = line[4:].strip()
+                    self.slot_held = [[] for _ in slot_q]
                     self.ended = True
+                    print(f"[strata] engine process {proc.pid if hasattr(proc, 'pid') else '?'} failed: "
+                          f"{self.fatal_note}; active requests aborted; recovery requires a new process", flush=True)
                 try:
                     proc.terminate()
                 except OSError:
                     pass
+                # Discard tokens/DONE already buffered by this process. A consumer
+                # also checks fatal_note, since it may have taken a line meanwhile.
+                for q in [lines, *slot_q]:
+                    while True:
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:
+                            break
                 break                           # publish EOF, never the trailing DONE
             if line.startswith(("BT ", "BDONE ")) and slot_q:   # --batch: a batch slot's own lines
                 try:
@@ -814,7 +832,14 @@ class StrataEngine:
 
     def alive(self) -> bool:
         proc = self.proc                                 # read once: restart() / close() may set it to None meanwhile
-        return proc is not None and not getattr(self, "ended", False) and proc.poll() is None
+        return (proc is not None and not getattr(self, "ended", False)
+                and not getattr(self, "fatal_note", None) and proc.poll() is None)
+
+    def _check_fatal(self, born: int | None = None):
+        if getattr(self, "fatal_note", None):
+            raise EngineDied("the engine discarded its inference state: " + self.fatal_note)
+        if born is not None and self.gen != born:
+            raise EngineDied("the engine process was replaced; the active request was aborted")
 
     def exit_code(self):
         if self.proc is None:
@@ -894,6 +919,9 @@ class StrataEngine:
             self.last.update(prompt_read=int(f[14]))
         if len(f) >= 16:                                  # #588 (engine 0.1.39+): routed experts read over PCIe
             self.last.update(offloaded=int(f[15]))
+        facts = parse_done_fields(f[16:])
+        if facts is not None:
+            self.last["inference"] = facts
 
     def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
@@ -920,7 +948,8 @@ class StrataEngine:
                 for kv in line.split()[1:]:
                     k, _, v = kv.partition("=")
                     out[k] = int(v) if v.lstrip("-").isdigit() else v
-                self.info.update({k: out[k] for k in ("expert_slots", "vram_free_mib") if k in out})
+                self.info.update({k: out[k] for k in ("expert_slots", "expert_slots_min", "vram_free_mib",
+                                                      "vram_reserve_short_mib") if k in out})
                 self.info["vram"] = out
                 return out
             if time.time() > deadline:
@@ -1008,12 +1037,13 @@ class StrataEngine:
         for each `T`; returns ("done", None) at DONE, or ("badm", continues) at BADM (after DONE).  `stop_when()`
         true sends STOP once (the request is then read to its DONE)."""
         stopped = False
+        born, lines = self.gen, self.lines
         beat = time.monotonic()
         while True:
             try:
                 # A client can leave before the first PP/token.  Poll its Event as often as _take_control does;
                 # the ten-second HTTP heartbeat is independent of how promptly STOP reaches the engine.
-                line = self.lines.get(timeout=0.5)
+                line = lines.get(timeout=0.5)
             except queue.Empty:
                 if cancel.is_set() and not stopped:
                     self._send("STOP")
@@ -1022,6 +1052,7 @@ class StrataEngine:
                     beat = time.monotonic()
                     yield None
                 continue
+            self._check_fatal(born)
             beat = time.monotonic()
             if line is None:
                 raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
@@ -1243,6 +1274,7 @@ class StrataEngine:
                             yield None
                     phase = "none"                          # its DONE is read
                     while pending:
+                        self._check_fatal(born)
                         t = pending.pop(0)
                         out.append(t)
                         yield t
@@ -1325,6 +1357,7 @@ class StrataEngine:
                     cont = bool(self._ctl_result and self._ctl_result[1])
                     phase = "slot" if cont else "none"
                     while pending:
+                        self._check_fatal(born)
                         t = pending.pop(0)
                         out.append(t)
                         yield t
@@ -1338,15 +1371,18 @@ class StrataEngine:
                 live.update(state="decoding", first_token=time.time(), generated=len(out))
                 gen0 = len(out) - 1                         # the admission's own token: the slot feeds it first
                 going_solo = False
+                self._check_fatal(born)
+                slot_lines = self.slot_q[slot]
                 while True:
                     try:
-                        line = self.slot_q[slot].get(timeout=10.0)
+                        line = slot_lines.get(timeout=10.0)
                     except queue.Empty:
                         if cancel.is_set() and not stop_sent:
                             self._send(f"BSTOP {slot}")
                             stop_sent = True
                         yield None
                         continue
+                    self._check_fatal(born)
                     if line is None:
                         phase = "none"
                         raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
@@ -1495,6 +1531,7 @@ class StrataEngine:
             self.proc.stdin.flush()
         except OSError:                                  # the pipe is gone: the engine died (not the client)
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
+        born, lines = self.gen, self.lines
         done = False
         # #481: how long the engine may stay silent from here.  Until the first line: the request's first prompt
         # chunk at the slowest prompt reading on top of silence_s; a PP line resets it to its own chunk's time.
@@ -1514,7 +1551,7 @@ class StrataEngine:
                         raise self._silent(f"the engine said nothing for {time.monotonic() - heard:.0f} s during "
                                            "the request")
                 try:
-                    line = self.lines.get(timeout=min(wait, 0.5))
+                    line = lines.get(timeout=min(wait, 0.5))
                 except queue.Empty:
                     if cancel.is_set():
                         return
@@ -1533,6 +1570,9 @@ class StrataEngine:
                 if line is None:
                     done = True
                     raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
+                if getattr(self, "fatal_note", None) or self.gen != born:
+                    done = True
+                    self._check_fatal(born)
                 heard = time.monotonic()                  # any line is output: T, PP, RESUME, INFO ...
                 beat = heard
                 if stall_state:
@@ -1568,6 +1608,8 @@ class StrataEngine:
                     done = True
                     raise ValueError(line[4:].strip())
         finally:
+            if self.gen != born or getattr(self, "fatal_note", None):
+                done = True                             # never STOP/drain a replacement process
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
                     try:
@@ -2180,7 +2222,8 @@ def engine_args(cfg: dict) -> list[str]:
     # says images are wanted: start the engine with them, and keep the encoder's VRAM free as setup does for a GPU encoder
     # (only when the config has no reserve of its own).  strata-poly has no such option: it reads a prompt's pictures
     # whenever a request has them.
-    poly = Path(str(cfg.get("exe") or "")).stem.lower() in ("strata-poly", "strata-glm")   # its name before 10-05
+    poly = (Path(str(cfg.get("exe") or "")).stem.lower().startswith("strata-poly") or
+            Path(str(cfg.get("exe") or "")).stem.lower() == "strata-glm")   # its name before 10-05
     if isinstance(cfg.get("vision"), dict) and "--vision" not in args and not poly:
         args.append("--vision")
         note = "added --vision"
@@ -2370,6 +2413,10 @@ def child_env(cfg: dict) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
+    if "inference_metrics" in cfg:
+        if not isinstance(cfg["inference_metrics"], bool):
+            raise ValueError("config inference_metrics must be true or false")
+        env["STRATA_POLY_INFERENCE_METRICS"] = "1" if cfg["inference_metrics"] else "0"
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -2490,7 +2537,7 @@ class Detokenizer:
             return self.inc.decode(self.tok.token_bytes(t))
         self.ids.append(t)
         text = self.tok.decode(self.ids)
-        if text.endswith("�"):
+        if text.endswith("ï¿½"):
             return ""
         delta, self.sent = text[self.sent:], len(text)
         return delta
@@ -3015,7 +3062,10 @@ class Service:
             out = self.engine.vram(reserve_mib)
             self.vram_reserve = reserve_mib
             print(f"[strata] VRAM: {out.get('vram_free_mib')} MiB free, expert cache {out.get('expert_cache_mib')} of "
-                  f"{out.get('expert_cache_full_mib')} MiB ({out.get('expert_slots')} experts)", flush=True)
+                  f"{out.get('expert_cache_full_mib')} MiB ({out.get('expert_slots')} experts"
+                  + (f" of {out['expert_slots_min']} kept at least" if out.get("expert_slots_min") else "") + ")"
+                  + (f"; the cache's floor left the reserve {out['vram_reserve_short_mib']} MiB short"
+                     if out.get("vram_reserve_short_mib") else ""), flush=True)
             return {"status": "ok", **out}
         finally:
             if ctl is not None:
@@ -3213,7 +3263,7 @@ class Service:
             if self.live_reqs:                          # parallel requests: the newest one's status
                 s = {**s, **dict(list(self.live_reqs.values())[-1][0]), "queued": s.get("queued", 0)}
             hist = list(self.history)
-            totals = dict(self.totals)
+            totals = {**self.totals, "inference": {k: dict(v) for k, v in self.totals.get("inference", {}).items()}}
         now = time.time()
         progress = getattr(self.engine, "progress", None)
         if s.get("busy") and s.get("first_token") is None:
@@ -3233,9 +3283,21 @@ class Service:
                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
                 "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
+        # Keep the legacy Monitor fields, and label their scope. Layered PP progress is a position estimate,
+        # including the reused prefix, not a count of fully evaluated tokens.
+        par = int(getattr(self.engine, "batch", 0) or 0)
+        observed, first_native, last_native = s.get("_native_observation", (0, None, None))
+        span_ms = (last_native - first_native) * 1000 if observed > 1 else None
+        live.update(prompt_position_tokens=progress[0] if not par and s.get("busy") and progress else None,
+                    prompt_position_is_estimate=True if not par and s.get("busy") and progress else None,
+                    prefill_rate_scope="legacy_engine_prompt_phase_estimate",
+                    tok_s_scope="server_output_events",
+                    server_observed_tokens=observed if s.get("busy") else None,
+                    server_token_span_ms=round(span_ms, 3) if s.get("busy") and span_ms is not None else None,
+                    server_token_span_tok_s=round((observed - 1) * 1000 / span_ms, 3)
+                    if s.get("busy") and span_ms is not None and span_ms > 0 else None)
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
-        par = int(getattr(self.engine, "batch", 0) or 0)
         if par:                                         # #465: the requests running together, slot by slot
             with self.status_lock:
                 running = len(self.live_reqs)
@@ -3624,6 +3686,10 @@ class Service:
         # one arrived.  A reasoning-budget continuation is another native generation, not another API request,
         # so the generated reasoning must not become this request's cached input (#615).
         segments = []
+        attempted_segments = 0
+        first_native = last_native = None
+        native_observed = 0
+        queue_ms = load_ms = control_wait_ms = 0.0
         trace = getattr(self.request_trace, "record", None)
         waiting = time.perf_counter()
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
@@ -3638,17 +3704,24 @@ class Service:
             with (contextlib.nullcontext() if getattr(self.engine, "batch", 0) else self.fifo):
                 try:
                     with self.status_lock:
+                        queue_ms = (time.perf_counter() - waiting) * 1000
                         if trace is not None:
                             trace["queue_s"] += round(time.perf_counter() - waiting, 3)
                             trace["state"] = "generating"
                         self.status["queued"] -= 1
                     # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
                     # (parallel requests do not hold the fifo: one of them starts it, the others wait for that)
+                    loading = time.perf_counter()
                     with (self.fifo if par else contextlib.nullcontext()):
+                        load_started = time.perf_counter()
+                        control_wait_ms = (load_started - loading) * 1000
                         self.ensure_loaded()
+                    load_ms = (time.perf_counter() - load_started) * 1000
+                    inference_started = time.perf_counter()
                     with self.status_lock:
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
                                   generated=0, started=time.time(), first_token=None, tool=None, tail="",
+                                  _native_observation=(0, None, None),
                                   max_tokens=max_new, reasoning_recoveries=0)
                         if par:
                             self.live_reqs[id(st)] = (st, rate)
@@ -3661,6 +3734,7 @@ class Service:
                     for ev in opening:
                         yield "event", ev
                     while True:
+                        attempted_segments += 1
                         segment_before = getattr(self.engine, "last", None)
                         gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
@@ -3674,6 +3748,11 @@ class Service:
                                     yield "ping", None
                                     continue
                                 n += 1
+                                last_native = time.perf_counter()
+                                if first_native is None:
+                                    first_native = last_native
+                                native_observed += 1
+                                st["_native_observation"] = (native_observed, first_native, last_native)
                                 if trace is not None and trace["first_token_s"] is None:
                                     with self.status_lock:
                                         trace["first_token_s"] = round(time.perf_counter() - trace["_clock"], 3)
@@ -3854,10 +3933,25 @@ class Service:
                             pcie_share = round(last["offloaded"] / routed, 3) \
                                 if last.get("offloaded") is not None and routed else None
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
+                            ended = time.perf_counter()
+                            inference = request_inference(len(ids), n, segments, attempted_segments, {
+                                "server_queue_ms": round(queue_ms, 3), "server_load_ms": round(load_ms, 3),
+                                "server_control_wait_ms": round(control_wait_ms, 3),
+                                "server_duration_ms": round((ended - waiting) * 1000, 3),
+                                "server_inference_ms": round((ended - inference_started) * 1000, 3),
+                                "server_ttft_ms": round((first_native - waiting) * 1000, 3)
+                                if first_native is not None else None,
+                                "server_inference_ttft_ms": round((first_native - inference_started) * 1000, 3)
+                                if first_native is not None else None,
+                                "server_observed_tokens": native_observed,
+                                "server_token_span_ms": round((last_native - first_native) * 1000, 3)
+                                if native_observed > 1 else None,
+                            })
                             self.history.append({
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
+                                "inference": inference,
                                 "prompt_tokens": seen, "reused": last.get("reused"), "output_tokens": n,
                                 # the request's whole prompt, and the tokens read of it (None: an older engine)
                                 "prompt_total": len(ids), "prompt_read": last.get("prompt_read"),
@@ -3873,6 +3967,7 @@ class Service:
                                 "drafts_offered": last.get("drafts_offered"),
                                 "drafts_accepted": last.get("drafts_accepted")})
                             t = self.totals
+                            observe_totals(t.setdefault("inference", {}), inference)
                             t["requests"] += 1
                             t["prompt_tokens"] += seen
                             t["reused"] += last.get("reused") or 0
@@ -3881,23 +3976,26 @@ class Service:
                             t["decode_ms"] += last.get("decode_ms") or 0.0
                             t["drafts_offered"] += last.get("drafts_offered") or 0
                             t["drafts_accepted"] += last.get("drafts_accepted") or 0
-                            ft0 = st.get("first_token")             # this request's own (#465: one per request)
-                            self.latencies.observe(ft0 - started if ft0 else None, n,
-                                                   (last.get("decode_ms") or 0.0) / 1000, time.time() - started)
+                            self.latencies.observe(
+                                inference["server_ttft_ms"] / 1000 if first_native is not None else None,
+                                native_observed, (inference["server_token_span_ms"] or 0) / 1000,
+                                inference["server_duration_ms"] / 1000)
                             fresh = getattr(self.engine, "last", None)
                             if fresh is not None and fresh is not before:      # the engine's clock for THIS request
                                 timings = request_timings(seen, n, last)
+                                if timings is not None:
+                                    timings["inference"] = inference
                                 self.last_timings = dict(timings, at=int(time.time())) if timings else None
+                            else:
+                                self.last_timings = None
                             self.last_request_at = time.time()
                             now = time.time()
                             el = now - st.get("started", now)
-                            ft = st.get("first_token")
-                            rate = n / max(1e-6, now - ft) if ft else 0.0
                             hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
                             if hit_msg and pcie_share:
                                 hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
-                            print(f"[strata] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
-                                  f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
+                            print(f"[strata] done: {n} tokens in {el:.0f} s "
+                                  f"({finish}, cancel={cancel.is_set()}){hit_msg}; {log_fields(inference)}", flush=True)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[strata] the reply reached max tokens while still thinking, so it has no "
                                       "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
@@ -3953,10 +4051,12 @@ def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | No
         return None
     cache_n = int(last.get("reused") or 0)
     prompt_n, prompt_ms, decode_ms = max(0, prompt_tokens - cache_n), float(last["prompt_ms"]), float(last.get("decode_ms") or 0)
-    decoded = int(last.get("generated") or generated)          # the engine's count gives its rate, as /metrics does
+    work_n = last.get("work_prompt_read", last.get("prompt_read", prompt_n))
+    decoded = last.get("generated")                         # injected/API tokens are never a native decode count
     return {"cache_n": cache_n, "prompt_n": prompt_n, "prompt_ms": round(prompt_ms, 1),
-            "prompt_per_token_ms": round(prompt_ms / prompt_n, 3) if prompt_n else None,
-            "prompt_per_second": round(prompt_n / (prompt_ms / 1000), 1) if prompt_n and prompt_ms > 0 else None,
+            "prompt_work_n": work_n,
+            "prompt_per_token_ms": round(prompt_ms / work_n, 3) if work_n else None,
+            "prompt_per_second": round(work_n / (prompt_ms / 1000), 1) if work_n and prompt_ms > 0 else None,
             "predicted_n": generated, "predicted_ms": round(decode_ms, 1),
             "predicted_per_token_ms": round(decode_ms / decoded, 3) if decoded else None,
             "predicted_per_second": round(decoded / (decode_ms / 1000), 1) if decoded and decode_ms > 0 else None,
@@ -3970,6 +4070,19 @@ def request_stats(segments: list[dict]) -> dict:
     if not segments:
         return {}
     result = dict(segments[-1])
+    reads = []
+    for segment in segments:
+        if segment.get("inference") is not None:
+            read = segment["inference"].get("prefill_tokens")
+        else:
+            read = segment.get("prompt_read")
+            # Older DONEs report no read count. Keep their legacy complete-prompt rate when input and reuse
+            # counts are known. Cancellation/unknown completion is not evidence that the whole prompt was read.
+            if (read is None and segment.get("finish") in ("stop", "length")
+                    and segment.get("prompt_tokens") is not None and segment.get("reused") is not None):
+                read = max(0, segment["prompt_tokens"] - segment["reused"])
+        reads.append(read)
+    result["work_prompt_read"] = sum(reads) if all(read is not None for read in reads) else None
     for key in ("reused", "prompt_read"):
         if key in segments[0]:
             result[key] = segments[0][key]
@@ -4701,9 +4814,17 @@ def make_handler(svc: Service):
                 self.end_headers()
                 self.wfile.write(body)
             elif path in ("/health", "/api/health"):
-                self._json(200, {"status": "ok", "max_context": svc.reported_ctx(), "model": svc.model,
-                                 "images": svc.vision is not None, "api_key": bool(svc.api_key),
-                                 "loaded": svc.loaded(), "service": "strata"})
+                loaded = svc.loaded()
+                failed = bool(getattr(svc.engine, "fatal_note", None)) or (
+                    not loaded and not getattr(svc.engine, "unloaded", True)
+                    and not getattr(svc.engine, "starting", False))
+                health = {"status": "error" if failed else "ok",
+                          "max_context": svc.reported_ctx(), "model": svc.model,
+                          "images": svc.vision is not None, "api_key": bool(svc.api_key),
+                          "loaded": loaded and not failed, "service": "strata"}
+                if failed:
+                    health["recovery"] = "new_engine_process"
+                self._json(503 if failed else 200, health)
             elif path == "/status":
                 if not self._authorized():                  # #212: it shows the end of the last answer
                     return
@@ -4715,7 +4836,7 @@ def make_handler(svc: Service):
                     if s.get("first_token"):
                         s["tokens_per_s"] = round(svc._tok_s(), 1)
                         s["tokens_per_s_mean"] = round(svc._tok_s_mean(), 1)
-                for k in ("started", "first_token"):
+                for k in ("started", "first_token", "_native_observation"):
                     s.pop(k, None)
                 self._json(200, s)
             elif path in ("/v1/models", "/models"):
@@ -5852,7 +5973,10 @@ def start_model(cfg: dict, tok, lazy: bool = False):
     (engine, vision, sampling defaults, the engine's arguments for an effort at the end or None).  SystemExit for
     a config that cannot be used, RuntimeError for an engine that does not start."""
     vision = None
-    env = child_env(cfg)
+    try:
+        env = child_env(cfg)
+    except ValueError as error:
+        raise SystemExit(f"[strata] {error}") from None
     sampling_defaults = sampling_defaults_from_config(cfg)
     if sampling_defaults:
         pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
@@ -5892,6 +6016,12 @@ def start_model(cfg: dict, tok, lazy: bool = False):
     engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
                           env=env, lazy=lazy)
     engine.silence_s = silence                      # an attribute of its own: restart() keeps it
+    if not lazy and env.get("STRATA_POLY_INFERENCE_METRICS") == "1":
+        if engine.info.get("inference_metrics_version") == 1:
+            print("[strata] native inference metrics enabled: strata-poly host steady_clock", flush=True)
+        else:
+            print("[strata] native inference metrics requested; the engine did not advertise the extension. "
+                  "Check metrics_version=1 in DONE for confirmation; legacy DONE counts remain available.", flush=True)
     warn_tight_ram(engine.info.get("arena_mib"))
     note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
                              linux_desktop())

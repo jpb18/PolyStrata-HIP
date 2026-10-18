@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import re
 import shlex
@@ -133,7 +134,7 @@ def compare(ref: list[dict], got: list[dict]) -> dict:
         same += 1
     worst = max(diffs, default=0.0)
     srt = sorted(diffs)
-    out = {"same": same, "of": min(len(ref), len(got)), "max_diff": round(worst, 4),
+    out = {"same": same, "of": len(ref), "engine_steps": len(got), "max_diff": round(worst, 4),
            "mean_diff": round(sum(diffs) / max(len(diffs), 1), 4),
            "p95_diff": round(srt[min(len(srt) - 1, int(0.95 * len(srt)))], 4) if srt else 0.0,
            "worst_step": diffs.index(worst) if diffs else None}
@@ -141,13 +142,17 @@ def compare(ref: list[dict], got: list[dict]) -> dict:
         k = out["worst_step"]
         out["worst_llama_top2"] = two(ref[k]["top"])
         out["worst_engine_top2"] = two(got[k]["top"])
-    if same < out["of"]:
+    if same < min(len(ref), len(got)):
         r2, g2 = two(ref[same]["top"]), two(got[same]["top"])
         out["parted_at"] = same
         out["llama_top2"] = r2
         out["engine_top2"] = g2
         gap = lambda t: t[0][1] - t[1][1] if len(t) > 1 else 1.0
         out["near_tie"] = min(gap(r2), gap(g2)) <= 0.1
+    # An empty output, or a matching prefix cut short, is not a successful parity check.  After a real
+    # divergence the two engines may stop at different lengths, so compare only their aligned steps there.
+    out["complete"] = bool(ref) and (len(got) >= len(ref) or "parted_at" in out)
+    out["finite_probs"] = all(math.isfinite(p) for steps in (ref, got) for s in steps for p in s["top"].values())
     return out
 
 
@@ -184,6 +189,8 @@ def main() -> int:
         refs = [(r["name"], r["ids"], [{"id": s["id"], "top": {int(k): v for k, v in s["top"].items()}}
                                        for s in r["ref"]]) for r in json.loads(pathlib.Path(a.refs).read_text())]
         refs = [r for r in refs if not a.only or a.only in r[0]]
+        if not refs:
+            ap.error("no reference prompts selected")
         print(f"reference: {a.refs} ({len(refs)} prompts)", flush=True)
     elif url is None:
         if not a.llama_server:
@@ -220,6 +227,7 @@ def main() -> int:
         other = {r["name"]: [{"id": s["id"], "top": {int(k): v for k, v in s["top"].items()}} for s in r["ref"]]
                  for r in json.loads(pathlib.Path(a.against_refs).read_text())}
     for name, ids, ref in refs:
+        ref = ref[:a.tokens]
         if a.against_refs:
             if name not in other:
                 print(f"skip {name}: not in {a.against_refs}", flush=True)
@@ -237,7 +245,8 @@ def main() -> int:
                 r2 = c["llama_top2"]
                 c["near_tie"] = len(r2) > 1 and r2[0][1] - r2[1][1] <= 0.1
                 c["engine_top2"] = "(not compared)"
-        ok = (c["same"] == c["of"] or c.get("near_tie", False)) and c["max_diff"] <= a.max_diff
+        ok = c["complete"] and c["finite_probs"] and \
+            (c["same"] == c["of"] or c.get("near_tie", False)) and c["max_diff"] <= a.max_diff
         good = good and ok
         line = (f"{name:9s} {len(ids):6d} tokens: {c['same']}/{c['of']} same, max diff {c['max_diff']:.3f} "
                 f"(step {c['worst_step']}), mean {c['mean_diff']:.4f}, p95 {c['p95_diff']:.3f}")
@@ -247,6 +256,7 @@ def main() -> int:
         print(("ok   " if ok else "FAIL ") + line, flush=True)
         if stats:
             print("     " + stats.replace("\n", "\n     "), flush=True)
+    good = good and bool(results)
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps(results, indent=1), encoding="utf-8")
     print("parity:", "PASS" if good else "FAIL")

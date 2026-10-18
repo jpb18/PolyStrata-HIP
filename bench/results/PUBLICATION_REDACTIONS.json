@@ -1,0 +1,395 @@
+{
+  "change": "Anonymized local Windows user directory component; original bytes preserved in a local ignored archive. Numeric JSON values and token-ID arrays unchanged.",
+  "files": [
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/full.json",
+      "original_sha256": "37b3a2201dfd4c60b11926ed311383690574a84b94689dab6ff9a6f8bdde7ca5",
+      "published_sha256": "7f72fabc13c5903798bdd9945dd3c67f1f4024c6d553a322d5e76fde0fe877dd",
+      "redactions": 18
+    },
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/prompts.json",
+      "original_sha256": "a7cb309e8139cd702da2e37d581425a760eaa1f8f32ac303a6f266ea1c966f45",
+      "published_sha256": "e96bfbbddc74580ea46fbdb40ed61bc94179fadd21decb8f7eea8f9e58d46e6e",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/sweep-hip.json",
+      "original_sha256": "d0b6b157545c373e5075bae2df68400d27d1ad388a9f5bdba4006b15fd484ff1",
+      "published_sha256": "49125043ba9b07e51afa1702637180f91725934f6788a05103d4c61f96b58f35",
+      "redactions": 4
+    },
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/sweep-poly.json",
+      "original_sha256": "a020ddccc12128570ad5fc049f5001d844222cacd320dce437e812def8b87d5b",
+      "published_sha256": "30fa29bace3dc29ba632f690d523ede7607cef35182c9a1e38456dee762bd7fa",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/sweep-vulkan.json",
+      "original_sha256": "b8db6378a980558bd5980b0bbeafde65274e24dab880510bef2addb591092c32",
+      "published_sha256": "928eef48f489fd58006d0ab66ed11f74793c63feafff352a844ff9b1c149d7e0",
+      "redactions": 8
+    },
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/sweep2-hip.json",
+      "original_sha256": "4ba598976c0f072b23ebabd8e3cd153dd2c8790b73b82a36463a2863a0890718",
+      "published_sha256": "88d48416e53298bdd39e8bccf616776afa273d7077a756b2d311236514b5a9ee",
+      "redactions": 4
+    },
+    {
+      "path": "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/sweep2-vulkan.json",
+      "original_sha256": "f57966ead17b704b367b726917981b5df2cc62b0c24525bc64d871ae17ebdfae",
+      "published_sha256": "40a498c1499030e54793f32bdfbe61156e88a0f78c59b8a975c1e76eda21d04e",
+      "redactions": 4
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/ctest.txt",
+      "original_sha256": "426858536735f88f6f6c7c13c6228594c1f51738af321220541edb2809d956da",
+      "published_sha256": "e61f8a52af73164f9cd8370dfcfa953ba85d06d119f82e633c47a8d1cf698935",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix-before-sync-fix/ctx128k-stream49k-1.json",
+      "original_sha256": "63319909b4e85224e104ca774c2c2cdd98c6537af337baede26e584ab412e7ec",
+      "published_sha256": "936f9b0d6ab454d1fe455eb1260652f8d226a3bd80fd9d03d25abaaf5da92ddd",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix-before-sync-fix/ctx128k-stream49k-2.json",
+      "original_sha256": "0b170d3b05213487a61de8654e709186604deea7923d2e462559980c83fcd132",
+      "published_sha256": "000c74911087b5021154ff3afd7a4609371d59c9f27e31e8f469ed91bfee9f4f",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix-before-sync-fix/ctx128k-stream49k-3.json",
+      "original_sha256": "f921de038df061f7d7aa16e4dcd82955f12ea136e45bf2672bc3f371f57db428",
+      "published_sha256": "36b83662b1d9661170a5275c6375a24082dc0188a44771195c1576c89efa28b5",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-resident-1.json",
+      "original_sha256": "aa70f850378080a00ab36e7b821eb0e9b7f8fe471dcb4ad170b7a7bf04b381d9",
+      "published_sha256": "a93ef056bf0f092498addcc87d5bc53dc71867b496f85eeb9348662dddc1d51d",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-resident-2.json",
+      "original_sha256": "f5eb92e18495d72efb9874d182af3df2abd6350c7be5450636cde9199ba990a8",
+      "published_sha256": "1ea8932175a8cba83187ebf7ced4fc5b8a7b92f39145f3b7fe812420f819b91e",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-resident-3.json",
+      "original_sha256": "620aff0b8e2242b7642d4931b2610d54dd0c11c3960b840627c77d8b35e2c1a4",
+      "published_sha256": "5a8d5ad046807ccac6a9971276cb4a57dfc7fe441dc1c0bb26483ee79289be19",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-resident-4.json",
+      "original_sha256": "cf0aea554d1182b8bd0cc2d8c51c6beac1a40aa8b52d4d80ebeba7562f0a2f01",
+      "published_sha256": "c22eb02e082025616968d0e8afc6291a20cdd53224a67899d8c50429eaf4471b",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-stream49k-1.json",
+      "original_sha256": "4d67412c41cd2577c9082e69d41e20c5cf92e284c0a1f82944b013cec24c2e58",
+      "published_sha256": "641b722afa1463c5fef849e2d5196503e6583370978392b12d17e9994f1e0d98",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-stream49k-2.json",
+      "original_sha256": "f51fb47bafefdd9a627856b30e5a24a6add5c06aeb7be3ec0db0ce0dfd85ef3d",
+      "published_sha256": "e90e0e3ccf2426c362429f7c59b636edb0c143cb500369c5a3d4cac7ff7acb1e",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-stream49k-3.json",
+      "original_sha256": "ac1b85f2521c6618cb09822938c3a660ba9adee765904a94c62903e30b52c4fb",
+      "published_sha256": "eff0f39d45d4814042ba43b4013f7890b3017d1421e2f88a4e298a2f4ef17385",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx128k-stream49k-zerocopy-1.json",
+      "original_sha256": "e60b1ea3dae184bd36dc25fe056360ac4414463a95588a326ecfb532dccdd68e",
+      "published_sha256": "705623bb8cf2dbdcffa11d95a108e18a5777b58fd25b1783675fa3f52c7432f4",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx262k-resident-1.json",
+      "original_sha256": "cf14e730143ea5f954ddf87d894c449f64aa61f33feb8afba0ca6e58e00f8c4d",
+      "published_sha256": "a55a68ca8d7d62cd1e45cb1a7559539050dfa61a6321b1247153ea1394468424",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx262k-resident-2.json",
+      "original_sha256": "0a6de64039e3f1fb5a649877f563b0e3b1cd25f0f65797a2c066ed3791f152cc",
+      "published_sha256": "d7b78bded9f5ce2b25eb0be0fcf429490971c33d84d2f868b505836cfc4b43a0",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx262k-stream49k-1.json",
+      "original_sha256": "28164f1e26ca984bed9fdf00ce85e9ad471a5996a567cfaae8085b61c373aeb7",
+      "published_sha256": "de68870070338de69a6e7461c2ba60bc05cff1b48487e5c7e5f6c1df76f58451",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx262k-stream49k-2.json",
+      "original_sha256": "246ca6d281187f05ae5e6da5b01634b3fe6202521f7c272ea08686ac2df73f19",
+      "published_sha256": "f192d5ddebb42c0e6a8d43f7e2a1c21489c00b3af15193973a368e4698df73d3",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx48k-resident-1.json",
+      "original_sha256": "e0582435c98e1b74ea7ca457f97f9e2ad9a81c339854ed434f3c554b174fa4bc",
+      "published_sha256": "9d785160bdc658bbc8765b554e2b1388cf3070879b3e62ba519995b86b183aa3",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx48k-resident-2.json",
+      "original_sha256": "69ca9adb44bd5db8188b9846419fd3e0bab4b40e1cd7fdbd10e9958c45221369",
+      "published_sha256": "f87bb29183b8e575c2cfea7b6e64c2a49132f60036e24943264ae9d479391c0e",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/matrix/ctx48k-resident-3.json",
+      "original_sha256": "cb0d09158cc5cec1db51be7ce7660b32219c643cab0279c494c37e27bc9f784c",
+      "published_sha256": "465298e3108af31da362d82d56aa3755f0f227209afc88e5d5382bda874b8e42",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/needles-first/ctx262k-resident.json",
+      "original_sha256": "83bcd45b3a0828761403ec5758be364c9c75048a2713bfebe70dc79aa2bb5b71",
+      "published_sha256": "0e348d90ed6b7b83fdf2daa5b0d50dc08fb0e3c267f7ae23e1996c5baad25a7f",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/needles-first/ctx262k-stream49k-zerocopy.json",
+      "original_sha256": "36a14af7e21b52cde604c921f4fa19921195c8bf003b0d6276e1db2b9d11f2e5",
+      "published_sha256": "d40f939177157618e0a385c45b6a172381415e1c56572f0d9d26f8a613469467",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_base-1.json",
+      "original_sha256": "a3a71f50ab5cd557435b16ac57953801d48aa3eb2c2c2b32c1dd1e2fdb1cf5e6",
+      "published_sha256": "74131a7768e4008e832e0798422f32ebd89f28913cc01baf8da4a46326aa12b2",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_base-2.json",
+      "original_sha256": "0860d918444c9fc5522e81616f5cbb75ea2410b91cd79d09f1ad10a85091ca20",
+      "published_sha256": "856716b8cfdf70637e2a507428261d7c5a407416d8abc248210d1f61c400ec4d",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_base-3.json",
+      "original_sha256": "789b28c8cf78469c1add3e5e6027344eee8ec1b93b8f83ae602111942c2f7035",
+      "published_sha256": "e3645054a116aee4e8878b52fef3978730742aa6202410e7b69df69d39fd6aa9",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_base-w1-1.json",
+      "original_sha256": "7a2148b6d3ce44ba711628b666306b03a0d07f1957c37c793964e107fae2b524",
+      "published_sha256": "2b111812281f7c3a74e54cabfe219f6699e2d9d8d68d091451c351e2f19010ad",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_base-w1-2.json",
+      "original_sha256": "fe4078e795905937acb828a9b7b8d5857bcb82c117f053b3c88526e6df7bae5a",
+      "published_sha256": "97ffd5ae82818eb50bef8a0a6e191a69245decafa20331e5213304ae79e3569d",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_base-w1-3.json",
+      "original_sha256": "43eadb2e227203a069af689cb95bb8ec01d4d35132918d3aa49a55970a0294c6",
+      "published_sha256": "1747c5dc6f038ba059d6d0a5f772137a667f3e1caf89e42a5dda4e967b4bcc8f",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_new-1.json",
+      "original_sha256": "cceda6d6c5c770d651e8fd721e3bafb7c56e37741088f2d9af217c0e14f87cdb",
+      "published_sha256": "a793a4c8e30e9f5df6afa16d1072ab2d9c9881a23dd3821f11e7abfbbe616f60",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_new-2.json",
+      "original_sha256": "9450f13eaf39495fd7814e645e2d09b4a2b7b0ae55ad4a354a44b00ce2884042",
+      "published_sha256": "dc8e083bbaac62733bd4b2d2f9267aae39c920fb4be5484503d881da74321275",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_new-3.json",
+      "original_sha256": "af1448581231a727d6ef96ef89602c10c66de3313004b07fb8c0d5605b7cadd6",
+      "published_sha256": "9b59e8610a8cd00a6d338ec5d4ee45f17e865c392ca85889a058298136fcf579",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_new-w1-1.json",
+      "original_sha256": "b579fb8c1232bb0d7d9289fdec4bd0494261b880b2cc49efa4cd8e5d29ff7275",
+      "published_sha256": "6acbdf2f6f7d33360ee5fc18f467838d836dd8815c08195f9969e6afc070320b",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_new-w1-2.json",
+      "original_sha256": "fc7c09379829bc78644eecf87ce640b975179233f5004a6f867a9d570b285f9e",
+      "published_sha256": "d783edc5752f0fae313f0122a41ce4cacf2275eed3c75c12d381acb2ff89d2da",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-poly-kv-streaming/regression/reg_new-w1-3.json",
+      "original_sha256": "b3a3e279d89bbf9aab3aaf03a4dda0fd7021c0daa6fc7644f1025b9977693ffc",
+      "published_sha256": "a34ec340658ed517dd01640b6f01d2b69c0bfe163b3116fb8b7177b23e825465",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/bench-summary.md",
+      "original_sha256": "2a0daf7c1065a7df9f7c0ed1706cf69cc5ed2fc72d325b27f03e1cda290fbc02",
+      "published_sha256": "48cea661ce55200eed98d74d5f888e4cb18a55516183e609d5b818f039b334cb",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/bench-warmup.json",
+      "original_sha256": "5d3fbfc15b5be840166f455b5a7dd00e66835a93534ca85724bdac6d9e7e2b45",
+      "published_sha256": "bc8461bf91534a0e4b8dd1adf9851b4a08e63aefc496418b09a14f9cdf82b0d1",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/bench.json",
+      "original_sha256": "4f6ad4e83953e81cb52f51fe2047e4b39db9e1d850edf0c61255abbe26109617",
+      "published_sha256": "a8abf186a3f1f85a9fb90d512dfc7469cb5958d255a1672dcdc565cbb83580d8",
+      "redactions": 12
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/logs/parity.log",
+      "original_sha256": "d7df3acb4aba2d1b73313a1486f48d093150815ff7c86c310d797c0e50d03f2d",
+      "published_sha256": "f9d52e1e9003645ed994da62f70ac8595748428c0f7feec2c1b8ae7c0f6bb4a7",
+      "redactions": 4
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx128k.json",
+      "original_sha256": "3fe67e9b245d5bda49920e021965f603f2d6865d4963a7e97e9265bb79ee2d6c",
+      "published_sha256": "23a16ef25681eb43ad608b467992fa3d45769e01debccf29b64348f60e58f81b",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx262k-stream.json",
+      "original_sha256": "be8bb836b4f88149f7a4ff257088ee7d859499d827ff61ba88283770eabcb360",
+      "published_sha256": "51d0093ab4142c530fa0daa2b878f3efdf044ccff67bc1ddc664a8a81e638b9c",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx262k.json",
+      "original_sha256": "e731fcca916a2abcc09800fc6880b4e3ef368d6428edfaeebb694cf9cffb85ad",
+      "published_sha256": "6aa83f8f016b689dbce4e711d8793693f8a9bdbd1635cae39b7d4a2fd60c89f5",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx32k-cpu.json",
+      "original_sha256": "71f69f648fb6a6315303262c6ea6399f7524092acd7111b98a835fbcefae2d7d",
+      "published_sha256": "36045fd08bf87bbc2db6a687c49ba85edd8435887ab25b83944acad3271a61f6",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx32k-nodraft.json",
+      "original_sha256": "ae4abf5ce469b334bc1064893ba200a9991561feec3891ae5f6bf8a0e0887e36",
+      "published_sha256": "b7f8968b588d1354e51b3554ae0a08d38ad4f44441dec0a2789e93abf670b292",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx32k-nommq.json",
+      "original_sha256": "f4ae62e7ce44fe8ade5dbcd3264c775ed618a5adff8031d016629bff221a84a4",
+      "published_sha256": "7116eb38139ad8f743aa2520e8a7fbf3ac7ec7003840dc5be2424c7a74f40218",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx32k-w1.json",
+      "original_sha256": "3b00a14dde71596d8cfceab6a6422a24cc3ba1095135d242dc997badcd18aed8",
+      "published_sha256": "b182ccdb46520166cdf1c26d50809d88597679d1b242c71462d442a88915bb27",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36-q3/longctx/ctx48k.json",
+      "original_sha256": "9d8b2d60356350f03c7807b5d4a986b4468d6fdddc04dc8fefa0d2214c8b5e1f",
+      "published_sha256": "50b9c8282d87045de4f496e3b5e1788f69815386c6953ea1b04fb577b673a1c1",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/bench-summary.md",
+      "original_sha256": "aec5345e1dac9a4e36c8d88c2efb46056442c57f46f15cf75612cbe67cf8e28a",
+      "published_sha256": "e45550e4faf0061bc1775e0f4c0ec2f24f1e564f5b466b9b1d53195fdbf9212c",
+      "redactions": 4
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/bench-warmup.json",
+      "original_sha256": "6d982814733826c94d5026d17501db180ca82e183426b31c403672f2927492be",
+      "published_sha256": "7f4c03286513f199373a2c3fe6d594c0b17971c14be45327511eb9361d56003d",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/bench.json",
+      "original_sha256": "b2f45c7678b9eccdfe04044ebebc463a43700226077306d1d50c2ab11119e6a6",
+      "published_sha256": "b92f3b0e0da094464ae0a02fbe87edae7c7152eb48e717e19b42a4a70db289a7",
+      "redactions": 24
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/ctest.txt",
+      "original_sha256": "b67c25acb1ddc0874e00d637bfd78d9ff915d664d17dc1130ff4aee98b825d59",
+      "published_sha256": "68afda702d2596279f4b45fe074d5cbbcafad73918a40bda7a7d7f5b10a76c1c",
+      "redactions": 2
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q35-ctx128k.json",
+      "original_sha256": "8eb25c0822df1b538dd1477342be6734fa9c4dea9848d92f5dfed04ff53f4d6e",
+      "published_sha256": "8efb3e2ab6894402264e477129b511ca913b33bf62821e8b90946ffd06846368",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q36-ctx128k-stream-nodraft.json",
+      "original_sha256": "690051d4f84fb5a32ce719bb60698172899ac2caced700b2b1b86c2d0621e24a",
+      "published_sha256": "2f4fed6edf9bf3508b01e56cd92a2d1ddd0c47b9f95783baf101fcb6e1382412",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q36-ctx128k-stream.json",
+      "original_sha256": "ac5e79e1f7657615a7fd99fef03a2f933d9c636890cbd7d567f95b7800e153f8",
+      "published_sha256": "9e2a852ffef119f2ea15d8d85e536ec37f93aab46d5115469a8aa6750de9f131",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q36-ctx128k.json",
+      "original_sha256": "abc8717955cd4ebf19665e72ff68d63a04acda2943398b8e0e46724c7f14179b",
+      "published_sha256": "b2a393123ae019440ca9164ee901734e15c228e6d544e84f37acee4e9e36293f",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q36-ctx262k-stream.json",
+      "original_sha256": "25495b6726299b59c9468c4ce02c13f00edfd71eb02cdf78d240dc88533975ab",
+      "published_sha256": "f67a05560f7fed4a672cd1242e17326b9a6baea55447a5a1eb706711d852cb41",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q36-ctx262k.json",
+      "original_sha256": "bdcc668d89fea062bb700c173ffd05c25439726114899011b193d7dcf52c94af",
+      "published_sha256": "2780ab3a205057f4bedb9effcb2e2e7e2d11cecd3b3833c7e1270283c250f6b7",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/longctx/q36-ctx48k.json",
+      "original_sha256": "0470b836ec81ed3285b52c5d1ff4bd38d29c711c4bd3dc5902d02957170d26a5",
+      "published_sha256": "8c11690b918656ddb75e56d44bd179ba11ff1be2f4b153743815a02b093106f3",
+      "redactions": 1
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/regression/q35-before-after.json",
+      "original_sha256": "71453d390b3e73e6874dec04a711b85f3e6632b24759f64fd80594eb0a299dd1",
+      "published_sha256": "848739dc02f1874f1454ff08432715c7965e82d5483d60b0b9303541d05927b7",
+      "redactions": 12
+    },
+    {
+      "path": "bench/results/2026-10-11-hip-qwen36/regression/summary.md",
+      "original_sha256": "f655e19fae0c57f29386468b2e95027c517e3e1f2dbdcb84b5528b1010368554",
+      "published_sha256": "7c56dd1befe4346b3bb84512dc5a46b28a6a4cb4c04aea9f5c1f7bc9536a71d7",
+      "redactions": 2
+    }
+  ]
+}
