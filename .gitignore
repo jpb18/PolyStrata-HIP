@@ -103,3 +103,15 @@ build-vision-cuda12.bat
 # remains versioned. Publish new evidence only after reviewing paths and prompts
 # (git add -f for a deliberately selected, redacted report).
 /bench/results/*/
+
+# Private configuration, credentials and complete repository backups.
+.env
+.env.*
+!.env.example
+*.bundle
+*.pfx
+*.p12
+/*.key
+/*.pem
+/.ssh/
+/.aws/

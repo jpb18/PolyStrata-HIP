@@ -8,6 +8,7 @@ Start with the [HIP fork README](../README.md).
 | [Tests](TESTING.md) | CPU, mock/API, local-fixture and GPU/model checks |
 | [Benchmarks](../bench/README.md) | Comparison commands, metrics and reproducibility |
 | [Release audit](RELEASE_AUDIT.md) | Cleanup scope, files preserved, checks and release limits |
+| [Privacy cleanup](PRIVACY_CLEANUP.md) | History anonymization, public Git identity, verification and recovery |
 | [Technical reports](reports/README.md) | Historical AMD measurements and investigations |
 | [Q8 implementation/validation](AMD_HIP_KV_Q8.md) | Detailed evidence, with subsequent decision records linked inside |
 | [Frozen Q8 launcher](HIP_LAUNCH_KV.md) | Local validation route and required artifacts |

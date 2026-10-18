@@ -2,6 +2,8 @@
 
 ## Unreleased — HIP repository preparation
 
+- Cleaned identifying paths throughout the branch history before publication, mapped the repository owner's commit identity to their public GitHub handle/noreply email and preserved other contributors' attribution. Original history and the commit map are retained in a private local bundle/archive; see `docs/PRIVACY_CLEANUP.md`.
+
 - Added a HIP-focused README, build/configuration guide, testing categories, benchmark instructions and contribution guidance.
 - Moved 14 AMD technical reports into `docs/reports/`, preserving old links through root pointers. Generalized personal paths in the publication reports; retained original evidence locally.
 - Preserved the previous main README in `docs/UPSTREAM_README.md` to retain upstream context and measurements.
