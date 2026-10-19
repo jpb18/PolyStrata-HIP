@@ -562,6 +562,13 @@ What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT 
   tail), each value the same bits (48 of 48 steps' logits, decode and windows). Decode +5.2 % at 2K and +6.2 % at
   45K with `--window 1`, +8.2 % and +2.1 % with guesses, medians of three alternated pairs on a PC in use
   ([bench/results/2026-10-19-hip-decode-fuse](../bench/results/2026-10-19-hip-decode-fuse/README.md)).
+- A prompt's attention skips the rescale of a block of keys whose largest score did not change (the factor is exactly 1,
+  so the values stay as they are, bit for bit): B-45k prefill 1,469 -> 1,519 tok/s (+3.4 %, two pairs on a PC in use;
+  8 of 8 steps' logits the same bits), no change at 2K. No switch.
+- `STRATA_POLY_EXPERT_SHARE=1` (off by default): the slots of a window that pick the same expert read it once (IQ3_XXS
+  gate/up, IQ4_XS down). 26 to 37 % of a window's picks repeat an expert, and the bits are the same (48 of 48 steps),
+  but the window was not faster here (median 99.1 tok/s with it, 99.0 without, forced windows of 4), so it stays off
+  ([bench/results/2026-10-19-hip-rescale-skip-expert-share](../bench/results/2026-10-19-hip-rescale-skip-expert-share/README.md)).
 
 `--turn-token ID` (every backend, off by default) puts a conversation checkpoint in front of a prompt's last turn.
 Qwen3.5's chat template writes the turn the model answered without its thinking block once it is history, so

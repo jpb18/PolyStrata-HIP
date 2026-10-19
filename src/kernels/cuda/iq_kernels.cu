@@ -18,6 +18,7 @@
 #include "ggml-common.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
 #include <cstdlib>
 #include <type_traits>
@@ -2791,11 +2792,67 @@ __global__ void __launch_bounds__(128) mmvq_slots_dev_kernel(const MmvqSlots* sl
     const float s = row_dot<TY>(w + (size_t) row * row_bytes, (const block_q8_1*) at.x[i], n_in / Fmt<TY>::qk, lane);
     if (lane == 0) at.y[i][row] = s;
 }
+
+// mmvq_slots_dev_kernel for a window (more than 8 slots) whose tokens pick the same experts: the slots with the same
+// matrix are one read of it.  Of the slots that share a matrix, every NC-th (counting from the first) takes it and the
+// next NC - 1 of them as columns (row_dot_multi: each column's dot is row_dot's, bit for bit), and the others have
+// nothing to do.  A slot without a matrix writes zeros as before.
+template<int TY, int NC>
+__global__ void __launch_bounds__(128) mmvq_slots_dev_share_kernel(const MmvqSlots* slots, size_t row_bytes, int n_in,
+                                                                   int n_out) {
+    const int row = blockIdx.x * 4 + threadIdx.y;
+    if (row >= n_out) return;   // the rows of a warp are all in or all out
+    const int lane = threadIdx.x;
+    const int me = int(blockIdx.y), count = int(gridDim.y);
+    const uint8_t* w = (const uint8_t*) slots[me / 8].w[me % 8];
+    if (!w) {
+        if (lane == 0) slots[me / 8].y[me % 8][row] = 0.0f;
+        return;
+    }
+    unsigned long long same = 0;   // the slots with my matrix, one bit each (count <= 64)
+    for (int base = 0; base < count; base += 32) {
+        const int q = base + lane;
+        const bool eq = q < count && slots[q / 8].w[q % 8] == (const void*) w;
+        same |= (unsigned long long) (unsigned) __ballot(eq) << base;
+    }
+    if (__popcll(same & ((1ull << me) - 1)) % NC != 0) return;   // an earlier slot reads it for this one
+    int col[NC];
+    int n = 1;
+    col[0] = me;
+    for (unsigned long long later = same & ~((2ull << me) - 1); n < NC && later != 0; later &= later - 1)
+        col[n++] = __ffsll((long long) later) - 1;
+    const block_q8_1* x0 = (const block_q8_1*) slots[me / 8].x[me % 8];
+    int off[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c)
+        off[c] = c < n ? int((const block_q8_1*) slots[col[c] / 8].x[col[c] % 8] - x0) : 0;
+    float s[NC];
+    row_dot_multi<TY, NC>(w + (size_t) row * row_bytes, x0, off, n, n_in / Fmt<TY>::qk, lane, s);
+    if (lane == 0)
+#pragma unroll
+        for (int c = 0; c < NC; ++c)
+            if (c < n) slots[col[c] / 8].y[col[c] % 8][row] = s[c];
+}
 }  // namespace
+
+// STRATA_POLY_EXPERT_SHARE=1 (off by default: measured no faster on an RX 9060 XT, see the bench README): the slots
+// of a window that share a matrix read it once.
+static bool expert_share_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_EXPERT_SHARE");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
 
 void iq_mmvq_slots_dev(int t, const MmvqSlots* slots, int count, int n_in, int n_out, void* stream) {
     const size_t rb = iq_row_bytes(t, n_in);
     const dim3 grid((unsigned) ((n_out + 3) / 4), (unsigned) count), block(32, 4);
+    if (t == 18 && count > 8 && expert_share_on()) {   // IQ3_XXS, the gate and up of Qwen3.6 UD-Q3_K_M
+        mmvq_slots_dev_share_kernel<18, 4><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out);
+        check("iq_mmvq_slots_dev");
+        return;
+    }
     switch (t) {
 #define STRATA_MMVQ(T) case T: mmvq_slots_dev_kernel<T><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out); break;
         STRATA_MMVQ_FMTS(STRATA_MMVQ)

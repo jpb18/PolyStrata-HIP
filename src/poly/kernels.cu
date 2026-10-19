@@ -1192,11 +1192,15 @@ __global__ void attn_softmax_block_kernel(const float* __restrict__ score, half*
 }
 
 // A chunk's results in the order of the groups, `dim` values a token and head: times its factor, or divided by it.
+// A factor of exactly 1 (the largest score did not change, so exp(0)) leaves every value as it is, bit for bit
+// (x * 1.0f is x), so the block returns without reading or writing the values.
 __global__ void attn_scale_kernel(float* out, const float* __restrict__ factor, int dim, bool divide) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim) return;
     const float f = factor[blockIdx.y];
-    out[size_t(blockIdx.y) * dim + i] *= divide ? 1.0f / f : f;
+    const float m = divide ? 1.0f / f : f;
+    if (m == 1.0f) return;
+    out[size_t(blockIdx.y) * dim + i] *= m;
 }
 
 __global__ void softcap_kernel(float* x, size_t n, float cap) {

@@ -1529,6 +1529,56 @@ __global__ void native_mmvq_slots_half_dev_kernel(const MmvqSlots* slots, int n_
     slots_half_rows<F>(at.w[i], at.x[i], at.y[i], n_in, n_out);
 }
 
+// native_mmvq_slots_half_dev_kernel for a window (more than 8 slots) whose tokens pick the same experts: the slots
+// with the same matrix are one read of it.  Of the slots that share a matrix, every NC-th (counting from the first)
+// takes it and the next NC - 1 of them as columns: `load` once, then `apply` to each column's activation, which is
+// what each slot's own launch does for its one, so a column comes out with its bits.  The others have nothing to do
+// (the whole warp returns together: the choice is the slot's).  A slot without a matrix writes zeros as before.
+template<typename F, int NC>
+__launch_bounds__(WARPS * WARP, 4)
+__global__ void native_mmvq_slots_half_dev_share_kernel(const MmvqSlots* slots, int n_in, int n_out) {
+    const int me = int(blockIdx.y), count = int(gridDim.y);
+    const void* wv = slots[me / 8].w[me % 8];
+    unsigned long long same = 0;   // the slots with my matrix, one bit each (count <= 64)
+    if (wv) {
+        for (int base = 0; base < count; base += 32) {
+            const int q = base + int(threadIdx.x);
+            const bool eq = q < count && slots[q / 8].w[q % 8] == wv;
+            same |= (unsigned long long) (unsigned) __ballot(eq) << base;
+        }
+        if (__popcll(same & ((1ull << me) - 1)) % NC != 0) return;   // an earlier slot reads it for this one
+    }
+    int col[NC];
+    int n = 1;
+    col[0] = me;
+    for (unsigned long long later = same & ~((2ull << me) - 1); n < NC && later != 0; later &= later - 1)
+        col[n++] = __ffsll((long long) later) - 1;
+    const auto* w = static_cast<const typename F::Block*>(wv);
+    const int lane = int(threadIdx.x) % 16;
+    const int row = 2 * (WARPS * int(blockIdx.x) + int(threadIdx.y)) + int(threadIdx.x) / 16;
+    const int blocks_per_row = n_in / F::DIV;
+    const int kbx = lane / F::T;
+    float tmp[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) tmp[c] = 0.0f;
+    if (w && row < n_out && kbx < blocks_per_row) {
+        const int kqs = F::kqs(lane);
+        const typename F::W loaded = F::load(w + std::size_t(row) * blocks_per_row + kbx, kqs);
+#pragma unroll
+        for (int c = 0; c < NC; ++c)
+            if (c < n)
+                tmp[c] += F::apply(loaded, static_cast<const Q81Block*>(slots[col[c] / 8].x[col[c] % 8]) + kbx * F::KBY,
+                                   kqs);
+    }
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        tmp[c] += 0.0f;
+#pragma unroll
+        for (int offset = 8; offset > 0; offset >>= 1) tmp[c] += __shfl_xor_sync(0xffffffff, tmp[c], offset, WARP);
+        if (c < n && lane == 0 && row < n_out) slots[col[c] / 8].y[col[c] % 8][row] = tmp[c];
+    }
+}
+
 // native_mmvq_slots_kernel with its slots in device memory, for rows too long for half a warp: a k-quant expert's
 // gate and up (2048 inputs of Q4_K are 8 blocks of 16 threads) and its down where a block takes more than 8
 // threads (Q4_K, Q5_K and Q6_K of 512 inputs), as Qwen3.6's UD-Q4_K_M has them.  The body is that kernel's, line
@@ -1571,14 +1621,25 @@ __global__ void native_mmvq_slots_dev_kernel(const MmvqSlots* slots, int n_in, i
     }
 }
 
+// STRATA_POLY_EXPERT_SHARE=1 (off by default: measured no faster on an RX 9060 XT, see the bench README): the slots
+// of a window that share a matrix read it once.
+static bool expert_share_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_POLY_EXPERT_SHARE");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
+
 // The kernels above for slots in device memory, each where launch_slots() would pick its twin.
 template<typename F>
-bool launch_slots_dev(const MmvqSlots* slots, int count, int n_in, int n_out, cudaStream_t s) {
+bool launch_slots_dev(const MmvqSlots* slots, int count, int n_in, int n_out, cudaStream_t s, bool share = false) {
     const dim3 threads(WARP, WARPS);
     if ((n_in / F::DIV) * F::T <= 16) {
         const unsigned rows_a_block = 2 * WARPS;
         const dim3 blocks(unsigned((std::size_t(n_out) + rows_a_block - 1) / rows_a_block), unsigned(count));
-        native_mmvq_slots_half_dev_kernel<F><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+        if (share && count > 8) native_mmvq_slots_half_dev_share_kernel<F, 4><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+        else native_mmvq_slots_half_dev_kernel<F><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
     } else if (n_in / F::DIV < F::BPI) {
         constexpr int ROWS = 2;
         const dim3 blocks(unsigned((std::size_t(n_out) + ROWS - 1) / ROWS), unsigned(count));
@@ -2913,7 +2974,7 @@ bool native_mmvq_slots_dev(int ggml_type, const MmvqSlots* slots, int count, int
     case 12: done = n_in % 256 == 0 && launch_slots_dev<Q4KTraits>(slots, count, n_in, n_out, s); break;
     case 13: done = n_in % 256 == 0 && launch_slots_dev<Q5KTraits>(slots, count, n_in, n_out, s); break;
     case 14: done = n_in % 256 == 0 && launch_slots_dev<Q6KTraits>(slots, count, n_in, n_out, s); break;
-    case 23: done = n_in % 256 == 0 && launch_slots_dev<IQ4XSTraits>(slots, count, n_in, n_out, s); break;
+    case 23: done = n_in % 256 == 0 && launch_slots_dev<IQ4XSTraits>(slots, count, n_in, n_out, s, expert_share_on()); break;
     default: return false;
     }
     if (done) launch_check();
