@@ -1,0 +1,8 @@
+prompt A-45k+B-45k: 90591 tokens
+{'flash': 'q8_0:0', 'rc': 0, 'prefill': '1174.7', 'decode': '51.86'}
+{'flash': 'q8_0:1', 'rc': 0, 'prefill': '1625.8', 'decode': '49.77'}
+flash=q8_0:1 against the first run (flash=q8_0:0): 128 steps, largest logit difference 36.3720, mean 1.85673, same first token 17 %, KL mean 1.50e+01 max 3.53e+01 nats, tokens equal False
+prompt A-45k+B-45k: 90591 tokens
+{'flash': 'q8_0:0', 'rc': 0, 'prefill': '1090.5', 'decode': '45.26'}
+{'flash': 'q8_0:1', 'rc': 0, 'prefill': '1644.2', 'decode': '48.69'}
+flash=q8_0:1 against the first run (flash=q8_0:0): 128 steps, largest logit difference 40.8846, mean 1.30944, same first token 40 %, KL mean 1.34e+01 max 3.85e+01 nats, tokens equal False

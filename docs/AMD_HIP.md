@@ -573,6 +573,11 @@ What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT 
   (6e-5 on values of 0.3), and the next-token distributions differ by 1e-4 to 1e-2 nats up to 122K positions.
   `STRATA_POLY_FLASH=0` gives the products back
   ([bench/results/2026-10-19-hip-flash-attention](../bench/results/2026-10-19-hip-flash-attention/README.md)).
+  The same kernel serves a decode call (a token or a window, up to 8), the keys split 512 a CTA and added by a second
+  launch: 1.1 to 1.3 times faster for a token and 7 to 8 times for a window of 4 than the rows kernels at 8K to
+  262K positions, each token the same bits whichever tokens come with it; in the engine +4 % to +8 % a token at 45K to 91K
+  positions and +91 % for windows of 4 at 91K. It rounds the keys, values, queries and weights to halves (4e-4 of the value
+  at most): the next-token distributions move 1e-3 nats on average, about twice the q8_0 cache's own distance from fp16.
 - `STRATA_POLY_EXPERT_SHARE=1` (off by default): the slots of a window that pick the same expert read it once (IQ3_XXS
   gate/up, IQ4_XS down). 26 to 37 % of a window's picks repeat an expert, and the bits are the same (48 of 48 steps),
   but the window was not faster here (median 99.1 tok/s with it, 99.0 without, forced windows of 4), so it stays off

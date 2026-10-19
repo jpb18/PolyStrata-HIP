@@ -1,4 +1,4 @@
-# strata-poly HIP: flash attention for a prompt batch, 19 October 2026
+# strata-poly HIP: flash attention for a prompt batch and for decode, 19 October 2026
 
 RX 9060 XT 16 GB (gfx1200), Ryzen 5 5600X (6 threads), 32 GB of RAM, Windows 11, ROCm 10.2.0a20260930 (TheRock).
 Qwen3.6-35B-A3B UD-Q3_K_M. Built from `main` at `48c0d927` plus this change, for gfx1200 only. **The PC was in use** for the engine
@@ -69,11 +69,58 @@ token is not stable. The same prompt with the products over an fp16 KV cache ins
 changed, differs from the products over q8_0 by 17.5 nats and also gives another token, so that difference is the
 prompt's, not the flash's (`flash-kv.log`: `--order 0,fp16:0,fp16:1 --ctx 140000`).
 
+## Decode: the same kernel, split over the keys (`poly_kernel_bench attn-dq8`, idle GPU)
+
+A decode call (a token, or a window of up to 8 guessed tokens) has 8 to 64 rows, one CTA's, which would leave the card
+empty. So `attend()` and `attend_kv()` (gfx12, the same shape as above) now split the keys between CTAs, 512 a CTA counted
+from row 0, each writes its largest score, the sum of its weights and its values' sums, and a second launch adds the splits
+of a token and head in their order. The rows kernels (4 launches and the scores through the scratch) stay behind
+`STRATA_POLY_FLASH=0`. The call is the engine's (the position read on the card, the rows sized by `room()`), q8_0 caches,
+microseconds a call (the "rows" column is the old kernels):
+
+| Context | 1 token | 2 tokens | 4 tokens | 8 tokens |
+| ---: | --- | --- | --- | --- |
+| 8,192 | 61 -> 51 | 89 -> 52 | 351 -> 51 | 702 -> 96 |
+| 32,768 | 194 -> 171 | 322 -> 196 | 1,417 -> 195 | 2,853 -> 377 |
+| 65,536 | 446 -> 349 | 637 -> 385 | 2,939 -> 393 | 5,818 -> 757 |
+| 262,128 | 1,848 -> 1,387 | 2,469 -> 1,421 | 12,138 -> 1,513 | 24,522 -> 3,217 |
+
+fp16 caches at 262,128 positions: 2,962 -> 1,956 us for a token and 12,505 -> 2,096 us for four. The flash reads K and V
+at about 205 GB/s for a token (the copy rate here is 282 GB/s read plus write). A window of 4 costs about what a token
+alone does, where the rows kernels took 4 to 8 times as long.
+
+**Same bits whatever the company:** each window of 2, 4 and 8 tokens against its tokens one at a time, q8_0 and fp16, from 8K
+to 262K positions: the same bits in every one (a token's columns of the products are its own, and a step that has none of
+its keys leaves its sums as they are). In the engine, B-45k, 200 greedy tokens, `--window 1` and the default windows of
+guesses (116 of 136 right): the same tokens, 58.3 and 84.2 tok/s.
+
+**Accuracy:** against doubles over the same q8_0 values the rows kernels were at 1e-9 (the keys and values read exact, the
+queries and weights in floats); the flash rounds the queries, the keys and values and the weights to halves, as the
+prompt's does and as llama.cpp's flash attention does: 4e-4 of the value at most (8e-7 to 4e-6 on values of 0.002 to 0.012).
+In the engine, B-45k, 64 greedy tokens, the logits against the first run of all the above off: KL 1.05e-3 nats mean and 1.9e-2
+at most, the same tokens, for the prompt and the decode together; the same run with the rows kernels over an fp16 KV
+cache instead of the q8_0 one: 5.6e-4 and 8.2e-3 (`--order 0,fp16:0 --ctx 49152`). So the flash roughly doubles the
+q8_0 cache's own distance from fp16.
+
+**In the engine** (`scripts/flash_ab.py`, `scripts/flash_win_ab.py`, the PC otherwise idle):
+
+| Run | Rows kernels | Flash |
+| --- | --- | --- |
+| B-45k, `--window 1`, 3,000 experts in VRAM, two pairs | 41.7, 44.1 tok/s | 43.5, 45.4 (+4 %) |
+| 90,591 tokens, `--window 1`, 5,000 experts | 45.3 tok/s | 48.7 (+8 %) |
+| 90,591 tokens, windows of 4 forced over the same 128 tokens, two pairs | 56.3, 56.2 | 107.1, 107.6 (+91 %) |
+
+A token alone gains little because at these contexts the experts, not the attention, bound it. The windows are where the old
+kernels were slow, so a guess that is right now costs little more than the token. The default windows of the guesses
+(`decode-90k-window1-and-default.log`, first block) were not compared: the two runs generate different tokens, so they
+guess differently.
+
 ## Not done
 
 - An idle PC; more pairs at the long prompts; the fp16 and the KV streaming (`--kv-resident`) profiles in the engine
   (the kernel is checked for fp16 caches, and a streaming layer's call keeps the products).
-- Other shapes (head dimension 128, a window or ring: Gemma 4 keeps the products), and other cards than gfx12.
+- Other shapes (head dimension 128, a window or ring: Gemma 4 keeps the products and the rows kernels), and other cards than gfx12.
+- The decode kernel at 205 GB/s of K and V is under the card's rate; 8 tokens take three times the least. A deeper pipeline might raise both.
 - Tuning: 32 TFLOP/s is well under what the matrix cores can do (a CTA of 8 waves with 54 KB of LDS); a bigger tile or a
   deeper pipeline might raise it. Not tried.
 - CUDA: the code is inside `#if defined(STRATA_USE_HIP)`, nothing was built or run on NVIDIA.

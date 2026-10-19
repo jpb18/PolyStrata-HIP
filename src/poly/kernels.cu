@@ -2144,6 +2144,11 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
     if (spill && ring > 0) throw std::invalid_argument("attend: a ring has no host part");
     if (dim % SCORE_VALUES || uintptr_t(q) % (SCORE_VALUES * sizeof(float)) || uintptr_t(kcache) % (SCORE_VALUES * 2))
         throw std::invalid_argument("attend: queries and keys are read four values at a time");
+    if (!spill && window == 0 && ring == 0 && !whole &&
+        attend_flash_decode(q, kcache, false, vcache, false, pos, rows, score,
+                            score_floats ? score_floats : size_t(chunk) * n_head * (at ? room : pos + rows), out, dim,
+                            n_head, kv_heads, scale, stream, at, room))
+        return;
     const long long last = whole ? pos + rows - 1 : -1;
     const int per = n_head / kv_heads;
     // STRATA_POLY_ATTN=0: the kernels of every shape for Qwen3.5/3.6's too (attn_score_rows_kernel)
@@ -2743,6 +2748,11 @@ void attend_kv(const float* q, const void* kcache, bool k_q8, const void* vcache
     if (at && (whole || room < 1)) throw std::invalid_argument("attend_kv: a position on the card needs its room");
     if (dim % SCORE_VALUES || uintptr_t(q) % 16 || uintptr_t(kcache) % 16 || uintptr_t(vcache) % 16)
         throw std::invalid_argument("attend_kv: queries and caches lie at multiples of 16 bytes");
+    if (window == 0 && ring == 0 && !whole &&
+        attend_flash_decode(q, kcache, k_q8, vcache, v_q8, pos, rows, score,
+                            score_floats ? score_floats : size_t(chunk) * n_head * (at ? room : pos + rows), out, dim,
+                            n_head, kv_heads, scale, stream, at, room))
+        return;
     const uint8_t* kq = (const uint8_t*) kcache;
     const uint8_t* vq = (const uint8_t*) vcache;
     const half* kh = (const half*) kcache;
@@ -2941,6 +2951,15 @@ void attend_batch_q8(void* blas, const float* q, const uint8_t* kcache, const ui
 //
 // The sums are in another order than attend_batch()'s (a step of 32 keys, the weights against the largest score so
 // far at each step), so a result is not the same bits: the same inputs rounded to halves, the same sums in floats.
+//
+// The same kernel serves a decode call (attend() and attend_kv() on gfx12, a token or a window of up to 8): its
+// 16 to 64 rows are one CTA's, which would leave the card empty, so the keys are split between CTAs, FL_SPLIT of
+// them each counted from row 0, and each writes its largest score, the sum of its weights and its values' sums
+// (unnormalized) for flash_combine_kernel, which adds the splits of a token and head in their order.  A token's
+// numbers do not depend on the others of the call: its columns of the products are its own, a step that has none
+// of its keys leaves its largest score, sum and values as they are (its weights are zero and the rescale is 1),
+// and the splits are the same whichever tokens come with it.  So a window's tokens come out the same bits as each
+// alone, as they did with the rows kernels.
 namespace {
 #if defined(__gfx1200__) || defined(__gfx1201__)
 #define STRATA_FLASH_WMMA 1
@@ -2955,6 +2974,7 @@ constexpr int FL_GROUPS = 4;              // groups of 16 rows a CTA
 constexpr int FL_THREADS = FL_GROUPS * 2 * 32;
 constexpr int FL_ROWS = 16 * FL_GROUPS;   // rows (token, head) a CTA
 constexpr int FL_KEYS = 32;               // keys a step
+constexpr int FL_SPLIT = 512;           // the keys a CTA of a decode call takes, from a multiple of it
 constexpr int FL_HALF = FL_D / 2;         // the dimensions a wave of a pair holds
 constexpr int FL_KPAD = FL_D + 8;         // a key's row in the LDS, in halves: 528 bytes, so the 16-row reads spread over banks
 constexpr int FL_VPAD = FL_KEYS + 8;      // a dimension's row of V^T, in halves: 80 bytes
@@ -3043,16 +3063,17 @@ __device__ __forceinline__ void fl_pack(const FlRaw<Q8>& r, uint4 (&out)[2]) {
     }
 }
 
-template <bool KQ8, bool VQ8>
+template <bool KQ8, bool VQ8, bool PARTIAL>
 __global__ void __launch_bounds__(FL_THREADS)
 flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, const void* __restrict__ vcache,
-                  long long pos, int rows, float* __restrict__ out, int n_head, int kv_heads, float scale_log2,
-                  int tiles) {
+                  long long pos, int first, const long long* __restrict__ at, int rows, float* __restrict__ out,
+                  int n_head, int kv_heads, float scale_log2, int tiles) {
 #if STRATA_FLASH_WMMA
     __shared__ __attribute__((aligned(16))) _Float16 ks[FL_KEYS * FL_KPAD];
     __shared__ __attribute__((aligned(16))) _Float16 vt[FL_D * FL_VPAD];
     __shared__ __attribute__((aligned(16))) float4 sp[FL_GROUPS][2][2][2][32];   // [group][part][sub][half of 8][lane]
     const int per = n_head / kv_heads;
+    const long long base = (at ? *at : pos) + first;          // the position of the call's first token
     const int tid = int(threadIdx.x), lane = tid & 31, wave = tid >> 5, col = lane & 15, half = lane >> 4;
     const int grp = wave & (FL_GROUPS - 1), part = wave / FL_GROUPS;   // the 16 rows, and which 128 dimensions
     const int kvh = int(blockIdx.y);
@@ -3061,10 +3082,16 @@ flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, 
     const int gr = g0 + grp * 16 + col;                       // this lane's row
     const bool ok = gr < total;
     const int tok = ok ? gr / per : rows - 1, hh = ok ? gr % per : 0;
-    const long long my_pos = pos + tok;                       // the keys this row attends: 0 to my_pos
+    const long long my_pos = base + tok;                       // the keys this row attends: 0 to my_pos
     const bool grp_on = g0 + grp * 16 < total;                // the group has a token
-    const long long grp_hi = pos + min(g0 + grp * 16 + 15, total - 1) / per;   // the last key any of its rows reads
-    const long long cta_hi = pos + (min(g0 + FL_ROWS, total) - 1) / per;
+    const long long grp_hi = base + min(g0 + grp * 16 + 15, total - 1) / per;   // the last key any of its rows reads
+    const long long cta_hi = base + (min(g0 + FL_ROWS, total) - 1) / per;
+    long long k_lo = 0, k_hi = cta_hi;   // the keys of this CTA
+    if constexpr (PARTIAL) {
+        k_lo = (long long) blockIdx.z * FL_SPLIT;
+        if (k_lo > cta_hi) return;   // a split past the call's last row
+        k_hi = min(cta_hi, k_lo + FL_SPLIT - 1);
+    }
     const int dim0 = part * FL_HALF;
 
     fl_h8 qf[8];
@@ -3098,15 +3125,15 @@ flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, 
 #pragma unroll
         for (int i = 0; i < 2; ++i) {
             const int c = tid + i * FL_THREADS, row = c >> 4, cg = c & 15;
-            kr[i] = fl_fetch<KQ8>(kcache, ts + row, ts + row <= cta_hi, kv_heads, kvh, cg);
+            kr[i] = fl_fetch<KQ8>(kcache, ts + row, ts + row <= k_hi, kv_heads, kvh, cg);
         }
         const int pair = tid & 15, cg = tid >> 4;
         const long long key = ts + 2 * pair;
-        vr[0] = fl_fetch<VQ8>(vcache, key, key <= cta_hi, kv_heads, kvh, cg);
-        vr[1] = fl_fetch<VQ8>(vcache, key + 1, key + 1 <= cta_hi, kv_heads, kvh, cg);
+        vr[0] = fl_fetch<VQ8>(vcache, key, key <= k_hi, kv_heads, kvh, cg);
+        vr[1] = fl_fetch<VQ8>(vcache, key + 1, key + 1 <= k_hi, kv_heads, kvh, cg);
     };
-    fetch(0);
-    for (long long ts = 0; ts <= cta_hi; ts += FL_KEYS) {
+    fetch(k_lo);
+    for (long long ts = k_lo; ts <= k_hi; ts += FL_KEYS) {
         // the fetched keys and values into the LDS: K as it lies, V as [dimension][key], two keys to a 32-bit write
 #pragma unroll
         for (int i = 0; i < 2; ++i) {
@@ -3129,7 +3156,7 @@ flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, 
                     uint32_t(h0[e]) | (uint32_t(h1[e]) << 16);
         }
         __syncthreads();
-        if (ts + FL_KEYS <= cta_hi) fetch(ts + FL_KEYS);   // the next step's, in flight while this one is computed
+        if (ts + FL_KEYS <= k_hi) fetch(ts + FL_KEYS);   // the next step's, in flight while this one is computed
         const bool act = grp_on && ts <= grp_hi;
         fl_f8 s[2];
         if (act) {
@@ -3197,6 +3224,22 @@ flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, 
     }
     if (!ok) return;
     const float l_all = l_run + __shfl_xor_sync(0xffffffffu, l_run, 16, 32);
+    if constexpr (PARTIAL) {
+        // this split's largest score, sum of weights and values' sums, for flash_combine_kernel: [split][group][row]
+        const size_t all = size_t(rows) * per, n = size_t(gridDim.z) * kv_heads * all;
+        const size_t pr = (size_t(blockIdx.z) * kv_heads + kvh) * all + size_t(gr);
+        if (part == 0 && half == 0) {
+            out[pr] = m_run;
+            out[n + pr] = l_all;
+        }
+        float* pa = out + 2 * n + pr * FL_D + dim0 + 8 * half;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            *reinterpret_cast<float4*>(pa + j * 16) = make_float4(acc[j][0], acc[j][1], acc[j][2], acc[j][3]);
+            *reinterpret_cast<float4*>(pa + j * 16 + 4) = make_float4(acc[j][4], acc[j][5], acc[j][6], acc[j][7]);
+        }
+        return;
+    }
     const float inv = l_all > 0.0f ? 1.0f / l_all : 0.0f;
     float* op = out + (size_t(tok) * n_head + size_t(kvh) * per + hh) * FL_D + dim0 + 8 * half;
 #pragma unroll
@@ -3209,6 +3252,29 @@ flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, 
 #else
     __builtin_trap();
 #endif
+}
+
+// A decode call's splits added: a block a token and head, a thread a dimension, the splits in their order from the
+// first to the one with the token's last key.  Each is weighed against the largest score of them all.
+__global__ void __launch_bounds__(FL_D)
+flash_combine_kernel(const float* __restrict__ part, float* __restrict__ out, long long pos, int first,
+                     const long long* __restrict__ at, int rows, int n_head, int kv_heads, int nsplit) {
+    const int d = int(threadIdx.x), t = int(blockIdx.x) / n_head, h = int(blockIdx.x) % n_head;
+    const int per = n_head / kv_heads, g = h / per, hh = h % per;
+    const size_t all = size_t(rows) * per, n = size_t(nsplit) * kv_heads * all, r = size_t(t) * per + hh;
+    const long long last = (at ? *at : pos) + first + t;   // the token's last key
+    const int splits = int(last / FL_SPLIT) + 1;
+    const auto at_split = [&](int j) { return (size_t(j) * kv_heads + g) * all + r; };
+    float m = -INFINITY;
+    for (int j = 0; j < splits; ++j) m = fmaxf(m, part[at_split(j)]);
+    float l = 0.0f, acc = 0.0f;
+    for (int j = 0; j < splits; ++j) {
+        const size_t k = at_split(j);
+        const float w = exp2f(part[k] - m);
+        l += w * part[n + k];
+        acc += w * part[2 * n + k * FL_D + d];
+    }
+    out[((size_t(first) + t) * n_head + h) * FL_D + d] = acc / l;
 }
 
 bool flash_arch_ok() {
@@ -3234,22 +3300,66 @@ bool attend_flash(const float* q, const void* kcache, bool k_q8, const void* vca
     const float scale_log2 = scale * 1.44269504088896340736f;
     cudaStream_t s = cs(stream);
     if (k_q8 && v_q8)
-        flash_attn_kernel<true, true><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
-                                                               scale_log2, tiles);
+        flash_attn_kernel<true, true, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, 0, nullptr, rows, out,
+                                                                      n_head, kv_heads, scale_log2, tiles);
     else if (k_q8)
-        flash_attn_kernel<true, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
-                                                                scale_log2, tiles);
+        flash_attn_kernel<true, false, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, 0, nullptr, rows, out,
+                                                                       n_head, kv_heads, scale_log2, tiles);
     else if (v_q8)
-        flash_attn_kernel<false, true><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
-                                                                scale_log2, tiles);
+        flash_attn_kernel<false, true, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, 0, nullptr, rows, out,
+                                                                       n_head, kv_heads, scale_log2, tiles);
     else
-        flash_attn_kernel<false, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
-                                                                 scale_log2, tiles);
+        flash_attn_kernel<false, false, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, 0, nullptr, rows, out,
+                                                                        n_head, kv_heads, scale_log2, tiles);
+    return true;
+}
+
+bool attend_flash_decode(const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8, int64_t pos,
+                         int rows, float* scratch, size_t scratch_floats, float* out, int dim, int n_head,
+                         int kv_heads, float scale, void* stream, const long long* at, int room) {
+    if (dim != FL_D || kv_heads < 1 || n_head % kv_heads || rows < 1 || !flash_arch_ok()) return false;
+    if (uintptr_t(q) % 16 || uintptr_t(kcache) % 16 || uintptr_t(vcache) % 16) return false;
+    const int per = n_head / kv_heads;
+    if (per > FL_ROWS) return false;
+    // the tokens of a launch: up to FL_ROWS rows, and as many as the scratch holds the splits' results of
+    const int keys_all = at ? room : int(pos) + rows;
+    const int nsplit_all = (keys_all + FL_SPLIT - 1) / FL_SPLIT;
+    int c_max = std::min(rows, FL_ROWS / per);
+    while (c_max > 0 && size_t(nsplit_all) * kv_heads * size_t(c_max) * per * (FL_D + 2) > scratch_floats) --c_max;
+    if (c_max < 1) return false;
+    cudaStream_t s = cs(stream);
+    for (int first = 0, c = 0; first < rows; first += c) {
+        c = std::min(c_max, rows - first);
+        const int keys = at ? room : int(pos) + first + c;
+        const int nsplit = (keys + FL_SPLIT - 1) / FL_SPLIT;
+        const int tiles = (c * per + FL_ROWS - 1) / FL_ROWS;
+        const dim3 g = dim3(unsigned(tiles), unsigned(kv_heads), unsigned(nsplit));
+        const float scale_log2 = scale * 1.44269504088896340736f;
+        const float* qc = q + size_t(first) * n_head * FL_D;
+        if (k_q8 && v_q8)
+            flash_attn_kernel<true, true, true><<<g, FL_THREADS, 0, s>>>(qc, kcache, vcache, pos, first, at, c, scratch,
+                                                                         n_head, kv_heads, scale_log2, tiles);
+        else if (k_q8)
+            flash_attn_kernel<true, false, true><<<g, FL_THREADS, 0, s>>>(qc, kcache, vcache, pos, first, at, c, scratch,
+                                                                          n_head, kv_heads, scale_log2, tiles);
+        else if (v_q8)
+            flash_attn_kernel<false, true, true><<<g, FL_THREADS, 0, s>>>(qc, kcache, vcache, pos, first, at, c, scratch,
+                                                                          n_head, kv_heads, scale_log2, tiles);
+        else
+            flash_attn_kernel<false, false, true><<<g, FL_THREADS, 0, s>>>(qc, kcache, vcache, pos, first, at, c,
+                                                                           scratch, n_head, kv_heads, scale_log2, tiles);
+        flash_combine_kernel<<<unsigned(c * n_head), FL_D, 0, s>>>(scratch, out, pos, first, at, c, n_head, kv_heads,
+                                                                  nsplit);
+    }
     return true;
 }
 #else
 bool attend_flash(const float*, const void*, bool, const void*, bool, int64_t, int, float*, int, int, int, float,
                   void*) {
+    return false;
+}
+bool attend_flash_decode(const float*, const void*, bool, const void*, bool, int64_t, int, float*, size_t, float*, int,
+                         int, int, float, void*, const long long*, int) {
     return false;
 }
 #endif

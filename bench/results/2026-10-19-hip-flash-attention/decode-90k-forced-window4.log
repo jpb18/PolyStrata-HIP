@@ -1,0 +1,6 @@
+flash 0 0 {"prefill": "1092.5", "decode": "56.25"}
+flash 1 0 {"prefill": "1654.4", "decode": "107.09"}
+flash 1 1 {"prefill": "1662.1", "decode": "107.57"}
+flash 0 1 {"prefill": "1129.7", "decode": "56.20"}
+flash 0 decode tok/s: [56.2, 56.25] median 56.25
+flash 1 decode tok/s: [107.09, 107.57] median 107.57

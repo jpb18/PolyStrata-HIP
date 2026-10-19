@@ -1044,6 +1044,234 @@ int attn_q8_bench() {
     return bad ? 1 : 0;
 }
 
+// poly_kernel_bench attn-dq8 [most]: a decode call's attention over q8_0 caches (attend_q8(), the engine's call: the
+// position read on the card, the rows sized by room()) for 1, 2, 4 and 8 tokens at contexts up to `most` positions
+// (default 100,000: it needs 2 x most x 544 bytes of VRAM and the f16 sources while it fills them, which is why it is
+// separate from attn-q8): the time a call with the rows kernels (STRATA_POLY_FLASH=0) and with the flash kernel, the
+// bytes of K and V a second the latter reads, and each one's largest error against the attention in doubles over the
+// same q8_0 values.  The flash kernel's window against its tokens one at a time, bit for bit.
+int attn_dq8_bench(int64_t most) {
+    const float scale = 1.f / 16.f;
+    uint8_t* kq = (uint8_t*) dev_random((size_t) most * kQ8Row, false);
+    uint8_t* vq = (uint8_t*) dev_random((size_t) most * kQ8Row, false);
+    uint16_t* k16 = (uint16_t*) dev_random((size_t) most * kWidth * 2, false);
+    uint16_t* v16 = (uint16_t*) dev_random((size_t) most * kWidth * 2, false);
+    fill_caches(k16, kq, most, true, 11);
+    fill_caches(v16, vq, most, false, 12);
+    const int batch = 8;
+    std::vector<float> hq((size_t) batch * kHeads * kDim);
+    {
+        std::mt19937 rng(13);
+        std::normal_distribution<float> nd(0.f, 1.f);
+        for (auto& x : hq) x = nd(rng);
+    }
+    float* q = (float*) dev_random(hq.size() * 4, true);
+    cudaMemcpy(q, hq.data(), hq.size() * 4, cudaMemcpyHostToDevice);
+    const size_t score_floats = size_t(16) << 20;
+    float* score = (float*) dev_random(score_floats * 4, true);
+    float* out_old = (float*) dev_random((size_t) batch * kHeads * kDim * 4, true);
+    float* out = (float*) dev_random((size_t) batch * kHeads * kDim * 4, true);
+    float* one = (float*) dev_random((size_t) batch * kHeads * kDim * 4, true);
+    long long* at = (long long*) dev_random(batch * 2 * sizeof(long long), false);
+    uint8_t* src = (uint8_t*) dev_random((size_t) 64 << 20, false);
+    uint8_t* dst = (uint8_t*) dev_random((size_t) 64 << 20, false);
+    const double copy_us = time_us([&] { cudaMemcpyAsync(dst, src, (size_t) 64 << 20, cudaMemcpyDeviceToDevice, g_st); });
+    const double rate = 2.0 * (64 << 20) / (copy_us * 1e3);   // GB/s read + written
+    std::printf("copy rate %.1f GB/s (read + write); a row of K and V in q8_0: %zu bytes\n", rate, 2 * kQ8Row);
+    std::vector<uint8_t> hkq((size_t) most * kQ8Row), hvq(hkq.size());
+    cudaMemcpy(hkq.data(), kq, hkq.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hvq.data(), vq, hvq.size(), cudaMemcpyDeviceToHost);
+    const auto q8_value = [&](const std::vector<uint8_t>& c, int64_t r, int g, int d) {
+        const uint8_t* head = c.data() + (size_t) r * kQ8Row + (size_t) g * kHb;
+        uint16_t sh;
+        std::memcpy(&sh, head + kDim + 2 * (d / 32), 2);
+        const int s = sh >> 15, e = (sh >> 10) & 31, m = sh & 1023;
+        const double sc = e == 0 ? std::ldexp((double) m, -24) : std::ldexp((double) (m + 1024), e - 25);
+        return (double) (int8_t) head[d] * (s ? -sc : sc);
+    };
+    int bad = 0;
+    for (int64_t ctx : {int64_t(8192), int64_t(32768), int64_t(65536), most - 16}) {
+        if (ctx > most - 16) continue;
+        const int64_t profile = 262144;
+        const int chunk = profile_chunk(profile);
+        for (int rows : {1, 2, 4, 8}) {
+            const int64_t pos = ctx;
+            int room = 1024;
+            while (room < pos + rows) room *= 2;
+            room = (int) std::min<int64_t>(room, profile);
+            std::vector<long long> h_at((size_t) rows * 2);
+            for (int t = 0; t < rows; ++t) h_at[(size_t) 2 * t] = h_at[(size_t) 2 * t + 1] = pos + t;
+            cudaStreamSynchronize(g_st);
+            cudaMemcpy(at, h_at.data(), h_at.size() * sizeof(long long), cudaMemcpyHostToDevice);
+            const int reps = g_reps;
+            g_reps = std::max(10, (int) (g_reps * 8192 / ctx));
+            const auto call = [&](float* o) {
+                poly::attend_q8(q, kq, vq, pos, rows, score, chunk, o, kDim, kHeads, kKv, scale, g_st, 0, 0, false, at,
+                                room);
+            };
+            _putenv("STRATA_POLY_FLASH=0");
+            const double old_us = time_us([&] { call(out_old); });
+            _putenv("STRATA_POLY_FLASH=1");
+            const double us = time_us([&] { call(out); });
+            g_reps = reps;
+            const double bytes = (double) (pos + rows) * kQ8Row * 2;
+            std::printf("  ctx %6lld, %d tok: rows kernels %8.1f us | flash %8.1f us (%.2fx), %6.1f GB/s of K and V (%.0f "
+                        "MB), %.2f x the least\n",
+                        (long long) ctx, rows, old_us, us, old_us / us, bytes / (us * 1e3), bytes / 1e6,
+                        us / (bytes / (rate * 1e3)));
+            // against the doubles: a few tokens and heads
+            std::vector<float> a((size_t) rows * kHeads * kDim), b(a.size());
+            cudaMemcpy(a.data(), out_old, a.size() * 4, cudaMemcpyDeviceToHost);
+            cudaMemcpy(b.data(), out, b.size() * 4, cudaMemcpyDeviceToHost);
+            double err_old = 0, err_new = 0, mag = 0;
+            if (rows == 1 || rows == 4)
+                for (int t : {0, rows - 1}) {
+                    const int64_t last = pos + t;
+                    for (int h : {0, 7, 12}) {
+                        const int g = h / (kHeads / kKv);
+                        const float* qh = &hq[((size_t) t * kHeads + h) * kDim];
+                        std::vector<double> w((size_t) last + 1);
+                        double mx = -1e300;
+                        for (int64_t j = 0; j <= last; ++j) {
+                            double s = 0;
+                            for (int d = 0; d < kDim; ++d) s += (double) qh[d] * q8_value(hkq, j, g, d);
+                            w[(size_t) j] = s * scale;
+                            mx = std::max(mx, w[(size_t) j]);
+                        }
+                        double sum = 0;
+                        for (auto& x : w) {
+                            x = std::exp(x - mx);
+                            sum += x;
+                        }
+                        for (int d = 0; d < kDim; d += 7) {
+                            double o = 0;
+                            for (int64_t j = 0; j <= last; ++j) o += w[(size_t) j] * q8_value(hvq, j, g, d);
+                            o /= sum;
+                            const size_t at_i = ((size_t) t * kHeads + h) * kDim + d;
+                            err_old = std::max(err_old, std::fabs(a[at_i] - o));
+                            err_new = std::max(err_new, std::fabs(b[at_i] - o));
+                            mag = std::max(mag, std::fabs(o));
+                        }
+                    }
+                }
+            if (mag > 0)
+                std::printf("      max |error| against doubles (values up to %.3f): rows kernels %.2e, flash %.2e\n", mag,
+                            err_old, err_new);
+            if (rows == 1) continue;
+            // the flash window's tokens against each alone
+            for (int t = 0; t < rows; ++t) {
+                cudaStreamSynchronize(g_st);
+                cudaMemcpy(at, h_at.data() + 2 * t, 2 * sizeof(long long), cudaMemcpyHostToDevice);
+                poly::attend_q8(q + (size_t) t * kHeads * kDim, kq, vq, pos + t, 1, score, chunk,
+                                one + (size_t) t * kHeads * kDim, kDim, kHeads, kKv, scale, g_st, 0, 0, false, at, room);
+            }
+            cudaStreamSynchronize(g_st);
+            cudaMemcpy(at, h_at.data(), h_at.size() * sizeof(long long), cudaMemcpyHostToDevice);
+            call(out);
+            cudaStreamSynchronize(g_st);
+            std::vector<uint32_t> x((size_t) rows * kHeads * kDim), y(x.size());
+            cudaMemcpy(x.data(), out, x.size() * 4, cudaMemcpyDeviceToHost);
+            cudaMemcpy(y.data(), one, y.size() * 4, cudaMemcpyDeviceToHost);
+            size_t differ = 0;
+            for (size_t i = 0; i < x.size(); ++i) differ += x[i] != y[i];
+            std::printf("      the flash window and its tokens one at a time: %s\n",
+                        differ ? "DIFFER" : "the same bits");
+            bad += differ != 0;
+        }
+    }
+    // fp16 caches (attend()): 1 and 4 tokens, the same
+    std::vector<uint16_t> hk16((size_t) most * kWidth), hv16(hk16.size());
+    cudaMemcpy(hk16.data(), k16, hk16.size() * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(hv16.data(), v16, hv16.size() * 2, cudaMemcpyDeviceToHost);
+    const auto half_value = [](uint16_t h) {
+        const int s = h >> 15, e = (h >> 10) & 31, m = h & 1023;
+        const double v = e == 0 ? std::ldexp((double) m, -24) : std::ldexp((double) (m + 1024), e - 25);
+        return s ? -v : v;
+    };
+    std::printf("fp16 caches (attend())\n");
+    for (int64_t ctx : {int64_t(8192), most - 16}) {
+        const int chunk = profile_chunk(262144);
+        for (int rows : {1, 4}) {
+            const int64_t pos = ctx;
+            int room = 1024;
+            while (room < pos + rows) room *= 2;
+            std::vector<long long> h_at((size_t) rows * 2);
+            for (int t = 0; t < rows; ++t) h_at[(size_t) 2 * t] = h_at[(size_t) 2 * t + 1] = pos + t;
+            cudaStreamSynchronize(g_st);
+            cudaMemcpy(at, h_at.data(), h_at.size() * sizeof(long long), cudaMemcpyHostToDevice);
+            const int reps = g_reps;
+            g_reps = std::max(10, (int) (g_reps * 8192 / ctx));
+            const auto call = [&](float* o) {
+                poly::attend(q, k16, v16, pos, rows, score, chunk, o, kDim, kHeads, kKv, scale, g_st, 0, 0, false, at,
+                             room);
+            };
+            _putenv("STRATA_POLY_FLASH=0");
+            const double old_us = time_us([&] { call(out_old); });
+            _putenv("STRATA_POLY_FLASH=1");
+            const double us = time_us([&] { call(out); });
+            g_reps = reps;
+            std::vector<float> a((size_t) rows * kHeads * kDim), b(a.size());
+            cudaMemcpy(a.data(), out_old, a.size() * 4, cudaMemcpyDeviceToHost);
+            cudaMemcpy(b.data(), out, b.size() * 4, cudaMemcpyDeviceToHost);
+            double err_old = 0, err_new = 0, mag = 0;
+            for (int t : {0, rows - 1}) {
+                const int64_t last = pos + t;
+                for (int h : {0, 7, 12}) {
+                    const int g = h / (kHeads / kKv);
+                    const float* qh = &hq[((size_t) t * kHeads + h) * kDim];
+                    std::vector<double> w((size_t) last + 1);
+                    double mx = -1e300;
+                    for (int64_t j = 0; j <= last; ++j) {
+                        double s = 0;
+                        for (int d = 0; d < kDim; ++d)
+                            s += (double) qh[d] * half_value(hk16[(size_t) j * kWidth + g * kDim + d]);
+                        w[(size_t) j] = s * scale;
+                        mx = std::max(mx, w[(size_t) j]);
+                    }
+                    double sum = 0;
+                    for (auto& x : w) {
+                        x = std::exp(x - mx);
+                        sum += x;
+                    }
+                    for (int d = 0; d < kDim; d += 7) {
+                        double o = 0;
+                        for (int64_t j = 0; j <= last; ++j)
+                            o += w[(size_t) j] * half_value(hv16[(size_t) j * kWidth + g * kDim + d]);
+                        o /= sum;
+                        const size_t at_i = ((size_t) t * kHeads + h) * kDim + d;
+                        err_old = std::max(err_old, std::fabs(a[at_i] - o));
+                        err_new = std::max(err_new, std::fabs(b[at_i] - o));
+                        mag = std::max(mag, std::fabs(o));
+                    }
+                }
+            }
+            std::printf("  ctx %6lld, %d tok: rows kernels %8.1f us | flash %8.1f us (%.2fx); max |error| against doubles "
+                        "(values up to %.3f): %.2e, flash %.2e\n",
+                        (long long) ctx, rows, old_us, us, old_us / us, mag, err_old, err_new);
+            if (rows > 1) {
+                for (int t = 0; t < rows; ++t) {
+                    cudaStreamSynchronize(g_st);
+                    cudaMemcpy(at, h_at.data() + 2 * t, 2 * sizeof(long long), cudaMemcpyHostToDevice);
+                    poly::attend(q + (size_t) t * kHeads * kDim, k16, v16, pos + t, 1, score, chunk,
+                                 one + (size_t) t * kHeads * kDim, kDim, kHeads, kKv, scale, g_st, 0, 0, false, at, room);
+                }
+                cudaStreamSynchronize(g_st);
+                cudaMemcpy(at, h_at.data(), h_at.size() * sizeof(long long), cudaMemcpyHostToDevice);
+                call(out);
+                cudaStreamSynchronize(g_st);
+                std::vector<uint32_t> x((size_t) rows * kHeads * kDim), y(x.size());
+                cudaMemcpy(x.data(), out, x.size() * 4, cudaMemcpyDeviceToHost);
+                cudaMemcpy(y.data(), one, y.size() * 4, cudaMemcpyDeviceToHost);
+                size_t differ = 0;
+                for (size_t i = 0; i < x.size(); ++i) differ += x[i] != y[i];
+                std::printf("      the flash window and its tokens one at a time: %s\n", differ ? "DIFFER" : "the same bits");
+                bad += differ != 0;
+            }
+        }
+    }
+    return bad ? 1 : 0;
+}
+
 // Phase 3 (poly_kernel_bench attn-kv-mix): attend_kv() and attend_batch_kv(), the engine's calls, with the keys and the
 // values each in fp16 or q8_0 (--kv, --kv-k, --kv-v).  Both fp16 against attend() and both q8_0 against attend_q8(), bit
 // for bit: the same launches.  Each of the four against the attention in doubles over the values it reads; a window
@@ -1726,6 +1954,11 @@ int main(int argc, char** argv) {
         g_reps = argc > 2 ? std::max(10, std::atoi(argv[2])) : 200;
         g_warm = 3;
         return attn_fit_bench();
+    }
+    if (argc > 1 && std::strcmp(argv[1], "attn-dq8") == 0) {
+        g_reps = 100;
+        g_warm = 3;
+        return attn_dq8_bench(argc > 2 ? std::atoll(argv[2]) : 100000);
     }
     if (argc > 1 && std::strcmp(argv[1], "attn-flash") == 0) {
         g_reps = argc > 2 ? std::max(3, std::atoi(argv[2])) : 10;

@@ -26,6 +26,8 @@ ap.add_argument("--prompt", default="B-2k")
 ap.add_argument("--order", default="0,1,0,1")
 ap.add_argument("--new", type=int, default=24)
 ap.add_argument("--ctx", default="262144")
+ap.add_argument("--cache", default="3000", help="--expert-cache-max")
+ap.add_argument("--window", default="1", help="1, or default for the engine's guessed-token windows")
 a = ap.parse_args()
 
 sets = json.loads((ROOT / "bench/results/2026-10-10-hip-poly-vs-llama-vulkan/prompts.json").read_text())["sets"]
@@ -42,7 +44,8 @@ for k, item in enumerate(a.order.split(",")):
     shutil.copyfile(PROFILE, prof)
     lg = work / f"{k}.logits"
     cmd = [a.exe, "--model", MODEL, "--threads", "6", "--turn-token", "248045", "--max-context", a.ctx, "--kv", kv,
-           "--expert-profile", str(prof), "--expert-swaps", "0", "--expert-cache-max", "3000", "--window", "1",
+           "--expert-profile", str(prof), "--expert-swaps", "0", "--expert-cache-max", a.cache,
+           *(["--window", a.window] if a.window != "default" else []),
            "--tokens", "@" + str(prompt), "--max-new", str(a.new), "--logits-out", str(lg)]
     env = engine_env(a.exe)
     env["STRATA_POLY_WARM"] = "1"

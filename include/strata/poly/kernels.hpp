@@ -187,6 +187,14 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
 /// or shape, STRATA_POLY_FLASH=0); attend_batch() and attend_batch_kv() then go on with their products.
 bool attend_flash(const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8, int64_t pos, int rows,
                   float* out, int dim, int n_head, int kv_heads, float scale, void* stream);
+/// The same kernel for a decode call: `rows` tokens (a token, a window) from position `pos` (or the one the card
+/// holds at `at`, sized by `room` as attend()'s), the keys split 512 a CTA, each CTA's results in `scratch` (the
+/// `score` of attend() and attend_kv(), which has room for them: scratch_floats floats) and added in order by a
+/// second launch.  A token's result is the same bits whichever tokens come with it.  False, with nothing launched, as
+/// attend_flash(), or where the scratch does not hold the splits of one token.
+bool attend_flash_decode(const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8, int64_t pos,
+                         int rows, float* scratch, size_t scratch_floats, float* out, int dim, int n_head,
+                         int kv_heads, float scale, void* stream, const long long* at = nullptr, int room = 0);
 /// attend() for a prompt batch: the same attention with cuBLAS products on the tensor cores, several times
 /// faster on many tokens.  The products read the cache's halves where they lie, take the queries and the
 /// softmax's weights rounded to halves, and sum floats.  A token's result depends on the tokens beside it, so

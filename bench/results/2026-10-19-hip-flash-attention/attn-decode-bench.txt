@@ -1,0 +1,47 @@
+copy rate 282.6 GB/s (read + write); a row of K and V in q8_0: 1088 bytes
+  ctx   8192, 1 tok: rows kernels     61.8 us | flash     53.0 us (1.17x),  168.3 GB/s of K and V (9 MB), 1.68 x the least
+      max |error| against doubles (values up to 0.010): rows kernels 3.07e-09, flash 3.85e-06
+  ctx   8192, 2 tok: rows kernels     89.0 us | flash     51.8 us (1.72x),  172.0 GB/s of K and V (9 MB), 1.64 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx   8192, 4 tok: rows kernels    349.4 us | flash     50.7 us (6.89x),  175.8 GB/s of K and V (9 MB), 1.61 x the least
+      max |error| against doubles (values up to 0.012): rows kernels 3.80e-09, flash 4.74e-06
+      the flash window and its tokens one at a time: the same bits
+  ctx   8192, 8 tok: rows kernels    705.4 us | flash     97.4 us (7.24x),   91.6 GB/s of K and V (9 MB), 3.09 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx  32768, 1 tok: rows kernels    192.7 us | flash    175.8 us (1.10x),  202.8 GB/s of K and V (36 MB), 1.39 x the least
+      max |error| against doubles (values up to 0.005): rows kernels 1.57e-09, flash 1.68e-06
+  ctx  32768, 2 tok: rows kernels    325.1 us | flash    197.7 us (1.64x),  180.3 GB/s of K and V (36 MB), 1.57 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx  32768, 4 tok: rows kernels   1419.0 us | flash    196.0 us (7.24x),  181.9 GB/s of K and V (36 MB), 1.55 x the least
+      max |error| against doubles (values up to 0.005): rows kernels 3.67e-09, flash 2.22e-06
+      the flash window and its tokens one at a time: the same bits
+  ctx  32768, 8 tok: rows kernels   2857.4 us | flash    376.9 us (7.58x),   94.6 GB/s of K and V (36 MB), 2.99 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx  65536, 1 tok: rows kernels    449.1 us | flash    349.6 us (1.28x),  203.9 GB/s of K and V (71 MB), 1.39 x the least
+      max |error| against doubles (values up to 0.003): rows kernels 1.36e-09, flash 1.38e-06
+  ctx  65536, 2 tok: rows kernels    634.5 us | flash    380.5 us (1.67x),  187.4 GB/s of K and V (71 MB), 1.51 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx  65536, 4 tok: rows kernels   2936.9 us | flash    393.7 us (7.46x),  181.1 GB/s of K and V (71 MB), 1.56 x the least
+      max |error| against doubles (values up to 0.004): rows kernels 4.52e-09, flash 1.65e-06
+      the flash window and its tokens one at a time: the same bits
+  ctx  65536, 8 tok: rows kernels   5849.9 us | flash    757.3 us (7.72x),   94.2 GB/s of K and V (71 MB), 3.00 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx 262128, 1 tok: rows kernels   1871.4 us | flash   1396.0 us (1.34x),  204.3 GB/s of K and V (285 MB), 1.38 x the least
+      max |error| against doubles (values up to 0.002): rows kernels 1.15e-09, flash 7.93e-07
+  ctx 262128, 2 tok: rows kernels   2459.6 us | flash   1427.3 us (1.72x),  199.8 GB/s of K and V (285 MB), 1.41 x the least
+      the flash window and its tokens one at a time: the same bits
+  ctx 262128, 4 tok: rows kernels  12551.5 us | flash   1512.8 us (8.30x),  188.5 GB/s of K and V (285 MB), 1.50 x the least
+      max |error| against doubles (values up to 0.002): rows kernels 4.28e-09, flash 8.90e-07
+      the flash window and its tokens one at a time: the same bits
+  ctx 262128, 8 tok: rows kernels  25263.1 us | flash   3212.9 us (7.86x),   88.8 GB/s of K and V (285 MB), 3.18 x the least
+      the flash window and its tokens one at a time: the same bits
+fp16 caches (attend())
+  ctx   8192, 1 tok: rows kernels     56.3 us | flash     45.1 us (1.25x); max |error| against doubles (values up to 0.010): 2.72e-09, flash 2.55e-06
+  ctx   8192, 4 tok: rows kernels    339.9 us | flash     52.7 us (6.45x); max |error| against doubles (values up to 0.012): 3.89e-09, flash 3.37e-06
+      the flash window and its tokens one at a time: the same bits
+  ctx 262128, 1 tok: rows kernels   2960.7 us | flash   1964.4 us (1.51x); max |error| against doubles (values up to 0.002): 1.32e-09, flash 4.29e-07
+  ctx 262128, 4 tok: rows kernels  12287.4 us | flash   2110.1 us (5.82x); max |error| against doubles (values up to 0.002): 4.79e-09, flash 5.53e-07
+      the flash window and its tokens one at a time: the same bits
+
+
+exit 0
