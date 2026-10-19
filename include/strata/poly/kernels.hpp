@@ -275,7 +275,24 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
 /// out = rms_norm(o) * o_norm * silu(z), n_head * dim values a token.  qkv, alpha and beta are overwritten.
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s,
               const float* z, const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows,
-              float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
+              float norm_eps, void* stream, float* snap = nullptr, size_t stride = 0, unsigned snaps = 0,
+              void* out_q8 = nullptr, bool gates_done = false);
+/// STRATA_POLY_FUSE: kernels that do the work of two or three of the ones in this header in one launch, each value by
+/// the same expression and the same order of sums, so the bits are theirs.  A Q8_1 output (q, yq, out_q8 of gdn_step)
+/// is native_quantize_q8_1()'s of the float output, the rows back to back.  Those that return bool launch nothing
+/// and return false for a shape they do not take.
+/// rms_norm() of x into y (rows of n, y_stride n) and its Q8_1 in yq; with `add`, axpy(add, 1, x) into x first.
+bool rms_norm_q8(float* x, const float* add, const float* w, float* y, void* yq, int n, int rows, float eps,
+                 void* stream);
+/// swiglu_clamp() (gate and up, gate_up null) or swiglu_clamp_rows() (gate_up), rows of n values, and the Q8_1 in q.
+bool swiglu_clamp_q8(const float* gate, const float* up, const float* gate_up, float* out, void* q, int n, int rows,
+                     float limit, void* stream);
+/// mul_sigmoid(acc, g, n, rows, g_stride, false) and the Q8_1 of acc in q.
+bool mul_sigmoid_q8(float* acc, const float* g, void* q, int n, int rows, int g_stride, void* stream);
+/// gemv_f32() of the gated delta net's alpha and beta (n_head rows of n_in each, x: rows of n_in), and gdn_step()'s
+/// gates on them: then gdn_step(..., gates_done = true).
+void gdn_ab(const float* wa, const float* wb, const float* x, float* alpha, float* beta, const float* dt,
+            const float* a, int n_in, int n_head, int rows, void* stream);
 /// The kernel of a prompt batch's state update in gdn_step() (32 tokens or more, no snapshots, heads of 128): 0
 /// the one of a few tokens, 1, 2 or 4 the one that keeps the state in registers, with that many columns a warp; the
 /// same bits.  STRATA_POLY_GDN_STATE sets it when this is not called; 4 when neither is.
@@ -322,6 +339,12 @@ void route_topk_softmax(const float* scores, int n_expert, int n_used, float min
 /// (wall_clock64()) sets *failed and adds nothing.  `waited`, when given, gets the ticks waited added to it.
 void wait_add(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, int n, int rows,
               long long ticks, uint32_t* failed, void* stream, unsigned long long* waited = nullptr);
+
+/// STRATA_POLY_FUSE: add_scaled_dev(sum, w, count, n), wait_add(need, ..., fo, n, rows, ...) and, with resid,
+/// axpy(fo, 1, resid, rows * n, true), in one launch with the same bits.
+void card_tail(const ScaledRows& sum, const float* w, int count, const int* need, const uint32_t* go,
+               const uint32_t* seq, const float* cpu, float* fo, float* resid, int n, int rows, long long ticks,
+               uint32_t* failed, void* stream, unsigned long long* waited = nullptr);
 
 /// *p = v, in stream order.
 void set_word(uint32_t* p, uint32_t v, void* stream);

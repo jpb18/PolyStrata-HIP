@@ -1,0 +1,28 @@
+{
+ "prompt": "B-2k",
+ "tokens": 2068,
+ "decode_off_vs_on": {
+  "steps": 48,
+  "same_bits": 48,
+  "ids_equal": true
+ },
+ "decode_info_on": [
+  "strata-poly: STRATA_POLY_FUSE: on",
+  "prompt 2068 tokens 646.8 tok/s, generated 48 tokens 47.42 tok/s (length); experts from VRAM 62.8%, CPU experts 0.3 ms/token, router wait 0.6 ms/token, 0 experts swapped into VRAM, 0 of 0 guessed tokens right"
+ ],
+ "decode_ref_vs_off": {
+  "steps": 48,
+  "same_bits": 48,
+  "ids_equal": true
+ },
+ "window_off_vs_on": {
+  "steps": 48,
+  "same_bits": 48,
+  "ids_equal": true
+ },
+ "window_off_vs_decode_off": {
+  "steps": 48,
+  "same_bits": 48,
+  "ids_equal": true
+ }
+}

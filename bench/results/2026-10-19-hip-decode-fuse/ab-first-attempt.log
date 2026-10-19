@@ -1,0 +1,220 @@
+== round 0 fuse0-wdefault
+warm A-2k: decode 59.65 tok/s
+B-2k#0: prefill 896.5 decode 112.25 tok/s, guesses 78/95, VRAM hits 0.9547
+   strata-poly trace: 128 tokens in 1140.3 ms (8.91 ms a token), 49 rounds
+     drafts     109 calls     142.6 ms  1.308 ms a call
+     eval(1)      1 calls      12.8 ms  12.810 ms a call
+     window(2)   20 calls     352.8 ms  17.639 ms a call, 1.75 tokens a call
+     window(3)    9 calls     181.3 ms  20.149 ms a call, 2.22 tokens a call
+     window(4)   19 calls     442.3 ms  23.281 ms a call, 3.74 tokens a call
+     keep 1.1 ms, pick 6.1 ms, show 0.8 ms, the rest 0.4 ms
+     guesses right in a window of 4: 0:1 1:1 2:0 3:17
+     engine: host waits for routing 681.5 ms, CPU experts 204.3 ms; experts from VRAM 44897, on the CPU 2055
+B-45k#0: prefill 1442.4 decode 94.18 tok/s, guesses 84/100, VRAM hits 0.966
+   strata-poly trace: 128 tokens in 1359.1 ms (10.62 ms a token), 44 rounds
+     drafts     107 calls     180.9 ms  1.690 ms a call
+     eval(1)      0 calls       0.0 ms  0.000 ms a call
+     window(2)   10 calls     217.2 ms  21.721 ms a call, 1.50 tokens a call
+     window(3)   16 calls     399.1 ms  24.945 ms a call, 2.56 tokens a call
+     window(4)   17 calls     486.8 ms  28.634 ms a call, 3.82 tokens a call
+     window(8)    1 calls      50.1 ms  50.086 ms a call, 6.00 tokens a call
+     keep 17.1 ms, pick 6.0 ms, show 0.8 ms, the rest 1.1 ms
+     guesses right in a window of 4: 0:0 1:1 2:1 3:15
+     engine: host waits for routing 990.7 ms, CPU experts 130.7 ms; experts from VRAM 45642, on the CPU 1614
+engine log: <home>\AppData\Local\Temp\tmpasb6r6nz.log
+== round 0 fuse1-wdefault
+warm A-2k: decode 65.45 tok/s
+B-2k#0: prefill 923.4 decode 104.02 tok/s, guesses 73/96, VRAM hits 0.9547
+   strata-poly trace: 128 tokens in 1230.5 ms (9.61 ms a token), 54 rounds
+     drafts     103 calls     137.2 ms  1.332 ms a call
+     eval(1)      2 calls      34.6 ms  17.285 ms a call
+     window(2)    8 calls     146.6 ms  18.323 ms a call, 1.75 tokens a call
+     window(3)   44 calls     903.8 ms  20.540 ms a call, 2.52 tokens a call
+     keep 1.1 ms, pick 5.9 ms, show 0.8 ms, the rest 0.4 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 707.6 ms, CPU experts 275.3 ms; experts from VRAM 46686, on the CPU 2138
+B-45k#0: prefill 1441.8 decode 77.54 tok/s, guesses 69/84, VRAM hits 0.9663
+   strata-poly trace: 128 tokens in 1650.7 ms (12.90 ms a token), 58 rounds
+     drafts      82 calls     264.9 ms  3.231 ms a call
+     eval(1)      0 calls       0.0 ms  0.000 ms a call
+     window(2)   40 calls     813.7 ms  20.343 ms a call, 1.77 tokens a call
+     window(3)   11 calls     281.2 ms  25.562 ms a call, 2.82 tokens a call
+     window(4)    6 calls     164.2 ms  27.374 ms a call, 3.67 tokens a call
+     window(5)    1 calls     117.3 ms  117.316 ms a call, 3.00 tokens a call
+     keep 1.3 ms, pick 6.0 ms, show 0.9 ms, the rest 1.1 ms
+     guesses right in a window of 4: 0:0 1:0 2:2 3:4
+     engine: host waits for routing 1074.6 ms, CPU experts 217.5 ms; experts from VRAM 44535, on the CPU 1561
+engine log: <home>\AppData\Local\Temp\tmp5ahm8iw4.log
+== round 0 fuse0-w1
+warm A-2k: decode 63.34 tok/s
+B-2k#0: prefill 1052.1 decode 73.22 tok/s, guesses 0/0, VRAM hits 0.9739
+   strata-poly trace: 128 tokens in 1748.1 ms (13.66 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    1740.7 ms  13.706 ms a call
+     keep 0.0 ms, pick 6.0 ms, show 1.1 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1207.5 ms, CPU experts 174.1 ms; experts from VRAM 39724, on the CPU 916
+B-45k#0: prefill 1468.4 decode 59.22 tok/s, guesses 0/0, VRAM hits 0.9846
+   strata-poly trace: 128 tokens in 2161.3 ms (16.89 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    2153.4 ms  16.956 ms a call
+     keep 0.0 ms, pick 6.3 ms, show 1.4 ms, the rest 0.3 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1707.7 ms, CPU experts 81.0 ms; experts from VRAM 40013, on the CPU 627
+engine log: <home>\AppData\Local\Temp\tmp2aj5ifor.log
+== round 0 fuse1-w1
+warm A-2k: decode 60.55 tok/s
+B-2k#0: prefill 1037.0 decode 77.8 tok/s, guesses 0/0, VRAM hits 0.9751
+   strata-poly trace: 128 tokens in 1645.2 ms (12.85 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    1638.4 ms  12.901 ms a call
+     keep 0.0 ms, pick 5.7 ms, show 1.0 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1204.4 ms, CPU experts 125.9 ms; experts from VRAM 39787, on the CPU 853
+B-45k#0: prefill 1474.7 decode 61.62 tok/s, guesses 0/0, VRAM hits 0.9841
+   strata-poly trace: 128 tokens in 2077.3 ms (16.23 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    2070.4 ms  16.303 ms a call
+     keep 0.0 ms, pick 5.7 ms, show 1.0 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1696.4 ms, CPU experts 71.9 ms; experts from VRAM 39994, on the CPU 646
+engine log: <home>\AppData\Local\Temp\tmpynpz_697.log
+== round 1 fuse1-wdefault
+warm A-2k: decode 62.17 tok/s
+B-2k#0: prefill 925.9 decode 111.63 tok/s, guesses 79/95, VRAM hits 0.9561
+   strata-poly trace: 128 tokens in 1146.6 ms (8.96 ms a token), 49 rounds
+     drafts     112 calls     154.8 ms  1.382 ms a call
+     eval(1)      8 calls     110.1 ms  13.766 ms a call
+     window(2)   13 calls     230.0 ms  17.691 ms a call, 1.92 tokens a call
+     window(3)    2 calls      40.6 ms  20.289 ms a call, 3.00 tokens a call
+     window(4)   26 calls     601.1 ms  23.118 ms a call, 3.38 tokens a call
+     keep 1.4 ms, pick 7.2 ms, show 0.9 ms, the rest 0.5 ms
+     guesses right in a window of 4: 0:2 1:4 2:2 3:18
+     engine: host waits for routing 660.4 ms, CPU experts 228.8 ms; experts from VRAM 44972, on the CPU 2004
+B-45k#0: prefill 1440.0 decode 92.69 tok/s, guesses 81/96, VRAM hits 0.9662
+   strata-poly trace: 128 tokens in 1380.9 ms (10.79 ms a token), 47 rounds
+     drafts     110 calls     188.0 ms  1.709 ms a call
+     eval(1)      6 calls     101.1 ms  16.856 ms a call
+     window(2)   10 calls     205.3 ms  20.534 ms a call, 1.60 tokens a call
+     window(3)   11 calls     279.3 ms  25.388 ms a call, 2.55 tokens a call
+     window(4)   19 calls     532.9 ms  28.049 ms a call, 3.74 tokens a call
+     window(8)    1 calls      48.4 ms  48.390 ms a call, 6.00 tokens a call
+     keep 16.7 ms, pick 6.1 ms, show 0.9 ms, the rest 2.2 ms
+     guesses right in a window of 4: 0:0 1:1 2:3 3:15
+     engine: host waits for routing 1009.0 ms, CPU experts 142.3 ms; experts from VRAM 45364, on the CPU 1596
+engine log: <home>\AppData\Local\Temp\tmp7dn5j73d.log
+== round 1 fuse0-wdefault
+warm A-2k: decode 91.03 tok/s
+B-2k#0: prefill 1359.5 decode 117.36 tok/s, guesses 78/99, VRAM hits 0.9582
+   strata-poly trace: 128 tokens in 1090.7 ms (8.52 ms a token), 50 rounds
+     drafts     110 calls     138.5 ms  1.259 ms a call
+     eval(1)      5 calls      66.5 ms  13.292 ms a call
+     window(2)    4 calls      65.3 ms  16.334 ms a call, 1.75 tokens a call
+     window(3)   28 calls     533.5 ms  19.055 ms a call, 2.50 tokens a call
+     window(4)   13 calls     278.3 ms  21.407 ms a call, 3.46 tokens a call
+     keep 1.1 ms, pick 6.2 ms, show 0.8 ms, the rest 0.4 ms
+     guesses right in a window of 4: 0:1 1:1 2:2 3:9
+     engine: host waits for routing 696.3 ms, CPU experts 141.5 ms; experts from VRAM 46584, on the CPU 1976
+B-45k#0: prefill 1527.2 decode 88.81 tok/s, guesses 78/105, VRAM hits 0.9672
+   strata-poly trace: 128 tokens in 1441.2 ms (11.26 ms a token), 50 rounds
+     drafts     121 calls     201.9 ms  1.669 ms a call
+     eval(1)      4 calls      68.3 ms  17.080 ms a call
+     window(2)    8 calls     160.8 ms  20.105 ms a call, 1.50 tokens a call
+     window(3)   17 calls     417.6 ms  24.567 ms a call, 2.06 tokens a call
+     window(4)   21 calls     583.8 ms  27.802 ms a call, 3.62 tokens a call
+     keep 0.9 ms, pick 5.9 ms, show 0.8 ms, the rest 1.1 ms
+     guesses right in a window of 4: 0:1 1:1 2:3 3:16
+     engine: host waits for routing 1081.6 ms, CPU experts 104.7 ms; experts from VRAM 48905, on the CPU 1663
+engine log: <home>\AppData\Local\Temp\tmpubdpu0eo.log
+== round 1 fuse1-w1
+warm A-2k: decode 76.89 tok/s
+B-2k#0: prefill 1465.5 decode 81.32 tok/s, guesses 0/0, VRAM hits 0.9791
+   strata-poly trace: 128 tokens in 1574.0 ms (12.30 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    1567.3 ms  12.341 ms a call
+     keep 0.0 ms, pick 5.7 ms, show 0.9 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1213.1 ms, CPU experts 62.7 ms; experts from VRAM 39922, on the CPU 718
+B-45k#0: prefill 1550.2 decode 58.38 tok/s, guesses 0/0, VRAM hits 0.9878
+   strata-poly trace: 128 tokens in 2192.7 ms (17.13 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    2182.4 ms  17.184 ms a call
+     keep 0.0 ms, pick 8.5 ms, show 1.5 ms, the rest 0.3 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1750.8 ms, CPU experts 88.4 ms; experts from VRAM 40145, on the CPU 495
+engine log: <home>\AppData\Local\Temp\tmp7rlt8yr4.log
+== round 1 fuse0-w1
+warm A-2k: decode 71.56 tok/s
+B-2k#0: prefill 1316.2 decode 78.31 tok/s, guesses 0/0, VRAM hits 0.9776
+   strata-poly trace: 128 tokens in 1634.6 ms (12.77 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    1627.5 ms  12.815 ms a call
+     keep 0.0 ms, pick 5.9 ms, show 1.0 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1229.0 ms, CPU experts 69.9 ms; experts from VRAM 39870, on the CPU 770
+B-45k#0: prefill 1524.5 decode 60.77 tok/s, guesses 0/0, VRAM hits 0.9866
+   strata-poly trace: 128 tokens in 2106.4 ms (16.46 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    2099.6 ms  16.532 ms a call
+     keep 0.0 ms, pick 5.7 ms, show 1.0 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1718.8 ms, CPU experts 53.2 ms; experts from VRAM 40096, on the CPU 544
+engine log: <home>\AppData\Local\Temp\tmpdh784p06.log
+== round 2 fuse0-wdefault
+warm A-2k: decode 105.4 tok/s
+B-2k#0: prefill 1278.2 decode 119.82 tok/s, guesses 82/109, VRAM hits 0.9563
+   strata-poly trace: 128 tokens in 1068.3 ms (8.35 ms a token), 46 rounds
+     drafts     121 calls     153.9 ms  1.272 ms a call
+     eval(1)      3 calls      39.6 ms  13.190 ms a call
+     window(2)    4 calls      64.6 ms  16.160 ms a call, 1.75 tokens a call
+     window(3)   12 calls     223.6 ms  18.634 ms a call, 2.17 tokens a call
+     window(4)   27 calls     578.9 ms  21.442 ms a call, 3.37 tokens a call
+     keep 0.9 ms, pick 5.7 ms, show 0.7 ms, the rest 0.4 ms
+     guesses right in a window of 4: 0:3 1:2 2:4 3:18
+     engine: host waits for routing 671.8 ms, CPU experts 149.2 ms; experts from VRAM 48388, on the CPU 2180
+B-45k#0: prefill 1495.4 decode 97.82 tok/s, guesses 82/91, VRAM hits 0.9671
+   strata-poly trace: 128 tokens in 1308.5 ms (10.22 ms a token), 46 rounds
+     drafts     103 calls     171.2 ms  1.663 ms a call
+     eval(1)      8 calls     135.7 ms  16.957 ms a call
+     window(2)    4 calls      85.4 ms  21.338 ms a call, 2.00 tokens a call
+     window(3)   15 calls     372.3 ms  24.820 ms a call, 2.53 tokens a call
+     window(4)   19 calls     535.0 ms  28.156 ms a call, 3.84 tokens a call
+     keep 0.9 ms, pick 6.0 ms, show 0.8 ms, the rest 1.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:3 3:16
+     engine: host waits for routing 977.6 ms, CPU experts 104.8 ms; experts from VRAM 43190, on the CPU 1474
+engine log: <home>\AppData\Local\Temp\tmpit2zpzg0.log
+== round 2 fuse1-wdefault
+warm A-2k: decode 99.49 tok/s
+B-2k#0: prefill 1306.1 decode 128.32 tok/s, guesses 81/96, VRAM hits 0.9566
+   strata-poly trace: 128 tokens in 997.5 ms (7.79 ms a token), 47 rounds
+     drafts     113 calls     140.7 ms  1.245 ms a call
+     eval(1)      8 calls     101.9 ms  12.742 ms a call
+     window(2)    5 calls      76.2 ms  15.244 ms a call, 1.80 tokens a call
+     window(3)   11 calls     197.9 ms  17.993 ms a call, 2.55 tokens a call
+     window(4)   23 calls     473.2 ms  20.572 ms a call, 3.57 tokens a call
+     keep 0.8 ms, pick 5.7 ms, show 0.7 ms, the rest 0.4 ms
+     guesses right in a window of 4: 0:1 1:2 2:3 3:17
+     engine: host waits for routing 642.1 ms, CPU experts 133.3 ms; experts from VRAM 44660, on the CPU 2004
+B-45k#0: prefill 1506.2 decode 96.59 tok/s, guesses 82/97, VRAM hits 0.9672
+   strata-poly trace: 128 tokens in 1325.2 ms (10.35 ms a token), 46 rounds
+     drafts     109 calls     178.8 ms  1.640 ms a call
+     eval(1)      5 calls      81.3 ms  16.265 ms a call
+     window(2)    7 calls     139.3 ms  19.903 ms a call, 1.57 tokens a call
+     window(3)   16 calls     389.0 ms  24.315 ms a call, 2.56 tokens a call
+     window(4)   17 calls     463.5 ms  27.266 ms a call, 3.76 tokens a call
+     window(8)    1 calls      49.0 ms  49.004 ms a call, 6.00 tokens a call
+     keep 16.2 ms, pick 5.7 ms, show 0.8 ms, the rest 1.5 ms
+     guesses right in a window of 4: 0:0 1:0 2:4 3:13
+     engine: host waits for routing 1002.9 ms, CPU experts 101.9 ms; experts from VRAM 45406, on the CPU 1546
+engine log: <home>\AppData\Local\Temp\tmpk4d3mntv.log
+== round 2 fuse0-w1
+warm A-2k: decode 68.49 tok/s
+B-2k#0: prefill 811.2 decode 72.83 tok/s, guesses 0/0, VRAM hits 0.9758
+   strata-poly trace: 128 tokens in 1757.6 ms (13.73 ms a token), 127 rounds
+     drafts       0 calls       0.0 ms  0.000 ms a call
+     eval(1)    127 calls    1750.5 ms  13.784 ms a call
+     keep 0.0 ms, pick 5.9 ms, show 1.0 ms, the rest 0.2 ms
+     guesses right in a window of 4: 0:0 1:0 2:0 3:0
+     engine: host waits for routing 1231.4 ms, CPU experts 74.8 ms; experts from VRAM 39802, on the CPU 838
+strata-poly: ERR GPU_FATAL backend=hip operation=generate code=-1 name=inference_state_unknown: the card waited more than a second for the CPU's experts; new process required
+(the driver script stopped here: decode_trace.py exited 1 after the engine's GPU_FATAL above)

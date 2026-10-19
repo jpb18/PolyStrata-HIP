@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -415,6 +416,15 @@ protected:
     const Image* image_at(int64_t row) const;
     bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
+    /// STRATA_POLY_FUSE: lin(*m.first, x, m.second, n, xq) for each of up to four matrices that take the same input,
+    /// in one launch with the same bits (kernels::native_mmvq_group()).  xq is the input already in Q8_1.  False,
+    /// with nothing launched, where the matrices or n do not allow it: the caller then calls lin() for each.
+    bool lin_group(std::initializer_list<std::pair<const Dev*, float*>> mats, int n, const void* xq);
+    /// Whether a call of n tokens takes the fused launches (STRATA_POLY_FUSE=1, a call of up to kCardRows tokens).
+    bool fuse(int n) const;
+    /// Whether layer_tail() is axpy(fo_, 1, r_, n * n_embd_) and nothing else, which card_launch() can then do in its
+    /// last launch (STRATA_POLY_FUSE).
+    virtual bool tail_is_add() const { return false; }
     void fill_expert_cache();
     void start_swaps();
     void plan_ahead(Layer& L, int il);
@@ -551,6 +561,11 @@ protected:
     float *g_ = nullptr, *u_ = nullptr, *h_ = nullptr, *d_ = nullptr, *cpu_ = nullptr, *rl_ = nullptr,
           *logits_ = nullptr;
     void *xq_ = nullptr, *q8_ = nullptr;
+    /// STRATA_POLY_FUSE=1: a call of up to kCardRows tokens (a token, a window) with fewer launches, the same bits:
+    /// a norm and the quantization of its output in one (and the residual's sum before it), the projections that
+    /// take one input in one (lin_group()), the activations with the quantization after them, and card_launch()'s
+    /// last launches with the layer's tail.  Not with --dump-layers.
+    bool fuse_ = false;
 
     // pinned host buffers
     float *h_r_ = nullptr, *h_rl_ = nullptr, *h_x_ = nullptr, *h_cpu_ = nullptr, *h_logits_ = nullptr;
@@ -591,7 +606,8 @@ protected:
     void upload_slots();
     void slot_changed(int il, int e);
     bool card_takes(int n) const;
-    void card_launch(Layer& L, int il, int n);
+    /// with_tail: also layer_tail()'s sum, when tail_is_add() (STRATA_POLY_FUSE); true when it did.
+    bool card_launch(Layer& L, int il, int n, bool with_tail = false);
     void card_host(int n);
     bool card_host_layer(int il, int n, std::chrono::steady_clock::time_point start);
     void card_gave_up();

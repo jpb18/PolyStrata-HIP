@@ -556,6 +556,12 @@ What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT 
   `STRATA_POLY_CARD_ROUTE=0` gives the host's routing back, `=1` turns it on elsewhere (not measured there), and
   `STRATA_POLY_CARD_ROUTE_CHECK=1` compares each routing with the host's.
 - `STRATA_POLY_PROFILE=1` prints where a one-token call's time goes, layer by layer.
+- `STRATA_POLY_FUSE` (on by default on HIP, Qwen3.5/3.6; `STRATA_POLY_FUSE=0` turns it off, and CUDA builds keep it off
+  unless `=1`, not built or measured there): a call of up to 8 tokens with about 470 fewer launches (a
+  norm with its quantization, projections that read one input in one launch, the experts' sums with the layer's
+  tail), each value the same bits (48 of 48 steps' logits, decode and windows). Decode +5.2 % at 2K and +6.2 % at
+  45K with `--window 1`, +8.2 % and +2.1 % with guesses, medians of three alternated pairs on a PC in use
+  ([bench/results/2026-10-19-hip-decode-fuse](../bench/results/2026-10-19-hip-decode-fuse/README.md)).
 
 `--turn-token ID` (every backend, off by default) puts a conversation checkpoint in front of a prompt's last turn.
 Qwen3.5's chat template writes the turn the model answered without its thinking block once it is history, so

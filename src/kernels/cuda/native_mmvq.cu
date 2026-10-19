@@ -848,15 +848,14 @@ __device__ __forceinline__ float small_q8_dot(const IQ4NLBlock* __restrict__ w,
 
 // QI=4 for Q4_0/Q5_0/IQ4_NL and QI=8 for Q8_0. With VDR=2 this preserves
 // the pinned 64/32-block iteration and 2048/1024-element small-K thresholds.
+// The kernel's work for its block bx: native_small_mmvq_kernel's, and native_mmvq_group()'s for each of its matrices.
 template<typename Weight, int Qi, bool SmallK>
-__launch_bounds__(WARPS * WARP, 1)
-__global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
-                                         const Q81Block* __restrict__ x,
-                                         float* __restrict__ y, int n_in, int n_out) {
+__device__ __forceinline__ void small_mmvq_block(const Weight* __restrict__ w, const Q81Block* __restrict__ x,
+                                                 float* __restrict__ y, int n_in, int n_out, int bx) {
     constexpr int ROWS = SmallK ? WARPS : 1;
     constexpr int BLOCKS_PER_ITER = 2 * WARPS * WARP / Qi;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    const int row0 = ROWS * int(blockIdx.x);
+    const int row0 = ROWS * bx;
     const int blocks_per_row = n_in / 32;
     float tmp[ROWS] = {};
     for (int kbx = tid / (Qi / 2); kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
@@ -883,6 +882,14 @@ __global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
         tmp[i] = warp_sum(tmp[i]);
         if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
     }
+}
+
+template<typename Weight, int Qi, bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
+                                         const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out) {
+    small_mmvq_block<Weight, Qi, SmallK>(w, x, y, n_in, n_out, int(blockIdx.x));
 }
 
 // ============================ plan v0.3 P3: ncols = 2..8 (speculative verify, small batches) ============================
@@ -1241,19 +1248,14 @@ static bool s26_tsum_on() {
 
 // S26 STRATA_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
 // input in one launch; each output's code is the single matrix's)
-template<typename F, int NCOLS, int NW, int ROWS, bool TS = false, bool PAIR = false>
-__launch_bounds__(NW * WARP, (ROWS <= 2 ? 4 : 1))
-__global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w, const Q81Block* x_, float* y_,
-                                         int n_in, int n_out,
-                                         const typename F::Block* __restrict__ w2 = nullptr, float* __restrict__ y2 = nullptr) {
+// The kernel's work for its block bxi: native_mmvq_multi_kernel's, and native_mmvq_group()'s for each of its matrices.
+template<typename F, int NCOLS, int NW, int ROWS, bool TS>
+__device__ __forceinline__ void mmvq_multi_block(const typename F::Block* __restrict__ w, const Q81Block* x_, float* y_,
+                                                 int n_in, int n_out, int bxi) {
     const Q81Block* STRATA_PDL_RESTRICT x = x_;   // __restrict__ below sm_70 only (pdl.hpp, #1469)
     float* STRATA_PDL_RESTRICT y = y_;
     constexpr int BPI = F::BPI * NW / WARPS;           // blocks per iteration scale with the warp count
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    int bxi = int(blockIdx.x);
-    if constexpr (PAIR) {
-        if (bxi >= n_out / ROWS) { bxi -= n_out / ROWS; w = w2; y = y2; }
-    }
     const int row0 = ROWS * bxi;
     const int blocks_per_row = n_in / F::DIV;
     const int x_stride = n_in / Q8K;                   // Q8_1 blocks per activation column
@@ -1338,6 +1340,29 @@ __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w
     }
 }
 
+template<typename F, int NCOLS, int NW, int ROWS, bool TS = false, bool PAIR = false>
+__launch_bounds__(NW * WARP, (ROWS <= 2 ? 4 : 1))
+__global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w, const Q81Block* x_, float* y_,
+                                         int n_in, int n_out,
+                                         const typename F::Block* __restrict__ w2 = nullptr, float* __restrict__ y2 = nullptr) {
+    int bxi = int(blockIdx.x);
+    float* y = y_;
+    if constexpr (PAIR) {
+        if (bxi >= n_out / ROWS) { bxi -= n_out / ROWS; w = w2; y = y2; }
+    }
+    mmvq_multi_block<F, NCOLS, NW, ROWS, TS>(w, x_, y, n_in, n_out, bxi);
+}
+
+// #783 PR-h (stuchapin909): two rows per block for every K, not only small K - each row keeps its own partial sums and
+// reduction, so a row's result does not depend on its neighbour; STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K
+bool multi_rows1() {
+    static const bool rows1 = [] {
+        const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return rows1;
+}
+
 template<typename F, int NCOLS>
 void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
@@ -1353,13 +1378,7 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
     // the PAIR arguments, unused here (launch_pdl passes every parameter)
     const typename F::Block* const no_w2 = nullptr;
     float* const no_y2 = nullptr;
-    // #783 PR-h (stuchapin909): two rows per block for every K, not only small K - each row keeps its own partial sums and
-    // reduction, so a row's result does not depend on its neighbour; STRATA_NO_MMVQ_ROWS2=1 keeps one row for large K
-    static const bool rows1 = [] {
-        const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    if (rows1 && n_in / F::DIV >= F::BPI) {
+    if (multi_rows1() && n_in / F::DIV >= F::BPI) {
         if (s26_tsum_on()) launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
         else launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, false, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
         return;
@@ -1384,6 +1403,47 @@ void launch_multi(const void* weights, const void* x_q8_1, float* y, int n_in, i
         case 8: launch_multi_n<F, 8>(weights, x_q8_1, y, n_in, n_out, s); break;
         default: throw std::invalid_argument("native MMVQ multi-column launch requires 2 <= ncols <= 8");
     }
+}
+
+// native_mmvq_group(): Q8_0 matrices of one input width in one launch.  The grid is the blocks each matrix's own
+// launch would have, one matrix after the other (first[k] is matrix k's first block), and a block does what the
+// block of that number does in the matrix's own launch: small_mmvq_block() for one column, mmvq_multi_block() for
+// 2 to 8, in the layout small_mmvq() and launch_multi_n() pick.  So every output is the bits of its own call.
+struct GroupArgs {
+    const Q80Block* w[MMVQ_GROUP_MAX];
+    float* y[MMVQ_GROUP_MAX];
+    int n_out[MMVQ_GROUP_MAX];
+    int first[MMVQ_GROUP_MAX + 1];
+    int count;
+};
+
+__device__ __forceinline__ int group_matrix(const GroupArgs& g, int bx) {
+    int k = 0;
+    while (k + 1 < g.count && bx >= g.first[k + 1]) ++k;
+    return k;
+}
+
+template<bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_q8_0_group1_kernel(GroupArgs g, const Q81Block* __restrict__ x, int n_in) {
+    const int k = group_matrix(g, int(blockIdx.x));
+    small_mmvq_block<Q80Block, 8, SmallK>(g.w[k], x, g.y[k], n_in, g.n_out[k], int(blockIdx.x) - g.first[k]);
+}
+
+template<int NCOLS, int ROWS>
+__launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 1))
+__global__ void native_q8_0_group_kernel(GroupArgs g, const Q81Block* x, int n_in) {
+    const int k = group_matrix(g, int(blockIdx.x));
+    mmvq_multi_block<SmallTraits<Q80Block, 8>, NCOLS, WARPS, ROWS, false>(g.w[k], x, g.y[k], n_in, g.n_out[k],
+                                                                          int(blockIdx.x) - g.first[k]);
+}
+
+template<int NCOLS>
+void group_launch_n(GroupArgs g, int rows, const Q81Block* x, int n_in, cudaStream_t s) {
+    for (int k = 0; k < g.count; ++k) g.first[k + 1] = g.first[k] + (g.n_out[k] + rows - 1) / rows;
+    const dim3 threads(WARP, WARPS);
+    if (rows == 1) native_q8_0_group_kernel<NCOLS, 1><<<unsigned(g.first[g.count]), threads, 0, s>>>(g, x, n_in);
+    else native_q8_0_group_kernel<NCOLS, 2><<<unsigned(g.first[g.count]), threads, 0, s>>>(g, x, n_in);
 }
 
 // Several matrices of one format and shape in one launch (native_mmvq_slots): blockIdx.y is the matrix, and the
@@ -2661,6 +2721,50 @@ bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void*
         case 6: q8_0_pair_launch<6>(a, b, x, y1, y2, n_in, n_out, s); break;
         case 7: q8_0_pair_launch<7>(a, b, x, y1, y2, n_in, n_out, s); break;
         default: q8_0_pair_launch<8>(a, b, x, y1, y2, n_in, n_out, s); break;
+    }
+    launch_check();
+    return true;
+}
+
+bool native_mmvq_group(int ggml_type, const MmvqGroupItem* items, int count, const void* x_q8_1, int n_in, int ncols,
+                       void* stream) {
+    using F = SmallTraits<Q80Block, 8>;
+    // only where every matrix's own call would run small_mmvq()'s or launch_multi_n()'s EXACT kernels
+    if (ggml_type != 8 || count < 1 || count > MMVQ_GROUP_MAX || ncols < 1 || ncols > 8 || n_in <= 0 || n_in % 32 != 0 ||
+        !x_q8_1 || !stream || (ncols > 1 && (!g_multi_exact || s26_tsum_on())))
+        return false;
+#if defined(STRATA_HIP_GFX906)
+    if (!g_wave_off) return false;   // small_mmvq() runs the wave64 kernels there
+#endif
+    const auto& reg = q8_packed_registry();
+    GroupArgs g{};
+    g.count = count;
+    for (int k = 0; k < count; ++k) {
+        if (!items[k].w || !items[k].y || items[k].n_out <= 0 || reg.count(items[k].w)) return false;
+        g.w[k] = static_cast<const Q80Block*>(items[k].w);
+        g.y[k] = items[k].y;
+        g.n_out[k] = items[k].n_out;
+    }
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const auto s = static_cast<cudaStream_t>(stream);
+    if (ncols == 1) {
+        const bool small_k = n_in / 32 < 2 * WARPS * WARP / 8;   // small_mmvq()'s rule for Q8_0
+        const int rows = small_k ? WARPS : 1;
+        for (int k = 0; k < count; ++k) g.first[k + 1] = g.first[k] + (g.n_out[k] + rows - 1) / rows;
+        const dim3 threads(WARP, WARPS);
+        if (small_k) native_q8_0_group1_kernel<true><<<unsigned(g.first[count]), threads, 0, s>>>(g, x, n_in);
+        else native_q8_0_group1_kernel<false><<<unsigned(g.first[count]), threads, 0, s>>>(g, x, n_in);
+    } else {
+        const int rows = multi_rows1() && n_in / F::DIV >= F::BPI ? 1 : 2;   // launch_multi_n()'s rule
+        switch (ncols) {
+            case 2: group_launch_n<2>(g, rows, x, n_in, s); break;
+            case 3: group_launch_n<3>(g, rows, x, n_in, s); break;
+            case 4: group_launch_n<4>(g, rows, x, n_in, s); break;
+            case 5: group_launch_n<5>(g, rows, x, n_in, s); break;
+            case 6: group_launch_n<6>(g, rows, x, n_in, s); break;
+            case 7: group_launch_n<7>(g, rows, x, n_in, s); break;
+            default: group_launch_n<8>(g, rows, x, n_in, s); break;
+        }
     }
     launch_check();
     return true;

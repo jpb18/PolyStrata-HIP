@@ -16,4 +16,6 @@
 - Removed a personal-machine tokenizer fallback from a test; `STRATA_TOKENIZER` remains supported.
 - Isolated checksum tests from installed engines/release network requests and mock quality campaigns from a live GPU campaign's lock. Assertions and validation thresholds are retained.
 
+- Added fused decode kernels for strata-poly (`STRATA_POLY_FUSE`): a norm with its Q8_1 quantization, projections that read one input in one launch, and the experts' sums with the layer's tail, about 470 fewer launches per call of up to 8 tokens. The bits match the unfused path (48 of 48 steps' logits at B-2k and Q8 262K with a fixed expert cache). On by default on HIP; `STRATA_POLY_FUSE=0` turns it off. CUDA builds keep it off unless `STRATA_POLY_FUSE=1`; they are not built or measured for it. Decode gain measured on a PC in use: +2% to +8%.
+
 No inference kernels, quantization rules, model loading, memory layouts, expert scheduling, MTP policy or numerical defaults were changed by this cleanup. See [the audit](docs/RELEASE_AUDIT.md) for verification results and remaining release limits.

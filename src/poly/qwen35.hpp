@@ -36,6 +36,7 @@ protected:
     int streams() const override { return 1; }
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
+    bool tail_is_add() const override { return true; }
     void output_rows(int first, int rows, float* h) override;
     void route(int il, const float* logits, int* ids, float* w, float* tmp) const override;
 #if defined(STRATA_USE_HIP)
@@ -81,7 +82,8 @@ private:
 
     void gdn(Block& B, int n);
     void attn(Block& B, int64_t pos, int n);
-    void attn_store(Block& B, int64_t pos, int n);
+    /// projected: k_ and v_ already hold the keys and values before their norm (attn()'s lin_group())
+    void attn_store(Block& B, int64_t pos, int n, bool projected = false);
     void turn_of(int64_t row, int32_t* thw) const;
     int64_t plan_kv() const;
     size_t cache_row(int c) const;

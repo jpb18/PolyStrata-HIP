@@ -154,6 +154,17 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
 /// bitwise the two calls. Returns false (nothing launched) where that is not the case (Q8_0, 2-8 columns only).
 bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void* x_q8_1, float* y1, float* y2,
                       int n_in, int n_out, int ncols, void* stream);
+/// native_mmvq(items[k].w -> items[k].y) for up to MMVQ_GROUP_MAX matrices of one type and input width, each with its
+/// own n_out, the same input and 1-8 columns, in ONE launch: every output is the bits of its own call.  Returns false
+/// (nothing launched) where that is not so: Q8_0 only, not a packed tensor (STRATA_Q8_PACKED), not STRATA_S26_TSUM.
+constexpr int MMVQ_GROUP_MAX = 4;
+struct MmvqGroupItem {
+    const void* w;
+    float* y;
+    int n_out;
+};
+bool native_mmvq_group(int ggml_type, const MmvqGroupItem* items, int count, const void* x_q8_1, int n_in, int ncols,
+                       void* stream);
 
 // Fork F4 (Eddoursul): 2..4 columns also INTERLEAVED, so one 16-byte load reads a position of every column: CP = 2 (2
 // columns) or 4 (3-4), zero-padded; nb = n_in / 32 blocks; int32 bm[nb][8][CP] (block-major), int32 pm[8][nb][CP]

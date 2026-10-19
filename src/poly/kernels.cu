@@ -2,6 +2,7 @@
 // ggml ops it builds.  Where a kernel takes several tokens, blockIdx.y is the token unless it says otherwise.
 #include "strata/poly/kernels.hpp"
 #include "strata/poly/gpu_failure.hpp"
+#include "strata/kernels/q8_1_finite.hpp"
 #if defined(STRATA_USE_HIP)
 #include "strata/kernels/native_mmvq.hpp"
 #endif
@@ -1434,6 +1435,121 @@ __global__ void gdn_out_kernel(float* __restrict__ out, const float* __restrict_
     out[at] = o / sqrtf(os / float(dim) + norm_eps) * o_norm[threadIdx.x] * (gate * sigmoid(gate));
 }
 
+// ---- STRATA_POLY_FUSE (kernels.hpp): kernels that each do the work of two or three of the ones above, so that a
+// call of a few tokens has fewer launches.  Each value comes from the same expression, in the same thread and the
+// same order of sums, as in the kernels it stands for, so the bits are theirs.  The Q8_1 blocks are
+// native_quantize_q8_1_kernel's: a warp has a block of 32 values in lane order, their largest magnitude and their
+// sum over the warp, so a kernel here quantizes only where every warp has 32 values in a row.
+struct Q81 {
+    half2 ds;
+    int8_t qs[32];
+};
+static_assert(sizeof(Q81) == 36, "native_mmvq's block_q8_1");
+
+__device__ __forceinline__ float warp_max(float x) {
+#pragma unroll
+    for (int o = WARP / 2; o > 0; o >>= 1) x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, o, WARP));
+    return x;
+}
+
+// Value i of a run of values quantized in place in y: every lane of the warp has one, i in lane order.
+__device__ __forceinline__ void q8_1_store(float xi, Q81* y, size_t i) {
+    const float amax = warp_max(fabsf(xi));
+    const float sum = warp_sum(xi);
+    const float d = kernels::q8_1_finite(amax / 127.0f);
+    y[i / 32].qs[i % 32] = kernels::q8_1_quant(xi, d, amax);
+    if (i % 32 == 0) y[i / 32].ds = kernels::q8_1_ds(d, sum);
+}
+
+// rms_norm_kernel and the quantization of its output.  With `add`, axpy_kernel(add, a, x) first, into x.
+__global__ void rms_norm_q8_kernel(float* x, const float* __restrict__ add, float a, const float* __restrict__ w,
+                                   float* y, Q81* __restrict__ yq, int n, float eps) {
+    __shared__ float part[32];
+    float* xr = x + size_t(blockIdx.x) * n;
+    float* yr = y + size_t(blockIdx.x) * n;
+    float ss = 0.0f;
+    if (add) {
+        const float* ar = add + size_t(blockIdx.x) * n;
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            const float v = xr[i] + ar[i] * a;
+            xr[i] = v;
+            ss += v * v;
+        }
+    } else {
+        for (int i = threadIdx.x; i < n; i += blockDim.x) ss += xr[i] * xr[i];
+    }
+    ss = block_sum(ss, part);
+    const float scale = 1.0f / sqrtf(ss / float(n) + eps);
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        const float v = w ? xr[i] * scale * w[i] : xr[i] * scale;
+        yr[i] = v;
+        q8_1_store(v, yq, size_t(blockIdx.x) * n + i);
+    }
+}
+
+// swiglu_clamp_kernel (gate and up) or swiglu_clamp_rows_kernel (gate_up: rows of n gate values, then n up values),
+// and the quantization of its output.  blockIdx.y is the row.
+__global__ void swiglu_clamp_q8_kernel(const float* __restrict__ gate, const float* __restrict__ up,
+                                       const float* __restrict__ gate_up, float* __restrict__ out,
+                                       Q81* __restrict__ q, int n, float limit) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;   // n is a multiple of 32: only whole warps return
+    const size_t at = size_t(blockIdx.y) * n + i;
+    const float* row = gate_up + size_t(blockIdx.y) * 2 * n;
+    const float g = fminf(gate_up ? row[i] : gate[at], limit);
+    const float u = fminf(fmaxf(gate_up ? row[n + i] : up[at], -limit), limit);
+    const float v = g / (1.0f + expf(-g)) * u;
+    out[at] = v;
+    q8_1_store(v, q, at);
+}
+
+// mul_sigmoid_kernel with a gate a value, and the quantization of its output.
+__global__ void mul_sigmoid_q8_kernel(float* __restrict__ acc, const float* __restrict__ g, Q81* __restrict__ q,
+                                      int n, int g_stride) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;   // n is a multiple of 32
+    const size_t at = size_t(blockIdx.y) * n + i;
+    acc[at] *= sigmoid(g[size_t(blockIdx.y) * g_stride + i]);
+    q8_1_store(acc[at], q, at);
+}
+
+// gdn_out_kernel and the quantization of its output.
+__global__ void gdn_out_q8_kernel(float* __restrict__ out, const float* __restrict__ z,
+                                  const float* __restrict__ o_norm, Q81* __restrict__ q, int dim, float norm_eps) {
+    __shared__ float part[8];
+    const size_t at = size_t(blockIdx.x) * dim + threadIdx.x;
+    const float o = out[at];
+    const float os = block_sum(o * o, part);
+    const float gate = z[at];
+    const float v = o / sqrtf(os / float(dim) + norm_eps) * o_norm[threadIdx.x] * (gate * sigmoid(gate));
+    out[at] = v;
+    q8_1_store(v, q, at);
+}
+
+// gemv_kernel for the gated delta net's alpha and beta (n_head rows each, blockIdx.x: alpha's rows, then beta's), and
+// gdn_gates_kernel's work on each output: alpha's becomes the decay, beta's the share of the error.
+__global__ void gdn_ab_kernel(const float* __restrict__ wa, const float* __restrict__ wb, const float* __restrict__ x,
+                              float* __restrict__ alpha, float* __restrict__ beta, const float* __restrict__ dt,
+                              const float* __restrict__ a, int n_in, int n_head) {
+    __shared__ float part[32];
+    const bool second = int(blockIdx.x) >= n_head;
+    const int h = second ? int(blockIdx.x) - n_head : int(blockIdx.x);
+    const size_t tok = blockIdx.y;
+    const float* wr = (second ? wb : wa) + size_t(h) * n_in;
+    const float* xr = x + tok * n_in;
+    float acc = 0.0f;
+    for (int i = threadIdx.x; i < n_in; i += blockDim.x) acc += ldw(wr, i) * xr[i];
+    acc = block_sum(acc, part);
+    if (threadIdx.x != 0) return;
+    const size_t at = tok * n_head + h;
+    if (second) {
+        beta[at] = sigmoid(acc);
+    } else {
+        const float g = acc + dt[h];
+        alpha[at] = expf((g > 20.0f ? g : logf(1.0f + expf(g))) * a[h]);
+    }
+}
+
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
 inline int grid(size_t n, int block) { return int((n + block - 1) / block); }
 
@@ -1704,6 +1820,52 @@ __global__ void wait_add_kernel(const int* need, const uint32_t* go, const uint3
             for (int i = threadIdx.x; i < n; i += blockDim.x) fo[(size_t) r * n + i] += cpu[(size_t) r * n + i];
 }
 
+// STRATA_POLY_FUSE: add_scaled_dev_kernel, wait_add_kernel and, with `resid`, axpy_kernel(fo, a, resid) in one
+// launch.  A thread has value i of every row, as in the first and the last, and a block waits for the host's sum
+// on its own, as wait_add_kernel's one block did (only block 0 counts the wait).  Each value goes through the same
+// sums in the same order as in the three launches.
+__global__ void card_tail_kernel(ScaledRows rows, const float* __restrict__ w, int count, const int* need,
+                                 const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, float* resid,
+                                 float a, int n, int n_rows, long long ticks, uint32_t* failed,
+                                 unsigned long long* waited) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        for (int k = 0; k < count; ++k) rows.acc[k][i] = rows.acc[k][i] + rows.x[k][i] * w[k];
+    int any = 0;
+    for (int r = 0; r < n_rows; ++r) any |= need[r];
+    if (any) {
+        __shared__ int ok;
+        if (threadIdx.x == 0) {
+            const uint32_t want = *seq;
+            const long long t0 = wall_clock64();
+            ok = 1;
+            while (__hip_atomic_load(go, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != want) {
+                if (__hip_atomic_load(failed, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) != 0) {
+                    ok = 0;
+                    break;
+                }
+                if (wall_clock64() - t0 > ticks) {
+                    ok = 0;
+                    *(volatile uint32_t*) failed = 1;
+                    __threadfence_system();
+                    break;
+                }
+                __builtin_amdgcn_s_sleep(2);
+            }
+            if (waited && blockIdx.x == 0) atomicAdd(waited, (unsigned long long) (wall_clock64() - t0));
+        }
+        __syncthreads();
+        if (ok && i < n)
+            for (int r = 0; r < n_rows; ++r)
+                if (need[r]) fo[(size_t) r * n + i] += cpu[(size_t) r * n + i];
+    }
+    if (resid && i < n)
+        for (int r = 0; r < n_rows; ++r) {
+            const size_t at = (size_t) r * n + i;
+            resid[at] = resid[at] + fo[at] * a;
+        }
+}
+
 __global__ void set_word_kernel(uint32_t* p, uint32_t v) { *p = v; }
 
 __global__ void set_slot_kernel(const uint8_t** table, size_t i, const uint8_t* slot) { table[i] = slot; }
@@ -1729,6 +1891,14 @@ void route_topk_softmax(const float* scores, int n_expert, int n_used, float min
 void wait_add(const int* need, const uint32_t* go, const uint32_t* seq, const float* cpu, float* fo, int n,
               int rows, long long ticks, uint32_t* failed, void* stream, unsigned long long* waited) {
     wait_add_kernel<<<1, 256, 0, cs(stream)>>>(need, go, seq, cpu, fo, n, rows, ticks, failed, waited);
+}
+
+void card_tail(const ScaledRows& sum, const float* w, int count, const int* need, const uint32_t* go,
+               const uint32_t* seq, const float* cpu, float* fo, float* resid, int n, int rows, long long ticks,
+               uint32_t* failed, void* stream, unsigned long long* waited) {
+    if (count < 1 || count > 32) throw std::invalid_argument("card_tail: 1 to 32 vectors");
+    card_tail_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(sum, w, count, need, go, seq, cpu, fo, resid, 1.f, n, rows,
+                                                         ticks, failed, waited);
 }
 
 void set_word(uint32_t* p, uint32_t v, void* stream) { set_word_kernel<<<1, 1, 0, cs(stream)>>>(p, v); }
@@ -2159,13 +2329,13 @@ void gdn_state_way(int way) { g_gdn_way = way; }
 
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s, const float* z,
               const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows, float norm_eps, void* stream,
-              float* snap, size_t stride, unsigned snaps) {
+              float* snap, size_t stride, unsigned snaps, void* out_q8, bool gates_done) {
     if (dim % WARP != 0 || dim > 256) throw std::invalid_argument("gdn_step: a head of 32 to 256 values, in 32s");
     const size_t row_n = (2 * size_t(k_heads) + n_head) * dim;
     const int gates = rows * n_head, columns = std::min(dim, 1024 / WARP);   // a block's columns: a warp each
     gdn_norm_kernel<<<rows * k_heads, dim, 0, cs(stream)>>>(qkv, dim, k_heads, row_n, norm_eps);
     if (prefill_mark) prefill_mark(stream, kPpGdnNorm);
-    gdn_gates_kernel<<<grid(gates, 256), 256, 0, cs(stream)>>>(alpha, beta, dt, a, n_head, gates);
+    if (!gates_done) gdn_gates_kernel<<<grid(gates, 256), 256, 0, cs(stream)>>>(alpha, beta, dt, a, n_head, gates);
     if (prefill_mark) prefill_mark(stream, kPpGdnGates);
     // a prompt batch (32 tokens or more, no snapshots) of heads of 128: the state in registers
     const int way = !snap && rows >= 32 && dim == 128 ? gdn_way() : 0;
@@ -2180,8 +2350,40 @@ void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const floa
         gdn_state_kernel<<<n_head * ((dim + columns - 1) / columns), columns * WARP, 0, cs(stream)>>>(
             qkv, alpha, beta, s, out, dim, n_head, k_heads, rows, snap, stride, snap ? snaps : 0u);
     if (prefill_mark) prefill_mark(stream, kPpGdnState);
-    gdn_out_kernel<<<rows * n_head, dim, 0, cs(stream)>>>(out, z, o_norm, dim, norm_eps);
+    if (out_q8)
+        gdn_out_q8_kernel<<<rows * n_head, dim, 0, cs(stream)>>>(out, z, o_norm, (Q81*) out_q8, dim, norm_eps);
+    else
+        gdn_out_kernel<<<rows * n_head, dim, 0, cs(stream)>>>(out, z, o_norm, dim, norm_eps);
     if (prefill_mark) prefill_mark(stream, kPpGdnOut);
+}
+
+// ---- STRATA_POLY_FUSE (kernels.hpp)
+bool rms_norm_q8(float* x, const float* add, const float* w, float* y, void* yq, int n, int rows, float eps,
+                 void* stream) {
+    const int threads = sum_threads(n);
+    if (n % threads != 0 || rows < 1) return false;   // every warp of every step has 32 values of the row
+    rms_norm_q8_kernel<<<rows, threads, 0, cs(stream)>>>(x, add, 1.f, w, y, (Q81*) yq, n, eps);
+    return true;
+}
+
+bool swiglu_clamp_q8(const float* gate, const float* up, const float* gate_up, float* out, void* q, int n, int rows,
+                     float limit, void* stream) {
+    if (n % WARP != 0 || rows < 1 || rows > 65535) return false;
+    swiglu_clamp_q8_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate, up, gate_up, out, (Q81*) q, n,
+                                                                            limit);
+    return true;
+}
+
+bool mul_sigmoid_q8(float* acc, const float* g, void* q, int n, int rows, int g_stride, void* stream) {
+    if (n % WARP != 0 || rows < 1 || rows > 65535) return false;
+    mul_sigmoid_q8_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(acc, g, (Q81*) q, n, g_stride);
+    return true;
+}
+
+void gdn_ab(const float* wa, const float* wb, const float* x, float* alpha, float* beta, const float* dt,
+            const float* a, int n_in, int n_head, int rows, void* stream) {
+    const int threads = n_in >= 128 ? sum_threads(n_in) : 32;   // gemv()'s
+    gdn_ab_kernel<<<dim3(2 * n_head, rows), threads, 0, cs(stream)>>>(wa, wb, x, alpha, beta, dt, a, n_in, n_head);
 }
 
 // ---- the attention over a q8_0 cache (docs/AMD_HIP_KV_Q8.md, kernels.hpp).  The fp16 kernels above are not touched:

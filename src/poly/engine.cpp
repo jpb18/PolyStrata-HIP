@@ -1515,6 +1515,16 @@ void Engine::alloc() {
     if (mmq_env != nullptr && mmq_env[0] == '0') tiles = false;
 #endif
     if (tiles) mmq_ = std::make_unique<Mmq>();
+    // STRATA_POLY_FUSE: a token's call, or a window's, with fewer launches and the same bits (fuse_).  On by default
+    // on HIP, where the fused kernels are; CUDA keeps its launches unless STRATA_POLY_FUSE=1.  STRATA_POLY_FUSE=0 is off.
+    const char* fuse_env = std::getenv("STRATA_POLY_FUSE");
+#if defined(STRATA_USE_HIP)
+    const bool fuse_default = true;
+#else
+    const bool fuse_default = false;
+#endif
+    fuse_ = (fuse_env == nullptr ? fuse_default : fuse_env[0] == '1') && !opt_.dump;
+    if (fuse_) std::fputs("strata-poly: STRATA_POLY_FUSE: on\n", stderr);
 
     shared_scratch();   // the first pass only counts
     assign_scratch();
@@ -1718,6 +1728,20 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
     for (int at = 0; at < n; at += 8)
         kernels::native_mmvq((int) w.type, w.p, (const uint8_t*) xq + (size_t) at * token,
                              y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
+}
+
+bool Engine::fuse(int n) const { return fuse_ && n <= kCardRows; }
+
+bool Engine::lin_group(std::initializer_list<std::pair<const Dev*, float*>> mats, int n, const void* xq) {
+    if (!xq || n < 1 || n > 8 || mats.size() < 2 || mats.size() > (size_t) kernels::MMVQ_GROUP_MAX) return false;
+    const Dev& first = *mats.begin()->first;
+    kernels::MmvqGroupItem items[kernels::MMVQ_GROUP_MAX];
+    int k = 0;
+    for (const auto& [w, y] : mats) {
+        if (w->type != first.type || w->n_in != first.n_in) return false;
+        items[k++] = {w->p, y, (int) w->n_out};
+    }
+    return kernels::native_mmvq_group((int) first.type, items, k, xq, (int) first.n_in, n, st_);
 }
 
 void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n, xq_); }
@@ -2030,16 +2054,34 @@ bool Engine::card_takes(int n) const {
 // the host's sum of the others when there are any.  Nothing here waits.  Each token's products and sums are the
 // ones it has on its own: its picks are its own launches' slots (kSlots a token, the last one's n_used_), and its
 // row of fo_ gets their sum in the order of its picks, then its CPU experts' sum.
-void Engine::card_launch(Layer& L, int il, int n) {
+bool Engine::card_launch(Layer& L, int il, int n, bool with_tail) {
     const int count = kSlots * (n - 1) + n_used_;
     kernels::native_mmvq_slots_dev((int) L.gu_type, (const kernels::MmvqSlots*) dgu_, count, n_embd_,
                                    2 * n_ff_exp_, st_);
-    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, count, st_);
-    else swiglu_clamp_rows(g_, h_, n_ff_exp_, count, clamp_exp_[(size_t) il], st_);
-    kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_ * count, 1, st_);   // the rows back to back: as rows, bit for bit
+    if (gelu_ || !fuse(n) ||
+        !swiglu_clamp_q8(nullptr, nullptr, g_, h_, q8_, n_ff_exp_, count, clamp_exp_[(size_t) il], st_)) {
+        if (gelu_) geglu_rows(g_, h_, n_ff_exp_, count, st_);
+        else swiglu_clamp_rows(g_, h_, n_ff_exp_, count, clamp_exp_[(size_t) il], st_);
+        kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_ * count, 1, st_);   // the rows back to back: as rows, bit for bit
+    }
     kernels::native_mmvq_slots_dev((int) L.d_type, (const kernels::MmvqSlots*) ddn_, count, n_ff_exp_, n_embd_,
                                    st_);
     constexpr int per = kSumRows / kSlots;   // tokens one add_scaled_dev() takes
+    if (fuse(n) && n <= per) {   // the experts' sum, the CPU's and the layer's tail in one launch
+        ScaledRows sum{};
+        int k = 0;
+        for (int t = 0; t < n; ++t)
+            for (int j = 0; j < n_used_; ++j, ++k) {
+                sum.x[k] = dcard_ + ((size_t) t * kSlots + (size_t) j) * n_embd_;
+                sum.acc[k] = fo_ + (size_t) t * n_embd_;
+            }
+        const bool tail = with_tail && tail_is_add();
+        card_tail(sum, dw_, k, dneed_ + (size_t) il * kCardRows, h_go_ + il, dseq_,
+                  h_cpul_ + (size_t) il * kCardRows * n_embd_, fo_, tail ? r_ : nullptr, n_embd_, n, wait_ticks_,
+                  h_failed_, st_, dwaited_);
+        ck(cudaGetLastError(), "routed experts");
+        return tail;
+    }
     for (int t0 = 0; t0 < n; t0 += per) {
         ScaledRows sum{};
         int k = 0;
@@ -2053,6 +2095,7 @@ void Engine::card_launch(Layer& L, int il, int n) {
     wait_add(dneed_ + (size_t) il * kCardRows, h_go_ + il, dseq_, h_cpul_ + (size_t) il * kCardRows * n_embd_, fo_,
              n_embd_, n, wait_ticks_, h_failed_, st_, dwaited_);
     ck(cudaGetLastError(), "routed experts");
+    return false;
 }
 
 // The host's share of a token run() handed the card whole: its MoE layers in turn, each once the card has routed
@@ -2628,8 +2671,9 @@ void Engine::run(const int32_t* tokens, int n) {
         if (prof) g_profile.mark(st_, 0, il);
 #endif
         if (!L.moe) continue;
+        bool tail_done = false;   // card_launch() did the tail as well (STRATA_POLY_FUSE)
 #if defined(STRATA_USE_HIP)
-        if (card_pipe_) card_launch(L, il, n);
+        if (card_pipe_) tail_done = card_launch(L, il, n, true);
         else
 #endif
         if (mmq_ && n >= kStageRows) moe_rows(L, il, n);
@@ -2638,7 +2682,7 @@ void Engine::run(const int32_t* tokens, int n) {
         if (prof) g_profile.mark(st_, 1, il);
         if (gtr) g_trace.mark(st_, GpuTrace::kExperts);
 #endif
-        tail(il, n, (size_t) n - 1);
+        if (!tail_done) tail(il, n, (size_t) n - 1);
 #if defined(STRATA_USE_HIP)
         if (prof) g_profile.mark(st_, 2, il);
 #endif

@@ -458,17 +458,29 @@ void Qwen35::load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t 
 // The gated delta net.  One projection gives the queries, keys and values, which a convolution over the last
 // four tokens mixes; another gives the gate of the output.
 void Qwen35::gdn(Block& B, int n) {
-    lin(B.wqkv, xn_, proj_, n, xq_);
-    lin(B.wz, xn_, z_, n, xq_);
-    lin(B.alpha, xn_, alpha_, n, xq_);
-    lin(B.beta, xn_, beta_, n, xq_);
+    if (!fuse(n) || !lin_group({{&B.wqkv, proj_}, {&B.wz, z_}}, n, xq_)) {
+        lin(B.wqkv, xn_, proj_, n, xq_);
+        lin(B.wz, xn_, z_, n, xq_);
+    }
+    // STRATA_POLY_FUSE: alpha's and beta's products and their gates in one launch, where they are floats
+    const bool gates = fuse(n) && B.alpha.type == kTypeF32 && B.beta.type == kTypeF32 && B.alpha.n_out == v_heads_ &&
+                       B.beta.n_out == v_heads_ && B.alpha.n_in == n_embd_ && B.beta.n_in == n_embd_;
+    if (gates) {
+        gdn_ab(fp(B.alpha), fp(B.beta), xn_, alpha_, beta_, fp(B.dt), fp(B.a), n_embd_, v_heads_, n, st_);
+    } else {
+        lin(B.alpha, xn_, alpha_, n, xq_);
+        lin(B.beta, xn_, beta_, n, xq_);
+    }
     pmark(kPpGdnProj);
     conv4_silu(proj_, B.past, fp(B.conv), qkv_, conv_dim_, n, st_,
                snap_bits_ ? snap_at_ + (B.past - state_) : nullptr, rec_n_, snap_bits_);
     pmark(kPpGdnConv);
+    // STRATA_POLY_FUSE: the output's norm quantized for wo's product in the same launch
+    const bool out_q8 = fuse(n) && (v_heads_ * s_dim_) % 32 == 0 && s_dim_ % 32 == 0;
     gdn_step(qkv_, alpha_, beta_, fp(B.dt), fp(B.a), B.s, z_, fp(B.o_norm), gated_, s_dim_, v_heads_, k_heads_, n,
-             rms_eps_, st_, snap_bits_ ? snap_at_ + (B.s - state_) : nullptr, rec_n_, snap_bits_);
-    lin(B.wo, gated_, ao_, n);
+             rms_eps_, st_, snap_bits_ ? snap_at_ + (B.s - state_) : nullptr, rec_n_, snap_bits_,
+             out_q8 ? q8_ : nullptr, gates);
+    lin(B.wo, gated_, ao_, n, out_q8 ? q8_ : nullptr);
     pmark(kPpGdnWo);
 }
 
@@ -517,14 +529,14 @@ const int32_t* Qwen35::turns(int64_t pos, int n, int64_t* first) {
 
 // The rows n tokens from position `pos` leave in an attention layer's caches: each head group's key, normed and
 // turned by the position, and its value.  xn_ and xq_ hold the layer's input.
-void Qwen35::attn_store(Block& B, int64_t pos, int n) {
+void Qwen35::attn_store(Block& B, int64_t pos, int n, bool projected) {
     int64_t first;
     const int32_t* axes = turns(pos, n, &first);
     const long long* at = recording_ ? at_ : nullptr;   // a recorded launch: the tokens from what at_ holds
-    lin(B.wk, xn_, kraw_, n, xq_);
+    if (!projected) lin(B.wk, xn_, kraw_, n, xq_);
     head_norm_rope(kraw_, head_dim_, fp(B.k_norm), k_, head_dim_, n_kv_, n_rot_, theta_scale_, first, n, rms_eps_, st_,
                    nullptr, axes, sections_, at ? at + 1 : nullptr);
-    lin(B.wv, xn_, v_, n, xq_);
+    if (!projected) lin(B.wv, xn_, v_, n, xq_);
     // a q8_0 cache quantizes the floats straight into its rows (every row in VRAM: check_kv_format())
     if (at) {
         if (k_q8_) store_q8_at(k_, B.keys8, head_dim_, n_kv_, at, n, st_);
@@ -568,7 +580,9 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
     int64_t first;
     const int32_t* axes = turns(pos, n, &first);
     const long long* at = recording_ ? at_ : nullptr;
-    lin(B.wq, xn_, qg_, n, xq_);
+    // STRATA_POLY_FUSE: the queries', keys' and values' products in one launch
+    const bool projected = fuse(n) && lin_group({{&B.wq, qg_}, {&B.wk, kraw_}, {&B.wv, v_}}, n, xq_);
+    if (!projected) lin(B.wq, xn_, qg_, n, xq_);
     head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, first, n, rms_eps_,
                    st_, nullptr, axes, sections_, at ? at + 1 : nullptr);
     if (q_capture_ && !recording_) {   // tests (--dump-kv): the queries as the attention gets them
@@ -578,7 +592,7 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
         ck(cudaMemcpy(q_capture_->data() + from, q_, nq * sizeof(float), cudaMemcpyDeviceToHost), "capture queries");
     }
     pmark(kPpAttnQ);
-    attn_store(B, pos, n);
+    attn_store(B, pos, n, projected);
     pmark(kPpAttnKv);
     const float scale = 1.f / std::sqrt((float) head_dim_);
     // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company.
@@ -601,25 +615,34 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
                at, at ? room(n) : 0, spill(B), fit_floats_);
     pmark(kPpAttnCore);
-    mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
-    lin(B.wo, att_, ao_, n);
+    // STRATA_POLY_FUSE: the gate and the quantization for wo's product in one launch
+    if (fuse(n) && mul_sigmoid_q8(att_, qg_ + head_dim_, q8_, head_dim_, n * n_head_, 2 * head_dim_, st_)) {
+        lin(B.wo, att_, ao_, n, q8_);
+    } else {
+        mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
+        lin(B.wo, att_, ao_, n);
+    }
     pmark(kPpAttnOut);
 }
 
 // A layer from its input to its router's copy.  A prompt batch's MoE (moe_rows) does its own routing.
 void Qwen35::layer_head(Layer& L, int il, int n) {
     Block& B = blocks_[(size_t) il];
-    rms_norm(r_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
-    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    // STRATA_POLY_FUSE: a norm and its quantization in one launch, and the residual's sum in the second
+    if (!fuse(n) || !rms_norm_q8(r_, nullptr, fp(L.attn_norm), xn_, xq_, n_embd_, n, rms_eps_, st_)) {
+        rms_norm(r_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
+        kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    }
     pmark(kPpNormIn);
     dbg("attn_in", il, xn_, n_embd_);
     if (B.gdn) gdn(B, n);
     else attn(B, pos_, n);
     dbg("attn", il, ao_, n_embd_);
-    axpy(ao_, 1.f, r_, n * n_embd_, true, st_);
-
-    rms_norm(r_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
-    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    if (!fuse(n) || !rms_norm_q8(r_, ao_, fp(L.ffn_norm), xn_, xq_, n_embd_, n, rms_eps_, st_)) {
+        axpy(ao_, 1.f, r_, n * n_embd_, true, st_);
+        rms_norm(r_, fp(L.ffn_norm), xn_, n_embd_, n, rms_eps_, st_);
+        kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    }
     pmark(kPpResidNorm);
     dbg("ffn_in", il, xn_, n_embd_);
     if (!(mmq_ && n >= kStageRows)) moe_router(L, n);
@@ -663,10 +686,17 @@ float Qwen35::card_route_floor() const { return kMinWeightSum; }
 
 // The shared expert, times the sigmoid of its own gate.  It runs on the GPU while the host routes.
 void Qwen35::moe_shared(const Layer& L, int il, int n) {
-    lin(L.sh_gate, xn_, g_, n, xq_);
-    lin(L.sh_up, xn_, u_, n, xq_);
-    swiglu_clamp(g_, u_, h_, n * n_ff_shexp_, clamp_shexp_[(size_t) il], st_);
-    lin(L.sh_down, h_, fo_, n);
+    // STRATA_POLY_FUSE: the gate's and up's products in one launch, and the activation with its quantization
+    if (!fuse(n) || !lin_group({{&L.sh_gate, g_}, {&L.sh_up, u_}}, n, xq_)) {
+        lin(L.sh_gate, xn_, g_, n, xq_);
+        lin(L.sh_up, xn_, u_, n, xq_);
+    }
+    if (fuse(n) && swiglu_clamp_q8(g_, u_, nullptr, h_, q8_, n_ff_shexp_, n, clamp_shexp_[(size_t) il], st_)) {
+        lin(L.sh_down, h_, fo_, n, q8_);
+    } else {
+        swiglu_clamp(g_, u_, h_, n * n_ff_shexp_, clamp_shexp_[(size_t) il], st_);
+        lin(L.sh_down, h_, fo_, n);
+    }
     lin(blocks_[(size_t) il].sh_gate_inp, xn_, sg_, n);
     mul_sigmoid(fo_, sg_, n_embd_, n, 1, true, st_);
 }
