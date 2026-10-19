@@ -20,8 +20,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.hip.poly_profile import PROFILES
-from tools.hip.functional_quality.resources import (ExclusiveGPU, admission, snapshot,
-                                                     MIN_RUNNING_FREE_RAM_MIB)
+from tools.hip.functional_quality.resources import ExclusiveGPU, admission, snapshot
 
 PROFILE = ROOT / "data/hip/qwen36-q3-q8-expert-profile.txt"
 PROFILE_SHA = "1bc70f7edf706578a24aca5a6e8beee4f308e192142ae88339968f5da1924a9d"
@@ -283,7 +282,8 @@ def check_resources(cfg):
             continue
         except psutil.AccessDenied:
             state["process_scan_complete"] = False
-    reasons = admission(state)
+    # no minimum of free RAM: a PC with less RAM runs it (the experts outside VRAM come from the disk's pages)
+    reasons = [r for r in admission(state) if not r.startswith("free RAM")]
     print(f"  Guarda Q8 {context}: RAM livre={state['ram_available_mib']:.0f} MiB; "
           f"VRAM ocupada={state.get('vram_used_mib')} MiB", flush=True)
     if reasons:
@@ -370,16 +370,11 @@ def verify_ready(engine, cfg):
 
 def check_loaded_resources(engine, cfg):
     import psutil
-    context, _, _ = q8_policy(cfg)
-    floor = 4096 if context >= 131072 else MIN_RUNNING_FREE_RAM_MIB
-    free_ram = psutil.virtual_memory().available / 2**20
+    q8_policy(cfg)
+    free_ram = psutil.virtual_memory().available / 2**20   # reported, with no minimum
     free_vram = engine.info.get("vram_free_mib")
     short = engine.info.get("vram_reserve_short_mib")
     problems = []
-    if free_ram < floor:
-        shortage = math.ceil(floor - free_ram)
-        problems.append(f"faltam {shortage} MiB de RAM disponivel para a margem de seguranca; "
-                        "fecha programas para libertar memoria e volta a executar o START")
     if not isinstance(free_vram, int):
         problems.append("o motor nao reportou VRAM livre; nao e possivel confirmar a margem")
     elif free_vram < 512:
@@ -388,8 +383,7 @@ def check_loaded_resources(engine, cfg):
         problems.append(f"a cache minima deixou a reserva curta em {short} MiB (--expert-cache-min): "
                         "baixa o minimo de experts ou a reserva")
     if problems:
-        raise ValueError(f"Q8 recusado apos carga: RAM livre {free_ram:.0f} MiB (minimo {floor}); "
-                         f"VRAM livre {free_vram} MiB (minimo 512). " + "; ".join(problems) +
+        raise ValueError(f"Q8 recusado apos carga: VRAM livre {free_vram} MiB (minimo 512). " + "; ".join(problems) +
                          ". INFO/READY confirmado, mas o servidor HTTP ainda nao foi aberto.")
     print(f"  Guarda apos carga: RAM livre={free_ram:.0f} MiB; VRAM livre={free_vram} MiB", flush=True)
 

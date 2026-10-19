@@ -368,42 +368,44 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Perfil Q8 invalido"):
             launch.q8_policy(cfg)
 
-    def test_preflight_refuses_unsafe_ram_vram_and_other_inference(self):
+    def test_preflight_refuses_unsafe_vram_and_other_inference_but_not_low_ram(self):
         import psutil
         _, cfg = self.prepare()
         good = dict(ram_available_mib=20000, vram_used_mib=1000,
                     process_scan_complete=True, other_inference=[])
-        cases = [dict(good, ram_available_mib=16000), dict(good, vram_used_mib=4000),
+        cases = [dict(good, vram_used_mib=4000),
                  dict(good, vram_used_mib=None), dict(good, process_scan_complete=False),
                  dict(good, other_inference=[{"pid": 987, "name": "strata-poly.exe"}])]
         for state in cases:
             with patch.object(launch, "snapshot", return_value=state), patch.object(psutil, "process_iter", return_value=[]), \
                     contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "guardas existentes"):
                 launch.check_resources(cfg)
+        for ram in (16000, 6000, 100):   # no minimum of RAM
+            with patch.object(launch, "snapshot", return_value=dict(good, ram_available_mib=ram)),                     patch.object(psutil, "process_iter", return_value=[]), contextlib.redirect_stdout(io.StringIO()):
+                launch.check_resources(cfg)
         other = SimpleNamespace(pid=988, info={"pid": 988, "name": "python.exe", "cmdline": ["python", "serve/server.py"]})
         with patch.object(launch, "snapshot", return_value=good.copy()), patch.object(psutil, "process_iter", return_value=[other]), \
                 contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "another inference"):
             launch.check_resources(cfg)
 
-    def test_postload_large_context_requires_ram_and_vram_headroom(self):
+    def test_postload_large_context_requires_vram_headroom_and_no_ram(self):
         import psutil
         out = launch.prepare_q8(profile="262k")
         cfg = json.loads(out.read_text())
-        for ram, vram in ((3000, 5000), (6000, 100), (6000, None)):
+        for ram, vram in ((6000, 100), (6000, None)):
             with patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(available=ram * 2**20)), \
                     self.assertRaisesRegex(ValueError, "recusado apos carga"):
                 launch.check_loaded_resources(SimpleNamespace(info={"vram_free_mib": vram}), cfg)
 
-    def test_postload_reports_actual_ram_deficit_without_relaxing_guard(self):
+    def test_postload_has_no_minimum_of_ram(self):
         import psutil
         out = launch.prepare_q8(profile="262k")
         cfg = json.loads(out.read_text())
-        with patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(available=2527 * 2**20)), \
-                self.assertRaisesRegex(ValueError, "faltam 1569 MiB de RAM disponivel") as error:
-            launch.check_loaded_resources(SimpleNamespace(info={"vram_free_mib": 6201}), cfg)
-        self.assertIn("minimo 4096", str(error.exception))
-        self.assertIn("HTTP ainda nao foi aberto", str(error.exception))
-        self.assertNotIn("faltam -", str(error.exception))
+        for ram in (2527, 800, 1):   # a PC with 16 GB of RAM, or less: reported, not refused
+            with patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(available=ram * 2**20)), \
+                    contextlib.redirect_stdout(io.StringIO()) as shown:
+                launch.check_loaded_resources(SimpleNamespace(info={"vram_free_mib": 6201}), cfg)
+            self.assertIn(f"RAM livre={ram}", shown.getvalue())
 
     def test_postload_reports_expert_cache_floor_leaving_reserve_short(self):
         import psutil
