@@ -7,7 +7,7 @@
 - Added a HIP-focused README, build/configuration guide, testing categories, benchmark instructions and contribution guidance.
 - Moved 14 AMD technical reports into `docs/reports/`, preserving old links through root pointers. Generalized personal paths in the publication reports; retained original evidence locally.
 - Preserved the previous main README in `docs/UPSTREAM_README.md` to retain upstream context and measurements.
-- Made `START_HIP_POLY.bat` the documented Windows HIP entry point; kept `START-POLY-HIP.bat` as its compatibility alias. Startup now reports missing prerequisites instead of installing dependencies or building automatically.
+- Made `START_HIP_POLY.bat` the documented Windows HIP entry point. Removed `START-POLY-HIP.bat`, which only forwarded to it: call `START_HIP_POLY.bat` instead. Startup now reports missing prerequisites instead of installing dependencies or building automatically.
 - Protected launcher profile selection from conflicting replacements and made FP16 `check` reuse profiles without creating them. Explicit custom configs do not require the default build directory.
 - Made the configuration writer refuse existing outputs unless `--overwrite` is explicit, and discover tokenizer tools in CMake's pinned fetched checkout.
 - Included the frozen Q8 expert profile under `data/hip/` with its original SHA-256; the frozen executable verification remains in place. SHA calculation also supports Python 3.10.

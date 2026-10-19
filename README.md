@@ -73,7 +73,7 @@ Stop the server with Ctrl+C. The launcher binds to `127.0.0.1`; exposing a manua
 
 ## Launch and configure
 
-**`START_HIP_POLY.bat` is the main Windows HIP launcher.** It resolves its own repository folder and also works when called from another directory. `START-POLY-HIP.bat` is a compatibility alias. Existing installation/update batch files serve their separate inherited tasks.
+**`START_HIP_POLY.bat` is the main Windows HIP launcher.** It resolves its own repository folder and also works when called from another directory. Existing installation/update batch files serve their separate inherited tasks.
 
 ```bat
 START_HIP_POLY.bat --help

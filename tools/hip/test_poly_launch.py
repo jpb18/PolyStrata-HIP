@@ -504,16 +504,16 @@ class LauncherTests(unittest.TestCase):
         env = dict(os.environ, POLY_CONFIG=str(self.source), POLY_NO_OPEN="1")
         for data, expected in (("\n", "missing.exe"), ("invalid\n1\n", "Opcao invalida"),
                                ("2\n", "Modelo Q8 esperado")):
-            result = subprocess.run(["cmd", "/d", "/c", "START-POLY-HIP.bat"], input=data, text=True,
+            result = subprocess.run(["cmd", "/d", "/c", str(repo / "START_HIP_POLY.bat")], input=data, text=True,
                                     capture_output=True, cwd=repo, env=env, timeout=20)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn(expected, result.stdout + result.stderr)
-        result = subprocess.run(["cmd", "/d", "/c", "START_HIP_POLY.bat q8_0 check"], input="\n", text=True,
+        result = subprocess.run(["cmd", "/d", "/c", str(repo / "START_HIP_POLY.bat"), "q8_0", "check"], input="\n", text=True,
                                 capture_output=True, cwd=repo, env=env, timeout=20)
         self.assertEqual(result.returncode, 1)
         self.assertIn("Modelo Q8 esperado", result.stdout + result.stderr)
         # "nocap" is an argument of its own (no ceiling), not a model name: the run reaches the Q8 config check.
-        result = subprocess.run(["cmd", "/d", "/c", "START-POLY-HIP.bat", "q8_0", "nocap"], input="", text=True,
+        result = subprocess.run(["cmd", "/d", "/c", str(repo / "START_HIP_POLY.bat"), "q8_0", "nocap"], input="", text=True,
                                 capture_output=True, cwd=repo, env=env, timeout=20)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Modelo Q8 esperado", result.stdout + result.stderr)

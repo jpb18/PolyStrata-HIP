@@ -528,9 +528,10 @@ python tools\hip\poly_config.py --model C:\models\Qwen3.5-35B-A3B-Q3_K_M.gguf --
 ```
 
 The last writes a run config, so `polystrata.py --model <name>`, its benchmark and the server take the model.
-`START-POLY-HIP.bat` does all of it with a double-click: it builds the engine and creates `.venv` when they are
-missing, then starts the server on `127.0.0.1:8090` and opens its page (`START-POLY-HIP.bat C:\models\X.gguf` the first
-time, to write the run config; `START-POLY-HIP.bat chat` for a chat in the window).
+`START_HIP_POLY.bat` starts it with a double-click once the engine and `.venv` are there (it builds and installs
+nothing; [README](../README.md) has those steps): the server on `127.0.0.1:8090` and its page
+(`START_HIP_POLY.bat C:\models\X.gguf` the first time, to write the run config; `START_HIP_POLY.bat chat` for a chat in
+the window).
 What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT (gfx1200, 16 GB), Ryzen 5 5600X,
 32 GB of RAM, Windows 11, ROCm 10.2.0a20260930 from TheRock, with the two programs the build adds (`hip_poly_probe`,
 `poly_kernel_bench`):
@@ -611,7 +612,7 @@ Notes at 5, 50 and 95% were found up to 261,000 tokens, with the KV in VRAM and 
 prompt path's MMQ (llama.cpp's WMMA kernels keep a block's scale times its sub-block's scale as one fp16) was 2-3
 times further from fp64 than a token alone. The largest probability difference to llama.cpp on two documents was
 0.145-0.158, against 0.072-0.099 with `STRATA_POLY_MMQ=0` (opt-in: prompts read about 8 times slower).
-`START-POLY-HIP.bat` asks which model when more than one is set up, and both share port 8090: with
+`START_HIP_POLY.bat` asks which model when more than one is set up, and both share port 8090: with
 `"switch_on_request": true` in the run config (`poly_config.py` writes it), a request whose `model` is another
 installed model's exact name switches the server to it first (40 to 55 s here), and any other name is answered by
 the loaded model. `tools/hip/opencode-polystrata-hip.json` is one provider with every profile of both models, and

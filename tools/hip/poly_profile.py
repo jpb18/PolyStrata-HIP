@@ -1,4 +1,4 @@
-"""The run config of one of START-POLY-HIP.bat's profiles (AMD_KV_STREAMING.md, section 12), written by
+"""The run config of one of START_HIP_POLY.bat's profiles (AMD_KV_STREAMING.md, section 12), written by
 tools/hip/poly_config.py the first time and reused after that.
 
     python tools/hip/poly_profile.py 128k [--gguf C:/models/X.gguf | --base qwen3.6]

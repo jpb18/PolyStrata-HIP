@@ -1,6 +1,6 @@
 # Escolher KV no launcher HIP
 
-O ponto de entrada principal é `START_HIP_POLY.bat`. `START-POLY-HIP.bat` mantém compatibilidade com o nome anterior. Os pré-requisitos e a compilação são passos explícitos no [README](../README.md); o launcher não instala dependências nem compila automaticamente.
+O ponto de entrada principal é `START_HIP_POLY.bat`. Os pré-requisitos e a compilação são passos explícitos no [README](../README.md); o launcher não instala dependências nem compila automaticamente.
 
 FP16 continua por omissão. A opção Q8 foi aprovada para uso local por escolha em 18/10/2026, no âmbito documentado: Windows HIP, RX 9060 XT 16 GB, 32 GB de RAM e Qwen3.6-35B-A3B UD-Q3_K_M. Esta decisão não valida outras placas, modelos ou binários, nem estabelece igualdade de texto FP16/Q8. Consulte as [decisões manuais](AMD_HIP_KV_Q8_MANUAL_APPROVAL.md) e o [registo da promoção](../bench/results/2026-10-18-hip-kv-q8-promotion/README.md).
 

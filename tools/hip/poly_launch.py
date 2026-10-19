@@ -1,4 +1,4 @@
-"""Small START-POLY-HIP adapter: isolated, voluntary Q8, with the measured expert cache ceiling or none; never
+"""Small START_HIP_POLY adapter: isolated, voluntary Q8, with the measured expert cache ceiling or none; never
 reload an occupied port."""
 from __future__ import annotations
 

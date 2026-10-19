@@ -13,7 +13,6 @@ No commit, push, merge, publication, staging, Git cleanup or destructive reset w
 | Area | Role and execution path |
 | --- | --- |
 | `START_HIP_POLY.bat` | Main Windows HIP launcher; menu/config → `tools/hip/poly_launch.py` → `serve.server` → configured engine |
-| `START-POLY-HIP.bat` | Existing compatibility alias, forwarding arguments to the main launcher |
 | `START-HERE.bat`, `SETUP.bat`, `setup.py`, `setup.sh` | Inherited general installation route; kept separate from the experimental poly HIP instructions |
 | `UPDATE.bat`, `update.sh` | Inherited update route |
 | `polystrata.py`, `chat.py` | Python model/client interfaces retained at their existing paths |
