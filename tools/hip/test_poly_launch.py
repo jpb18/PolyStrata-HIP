@@ -27,7 +27,7 @@ class LauncherTests(unittest.TestCase):
         assert Path(self.temp.name).resolve().parent == scratch.resolve()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.exe = self.root / "candidate.exe"
+        self.exe = self.root / "strata-poly.exe"
         self.exe.write_bytes(b"CPU fixture, never executed")
         self.profile = self.root / "frozen.txt"
         self.profile.write_bytes(b"frozen experts")
@@ -41,8 +41,7 @@ class LauncherTests(unittest.TestCase):
                     "vision": {"exe": "untouched-vision"}, "sampling": {"temperature": 0.6}}
         self.source = self.root / f"strata-{launch.BASE}.json"
         self.source.write_text(json.dumps(self.cfg))
-        self.patches = patch.multiple(launch, ROOT=self.root, Q8_EXE=self.exe, Q8_SHA=launch.sha(self.exe),
-                                      PROFILE=self.profile, PROFILE_SHA=launch.sha(self.profile))
+        self.patches = patch.multiple(launch, ROOT=self.root, PROFILE=self.profile, PROFILE_SHA=launch.sha(self.profile))
         self.patches.start()
         self.addCleanup(self.patches.stop)
 
@@ -108,10 +107,14 @@ class LauncherTests(unittest.TestCase):
             target.unlink()
             with self.assertRaisesRegex(ValueError, "Ficheiro em falta"):
                 self.prepare()
-            target.write_bytes(data + b"changed")
-            with self.assertRaisesRegex(ValueError, "SHA-256 inesperado"):
-                self.prepare()
             target.write_bytes(data)
+        # the profile is pinned by its hash; the engine is whatever build the config names (one binary, no pinning)
+        self.profile.write_bytes(b"frozen experts changed")
+        with self.assertRaisesRegex(ValueError, "SHA-256 inesperado"):
+            self.prepare()
+        self.profile.write_bytes(b"frozen experts")
+        self.exe.write_bytes(b"CPU fixture, rebuilt, never executed")
+        self.prepare()
 
     def test_unsupported_model_and_incomplete_vision_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "apenas"):
@@ -139,7 +142,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(launch.q8_policy(uncapped), (32768, 0, None))
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         from serve.server import engine_args
-        actual["exe"] = "build-hip-poly-q8-operational-win/strata-poly-q8.exe"
+        actual["exe"] = "build-hip-poly-win/strata-poly.exe"
         self.assertNotIn("--vision", engine_args(actual))
 
     def test_invalid_cli_input_rejected(self):
@@ -171,7 +174,7 @@ class LauncherTests(unittest.TestCase):
             code, text = self.main("--config", str(out), "--kv", "q8_0", "--mode", "check")
         self.assertEqual(code, 0)
         run.assert_not_called()
-        self.assertIn("Q8_0 - Aprovado", text)
+        self.assertIn("Motor: Q8_0", text)
         self.assertIn("INFO/READY por confirmar", text)
         self.assertIn("32768", text)
 

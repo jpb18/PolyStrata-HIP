@@ -57,14 +57,14 @@ Final results, after correcting sandbox restrictions and the test-isolation issu
 | Check | Result |
 | --- | --- |
 | New profile/config/launcher regression tests | **8 passed**, including external working directory, spaces in paths, custom MTP/cache arguments, read-only check, missing environment and overwrite refusal |
-| Existing HIP launcher tests | **33 passed**, including frozen Q8 policy, resource refusals, occupied ports, no fallback and configuration preservation |
+| Existing HIP launcher tests | **33 passed**, including the Q8 policy, resource refusals, occupied ports, no fallback and configuration preservation |
 | Q8 T4 policy unit tests | **8 passed** |
 | Python server suite | **664 run, 9 skipped, all remaining passed**; mocks/loopback, no real model inference |
 | Paired functional-quality harness CPU/mock suite | **64 passed** |
 | Setup test collection | **30 scripts, 467 tests passed**; final checksum/ModelScope rechecks included |
 | Fresh CPU CMake configure/build and CTest | **12/12 targets passed**, MSVC 19.51, Visual Studio 18 2026; separate `build-release-cpu-check` |
 | Source/license preservation | **567 backend/source hashes unchanged**; CMake and license checks passed |
-| Frozen Q8 artifact checks | Included profile matches its pinned SHA; existing local Q8 executable matches `0309bbe8f15de07a89fd4fe9260c3d43b306303f5bbb6e1cfcaf4f598679177c` |
+| Q8 artifact checks | Included profile matches its pinned SHA |
 | Publication text scan | No recognizable GitHub/AWS/OpenAI token patterns or this machine's username in non-ignored publication candidates; no candidate read errors |
 | Diff whitespace and current guide links | Passed; 94 local guide links resolve in the working tree; historical local-only archive links are documented below |
 
@@ -75,7 +75,7 @@ Windows sandbox temp-file and localhost restrictions initially prevented some te
 ## Remaining release limits
 
 1. A **clean-clone HIP compilation and real AMD/model regression run were not performed** for this cleanup. No new GPU numerical, VRAM-pressure, long-context, MTP-acceptance, vision or performance measurement is claimed. Run the hardware/model checks in [TESTING.md](TESTING.md) for the exact source revision intended for release, including the pre-existing uncommitted implementation work. CUDA/SYCL were not rebuilt because their source files were not changed by the cleanup.
-2. The Q8 menu requires the existing frozen executable, which is ignored and not supplied by a clone. Its profile now ships as source data; an ordinary fresh build is not byte-identical to or automatically accepted as the frozen executable. Distribution/revalidation of that optional artifact is a release decision still required for a portable Q8 menu. The normal source-built FP16 path is documented independently.
+2. The Q8 menu runs the one engine, `build-hip-poly-win\strata-poly.exe`, which is ignored and built locally, not supplied by a clone. Its profile ships as source data.
 3. Historical report links to local raw campaigns may not resolve in a clone. Original evidence remains local. Publication copies can have different hashes after path redaction; do not replace numerical evidence or claim original-file identity. New prompt preparation reads the changed documentation corpus, so paired comparisons must share a frozen token-ID file.
 4. The nine server skips depend on unavailable optional fixtures/capabilities. Python 3.10 compatibility was reviewed in the changed hashing path but tests ran under Python 3.14.6; other Python versions, AMD architectures and Linux were not exercised.
 5. The checkout still contains the user's original unstaged/untracked work. Release review should include those implementation files; this audit certifies preservation during cleanup, not independent approval of all pre-existing code.

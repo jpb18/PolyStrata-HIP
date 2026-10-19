@@ -21,12 +21,9 @@ rem   raised the hit rate and the tokens/s (AMD_HIP_VRAM_FLOOR.md).
 rem
 rem Prerequisites are installed explicitly: see README.md. This launcher never installs packages or builds.
 rem Each profile of a model has its own run config (tools\hip\poly_profile.py writes it once); the last choices are the
-rem menus' defaults.  Settings: POLY_CONFIG (a strata-<name>.json: skips the menus), POLY_NO_OPEN=1 (no browser),
-rem STRATA_POLY_FUSE=0 (the engine's launches as before; see below).
+rem menus' defaults.  Settings: POLY_CONFIG (a strata-<name>.json: skips the menus), POLY_NO_OPEN=1 (no browser).
+rem There is one engine, build-hip-poly-win\strata-poly.exe, for every menu; a change to it is in the next start.
 setlocal EnableDelayedExpansion
-rem STRATA_POLY_FUSE=1: a token's call, or a window's, with fewer kernel launches and the same bits
-rem (bench\results\2026-10-19-hip-decode-fuse).  An engine built before it ignores it.  Set to 0 beforehand to turn it off.
-if not defined STRATA_POLY_FUSE set "STRATA_POLY_FUSE=1"
 title PolyStrata (AMD, HIP)
 pushd "%~dp0" || exit /b 1
 set "PY=.venv\Scripts\python.exe"
@@ -215,8 +212,7 @@ echo Usage: START_HIP_POLY.bat [model-substring^|"model.gguf"] [48k^|128k^|262k^
 echo        START_HIP_POLY.bat [fp16^|q8_0] [chat^|check] [context] [nocap]
 echo POLY_CONFIG selects an existing JSON config; its engine arguments are preserved.
 echo POLY_NO_OPEN=1 disables the browser; POLY_NO_PAUSE=1 disables error pauses.
-echo STRATA_POLY_FUSE=1 is set unless already defined; STRATA_POLY_FUSE=0 turns the fused launches off.
-echo Q8 uses the frozen validation binary and profile described in docs\HIP_LAUNCH_KV.md.
+echo Q8 uses the profile described in docs\HIP_LAUNCH_KV.md, with the same engine as FP16.
 echo Installation, builds and downloads are explicit steps in README.md.
 :end
 popd

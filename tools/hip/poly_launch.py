@@ -23,8 +23,6 @@ from tools.hip.poly_profile import PROFILES
 from tools.hip.functional_quality.resources import (ExclusiveGPU, admission, snapshot,
                                                      MIN_RUNNING_FREE_RAM_MIB)
 
-Q8_EXE = ROOT / "build-hip-poly-q8-operational-win/strata-poly-q8.exe"
-Q8_SHA = "0309bbe8f15de07a89fd4fe9260c3d43b306303f5bbb6e1cfcaf4f598679177c"
 PROFILE = ROOT / "data/hip/qwen36-q3-q8-expert-profile.txt"
 PROFILE_SHA = "1bc70f7edf706578a24aca5a6e8beee4f308e192142ae88339968f5da1924a9d"
 EXPERT_SET = "dea737b94e80ddcd"
@@ -84,7 +82,7 @@ def choose_menu(title, options, default, timeout=20):
 def choose_kv(timeout=20):
     return choose_menu("PolyStrata HIP - formato KV",
                        [("fp16", "FP16 - Estavel / Padrao"),
-                        ("q8_0", "Q8_0 - Aprovado (por escolha; sem parking)")], "FP16", timeout)
+                        ("q8_0", "Q8_0 (sem parking)")], "FP16", timeout)
 
 
 def choose_context(timeout=20):
@@ -175,7 +173,7 @@ def prepare_q8(config=None, base=None, gguf=None, profile="32k", caps="capped"):
             checked_file(cfg["vision"].get(key, ""))
         if Path(cfg["vision"]["model"]).resolve() != model.resolve():
             raise ValueError("O modelo do encoder Vision difere do modelo de texto.")
-    checked_file(Q8_EXE, Q8_SHA)
+    checked_file(cfg.get("exe", ""))   # the one engine, the config's (build-hip-poly-win)
     checked_file(PROFILE, PROFILE_SHA)
     # Replace only the experimental settings; keep tokenizer, sampling, threads, turn token, port and MTP.
     cfg = copy.deepcopy(cfg)
@@ -203,7 +201,7 @@ def prepare_q8(config=None, base=None, gguf=None, profile="32k", caps="capped"):
         args += ["--expert-cache-max", str(cap)]
     args += ["--expert-swaps", "0", "--conversation-cache-mib", "0", "--conversation-cache-slots", "0"]
     ceiling = "" if cap else " sem tecto"
-    cfg.update(exe=str(Q8_EXE), args=args, cwd=str(ROOT), log=str(run / "engine-q8_0.log"),
+    cfg.update(args=args, cwd=str(ROOT), log=str(run / "engine-q8_0.log"),
                switch_on_request=False, lazy_load=False,
                display_name=f"Qwen3.6-35B-A3B Q8_0 {profile.upper()}{ceiling}" + (" + Vision" if vision else ""))
     # Preserve the selected Vision encoder; slot restore and external unload hooks stay disabled.
@@ -326,7 +324,7 @@ def port_free(port):
 def describe(cfg, kv):
     args = cfg["args"]
     print("\n  PolyStrata HIP", flush=True)
-    print(f"  Motor: {'Q8_0 - Aprovado' if kv == 'q8_0' else 'FP16 - Estavel / Padrao'}")
+    print(f"  Motor: {'Q8_0' if kv == 'q8_0' else 'FP16 - Estavel / Padrao'}")
     print(f"  Executavel: {cfg['exe']}\n  SHA-256: {sha(cfg['exe'])}")
     print(f"  Modelo: {arg(args, '--model')}\n  KV Cache: {kv} (configurado)")
     print(f"  Contexto: {arg(args, '--max-context')}\n  Porta: {cfg.get('port', 8090)}")
@@ -341,7 +339,7 @@ def describe(cfg, kv):
             print("  Experts: sem tecto (a cache enche a VRAM livre), swaps=0; parking=0")
         if context == Q8_CONTEXTS["262k"]:
             print("  Contexto 262K: 262K")
-        print(f"  Logs: {cfg['log']}\n  Estado: promovido para uso local por escolha")
+        print(f"  Logs: {cfg['log']}")
     print("  Estado: configuracao verificada; INFO/READY por confirmar", flush=True)
 
 
@@ -352,8 +350,8 @@ def verify_ready(engine, cfg):
         raise ValueError(f"Q8 recusado: INFO/READY inesperado: {info}, READY {engine.max_context}")
     if info.get("conversation_cache_mib") != 0 or (cap and info.get("expert_slots") != cap):
         raise ValueError(f"Q8 recusado: parking ou expert cache inesperado: {info}")
-    if Path(engine.spawn[0]).resolve() != Q8_EXE.resolve():
-        raise ValueError("Q8 recusado: executavel efetivo diferente do candidato.")
+    if Path(engine.spawn[0]).resolve() != Path(cfg["exe"]).resolve():
+        raise ValueError("Q8 recusado: executavel efetivo diferente do configurado.")
     log = Path(cfg["log"]).read_text(encoding="utf-8", errors="replace")
     # With no ceiling the set is whatever the free VRAM held, so its size is not pinned to a measurement; the log's
     # own set line must at least confirm the count INFO reports, and the cache must not be empty.
@@ -508,7 +506,7 @@ def main():
             raise ValueError("Falta --config.")
         checked_file(a.config)
         cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig"))
-        checked_file(cfg["exe"], Q8_SHA if a.kv == "q8_0" else None)
+        checked_file(cfg["exe"])
         args = cfg["args"]
         if a.kv == "q8_0":
             checked_file(arg(args, "--expert-profile", ""), PROFILE_SHA)

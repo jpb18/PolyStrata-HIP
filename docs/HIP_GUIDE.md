@@ -64,7 +64,7 @@ Q8 is supported on the Qwen attention path, requires all KV positions in VRAM an
 
 FP16 streaming uses `--kv-resident N|auto|all`, `--kv-ram-mib` and `--kv-ram-floor-mib`. Positions outside the resident prefix use pinned host RAM and PCIe traffic. The `262k-stream` preset keeps 49,152 positions resident; it is not a Q8 preset.
 
-The launcher's Q8 route is narrower than source support. It verifies a particular executable SHA and model, uses the included frozen expert profile, checks free RAM/VRAM, checks INFO/READY and HTTP health, and refuses an occupied port. It creates a separate run directory under `tmp/hip-launch-q8`, disables swapping and conversation parking, and never promotes a newly compiled binary automatically. The included `data/hip/qwen36-q3-q8-expert-profile.txt` is byte-identical to the campaign profile (SHA-256 `1bc70f7edf706578a24aca5a6e8beee4f308e192142ae88339968f5da1924a9d`). The engine may update expert profiles, so the launcher copies the frozen file per run.
+The launcher's Q8 route is narrower than source support. It runs the same engine as every menu (`build-hip-poly-win\strata-poly.exe`, no pinned or separate binary), verifies the model, uses the included expert profile (pinned by its SHA), checks free RAM/VRAM, checks INFO/READY and HTTP health, and refuses an occupied port. It creates a separate run directory under `tmp/hip-launch-q8`, disables swapping and conversation parking. The included `data/hip/qwen36-q3-q8-expert-profile.txt` is byte-identical to the campaign profile (SHA-256 `1bc70f7edf706578a24aca5a6e8beee4f308e192142ae88339968f5da1924a9d`). The engine may update expert profiles, so the launcher copies the frozen file per run.
 
 ### Expert cache and VRAM safety
 
@@ -80,7 +80,7 @@ Draft-block loading is architecture-specific; the shared engine and `src/poly/ma
 
 `--window N` controls speculative window size; `--window 1` disables speculative windows. `--no-draft` disables the draft block; repeated-token lookup is separately controlled by `--lookup` (zero disables it). There is no generic `--mtp on` option. Record these controls and confirm an actual draft load/acceptance in logs when reporting MTP measurements. `--window-fixed` is a diagnostic instrument, not the normal adaptive policy. See [INFERENCE_METRICS.md](INFERENCE_METRICS.md).
 
-The launcher does not rewrite MTP options in an explicitly selected FP16 config. The frozen Q8 adapter preserves the source config's MTP switches while applying its documented cache/parking policy. A missing or incompatible MTP block must not be presented as an MTP-enabled benchmark.
+The launcher does not rewrite MTP options in an explicitly selected FP16 config. The Q8 adapter preserves the source config's MTP switches while applying its documented cache/parking policy. A missing or incompatible MTP block must not be presented as an MTP-enabled benchmark.
 
 ## Code map
 

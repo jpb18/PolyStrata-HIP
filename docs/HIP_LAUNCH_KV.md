@@ -24,13 +24,7 @@ Um modelo, GGUF ou `POLY_CONFIG` explícito dispensa o menu de modelos. Para FP1
 
 ## Artefactos Q8
 
-Este menu usa o binário congelado `build-hip-poly-q8-operational-win/strata-poly-q8.exe`, com SHA-256:
-
-```text
-0309bbe8f15de07a89fd4fe9260c3d43b306303f5bbb6e1cfcaf4f598679177c
-```
-
-É a imagem candidata validada com resumo temporal de nove casas decimais. Um clone não inclui este executável: uma compilação normal não é promovida automaticamente para este percurso. Falta ou divergência de hash impede o arranque.
+Este menu corre o mesmo motor dos outros menus, `build-hip-poly-win/strata-poly.exe`: há um único executável, sem binário Q8 separado nem hash fixado, e uma recompilação entra no arranque seguinte. O launcher mostra e regista o SHA-256 do motor que corre.
 
 O perfil congelado incluído em `data/hip/qwen36-q3-q8-expert-profile.txt` tem SHA-256:
 

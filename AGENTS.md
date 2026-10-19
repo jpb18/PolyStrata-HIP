@@ -23,7 +23,9 @@ offers the same steps as tools.
   `.rgignore` omits historical results and root AMD reports; use `rg --no-ignore <pattern> bench/results/<run>`
   (or a specific report) when evidence is needed. See [docs/REPOSITORY_AUDIT.md](docs/REPOSITORY_AUDIT.md) for the inventory.
 - Skip `build*/`, `engine*/`, `.venv/`, `.rocm-win/`, `.lcm/` and generated logs in routine source searches.
-  Build folders can hold operational binaries and rollback copies: preserve these, validation reports, patches and existing local work.
+- There is one engine: `build-hip-poly-win\strata-poly.exe`, which every `START_HIP_POLY.bat` menu runs. No promoted, frozen or
+  "to be promoted" binaries, no pinned engine hashes: after a change, build it there (`tools\hip\build_windows.bat poly` builds into that folder), so the next
+  start of `START_HIP_POLY.bat` has it. Do not keep rollback copies of the engine. Preserve validation reports, patches and existing local work.
 - How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
   the [paper](docs/paper/Strata-Paper.pdf).
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
@@ -39,9 +41,10 @@ offers the same steps as tools.
 - Search the open issues and pull requests first, and add to a thread that already covers your point.
 - Open an issue with the form that fits (bug report, feature request or question).
 - One change per pull request. Say what it changes and what it leaves alone.
-- A new feature is opt-in, and the default path stays byte-identical to the last release. Say how you checked.
+- A feature is on by default, and reachable from `START_HIP_POLY.bat`. It gets a flag only when it was measured to cost
+  speed (say by how much). Say how you checked the bits.
 - Build every backend a file touches (CUDA, HIP, SYCL) before asking for review.
-- Change a default only where you measured it faster, and show the numbers with what they were measured on.
+- Show the numbers with what they were measured on.
 - A report from hardware the maintainers do not have is welcome. Follow
   [docs/COMMUNITY_BENCHMARKS.md](docs/COMMUNITY_BENCHMARKS.md), compare against a same-day run of the build you are
   testing, and say what you did not test.

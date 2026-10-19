@@ -99,7 +99,7 @@ See [configuration examples and feature limits](docs/HIP_GUIDE.md#configuration)
 
 The **source engine** implements `--kv q8_0` for Qwen3.5/3.6 attention, without KV streaming. FP16 remains the default. Weight quantization and KV quantization are independent.
 
-The launcher's `q8_0` menu is a **frozen validation route** for Qwen3.6 UD-Q3_K_M. It requires `build-hip-poly-q8-operational-win\strata-poly-q8.exe` with the exact SHA recorded in `tools/hip/poly_launch.py`; an ordinary source build is not automatically promoted into that route. The matching expert profile is included in `data/hip/`. Missing or mismatched artifacts stop startup. Q8 also enforces resource checks and disables expert swaps and conversation parking for that validation route. See [Q8 launch policy](docs/HIP_LAUNCH_KV.md) and [technical limits](docs/HIP_GUIDE.md#q8-kv-and-streaming).
+The launcher's `q8_0` menu is for Qwen3.6 UD-Q3_K_M. It runs the same engine as every other menu, `build-hip-poly-win\strata-poly.exe`: there is one engine, no separate Q8 binary and no pinned executable, so a rebuild is in the next start. The matching expert profile is included in `data/hip/` and pinned by its SHA. Missing artifacts stop startup. Q8 also enforces resource checks and disables expert swaps and conversation parking for this route. See [Q8 launch policy](docs/HIP_LAUNCH_KV.md) and [technical limits](docs/HIP_GUIDE.md#q8-kv-and-streaming).
 
 ## Tests and benchmarks
 
@@ -135,7 +135,7 @@ tools/vision/            image encoder source
 tools/test_*.py           inherited setup/tool unit tests
 tests/                   core, platform, CUDA, HIP and quality tests
 bench/                   comparisons, microbenchmarks and historical results
-data/                    small runtime data and the frozen Q8 expert profile
+data/                    small runtime data and the Q8 expert profile
 docs/                    user/developer guides; detailed reports in reports/
 sycl/                    inherited Intel backend
 third_party/ggml/        retained license and upstream metadata
