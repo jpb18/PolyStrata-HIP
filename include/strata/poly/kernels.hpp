@@ -180,6 +180,13 @@ void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int6
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
             int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0,
             const KvSpill* spill = nullptr, size_t score_floats = 0);
+/// Flash attention for a prompt batch (HIP, gfx12, dim 256, no window or ring): `rows` tokens from position `pos`, each
+/// over the keys 0 to its own row, the keys and values as fp16 rows or q8_0 rows (k_q8 / v_q8), in one launch that
+/// keeps the scores in registers.  The same inputs rounded to halves and the same float sums as attend_batch(), in
+/// another order, so not the same bits.  False, with nothing launched, where it does not apply (another architecture
+/// or shape, STRATA_POLY_FLASH=0); attend_batch() and attend_batch_kv() then go on with their products.
+bool attend_flash(const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8, int64_t pos, int rows,
+                  float* out, int dim, int n_head, int kv_heads, float scale, void* stream);
 /// attend() for a prompt batch: the same attention with cuBLAS products on the tensor cores, several times
 /// faster on many tokens.  The products read the cache's halves where they lie, take the queries and the
 /// softmax's weights rounded to halves, and sum floats.  A token's result depends on the tokens beside it, so

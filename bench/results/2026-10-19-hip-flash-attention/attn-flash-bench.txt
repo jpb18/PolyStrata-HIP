@@ -1,0 +1,27 @@
+ctx   8192 fp16 batch 1024: products      9.17 ms | flash      4.16 ms (2.20x) | max |error| vs double: products 3.35e-05 flash 3.18e-05 (values up to 0.58), flash vs products 1.32e-05
+ctx   8192 q8_0 batch 1024: products      9.29 ms | flash      4.27 ms (2.18x) | max |error| vs double: products 7.20e-05 flash 7.60e-05 (values up to 0.57), flash vs products 1.33e-04
+ctx  32768 fp16 batch 1024: products     35.79 ms | flash     17.19 ms (2.08x) | max |error| vs double: products 2.88e-05 flash 3.27e-05 (values up to 0.42), flash vs products 2.34e-05
+ctx  32768 q8_0 batch 1024: products     36.59 ms | flash     17.73 ms (2.06x) | max |error| vs double: products 4.47e-05 flash 4.92e-05 (values up to 0.42), flash vs products 5.80e-05
+ctx  65536 fp16 batch 1024: products     72.22 ms | flash     34.41 ms (2.10x) | max |error| vs double: products 2.48e-05 flash 4.15e-05 (values up to 0.31), flash vs products 3.62e-05
+ctx  65536 q8_0 batch 1024: products     73.83 ms | flash     35.58 ms (2.08x) | max |error| vs double: products 3.38e-05 flash 5.04e-05 (values up to 0.31), flash vs products 4.30e-05
+ctx 131072 fp16 batch 1024: products    143.17 ms | flash     69.48 ms (2.06x) | max |error| vs double: products 3.11e-05 flash 6.64e-05 (values up to 0.32), flash vs products 6.21e-05
+ctx 131072 q8_0 batch 1024: products    145.13 ms | flash     71.09 ms (2.04x) | max |error| vs double: products 1.86e-05 flash 6.03e-05 (values up to 0.32), flash vs products 5.96e-05
+from      0,   32 tokens fp16: max |error| vs double: products 1.16e-04 flash 1.16e-04 (values up to 1.00)
+from      0,   32 tokens q8_0: max |error| vs double: products 1.52e-04 flash 1.52e-04 (values up to 1.00)
+from      0,   64 tokens fp16: max |error| vs double: products 9.71e-05 flash 6.95e-05 (values up to 1.00)
+from      0,   64 tokens q8_0: max |error| vs double: products 1.03e-04 flash 1.02e-04 (values up to 1.00)
+from      0,  200 tokens fp16: max |error| vs double: products 1.01e-04 flash 9.93e-05 (values up to 1.00)
+from      0,  200 tokens q8_0: max |error| vs double: products 7.30e-05 flash 6.02e-05 (values up to 1.00)
+from      5,   33 tokens fp16: max |error| vs double: products 1.12e-04 flash 1.12e-04 (values up to 0.96)
+from      5,   33 tokens q8_0: max |error| vs double: products 1.58e-04 flash 1.58e-04 (values up to 0.96)
+from     31,   97 tokens fp16: max |error| vs double: products 1.31e-04 flash 1.31e-04 (values up to 0.96)
+from     31,   97 tokens q8_0: max |error| vs double: products 1.50e-04 flash 1.50e-04 (values up to 0.96)
+from   1000,  100 tokens fp16: max |error| vs double: products 6.71e-05 flash 6.82e-05 (values up to 0.58)
+from   1000,  100 tokens q8_0: max |error| vs double: products 6.03e-05 flash 5.49e-05 (values up to 0.57)
+from   8000,  129 tokens fp16: max |error| vs double: products 3.97e-05 flash 3.31e-05 (values up to 0.55)
+from   8000,  129 tokens q8_0: max |error| vs double: products 6.83e-05 flash 7.14e-05 (values up to 0.55)
+from  50000,  777 tokens fp16: max |error| vs double: products 2.77e-05 flash 3.64e-05 (values up to 0.34)
+from  50000,  777 tokens q8_0: max |error| vs double: products 2.78e-05 flash 4.20e-05 (values up to 0.34)
+
+
+exit 0

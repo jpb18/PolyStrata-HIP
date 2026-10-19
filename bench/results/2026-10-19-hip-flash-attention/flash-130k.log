@@ -1,0 +1,4 @@
+prompt cat130k: 130122 tokens
+{'flash': '0', 'rc': 0, 'prefill': '906.6', 'decode': '28.76'}
+{'flash': '1', 'rc': 0, 'prefill': '1397.3', 'decode': '34.99'}
+flash=1 against the first run (flash=0): 8 steps, largest logit difference 26.3256, mean 1.96688, same first token 0 %, KL mean 1.44e+01 max 2.38e+01 nats, tokens equal False

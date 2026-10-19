@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -2215,6 +2216,10 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                   float scale, void* stream, int window, int ring, bool whole, const KvSpill* spill) {
     if (spill && ring > 0) throw std::invalid_argument("attend_batch: a ring has no host part");
     if (spill && (kv_heads * dim) % 8) throw std::invalid_argument("attend_batch: a row is copied 16 bytes at a time");
+    // flash attention where the call is the plain prompt batch (no window, ring, call-wide view or host part)
+    if (!spill && window == 0 && ring == 0 && !whole &&
+        attend_flash(q, kcache, false, vcache, false, pos, rows, out, dim, n_head, kv_heads, scale, stream))
+        return;
     const cublasHandle_t h = (cublasHandle_t) blas;
     const float one = 1.0f, zero = 0.0f;
     const int per = n_head / kv_heads, width = kv_heads * dim;
@@ -2824,6 +2829,9 @@ void attend_batch_kv(void* blas, const float* q, const void* kcache, bool k_q8, 
     if (k_q8 || v_q8) check_q8(dim, kv_heads, "attend_batch_kv");
     if ((k_q8 && !kstage) || (v_q8 && !vstage) || ((k_q8 || v_q8) && stage_rows < 1))
         throw std::invalid_argument("attend_batch_kv: no stage for the blocks");
+    if (window == 0 && ring == 0 && !whole &&
+        attend_flash(q, kcache, k_q8, vcache, v_q8, pos, rows, out, dim, n_head, kv_heads, scale, stream))
+        return;
     const cublasHandle_t h = (cublasHandle_t) blas;
     const float one = 1.0f, zero = 0.0f;
     const int per = n_head / kv_heads, width = kv_heads * dim;
@@ -2907,6 +2915,344 @@ void attend_batch_q8(void* blas, const float* q, const uint8_t* kcache, const ui
     attend_batch_kv(blas, q, kcache, true, vcache, true, pos, rows, score, score_floats, work, out, dim, n_head,
                     kv_heads, scale, stream, kstage, vstage, stage_rows, window, ring, whole);
 }
+
+#if defined(STRATA_USE_HIP)
+// ---- Flash attention for a prompt batch on RDNA4 matrix cores (HIP, gfx12; STRATA_POLY_FLASH=0 turns it off).
+//
+// attend_batch() writes every block's scores to the scratch as floats, reads them again for the softmax and for the
+// rescale of the values so far: at 100K positions that is half the prompt's time.  Here a CTA takes 64 rows (a
+// token's `per` heads of one key-value head, several tokens) and walks the keys 32 at a time: S^T = K Q^T on the
+// matrix cores, an online softmax in registers (the largest score so far, the sum of the weights as the values get
+// them: rounded to halves), O^T += V^T P^T, and nothing but the result goes to memory.  K and V are read as halves
+// where they lie, or as codes times scales (a q8_0 cache), each value rounded to a half as kv_dequant_q8() hands it
+// to attend_batch_kv()'s products; so no stage is needed.
+//
+// S^T and O^T rather than S and O: the fragment a lane holds of S^T (keys 8 * half + i of query `col`) is the one the
+// product with V^T takes as its B operand, so the weights never leave the registers, and a query's statistics are
+// one lane's (and its partner's, 16 lanes on) and need no exchange.  Fragments (gfx12 16x16x16, wave32): A lane l
+// holds A[l % 16][8 (l / 16) + i], B lane l holds B[8 (l / 16) + i][l % 16], C/D lane l holds D[8 (l / 16) + i][l % 16].
+//
+// A CTA is eight waves: four groups of 16 rows, and the two waves of a group split the 256 dimensions (the queries
+// and the sums of the values: 32 and 64 registers a lane instead of twice that, which with every dimension in one
+// wave spilled to memory).  Each wave's share of a score is a partial sum over its 128 dimensions; the two are
+// added through the LDS (the same two numbers in either order, so both waves have the same score), and the
+// softmax is done by both, on the same numbers.  The next step's keys and values are fetched into registers while
+// this one is computed.
+//
+// The sums are in another order than attend_batch()'s (a step of 32 keys, the weights against the largest score so
+// far at each step), so a result is not the same bits: the same inputs rounded to halves, the same sums in floats.
+namespace {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+#define STRATA_FLASH_WMMA 1
+#else
+#define STRATA_FLASH_WMMA 0
+#endif
+typedef _Float16 fl_h8 __attribute__((ext_vector_type(8)));
+typedef float fl_f8 __attribute__((ext_vector_type(8)));
+
+constexpr int FL_D = 256;                 // the head's dimension this kernel is for
+constexpr int FL_GROUPS = 4;              // groups of 16 rows a CTA
+constexpr int FL_THREADS = FL_GROUPS * 2 * 32;
+constexpr int FL_ROWS = 16 * FL_GROUPS;   // rows (token, head) a CTA
+constexpr int FL_KEYS = 32;               // keys a step
+constexpr int FL_HALF = FL_D / 2;         // the dimensions a wave of a pair holds
+constexpr int FL_KPAD = FL_D + 8;         // a key's row in the LDS, in halves: 528 bytes, so the 16-row reads spread over banks
+constexpr int FL_VPAD = FL_KEYS + 8;      // a dimension's row of V^T, in halves: 80 bytes
+
+__device__ __forceinline__ fl_f8 fl_wmma(fl_h8 a, fl_h8 b, fl_f8 c) {
+#if STRATA_FLASH_WMMA
+    return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c);
+#else
+    __builtin_trap();
+    return c;
+#endif
+}
+
+// Sixteen values of a key's row (the 16 dimensions 16 cg to 16 cg + 15), as they lie in the cache: halves, or q8_0
+// codes and their block's scale (a block of 32 is two such groups); and as the halves the products read.
+template <bool Q8>
+struct FlRaw;
+template <>
+struct FlRaw<false> {
+    uint4 a, b;
+};
+template <>
+struct FlRaw<true> {
+    uint4 c;
+    uint32_t s;   // the scale's half
+};
+
+template <bool Q8>
+__device__ __forceinline__ FlRaw<Q8> fl_fetch(const void* cache, long long key, bool valid, int kv_heads, int kvh,
+                                              int cg) {
+    FlRaw<Q8> r;
+    if constexpr (Q8) {
+        r.c = make_uint4(0, 0, 0, 0);
+        r.s = 0;
+        if (valid) {
+            const size_t hb = q8_hb(FL_D);
+            const uint8_t* head = static_cast<const uint8_t*>(cache) + size_t(key) * kv_heads * hb + size_t(kvh) * hb;
+            r.c = *reinterpret_cast<const uint4*>(head + 16 * cg);
+            r.s = *reinterpret_cast<const uint16_t*>(head + FL_D + 2 * (cg / 2));
+        }
+    } else {
+        r.a = make_uint4(0, 0, 0, 0);
+        r.b = r.a;
+        if (valid) {
+            const uint4* p = reinterpret_cast<const uint4*>(static_cast<const half*>(cache) +
+                                                           (size_t(key) * kv_heads + kvh) * FL_D + 16 * cg);
+            r.a = p[0];
+            r.b = p[1];
+        }
+    }
+    return r;
+}
+
+typedef _Float16 fl_h2 __attribute__((ext_vector_type(2)));
+
+// Four codes (the bytes of w) times a scale, as two pairs of halves: a code is c + 128 in the low byte of a half whose
+// high byte is 0x64 (1024 + c + 128, exact), less 1152 gives c, exact, and the product with the scale is rounded once,
+// as the float product kv_dequant_q8() rounds to a half (a code of 8 bits times a scale of 11 fits a float's 24).
+__device__ __forceinline__ void fl_dequant4(uint32_t w, fl_h2 scale, uint32_t& lo, uint32_t& hi) {
+    const uint32_t u = w ^ 0x80808080u;
+    const uint32_t a = __builtin_amdgcn_perm(0x64646464u, u, 0x04010400u);
+    const uint32_t b = __builtin_amdgcn_perm(0x64646464u, u, 0x04030402u);
+    const fl_h2 bias = {(_Float16) 1152.0f, (_Float16) 1152.0f};
+    const fl_h2 x = (__builtin_bit_cast(fl_h2, a) - bias) * scale;
+    const fl_h2 y = (__builtin_bit_cast(fl_h2, b) - bias) * scale;
+    lo = __builtin_bit_cast(uint32_t, x);
+    hi = __builtin_bit_cast(uint32_t, y);
+}
+
+// The sixteen values as halves: out[0] the first eight, out[1] the rest.
+template <bool Q8>
+__device__ __forceinline__ void fl_pack(const FlRaw<Q8>& r, uint4 (&out)[2]) {
+    if constexpr (Q8) {
+        const _Float16 sh = __builtin_bit_cast(_Float16, uint16_t(r.s));
+        const fl_h2 scale = {sh, sh};
+        uint32_t o[8];
+        fl_dequant4(r.c.x, scale, o[0], o[1]);
+        fl_dequant4(r.c.y, scale, o[2], o[3]);
+        fl_dequant4(r.c.z, scale, o[4], o[5]);
+        fl_dequant4(r.c.w, scale, o[6], o[7]);
+        out[0] = make_uint4(o[0], o[1], o[2], o[3]);
+        out[1] = make_uint4(o[4], o[5], o[6], o[7]);
+    } else {
+        out[0] = r.a;
+        out[1] = r.b;
+    }
+}
+
+template <bool KQ8, bool VQ8>
+__global__ void __launch_bounds__(FL_THREADS)
+flash_attn_kernel(const float* __restrict__ q, const void* __restrict__ kcache, const void* __restrict__ vcache,
+                  long long pos, int rows, float* __restrict__ out, int n_head, int kv_heads, float scale_log2,
+                  int tiles) {
+#if STRATA_FLASH_WMMA
+    __shared__ __attribute__((aligned(16))) _Float16 ks[FL_KEYS * FL_KPAD];
+    __shared__ __attribute__((aligned(16))) _Float16 vt[FL_D * FL_VPAD];
+    __shared__ __attribute__((aligned(16))) float4 sp[FL_GROUPS][2][2][2][32];   // [group][part][sub][half of 8][lane]
+    const int per = n_head / kv_heads;
+    const int tid = int(threadIdx.x), lane = tid & 31, wave = tid >> 5, col = lane & 15, half = lane >> 4;
+    const int grp = wave & (FL_GROUPS - 1), part = wave / FL_GROUPS;   // the 16 rows, and which 128 dimensions
+    const int kvh = int(blockIdx.y);
+    const int total = rows * per;
+    const int g0 = (tiles - 1 - int(blockIdx.x)) * FL_ROWS;   // the longest first: the last tokens read the most keys
+    const int gr = g0 + grp * 16 + col;                       // this lane's row
+    const bool ok = gr < total;
+    const int tok = ok ? gr / per : rows - 1, hh = ok ? gr % per : 0;
+    const long long my_pos = pos + tok;                       // the keys this row attends: 0 to my_pos
+    const bool grp_on = g0 + grp * 16 < total;                // the group has a token
+    const long long grp_hi = pos + min(g0 + grp * 16 + 15, total - 1) / per;   // the last key any of its rows reads
+    const long long cta_hi = pos + (min(g0 + FL_ROWS, total) - 1) / per;
+    const int dim0 = part * FL_HALF;
+
+    fl_h8 qf[8];
+    {
+        const float* qp = q + (size_t(tok) * n_head + size_t(kvh) * per + hh) * FL_D + dim0 + 8 * half;
+#pragma unroll
+        for (int kk = 0; kk < 8; ++kk) {
+            fl_h8 h;
+            if (ok) {
+                const float4 a = *reinterpret_cast<const float4*>(qp + kk * 16);
+                const float4 b = *reinterpret_cast<const float4*>(qp + kk * 16 + 4);
+                h[0] = (_Float16) a.x; h[1] = (_Float16) a.y; h[2] = (_Float16) a.z; h[3] = (_Float16) a.w;
+                h[4] = (_Float16) b.x; h[5] = (_Float16) b.y; h[6] = (_Float16) b.z; h[7] = (_Float16) b.w;
+            } else {
+#pragma unroll
+                for (int i = 0; i < 8; ++i) h[i] = (_Float16) 0.0f;
+            }
+            qf[kk] = h;
+        }
+    }
+    fl_f8 acc[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) acc[j] = fl_f8{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    float m_run = -INFINITY, l_run = 0.0f;
+
+    // a thread's share of a step's keys and values: 2 groups of 16 values of K, and the same group of 2 keys of V
+    // (transposed on the way in)
+    FlRaw<KQ8> kr[2];
+    FlRaw<VQ8> vr[2];
+    const auto fetch = [&](long long ts) {
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const int c = tid + i * FL_THREADS, row = c >> 4, cg = c & 15;
+            kr[i] = fl_fetch<KQ8>(kcache, ts + row, ts + row <= cta_hi, kv_heads, kvh, cg);
+        }
+        const int pair = tid & 15, cg = tid >> 4;
+        const long long key = ts + 2 * pair;
+        vr[0] = fl_fetch<VQ8>(vcache, key, key <= cta_hi, kv_heads, kvh, cg);
+        vr[1] = fl_fetch<VQ8>(vcache, key + 1, key + 1 <= cta_hi, kv_heads, kvh, cg);
+    };
+    fetch(0);
+    for (long long ts = 0; ts <= cta_hi; ts += FL_KEYS) {
+        // the fetched keys and values into the LDS: K as it lies, V as [dimension][key], two keys to a 32-bit write
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const int c = tid + i * FL_THREADS, row = c >> 4, cg = c & 15;
+            uint4 h[2];
+            fl_pack<KQ8>(kr[i], h);
+            *reinterpret_cast<uint4*>(&ks[row * FL_KPAD + 16 * cg]) = h[0];
+            *reinterpret_cast<uint4*>(&ks[row * FL_KPAD + 16 * cg + 8]) = h[1];
+        }
+        {
+            const int pair = tid & 15, cg = tid >> 4;
+            uint4 a[2], b[2];
+            fl_pack<VQ8>(vr[0], a);
+            fl_pack<VQ8>(vr[1], b);
+            const uint16_t* h0 = reinterpret_cast<const uint16_t*>(a);
+            const uint16_t* h1 = reinterpret_cast<const uint16_t*>(b);
+#pragma unroll
+            for (int e = 0; e < 16; ++e)
+                *reinterpret_cast<uint32_t*>(&vt[(16 * cg + e) * FL_VPAD + 2 * pair]) =
+                    uint32_t(h0[e]) | (uint32_t(h1[e]) << 16);
+        }
+        __syncthreads();
+        if (ts + FL_KEYS <= cta_hi) fetch(ts + FL_KEYS);   // the next step's, in flight while this one is computed
+        const bool act = grp_on && ts <= grp_hi;
+        fl_f8 s[2];
+        if (act) {
+            // this wave's partial scores: its 128 dimensions of the 32 keys
+#pragma unroll
+            for (int sub = 0; sub < 2; ++sub) {
+                fl_f8 a = fl_f8{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+                for (int kk = 0; kk < 8; ++kk)
+                    a = fl_wmma(*reinterpret_cast<const fl_h8*>(
+                                    &ks[(sub * 16 + col) * FL_KPAD + dim0 + kk * 16 + 8 * half]),
+                                qf[kk], a);
+                s[sub] = a;
+                sp[grp][part][sub][0][lane] = make_float4(a[0], a[1], a[2], a[3]);
+                sp[grp][part][sub][1][lane] = make_float4(a[4], a[5], a[6], a[7]);
+            }
+        }
+        __syncthreads();
+        if (act) {
+            float sv[16];
+            float mx = -INFINITY;
+#pragma unroll
+            for (int sub = 0; sub < 2; ++sub) {
+                const float4 o0 = sp[grp][part ^ 1][sub][0][lane], o1 = sp[grp][part ^ 1][sub][1][lane];
+                const float other[8] = {o0.x, o0.y, o0.z, o0.w, o1.x, o1.y, o1.z, o1.w};
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const long long key = ts + sub * 16 + 8 * half + i;
+                    // the two partial sums in either order: the same number in both waves of the pair
+                    const float x = ok && key <= my_pos ? (s[sub][i] + other[i]) * scale_log2 : -INFINITY;
+                    sv[sub * 8 + i] = x;
+                    mx = fmaxf(mx, x);
+                }
+            }
+            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 16, 32));
+            const float m_new = fmaxf(m_run, mx);
+            const bool seen = m_new != -INFINITY;   // false: none of this step's keys is this row's, and none before
+            const float alpha = seen && m_run != -INFINITY ? exp2f(m_run - m_new) : 1.0f;
+            fl_h8 pf[2];
+            float lsum = 0.0f;
+#pragma unroll
+            for (int sub = 0; sub < 2; ++sub)
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const float p = seen && sv[sub * 8 + i] != -INFINITY ? exp2f(sv[sub * 8 + i] - m_new) : 0.0f;
+                    const _Float16 h = (_Float16) p;
+                    pf[sub][i] = h;
+                    lsum += (float) h;   // the sum of the weights as the values get them
+                }
+            l_run = l_run * alpha + lsum;
+            m_run = seen ? m_new : m_run;
+            if (__any(alpha != 1.0f)) {
+#pragma unroll
+                for (int j = 0; j < 8; ++j) acc[j] *= alpha;
+            }
+#pragma unroll
+            for (int sub = 0; sub < 2; ++sub)
+#pragma unroll
+                for (int j = 0; j < 8; ++j)
+                    acc[j] = fl_wmma(*reinterpret_cast<const fl_h8*>(
+                                         &vt[(dim0 + j * 16 + col) * FL_VPAD + sub * 16 + 8 * half]),
+                                     pf[sub], acc[j]);
+        }
+        __syncthreads();
+    }
+    if (!ok) return;
+    const float l_all = l_run + __shfl_xor_sync(0xffffffffu, l_run, 16, 32);
+    const float inv = l_all > 0.0f ? 1.0f / l_all : 0.0f;
+    float* op = out + (size_t(tok) * n_head + size_t(kvh) * per + hh) * FL_D + dim0 + 8 * half;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        *reinterpret_cast<float4*>(op + j * 16) =
+            make_float4(acc[j][0] * inv, acc[j][1] * inv, acc[j][2] * inv, acc[j][3] * inv);
+        *reinterpret_cast<float4*>(op + j * 16 + 4) =
+            make_float4(acc[j][4] * inv, acc[j][5] * inv, acc[j][6] * inv, acc[j][7] * inv);
+    }
+#else
+    __builtin_trap();
+#endif
+}
+
+bool flash_arch_ok() {
+    const char* e = std::getenv("STRATA_POLY_FLASH");   // read at each call: the bench switches it
+    if (e != nullptr && e[0] == '0') return false;
+    static const bool ok = [] {
+        int dev = 0;
+        cudaDeviceProp prop;
+        if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return false;
+        return std::strncmp(prop.gcnArchName, "gfx12", 5) == 0;
+    }();
+    return ok;
+}
+}  // namespace
+
+bool attend_flash(const float* q, const void* kcache, bool k_q8, const void* vcache, bool v_q8, int64_t pos, int rows,
+                  float* out, int dim, int n_head, int kv_heads, float scale, void* stream) {
+    if (dim != FL_D || kv_heads < 1 || n_head % kv_heads || rows < 1 || !flash_arch_ok()) return false;
+    if (uintptr_t(q) % 16 || uintptr_t(kcache) % 16 || uintptr_t(vcache) % 16) return false;
+    const int per = n_head / kv_heads;
+    const int tiles = (rows * per + FL_ROWS - 1) / FL_ROWS;
+    const dim3 g = dim3(unsigned(tiles), unsigned(kv_heads));
+    const float scale_log2 = scale * 1.44269504088896340736f;
+    cudaStream_t s = cs(stream);
+    if (k_q8 && v_q8)
+        flash_attn_kernel<true, true><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
+                                                               scale_log2, tiles);
+    else if (k_q8)
+        flash_attn_kernel<true, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
+                                                                scale_log2, tiles);
+    else if (v_q8)
+        flash_attn_kernel<false, true><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
+                                                                scale_log2, tiles);
+    else
+        flash_attn_kernel<false, false><<<g, FL_THREADS, 0, s>>>(q, kcache, vcache, pos, rows, out, n_head, kv_heads,
+                                                                 scale_log2, tiles);
+    return true;
+}
+#else
+bool attend_flash(const float*, const void*, bool, const void*, bool, int64_t, int, float*, int, int, int, float,
+                  void*) {
+    return false;
+}
+#endif
 
 void (*prefill_mark)(void* stream, int part) = nullptr;
 void (*prefill_mark_fine)(void* stream, int part) = nullptr;

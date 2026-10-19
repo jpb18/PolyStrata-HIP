@@ -1,0 +1,6 @@
+prompt cat130k: 130122 tokens
+{'flash': 'q8_0:0', 'rc': 0, 'prefill': '890.3', 'decode': '33.18'}
+{'flash': 'fp16:0', 'rc': 0, 'prefill': '896.4', 'decode': '25.45'}
+{'flash': 'fp16:1', 'rc': 0, 'prefill': '1425.5', 'decode': '23.85'}
+flash=fp16:0 against the first run (flash=q8_0:0): 8 steps, largest logit difference 26.1531, mean 1.85392, same first token 0 %, KL mean 1.75e+01 max 2.50e+01 nats, tokens equal False
+flash=fp16:1 against the first run (flash=q8_0:0): 8 steps, largest logit difference 25.9699, mean 1.85252, same first token 0 %, KL mean 1.74e+01 max 2.56e+01 nats, tokens equal False

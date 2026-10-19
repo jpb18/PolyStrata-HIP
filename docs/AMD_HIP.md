@@ -565,6 +565,14 @@ What it does on AMD that it does not on NVIDIA, each measured on one RX 9060 XT 
 - A prompt's attention skips the rescale of a block of keys whose largest score did not change (the factor is exactly 1,
   so the values stay as they are, bit for bit): B-45k prefill 1,469 -> 1,519 tok/s (+3.4 %, two pairs on a PC in use;
   8 of 8 steps' logits the same bits), no change at 2K. No switch.
+- A prompt batch's attention is one flash-attention kernel on gfx12 (Qwen3.5/3.6's shape: head dimension 256, no window,
+  ring or host part; fp16 or q8_0 caches, read as they lie): 2.0 to 2.2 times faster than the products it replaces at
+  8K to 131K positions (131K, 1,024 tokens: 143 -> 68 ms fp16, 146 -> 71 ms q8_0), and the prompt in the engine +38 % at
+  76K, +52 % at 91K, +54 % at 122K and 130K positions (q8_0 KV; B-45k +40 %). Not the same bits (another order of sums):
+  against a double-precision attention its error is the products' at 32 to 200 tokens and up to twice theirs at 131K
+  (6e-5 on values of 0.3), and the next-token distributions differ by 1e-4 to 1e-2 nats up to 122K positions.
+  `STRATA_POLY_FLASH=0` gives the products back
+  ([bench/results/2026-10-19-hip-flash-attention](../bench/results/2026-10-19-hip-flash-attention/README.md)).
 - `STRATA_POLY_EXPERT_SHARE=1` (off by default): the slots of a window that pick the same expert read it once (IQ3_XXS
   gate/up, IQ4_XS down). 26 to 37 % of a window's picks repeat an expert, and the bits are the same (48 of 48 steps),
   but the window was not faster here (median 99.1 tok/s with it, 99.0 without, forced windows of 4), so it stays off

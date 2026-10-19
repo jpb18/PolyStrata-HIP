@@ -192,6 +192,171 @@ int attn_bench() {
     return bad ? 1 : 0;
 }
 
+// poly_kernel_bench attn-flash [reps]: a prompt batch's attention, flash attention (attend_flash(), what the engine's
+// attend_batch() and attend_batch_kv() take on gfx12) against their products with STRATA_POLY_FLASH=0, over fp16 and
+// q8_0 caches of 8K to 131K positions at Qwen3.6-35B-A3B's shapes (16 heads, 2 key-value heads of 256): the times, and
+// each result's distance to a double-precision attention of the same half-rounded inputs on a few tokens.  Then
+// batches of other sizes and positions (a first chunk, a position that is no multiple of the step, a batch of 33
+// tokens) against the double-precision attention only.
+int attn_flash_bench() {
+    const int dim = 256, n_head = 16, kv = 2, width = kv * dim, batch = 1024;
+    const float scale = 1.f / 16.f;
+    const int64_t most = 131072;
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> u(-1.f, 1.f);
+    std::vector<float> hx((size_t) most * width);
+    float* xf = nullptr;
+    cudaMalloc((void**) &xf, hx.size() * 4);
+    uint16_t* k16 = (uint16_t*) dev_random((size_t) most * width * 2, false);
+    uint16_t* v16 = (uint16_t*) dev_random((size_t) most * width * 2, false);
+    uint8_t* kq = nullptr;
+    uint8_t* vq = nullptr;
+    const size_t q8_bytes = (size_t) most * poly::q8_row_bytes(dim, kv);
+    cudaMalloc((void**) &kq, q8_bytes);
+    cudaMalloc((void**) &vq, q8_bytes);
+    for (int which = 0; which < 2; ++which) {
+        for (auto& x : hx) x = u(rng);
+        cudaMemcpy(xf, hx.data(), hx.size() * 4, cudaMemcpyHostToDevice);
+        poly::store_f16(xf, which ? v16 : k16, width, 0, (int) most, g_st);
+        poly::store_q8(xf, which ? vq : kq, dim, kv, 0, (int) most, g_st);
+    }
+    cudaStreamSynchronize(g_st);
+    std::vector<float> hq((size_t) batch * n_head * dim);
+    for (auto& x : hq) x = u(rng) * 8.f;   // scores with a spread of a few: a peaked softmax
+    float* q = nullptr;
+    cudaMalloc((void**) &q, hq.size() * 4);
+    cudaMemcpy(q, hq.data(), hq.size() * 4, cudaMemcpyHostToDevice);
+    const size_t score_floats = size_t(16) << 20;
+    float* score = (float*) dev_random(score_floats * 4, true);
+    float* work = (float*) dev_random((size_t) batch * n_head * (dim + dim / 2 + 3) * 4 + 64, true);
+    float* out_old = nullptr;
+    float* out_new = nullptr;
+    cudaMalloc((void**) &out_old, (size_t) batch * n_head * dim * 4);
+    cudaMalloc((void**) &out_new, (size_t) batch * n_head * dim * 4);
+    const int stage_rows = poly::kQ8StageRows;
+    uint16_t* ks = (uint16_t*) dev_random((size_t) stage_rows * width * 2, false);
+    uint16_t* vs = (uint16_t*) dev_random((size_t) stage_rows * width * 2, false);
+    void* blas = poly::blas_create(g_st);
+    uint16_t* dq = nullptr;   // a q8_0 cache as the halves the products read, for the reference
+    uint16_t* dq2 = nullptr;
+    float* out_chk = nullptr;
+    cudaMalloc((void**) &dq, (size_t) most * width * 2);
+    cudaMalloc((void**) &dq2, (size_t) most * width * 2);
+    cudaMalloc((void**) &out_chk, (size_t) batch * n_head * dim * 4);
+    std::vector<uint16_t> hk((size_t) most * width), hv((size_t) most * width);
+    const auto half_to_double = [](uint16_t h) {
+        const int s = h >> 15, e = (h >> 10) & 31, m = h & 1023;
+        const double v = e == 0 ? std::ldexp((double) m, -24) : std::ldexp((double) (m + 1024), e - 25);
+        return s ? -v : v;
+    };
+    int bad = 0;
+    // one batch of `n` tokens from position bpos over a cache of q8 or fp16 rows: the times when `timed`, and the
+    // distance of each result to the double-precision attention
+    const auto compare = [&](int64_t bpos, int n, int q8, bool timed) {
+        const int64_t ctx = bpos + n;
+        const auto run = [&](float* o) {
+            if (q8)
+                poly::attend_batch_kv(blas, q, kq, true, vq, true, bpos, n, score, score_floats, work, o, dim, n_head, kv,
+                                      scale, g_st, ks, vs, stage_rows);
+            else
+                poly::attend_batch(blas, q, k16, v16, bpos, n, score, score_floats, work, o, dim, n_head, kv, scale,
+                                   g_st);
+        };
+        double old_us = 0, new_us = 0;
+        _putenv("STRATA_POLY_FLASH=0");
+        if (timed) old_us = time_us([&] { run(out_old); });
+        else run(out_old);
+        _putenv("STRATA_POLY_FLASH=1");
+        if (timed) new_us = time_us([&] { run(out_new); });
+        else run(out_new);
+        cudaStreamSynchronize(g_st);
+        // the reference: the halves the products read (a q8_0 cache's, dequantized)
+        if (q8) {
+            poly::kv_dequant_q8(kq, 0, (int) ctx, dim, kv, dq, g_st);
+            poly::kv_dequant_q8(vq, 0, (int) ctx, dim, kv, dq2, g_st);
+            cudaStreamSynchronize(g_st);
+            cudaMemcpy(hk.data(), dq, (size_t) ctx * width * 2, cudaMemcpyDeviceToHost);
+            cudaMemcpy(hv.data(), dq2, (size_t) ctx * width * 2, cudaMemcpyDeviceToHost);
+            // flash over the q8_0 rows against flash over the halves they dequantize to: the same bits when the
+            // kernel's own dequantization is kv_dequant_q8()'s
+            poly::attend_batch(blas, q, dq, dq2, bpos, n, score, score_floats, work, out_chk, dim, n_head, kv, scale,
+                               g_st);
+            cudaStreamSynchronize(g_st);
+            std::vector<uint32_t> x((size_t) n * n_head * dim), y(x.size());
+            cudaMemcpy(x.data(), out_new, x.size() * 4, cudaMemcpyDeviceToHost);
+            cudaMemcpy(y.data(), out_chk, y.size() * 4, cudaMemcpyDeviceToHost);
+            const bool same = std::memcmp(x.data(), y.data(), x.size() * 4) == 0;
+            if (!same) std::printf("  flash over q8_0 rows differs from flash over their dequantized halves\n");
+            bad += !same;
+        } else {
+            cudaMemcpy(hk.data(), k16, (size_t) ctx * width * 2, cudaMemcpyDeviceToHost);
+            cudaMemcpy(hv.data(), v16, (size_t) ctx * width * 2, cudaMemcpyDeviceToHost);
+        }
+        std::vector<float> a((size_t) n * n_head * dim), b(a.size());
+        cudaMemcpy(a.data(), out_old, a.size() * 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), out_new, b.size() * 4, cudaMemcpyDeviceToHost);
+        double err_old = 0, err_new = 0, err_between = 0, mag = 0;
+        const int probes[4] = {0, std::min(1, n - 1), n / 2 + 1 < n ? n / 2 + 1 : n - 1, n - 1};
+        for (int t : probes) {
+            const int64_t last = bpos + t;   // attends keys 0..last
+            for (int h = 0; h < n_head; h += 5) {
+                const int g = h / (n_head / kv);
+                const float* qh = &hq[((size_t) t * n_head + h) * dim];
+                std::vector<double> w((size_t) last + 1);
+                double mx = -1e300;
+                for (int64_t j = 0; j <= last; ++j) {
+                    double s = 0;
+                    for (int d = 0; d < dim; ++d) {
+                        const _Float16 qhv = (_Float16) qh[d];   // the half the products take for the query
+                        s += (double) (float) qhv * half_to_double(hk[(size_t) j * width + g * dim + d]);
+                    }
+                    w[(size_t) j] = s * scale;
+                    mx = std::max(mx, w[(size_t) j]);
+                }
+                double sum = 0;
+                for (auto& x : w) {
+                    x = std::exp(x - mx);
+                    sum += x;
+                }
+                for (int d = 0; d < dim; ++d) {
+                    double o = 0;
+                    for (int64_t j = 0; j <= last; ++j)
+                        o += w[(size_t) j] * half_to_double(hv[(size_t) j * width + g * dim + d]);
+                    o /= sum;
+                    const size_t at = ((size_t) t * n_head + h) * dim + d;
+                    err_old = std::max(err_old, std::fabs(a[at] - o));
+                    err_new = std::max(err_new, std::fabs(b[at] - o));
+                    err_between = std::max(err_between, (double) std::fabs(a[at] - b[at]));
+                    mag = std::max(mag, std::fabs(o));
+                }
+            }
+        }
+        if (timed)
+            std::printf("ctx %6lld %s batch %d: products %9.2f ms | flash %9.2f ms (%.2fx) | max |error| vs double: "
+                        "products %.2e flash %.2e (values up to %.2f), flash vs products %.2e\n",
+                        (long long) ctx, q8 ? "q8_0" : "fp16", n, old_us / 1e3, new_us / 1e3, old_us / new_us, err_old,
+                        err_new, mag, err_between);
+        else
+            std::printf("from %6lld, %4d tokens %s: max |error| vs double: products %.2e flash %.2e (values up to %.2f)\n",
+                        (long long) bpos, n, q8 ? "q8_0" : "fp16", err_old, err_new, mag);
+        bad += !(err_new < 8 * err_old + 1e-5);
+    };
+    for (int64_t ctx : {8192, 32768, 65536, 131072})
+        for (int q8 = 0; q8 < 2; ++q8) {
+            g_reps = std::max(3, 200 * 8192 / (int) ctx / 8);
+            compare(ctx - batch, batch, q8, true);
+        }
+    struct Edge {
+        int64_t pos;
+        int n;
+    };
+    for (const Edge e : {Edge{0, 32}, Edge{0, 64}, Edge{0, 200}, Edge{5, 33}, Edge{31, 97}, Edge{1000, 100},
+                         Edge{8000, 129}, Edge{50000, 777}})
+        for (int q8 = 0; q8 < 2; ++q8) compare(e.pos, e.n, q8, false);
+    poly::blas_destroy(blas);
+    return bad ? 1 : 0;
+}
+
 // poly_kernel_bench attn-decode [reps]: the attention of a call of 1 to 4 tokens (a decode token, a window of
 // guesses) at Qwen3.6-35B-A3B's shapes over caches of 2K to 45K positions in VRAM, as the engine launches it from a
 // recording (the rows sized by room(), the positions read on the card).  Beside each time, what reading the keys
@@ -1561,6 +1726,11 @@ int main(int argc, char** argv) {
         g_reps = argc > 2 ? std::max(10, std::atoi(argv[2])) : 200;
         g_warm = 3;
         return attn_fit_bench();
+    }
+    if (argc > 1 && std::strcmp(argv[1], "attn-flash") == 0) {
+        g_reps = argc > 2 ? std::max(3, std::atoi(argv[2])) : 10;
+        g_warm = 1;
+        return attn_flash_bench();
     }
     if (argc > 1 && std::strcmp(argv[1], "attn") == 0) {
         g_reps = argc > 2 ? std::max(10, std::atoi(argv[2])) : 200;
