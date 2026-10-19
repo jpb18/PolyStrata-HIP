@@ -3626,7 +3626,11 @@ class Service:
         if s.get("first_token") is None:
             pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
             done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
-            print(f"[strata] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
+            rate = pr and getattr(self.engine, "prefill_tok_s_mean", None)   # the engine's mean; none before its first PP
+            if not rate and pr and getattr(self.engine, "progress_ms", 0):   # else: tokens read now / the engine's ms
+                rate = (pr[0] - (getattr(self.engine, "reused", 0) or 0)) * 1000 / self.engine.progress_ms
+            speed = f", {rate:,.0f} tok/s" if rate and rate > 0 else ""
+            print(f"[strata] reading the prompt: {done} tokens{speed}, {el:.0f} s so far", flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
             print(f"[strata] {s['phase']}: {s['generated']} of max {s.get('max_tokens')} tokens, {rate:.1f} tok/s, "
